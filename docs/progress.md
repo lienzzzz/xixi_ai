@@ -310,18 +310,29 @@ compat: { thinkingFormat: deepseek, requiresReasoningContentOnAssistantMessages:
 **这 8 条全部发生在修复（约 19:55）之前，不会被追溯修改**——台账是当时发生的事实记录，修的是「从现在起不再发生」。
 **这些库里没有任何修复之后的轮次**，所以「修复之后零违规」只在 t111 自己的运行窗口（它用的是 `%TEMP%` 下的临时库）
 与离线探针上成立，**不能在仓库台账上证实**；「4 条全部伴随工具」说的也是那 4 条**修复前**的轮次（它们恰好都调用了工具）。
-复算命令（评审 t114 的脚本；**它只扫两个库，复算时必须把 `data/web-chat` 也扫上**）：
+**可重跑的主引用**（一条命令一次扫三个库；在仓库根目录执行，输出与上面两句逐字对应）：
 
 ```powershell
-node data/rev-tmp/t114-invariant.mjs   # 末几行给出每库「含具体值的轮次：伴随工具 N / 无工具 M」与 tool_name 分布
+node -e "Promise.all([import('node:fs'),import('node:sqlite'),import('./packages/conversation/src/engine.ts')]).then(([fs,sq,eng])=>{const dbPaths=['data/chat/xixi.sqlite','data/field-test/xixi.sqlite','data/web-chat/xixi.sqlite'];let backed=0;let nulls=0;for(const p of dbPaths){if(!fs.existsSync(p))continue;const db=new sq.DatabaseSync(p,{readOnly:true});const rows=db.prepare('select event_type, payload_json from events').all();let b=0;let n=0;for(const row of rows){if(row.event_type!=='conversation.turn')continue;const q=JSON.parse(String(row.payload_json));if(q.role!=='assistant')continue;if(eng.findUnbackedFactClaims(String(q.text||'')).length===0)continue;if(q.tool_name===null||q.tool_name===undefined)n+=1;else b+=1;}console.log(p+': 伴随工具 '+b+' / 无工具 '+n);backed+=b;nulls+=n;db.close();}console.log('三库合计：伴随工具 '+backed+' / 无工具 '+nulls);});"
 ```
 
-它当前只扫 `data/chat` 与 `data/field-test`，打印「伴随工具 1 / 无工具 **6**」与「伴随工具 2 / 无工具 **1**」；
-**复算时三个库都要扫，否则会少一条无工具的（`data/web-chat` 10:09:40）和一条伴随工具的（`data/web-chat` 10:04）**——
-三个库一起扫的结果是「伴随工具 **4** / 无工具 **8**」，与上面两句逐字对应。
-等价的一次性查询是 `select timestamp, payload_json from events where event_type='conversation.turn'`
-（只取 `payload_json.role='assistant'`），对 `data/chat`、`data/field-test`、`data/web-chat` **三个库各跑一次**，
-再用同一个 `findUnbackedFactClaims()` 判 `payload_json.text`，并用 `payload_json.tool_name` 判有没有工具调用。
+实跑输出（2026-09-30，本机）：
+
+```text
+data/chat/xixi.sqlite: 伴随工具 1 / 无工具 6
+data/field-test/xixi.sqlite: 伴随工具 2 / 无工具 1
+data/web-chat/xixi.sqlite: 伴随工具 1 / 无工具 1
+三库合计：伴随工具 4 / 无工具 8
+```
+
+判据就是上面那两句：`findUnbackedFactClaims()` 判「含具体值」，`payload_json.tool_name` 判这一轮有没有工具调用。
+（命令里带中文标签：直接粘进终端跑就是上面这段输出；若**存成 `.ps1` 再用 Windows PowerShell 5.1 执行**，
+请存成**带 BOM 的 UTF-8**，否则中文标签会读成乱码——同一个坑见 [`AGENTS.md` §9.8](../AGENTS.md) ⑤。）
+
+**附（背景，不是主引用）**：评审 t114 当时的脚本 `data/rev-tmp/t114-invariant.mjs` 落在 `data/`（已 gitignore），
+随机器清理会消失，而且**只扫 `data/chat` 与 `data/field-test` 两个库**——直接跑它只会得到「伴随工具 1 / 无工具 6」
+与「伴随工具 2 / 无工具 1」；**复算时三个库都要扫，否则会少一条无工具的（`data/web-chat` 10:09:40）
+和一条伴随工具的（`data/web-chat` 10:04）**。以主引用那条命令为准。
 
 ## 2b. 评审与验证汇总（本轮）
 

@@ -175,6 +175,9 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    **验证方式（t112 提出、t113 复核时复现，建议固定成惯例）**：从 markdown 里把命令行**抽出来**、
    **原样**丢给目标 shell 执行（写成 `%TEMP%` 里的脚本再 `powershell -NoProfile -File` 跑），
    **不要靠手读判断能不能跑**——手读看不出 `\"` 这类由外层 shell 抢先解析的问题。
+   **⑤ `Out-File -Encoding utf8` 会写 BOM**（captain 本轮踩到）：写出的 JSON 交给 `JSON.parse` 会报
+   `Unexpected token '﻿'`。要写无 BOM 文件用 `Set-Content -Encoding utf8NoBOM`，或在读取侧先
+   `.replace(/^\uFEFF/,'')`。
 9. **默认门禁要保持「可用于迭代」的速度**：重的端到端断言要**缩小输入**（单档 tier、最小夹具子集）来提速，
    **不许靠删断言或把测试挪出默认门禁**来换速度——「测试写了就必须跑」是本项目已经踩过坑的原则。
    **不写死秒数**（曾写 `<25s`，一度不可达）：耗时以实跑为准。
