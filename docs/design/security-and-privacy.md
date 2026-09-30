@@ -58,9 +58,9 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
 | 方案要求 | 现状 |
 |---|---|
 | 内存 ring buffer | **未实现**：没有常驻音频缓冲（`services/voice-edge` 里没有环形缓冲/常开采集代码；浏览器「按住🎤」一次采集一段，`segment.py` 按文件读入） |
-| 非触发片段不落盘 | ✅ **已实现**（默认策略下连整段录音都不落 `data/`）：VAD 是独立 Python 进程、需要文件输入，所以整段录音只写进**系统临时目录**（`scripts/field-test.ts` 的 `handleVoiceTurn` 里用 `mkdtempSync(tmpdir()/xixi-vad-)` 建临时目录，核对：`grep -n "xixi-vad-" scripts/field-test.ts`）供读一次，**不进 `data/`**；现场测试控制台自测 `runSelfTest` 里有一条断言「隐私策略：整段录音不落盘」（核对：`grep -n "整段录音不落盘" scripts/field-test.ts`）。**历史**：这条以前是反着的（旧 `/api/voice` 先把整段写进 `data/voice-web/capture-*.wav` 再做 VAD，无语音时也已经落盘），两个入口改用共享核心后修掉（见 `scripts/serve-chat.ts` 的 `handleVoice` 上方那段「why not inline any more」的注释，核对：`grep -n "handleVoice" scripts/serve-chat.ts`） |
+| 非触发片段不落盘 | ✅ **已实现**（默认策略下连整段录音都不落 `data/`）：VAD 是独立 Python 进程、需要文件输入，所以整段录音只写进**系统临时目录**（`scripts/field-test.ts` 的 `handleVoiceTurn` 里用 `mkdtempSync(tmpdir()/xixi-vad-)` 建临时目录，核对：`git grep -n "xixi-vad-" -- scripts/field-test.ts`）供读一次，**不进 `data/`**；现场测试控制台自测 `runSelfTest` 里有一条断言「隐私策略：整段录音不落盘」（核对：`git grep -n "整段录音不落盘" -- scripts/field-test.ts`）。**历史**：这条以前是反着的（旧 `/api/voice` 先把整段写进 `data/voice-web/capture-*.wav` 再做 VAD，无语音时也已经落盘），两个入口改用共享核心后修掉（见 `scripts/serve-chat.ts` 的 `handleVoice` 上方那段「why not inline any more」的注释，核对：`git grep -n "handleVoice" -- scripts/serve-chat.ts`） |
 | 被识别为对话的短音频可暂存用于 ASR | ✅ 但**默认不保留**：`keepSpeechSegments = privacy.store_raw_audio && memory.raw_audio_retention_days > 0`——默认（`store_raw_audio: false`、保留 0 天）语音段也不写盘，ASR 直接用内存里的音频 |
-| 调试模式可配置保留 N 天 | ✅ **已实现**（不再是「配置项无人读取」）：`scripts/field-test.ts` 的 `retentionPolicy(config)` 读 `privacy.store_raw_audio` + `memory.raw_audio_retention_days`，`pruneVoiceDir()` 在**启动时清理过期文件**；两个入口都在用（`scripts/serve-chat.ts` 顶层的启动期清理：`retentionPolicy(config)` + `pruneVoiceDir(VOICE_DIR, policy)`，随后打印 `[privacy] 按保留策略清理 …`；现场测试控制台在 `createFieldServer` 启动时与 `handleVoiceTurn` 每轮结束前各清理一次，核对：`grep -n "pruneVoiceDir" scripts/field-test.ts scripts/serve-chat.ts`）。开启后只写 VAD 检出的语音段到 `data/voice-web/`，保留 N 天 |
+| 调试模式可配置保留 N 天 | ✅ **已实现**（不再是「配置项无人读取」）：`scripts/field-test.ts` 的 `retentionPolicy(config)` 读 `privacy.store_raw_audio` + `memory.raw_audio_retention_days`，`pruneVoiceDir()` 在**启动时清理过期文件**；两个入口都在用（`scripts/serve-chat.ts` 顶层的启动期清理：`retentionPolicy(config)` + `pruneVoiceDir(VOICE_DIR, policy)`，随后打印 `[privacy] 按保留策略清理 …`；现场测试控制台在 `createFieldServer` 启动时与 `handleVoiceTurn` 每轮结束前各清理一次，核对：`git grep -n "pruneVoiceDir" -- scripts/field-test.ts scripts/serve-chat.ts`）。开启后只写 VAD 检出的语音段到 `data/voice-web/`，保留 N 天 |
 | 正式运行不长期保存原始环境音 | ✅ **默认成立**（不落盘、不保留）；开启保留时是**按天数粗粒度**清理 + 手工删目录，**没有针对单条记录的删除接口**（细粒度删除仍属 M4 的记忆管理） |
 
 **唯一硬约束是「不进版本库」**：`data/` 与 `.env` 都在 `.gitignore`（`.gitignore` 含 `data/`、`.dsh/`、`.venvs/`、`.env`、`.env.local`）。
@@ -137,7 +137,7 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
 
 ## 6. §41.7 / §55 审计：`reason_code` 与分数
 
-- **事件是唯一事实来源**（ADR-0003）。调用点数量**以实测为准、不写死**：核对命令 `grep -n "appendEvent(" packages`（当前 5 处；`packages/domain/src/store.ts` 里 `appendEvent(event: EventEnvelope)` 那一行是**定义**，不算调用点）：
+- **事件是唯一事实来源**（ADR-0003）。调用点数量**以实测为准、不写死**：核对命令 `git grep -n "appendEvent(" -- packages`（当前 5 处；`packages/domain/src/store.ts` 里 `appendEvent(event: EventEnvelope)` 那一行是**定义**，不算调用点）：
 
   | 文件 | 函数 | 事件 |
   |---|---|---|
@@ -150,7 +150,7 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
   还有一条**不经过 `appendEvent`** 的写入路径：感知边进程用 Python 直接 SQL 写同一个库
   （`services/perception-edge/perception_edge/emitter.py`，`INSERT INTO events` 与 `world_state` 同一事务；
   `scripts/verify-camera-presence.ts` 把这些事件**手工重建信封对象之后**用 `validateEvent()` 校验一遍，
-  核对：`grep -n "validateEvent(" scripts/verify-camera-presence.ts`）。
+  核对：`git grep -n "validateEvent(" -- scripts/verify-camera-presence.ts`）。
   **`createSession` 不写事件；`seedSelfProfile` / `overrideSelfProfile` 只写 `self_profile` 与 `self_profile_history`，同样不写事件。**
   所以「每条状态变更都进事件表」目前对**对话轮次、接受判定、健康状态、在场状态与主动开口判定**成立。
 - **被拒绝的轮次有记录**：`ConversationEngine.respond` 在 `accepted === false` 时**不**调用 `recordTurn`
@@ -208,7 +208,7 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
   `code` + `originalCode`）、`the DSH path keeps the harness error code in originalCode`（DSH 侧原始码进 `originalCode`）；
   `tests/integration/brain-adapter.test.ts` 的 `a missing API key fails as MISSING_KEY before any request is attempted`
   在集成层复核同一件事（含 `attempted === 0`）。核对命令：
-  `grep -n "^test(" tests/unit/core/brain-error-classification.test.ts tests/integration/brain-adapter.test.ts`。
+  `git grep -n "^test(" -- tests/unit/core/brain-error-classification.test.ts tests/integration/brain-adapter.test.ts`。
 
 ## 维护规则
 

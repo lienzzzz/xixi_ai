@@ -80,8 +80,9 @@ $env:NODE_USE_ENV_PROXY = '1'   # Node 需要显式开启才读环境变量代�
 
 ```powershell
 npm test                 # 全部离线测试（unit/integration/perception/console），不花 API 费用
-                         #   项数与耗时**以实跑输出为准**：空载约 27–30s，成员并发时可达 45s+
-                         #   关键路径是单文件 frontend.test.ts（约 21s，内含多次 Python VAD 子进程启动）
+                         #   项数与耗时**以实跑输出为准**（当前：空载约 15s、有并发约 18s）
+                         #   关键路径曾是单文件 frontend.test.ts（多次 Python 冷启动），
+                         #   t47 用常驻 Python worker 把它从约 21s 降到约 7s；如需回退可设 XIXI_VAD_ONESHOT=1
 npm run test:perception  # 只跑摄像头在场与 WorldState 投影
 npm run test:console     # 只跑现场测试控制台
 npm run install:profile  # 幂等：把仓库内的西西 DSH profile 装进 .dsh/
@@ -146,9 +147,12 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    要批量改文本请用编辑工具，或 Python 显式 `encoding='utf-8'` 读写；改完 `git diff --stat` 自检异常体积。
 9. **默认门禁要保持「可用于迭代」的速度**：重的端到端断言要**缩小输入**（单档 tier、最小夹具子集）来提速，
    **不许靠删断言或把测试挪出默认门禁**来换速度——「测试写了就必须跑」是本项目已经踩过坑的原则。
-   **不再写死秒数目标**（曾经写 `<25s`，实测已不可达）：关键路径是 `tests/unit/voice/frontend.test.ts`，
-   它要多次启动 Python（pipecat + Silero 每次约 2.5–3.4s），空载约 27–30s、有并发时 38–40s。
-   已知的下一步杠杆是**把该文件对 Python 的多次调用合并为一次**（见对应任务），而不是砍断言。
+   **不写死秒数**（曾写 `<25s`，一度不可达）：耗时以实跑为准。
+   关键路径曾是 `tests/unit/voice/frontend.test.ts` 的多次 Python 冷启动（每次 2.5–3.4s）；
+   **t47 已用常驻 Python worker 解决**（该文件约 21s → 约 7s，全量约 15–18s），
+   回退开关是 `XIXI_VAD_ONESHOT=1` 或 `--no-vad-worker`。
+   **可复用的经验**：进程启动成本高时，把「每个用例起一个进程」改成「一个常驻 worker + 真实 CLI 入口 + 内存捕获 stdout」，
+   并用一次性路径做对照实验证明结果等价——这比砍断言或改测试强度划算得多。
 10. **全量测试结果要在成员在途编辑窗口之外判读**：本轮多次出现「红 1 项」实为他人半成品（失败用例名每次不同、stash 后仍失败即可判定）。
    声明「全绿」时必须带**修订号**与实测输出，否则视为未验证。
    **瞬态红灯有三个来源，判读前先查 `git diff HEAD` 是否为空**：
