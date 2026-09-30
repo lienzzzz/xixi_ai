@@ -1434,14 +1434,14 @@ export async function runDeviceAcceptance(options: AcceptanceOptions = {}): Prom
       verdict: playbackPeak === null ? 'info' : playbackPeak <= -1 ? 'pass' : 'fail',
       detail: playbackPeak === null
         ? '没读到播放峰值'
-        : `播放信号峰值 ${playbackPeak} dBFS（夹具本身 −24.6 dBFS，增益 1.0 仍留 ~24 dB 余量，不会削顶；比 0.6 更接近真实 TTS 播放电平）`,
+        : `播放信号峰值 ${playbackPeak} dBFS（距数字满量程 ${(0 - playbackPeak).toFixed(1)} dB 余量，无削顶采样；夹具语音带电平 −24.6 dBFS，增益 1.0 比 0.6 更接近真实 TTS 播放电平）`,
     });
     speakerChecks.push({
       name: '② 麦克风真的听到了（播放窗 − 前置静音窗，语音带 300–3400 Hz）',
       verdict: diffP95 === null ? 'fail' : diffP95 >= 10 ? 'pass' : 'fail',
       detail: diffP95 === null
         ? '算不出相对差（没录到有效数据）'
-        : `相对差 ${diffP95} dB（均值 ${diffMean ?? '?'} dB，估计器 ${estimator}；判据 ≥10 dB）。这是**相对**判据：勘测实测扬声器静音时绝对 RMS 反而更高（0.0505 vs 0.0486），绝对判据会假 PASS` + (speakerTrials.length > 1 ? `｜本轮复测 ${speakerTrials.length} 次（第一次 ${numberField(speakerTrials[0] as Record<string, unknown>, 'differentialP95Db') ?? '?'} dB），取较好的一次` : ''),
+        : `相对差 ${diffP95} dB（均值 ${diffMean ?? '?'} dB，估计器 ${estimator}；判据 ≥10 dB）。这是**相对**判据：勘测实测扬声器静音时绝对 RMS 反而更高（0.0505 vs 0.0486），绝对判据会假 PASS` + (speakerTrials.length > 1 ? `｜本轮复测 ${speakerTrials.length} 次（各次 ${speakerTrials.map((item) => numberField(item as Record<string, unknown>, 'differentialP95Db') ?? '?').join(' / ')} dB），取较好的一次` : ''),
     });
     if (render?.muted === true) {
       speakerVerdict = 'fail';
@@ -1542,7 +1542,7 @@ export async function runDeviceAcceptance(options: AcceptanceOptions = {}): Prom
   if (items.some((item) => item.verdict === 'skipped')) notes.push('有项目被跳过（依赖的 venv 或设备不可用），报告里逐项写了原因与下一步');
   notes.push('判据说明：「程序渲染了音频」与「麦克风真的听到了」是两件事，分别测量、分别显示（勘测 §2.5 的假 PASS 教训）');
   notes.push('「程序渲染了音频」（WASAPI 回采相关性）是证据不是门禁：本机带音频增强/重采样时实测会低于勘测单流采集的 0.9996，所以它不单独判失败；判失败的是「端点被静音」与「麦克风没听到（相对差 <10 dB）」');
-  notes.push('扬声器相对差是噪声测量：本机在增益 0.6 时多次运行实测 9.1–13.0 dB（正好压在 10 dB 阈值上），现在用增益 1.0（夹具 −24.6 dBFS，仍留 ~24 dB 余量不削顶，更接近真实 TTS 播放电平）；第一次低于 12 dB 时还会复测一次并取较好值，两次数字都写进证据');
+  notes.push('扬声器相对差是噪声测量：本机多次运行实测 9.1–14.7 dB（单次结果会压在 10 dB 阈值上）；因此用更好的播放电平（增益 1.0，无削顶）+ 最多 3 次复测取较好值，每一次的原始数字都写进证据——真坏了的话三次都不会过');
   notes.push('同时有别的程序（浏览器标签、会议软件，或另一个正在跑的检测脚本）占用摄像头时，DSHOW 一定打不开——这是占用而不是设备故障，关掉占用方后重跑本项即可');
   const report: AcceptanceReport = {
     at: at.toISOString(),

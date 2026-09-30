@@ -130,8 +130,11 @@ VAD 参数本身：`stop_secs` 保持 ADR-0007 的 0.6（句内 352 ms 停顿的
 | 同上 | 120 Hz | 1 | 320 ms | 600 ms | 128 ms |
 | `direct-question-snr6db` | 关 | 1 | 448 ms | 1056 ms | 0 ms |
 | 同上 | 120 Hz | 1 | 448 ms | 1056 ms | 0 ms |
-| `longer-turn-snr0db` | 关 | 1 | 640 ms | — | — |
-| 同上 | 120 Hz | 1 | **352 ms** | — | — |
+| `longer-turn-snr0db` | 关 | 1 | 672 ms | — | — |
+| 同上 | 120 Hz | 1 | **384 ms** | — | — |
+
+（同一天同一批夹具的两种设置，逐个夹具对比；60 Hz 与 120 Hz 之间的差 ≤1 帧。原始 JSON：
+`data/voice/frontend-vad-grid.json`，每行有 `highpassHz` 字段。）
 
 即：**宽带噪声降了 5.3 dB，VAD 的段数/起点/端点基本不变**（个别 0–288 ms 的方向性改善）。
 原因合理：Silero 自己就忽略 <100 Hz 的能量；高通真正的价值在能量门限（第（3）条）与
@@ -193,11 +196,15 @@ recon 实测「夹具电平（−24.6 dBFS）下麦克风只比噪声底高 0.8�
 
 逐条失败样本（保留原样，不删）：0 dB 档 `followup-turn` →「嗯。」（相似度 0）、`tv-dialogue` →「怎么了？」（0.286）；
 −6 dB 档 4 条全部 `NO_SPEECH_DETECTED`。
+（0 dB 档的「平均端点延迟 −96 ms」是因为检测窗被截在干净语音结束点，不是真的提前；噪声下的端点
+是**变晚**的，见下面第三条约定与 §1.1（4）的 1056–1472 ms。）
 
 **可复现的成功边界（写死）**：
 
 > **SNR_inband ≥ 3 dB 时，4 条中文夹具全部检出，平均字符相似度 0.805（≥0.6），端点延迟 640 ms（≤1500 ms 上限）。
 > 0 dB 时仍能全部检出但转写质量掉到 0.491（个别夹具只吐出一个语气词）；−6 dB 完全不可用。**
+
+（脚本自动写进 `report.boundary.lowestPassingTierDb` 与 `report.boundary.claim`，本节数字与之逐字一致。）
 
 边界值取自 `report.boundary.lowestPassingTierDb`（脚本自动算），不是手写的。
 两个已知的测量约定：

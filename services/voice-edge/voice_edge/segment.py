@@ -140,18 +140,22 @@ async def segment(
     applied_gate = params.gate_threshold_dbfs if gate_threshold_dbfs is None else float(gate_threshold_dbfs)
     conditioning_ms = (time.perf_counter() - conditioning_started) * 1000.0
 
-    nr_started = time.perf_counter()
-    enhanced = fe.condition_for_vad(
-        raw_samples,
-        sample_rate,
-        highpass_hz,
-        noise_floor_dbfs_value=effective_floor,
-        noise_reduction=noise_reduction,
-        oversubtraction=oversubtraction,
-    )
-    nr_ms = (time.perf_counter() - nr_started) * 1000.0
-    enhanced_floor = fe.noise_floor_dbfs(enhanced, sample_rate)
-    pcm = (np.clip(enhanced, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+    nr_ms = 0.0
+    applied = conditioned
+    if noise_reduction:
+        nr_started = time.perf_counter()
+        enhanced = fe.condition_for_vad(
+            raw_samples,
+            sample_rate,
+            highpass_hz,
+            noise_floor_dbfs_value=effective_floor,
+            noise_reduction=True,
+            oversubtraction=oversubtraction,
+        )
+        nr_ms = (time.perf_counter() - nr_started) * 1000.0
+        applied = enhanced
+    enhanced_floor = fe.noise_floor_dbfs(applied, sample_rate)
+    pcm = (np.clip(applied, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
     frontend_ms = conditioning_ms + nr_ms
 
     load_started = time.perf_counter()
@@ -221,6 +225,7 @@ async def segment(
             "measuredNoiseFloorDbfs": round(measured_floor, 2),
             "enhancedNoiseFloorDbfs": round(enhanced_floor, 2),
             "noiseFloorReductionDb": round(measured_floor - enhanced_floor, 2),
+            "noiseReductionApplied": noise_reduction,
             "gateThresholdDbfs": round(applied_gate, 2),
             "gateMarginDb": params.gate_margin_db,
             "legacyEnergyThresholdDbfs": threshold_dbfs,
