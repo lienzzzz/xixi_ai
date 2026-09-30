@@ -41,7 +41,8 @@
       "firstTokenMs": 911,
       "segmentChars": [
         29
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "G02",
@@ -55,7 +56,8 @@
       "firstTokenMs": 3703,
       "segmentChars": [
         35
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "G04",
@@ -76,7 +78,8 @@
         43,
         44,
         110
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "G05",
@@ -87,7 +90,8 @@
       "reply": null,
       "model": "mimo-v2.6-flash",
       "totalMs": 4657,
-      "firstTokenMs": 4436
+      "firstTokenMs": 4436,
+      "run": 1
     },
     {
       "scenario": "G06",
@@ -101,7 +105,8 @@
       "firstTokenMs": 1901,
       "segmentChars": [
         19
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "G09",
@@ -115,7 +120,8 @@
       "firstTokenMs": 6977,
       "segmentChars": [
         45
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "G11",
@@ -129,7 +135,8 @@
       "firstTokenMs": 2756,
       "segmentChars": [
         18
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "G11",
@@ -143,7 +150,8 @@
       "firstTokenMs": 1815,
       "segmentChars": [
         52
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "weather-thread",
@@ -160,7 +168,8 @@
         48,
         58,
         45
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "weather-thread",
@@ -174,7 +183,8 @@
       "firstTokenMs": 2730,
       "segmentChars": [
         24
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "weather-thread",
@@ -188,7 +198,8 @@
       "firstTokenMs": 2220,
       "segmentChars": [
         24
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "tired-then-sleepy",
@@ -202,7 +213,8 @@
       "firstTokenMs": 989,
       "segmentChars": [
         17
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "tired-then-sleepy",
@@ -216,7 +228,8 @@
       "firstTokenMs": 853,
       "segmentChars": [
         22
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "tired-then-sleepy",
@@ -230,7 +243,8 @@
       "firstTokenMs": 5549,
       "segmentChars": [
         7
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "town-trip-thread",
@@ -244,7 +258,8 @@
       "firstTokenMs": 836,
       "segmentChars": [
         26
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "town-trip-thread",
@@ -259,7 +274,8 @@
       "segmentChars": [
         30,
         32
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "town-trip-thread",
@@ -274,7 +290,8 @@
       "segmentChars": [
         41,
         24
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "tv-not-addressed",
@@ -285,7 +302,8 @@
       "reply": null,
       "model": "mimo-v2.6-flash",
       "totalMs": 0,
-      "firstTokenMs": null
+      "firstTokenMs": null,
+      "run": 1
     },
     {
       "scenario": "quiet-mode",
@@ -299,7 +317,8 @@
       "firstTokenMs": 1202,
       "segmentChars": [
         12
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "quiet-mode",
@@ -310,7 +329,8 @@
       "reply": null,
       "model": "mimo-v2.6-flash",
       "totalMs": 0,
-      "firstTokenMs": null
+      "firstTokenMs": null,
+      "run": 1
     },
     {
       "scenario": "terse-personality",
@@ -324,7 +344,8 @@
       "firstTokenMs": 1621,
       "segmentChars": [
         36
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "terse-personality",
@@ -338,7 +359,8 @@
       "firstTokenMs": 3441,
       "segmentChars": [
         30
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "terse-personality",
@@ -352,7 +374,8 @@
       "firstTokenMs": 1060,
       "segmentChars": [
         21
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "chatty-personality",
@@ -366,7 +389,8 @@
       "firstTokenMs": 1156,
       "segmentChars": [
         24
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "chatty-personality",
@@ -381,7 +405,8 @@
       "segmentChars": [
         41,
         41
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "chatty-personality",
@@ -395,7 +420,8 @@
       "firstTokenMs": 2738,
       "segmentChars": [
         41
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "silence-allowed",
@@ -406,7 +432,8 @@
       "reply": null,
       "model": "mimo-v2.6-flash",
       "totalMs": 804,
-      "firstTokenMs": 600
+      "firstTokenMs": 600,
+      "run": 1
     },
     {
       "scenario": "silence-allowed",
@@ -420,7 +447,8 @@
       "firstTokenMs": 817,
       "segmentChars": [
         22
-      ]
+      ],
+      "run": 1
     },
     {
       "scenario": "G01",
@@ -434,7 +462,8 @@
       "firstTokenMs": 2960,
       "segmentChars": [
         19
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "G02",
@@ -448,7 +477,8 @@
       "firstTokenMs": 8264,
       "segmentChars": [
         28
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "G04",
@@ -469,7 +499,8 @@
         53,
         56,
         91
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "G05",
@@ -483,7 +514,8 @@
       "firstTokenMs": 1292,
       "segmentChars": [
         12
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "G06",
@@ -497,7 +529,8 @@
       "firstTokenMs": 2043,
       "segmentChars": [
         16
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "G09",
@@ -511,7 +544,8 @@
       "firstTokenMs": 6069,
       "segmentChars": [
         45
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "G11",
@@ -525,7 +559,8 @@
       "firstTokenMs": 2290,
       "segmentChars": [
         20
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "G11",
@@ -539,7 +574,8 @@
       "firstTokenMs": 1843,
       "segmentChars": [
         43
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "weather-thread",
@@ -554,7 +590,8 @@
       "segmentChars": [
         47,
         14
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "weather-thread",
@@ -568,7 +605,8 @@
       "firstTokenMs": 1465,
       "segmentChars": [
         24
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "weather-thread",
@@ -583,7 +621,8 @@
       "segmentChars": [
         48,
         17
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "tired-then-sleepy",
@@ -597,7 +636,8 @@
       "firstTokenMs": 761,
       "segmentChars": [
         21
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "tired-then-sleepy",
@@ -611,7 +651,8 @@
       "firstTokenMs": 1499,
       "segmentChars": [
         40
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "tired-then-sleepy",
@@ -622,7 +663,8 @@
       "reply": null,
       "model": "mimo-v2.6-flash",
       "totalMs": 1898,
-      "firstTokenMs": 1676
+      "firstTokenMs": 1676,
+      "run": 2
     },
     {
       "scenario": "town-trip-thread",
@@ -636,7 +678,8 @@
       "firstTokenMs": 1339,
       "segmentChars": [
         18
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "town-trip-thread",
@@ -651,7 +694,8 @@
       "segmentChars": [
         34,
         33
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "town-trip-thread",
@@ -665,7 +709,8 @@
       "firstTokenMs": 1776,
       "segmentChars": [
         37
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "tv-not-addressed",
@@ -676,7 +721,8 @@
       "reply": null,
       "model": "mimo-v2.6-flash",
       "totalMs": 0,
-      "firstTokenMs": null
+      "firstTokenMs": null,
+      "run": 2
     },
     {
       "scenario": "quiet-mode",
@@ -690,7 +736,8 @@
       "firstTokenMs": 855,
       "segmentChars": [
         16
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "quiet-mode",
@@ -701,7 +748,8 @@
       "reply": null,
       "model": "mimo-v2.6-flash",
       "totalMs": 0,
-      "firstTokenMs": null
+      "firstTokenMs": null,
+      "run": 2
     },
     {
       "scenario": "terse-personality",
@@ -715,7 +763,8 @@
       "firstTokenMs": 771,
       "segmentChars": [
         24
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "terse-personality",
@@ -729,7 +778,8 @@
       "firstTokenMs": 5761,
       "segmentChars": [
         33
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "terse-personality",
@@ -743,7 +793,8 @@
       "firstTokenMs": 1228,
       "segmentChars": [
         25
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "chatty-personality",
@@ -758,7 +809,8 @@
       "segmentChars": [
         41,
         32
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "chatty-personality",
@@ -772,7 +824,8 @@
       "firstTokenMs": 4431,
       "segmentChars": [
         24
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "chatty-personality",
@@ -786,7 +839,8 @@
       "firstTokenMs": 632,
       "segmentChars": [
         38
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "silence-allowed",
@@ -797,7 +851,8 @@
       "reply": null,
       "model": "mimo-v2.6-flash",
       "totalMs": 1212,
-      "firstTokenMs": 954
+      "firstTokenMs": 954,
+      "run": 2
     },
     {
       "scenario": "silence-allowed",
@@ -811,7 +866,8 @@
       "firstTokenMs": 492,
       "segmentChars": [
         16
-      ]
+      ],
+      "run": 2
     },
     {
       "scenario": "G01",
@@ -825,7 +881,8 @@
       "firstTokenMs": 744,
       "segmentChars": [
         32
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "G02",
@@ -839,7 +896,8 @@
       "firstTokenMs": 718,
       "segmentChars": [
         35
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "G04",
@@ -860,7 +918,8 @@
         51,
         28,
         170
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "G05",
@@ -874,7 +933,8 @@
       "firstTokenMs": 1270,
       "segmentChars": [
         12
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "G06",
@@ -888,7 +948,8 @@
       "firstTokenMs": 1865,
       "segmentChars": [
         34
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "G09",
@@ -902,7 +963,8 @@
       "firstTokenMs": 12162,
       "segmentChars": [
         35
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "G11",
@@ -916,7 +978,8 @@
       "firstTokenMs": 1346,
       "segmentChars": [
         20
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "G11",
@@ -930,7 +993,8 @@
       "firstTokenMs": 957,
       "segmentChars": [
         32
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "weather-thread",
@@ -945,7 +1009,8 @@
       "segmentChars": [
         55,
         18
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "weather-thread",
@@ -959,7 +1024,8 @@
       "firstTokenMs": 845,
       "segmentChars": [
         55
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "weather-thread",
@@ -973,7 +1039,8 @@
       "firstTokenMs": 991,
       "segmentChars": [
         52
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "tired-then-sleepy",
@@ -987,7 +1054,8 @@
       "firstTokenMs": 1253,
       "segmentChars": [
         20
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "tired-then-sleepy",
@@ -1001,7 +1069,8 @@
       "firstTokenMs": 1232,
       "segmentChars": [
         22
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "tired-then-sleepy",
@@ -1012,7 +1081,8 @@
       "reply": null,
       "model": "mimo-v2.6-flash",
       "totalMs": 1541,
-      "firstTokenMs": 1336
+      "firstTokenMs": 1336,
+      "run": 3
     },
     {
       "scenario": "town-trip-thread",
@@ -1026,7 +1096,8 @@
       "firstTokenMs": 1490,
       "segmentChars": [
         58
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "town-trip-thread",
@@ -1040,7 +1111,8 @@
       "firstTokenMs": 2109,
       "segmentChars": [
         29
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "town-trip-thread",
@@ -1054,7 +1126,8 @@
       "firstTokenMs": 2317,
       "segmentChars": [
         25
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "tv-not-addressed",
@@ -1065,7 +1138,8 @@
       "reply": null,
       "model": "mimo-v2.6-flash",
       "totalMs": 0,
-      "firstTokenMs": null
+      "firstTokenMs": null,
+      "run": 3
     },
     {
       "scenario": "quiet-mode",
@@ -1079,7 +1153,8 @@
       "firstTokenMs": 1393,
       "segmentChars": [
         16
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "quiet-mode",
@@ -1090,7 +1165,8 @@
       "reply": null,
       "model": "mimo-v2.6-flash",
       "totalMs": 0,
-      "firstTokenMs": null
+      "firstTokenMs": null,
+      "run": 3
     },
     {
       "scenario": "terse-personality",
@@ -1104,7 +1180,8 @@
       "firstTokenMs": 2155,
       "segmentChars": [
         24
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "terse-personality",
@@ -1118,7 +1195,8 @@
       "firstTokenMs": 301,
       "segmentChars": [
         51
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "terse-personality",
@@ -1132,7 +1210,8 @@
       "firstTokenMs": 778,
       "segmentChars": [
         22
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "chatty-personality",
@@ -1147,7 +1226,8 @@
       "segmentChars": [
         52,
         38
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "chatty-personality",
@@ -1161,7 +1241,8 @@
       "firstTokenMs": 1275,
       "segmentChars": [
         24
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "chatty-personality",
@@ -1176,7 +1257,8 @@
       "segmentChars": [
         52,
         18
-      ]
+      ],
+      "run": 3
     },
     {
       "scenario": "silence-allowed",
@@ -1187,7 +1269,8 @@
       "reply": null,
       "model": "mimo-v2.6-flash",
       "totalMs": 997,
-      "firstTokenMs": 703
+      "firstTokenMs": 703,
+      "run": 3
     },
     {
       "scenario": "silence-allowed",
@@ -1198,7 +1281,8 @@
       "reply": null,
       "model": "mimo-v2.6-flash",
       "totalMs": 539,
-      "firstTokenMs": 352
+      "firstTokenMs": 352,
+      "run": 3
     }
   ],
   "gates": [
@@ -1262,13 +1346,14 @@
     "turns": 84,
     "accepted": 78,
     "rejected": 6,
-    "spokenTurns": 71,
+    "spokenTurns": 63,
+    "repairTurns": 8,
     "silenceTurns": 7,
     "silenceRate": 0.09,
-    "questionTurns": 44,
-    "questionRate": 0.62,
-    "questionEndingTurns": 37,
-    "questionEndingRate": 0.521,
+    "questionTurns": 36,
+    "questionRate": 0.571,
+    "questionEndingTurns": 29,
+    "questionEndingRate": 0.46,
     "chars": [
       29,
       35,
@@ -1278,8 +1363,6 @@
       18,
       52,
       187,
-      24,
-      24,
       17,
       22,
       7,
@@ -1290,7 +1373,6 @@
       36,
       30,
       21,
-      24,
       82,
       41,
       22,
@@ -1303,7 +1385,6 @@
       20,
       43,
       61,
-      24,
       65,
       21,
       40,
@@ -1311,11 +1392,9 @@
       67,
       37,
       16,
-      24,
       33,
       25,
       73,
-      24,
       38,
       16,
       32,
@@ -1335,30 +1414,41 @@
       29,
       25,
       16,
-      24,
       51,
       22,
       90,
-      24,
       70
     ],
-    "charsP50": 29,
+    "charsP50": 33,
     "charsMax": 424,
     "length": {
       "counts": {
         "半句(<=15)": 4,
-        "短句(16-40)": 44,
+        "短句(16-40)": 36,
         "中句(41-90)": 19,
         "长解释(>=91)": 4
       },
       "shares": {
-        "半句(<=15)": 0.056,
-        "短句(16-40)": 0.62,
-        "中句(41-90)": 0.268,
-        "长解释(>=91)": 0.056
+        "半句(<=15)": 0.063,
+        "短句(16-40)": 0.571,
+        "中句(41-90)": 0.302,
+        "长解释(>=91)": 0.063
       },
-      "dominantShare": 0.62,
+      "dominantShare": 0.571,
       "dominantBucket": "短句(16-40)"
+    },
+    "segments": {
+      "n": 63,
+      "perTurnHistogram": {
+        "1段": 49,
+        "8段": 3,
+        "4段": 1,
+        "2段": 10
+      },
+      "perTurnMean": 1.5,
+      "segmentCharsP50": 34,
+      "segmentCharsMax": 170,
+      "overLimitTurns": 3
     },
     "bannedTemplateTurns": 0,
     "bannedTemplateRate": 0,
@@ -1368,1090 +1458,849 @@
         "phrase": "度，降水概率",
         "turns": [
           8,
-          18,
+          16,
+          17,
           19,
-          22,
+          27,
           30,
-          33,
-          39,
-          43,
-          45,
-          57,
-          67
+          35,
+          38,
+          40,
+          51,
+          60
         ]
       },
       {
         "phrase": "19到24度",
         "turns": [
           5,
-          15,
-          18,
+          13,
+          16,
+          27,
           30,
-          33,
-          39,
-          45,
-          57,
-          67,
-          69
+          35,
+          40,
+          51,
+          60,
+          62
         ]
       },
       {
         "phrase": "9到24度，",
         "turns": [
           5,
-          15,
-          18,
+          13,
+          16,
+          27,
           30,
-          33,
-          39,
-          45,
-          57,
-          67,
-          69
-        ]
-      },
-      {
-        "phrase": "这个我记不准",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "个我记不准，",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "我记不准，不",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "记不准，不敢",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "不准，不敢乱",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "准，不敢乱说",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "，不敢乱说—",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "不敢乱说——",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "敢乱说——要",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "乱说——要不",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "说——要不我",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "——要不我查",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "—要不我查一",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "要不我查一下",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "不我查一下再",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "我查一下再告",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "查一下再告诉",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "一下再告诉你",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
-        ]
-      },
-      {
-        "phrase": "下再告诉你？",
-        "turns": [
-          9,
-          10,
-          21,
-          34,
-          42,
-          46,
-          66,
-          70
+          35,
+          40,
+          51,
+          60,
+          62
         ]
       },
       {
         "phrase": "阴天，19到",
         "turns": [
-          15,
-          18,
+          13,
+          16,
+          27,
           30,
-          33,
-          39,
-          45,
-          57,
-          67
+          35,
+          40,
+          51,
+          60
         ]
       },
       {
         "phrase": "天，19到2",
         "turns": [
-          15,
-          18,
+          13,
+          16,
+          27,
           30,
-          33,
-          39,
-          45,
-          57,
-          67
+          35,
+          40,
+          51,
+          60
         ]
       },
       {
         "phrase": "，19到24",
         "turns": [
-          15,
-          18,
+          13,
+          16,
+          27,
           30,
-          33,
-          39,
-          45,
-          57,
-          67
+          35,
+          40,
+          51,
+          60
         ]
       },
       {
         "phrase": "都过十二点了",
         "turns": [
-          12,
-          20,
-          28,
-          45,
-          52,
-          61,
-          68
+          10,
+          18,
+          25,
+          40,
+          46,
+          55,
+          61
         ]
       },
       {
         "phrase": "24度，降水",
         "turns": [
           8,
-          18,
+          16,
+          27,
           30,
-          33,
-          39,
-          57
+          35,
+          51
         ]
       },
       {
         "phrase": "4度，降水概",
         "turns": [
           8,
-          18,
+          16,
+          27,
           30,
-          33,
-          39,
-          57
+          35,
+          51
         ]
       },
       {
         "phrase": "概率只有12",
         "turns": [
-          15,
+          13,
+          27,
           30,
-          33,
-          39,
-          45,
-          69
+          35,
+          40,
+          62
         ]
       },
       {
         "phrase": "率只有12%",
         "turns": [
-          15,
+          13,
+          27,
           30,
-          33,
-          39,
-          45,
-          69
+          35,
+          40,
+          62
         ]
       },
       {
         "phrase": "12%，基本",
         "turns": [
-          18,
-          33,
-          39,
-          45,
-          57,
-          69
+          16,
+          30,
+          35,
+          40,
+          51,
+          62
         ]
       },
       {
         "phrase": "2%，基本不",
         "turns": [
-          18,
-          33,
-          39,
-          45,
-          57,
-          69
+          16,
+          30,
+          35,
+          40,
+          51,
+          62
         ]
       },
       {
         "phrase": "，18到26",
         "turns": [
+          17,
           19,
-          22,
-          35,
-          43,
-          58,
-          67
+          31,
+          38,
+          52,
+          60
         ]
       },
       {
         "phrase": "18到26度",
         "turns": [
+          17,
           19,
-          22,
-          35,
-          43,
-          58,
-          67
+          31,
+          38,
+          52,
+          60
         ]
       },
       {
         "phrase": "，基本不会下",
         "turns": [
           8,
-          18,
-          39,
-          57,
-          67
+          16,
+          35,
+          51,
+          60
         ]
       },
       {
         "phrase": "基本不会下雨",
         "turns": [
           8,
-          18,
-          39,
-          57,
-          67
+          16,
+          35,
+          51,
+          60
         ]
       },
       {
         "phrase": "本不会下雨。",
         "turns": [
           8,
-          18,
-          39,
-          57,
-          67
+          16,
+          35,
+          51,
+          60
         ]
       },
       {
         "phrase": "只有12%，",
         "turns": [
-          15,
-          33,
-          39,
-          45,
-          69
+          13,
+          30,
+          35,
+          40,
+          62
         ]
       },
       {
         "phrase": "明天成都阴天",
         "turns": [
-          18,
-          33,
-          54,
-          57,
-          67
+          16,
+          30,
+          48,
+          51,
+          60
         ]
       },
       {
         "phrase": "天成都阴天，",
         "turns": [
-          18,
-          33,
-          54,
-          57,
-          67
+          16,
+          30,
+          48,
+          51,
+          60
         ]
       },
       {
         "phrase": "到24度，降",
         "turns": [
-          18,
+          16,
+          27,
           30,
-          33,
-          39,
-          57
+          35,
+          51
         ]
       },
       {
         "phrase": "8到26度，",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          58,
-          67
+          38,
+          52,
+          60
         ]
       },
       {
         "phrase": "，出门记得带",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          58,
-          67
+          38,
+          52,
+          60
         ]
       },
       {
         "phrase": "出门记得带把",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          58,
-          67
+          38,
+          52,
+          60
         ]
       },
       {
         "phrase": "门记得带把伞",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          58,
-          67
+          38,
+          52,
+          60
         ]
       },
       {
         "phrase": "记得带把伞。",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          58,
-          67
+          38,
+          52,
+          60
         ]
       },
       {
         "phrase": "，降水概率只",
         "turns": [
+          27,
           30,
-          33,
-          39,
-          45,
-          69
+          35,
+          40,
+          62
         ]
       },
       {
         "phrase": "降水概率只有",
         "turns": [
+          27,
           30,
-          33,
-          39,
-          45,
-          69
+          35,
+          40,
+          62
         ]
       },
       {
         "phrase": "水概率只有1",
         "turns": [
+          27,
           30,
-          33,
-          39,
-          45,
-          69
+          35,
+          40,
+          62
         ]
       },
       {
         "phrase": "，降水概率才",
         "turns": [
           8,
-          54,
-          57,
-          63
+          48,
+          51,
+          57
         ]
       },
       {
         "phrase": "%，基本不会",
         "turns": [
           8,
-          18,
-          39,
-          57
+          16,
+          35,
+          51
         ]
       },
       {
         "phrase": "，都过十二点",
         "turns": [
-          12,
-          52,
-          61,
-          68
+          10,
+          46,
+          55,
+          61
         ]
       },
       {
         "phrase": "成都阴天，1",
         "turns": [
-          18,
-          33,
-          57,
-          67
+          16,
+          30,
+          51,
+          60
         ]
       },
       {
         "phrase": "都阴天，19",
         "turns": [
-          18,
-          33,
-          57,
-          67
+          16,
+          30,
+          51,
+          60
         ]
       },
       {
         "phrase": "毛毛雨，18",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          67
+          38,
+          60
         ]
       },
       {
         "phrase": "毛雨，18到",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          67
+          38,
+          60
         ]
       },
       {
         "phrase": "雨，18到2",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          67
+          38,
+          60
         ]
       },
       {
         "phrase": "到26度，降",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          67
+          38,
+          60
         ]
       },
       {
         "phrase": "26度，降水",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          67
+          38,
+          60
         ]
       },
       {
         "phrase": "6度，降水概",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          67
+          38,
+          60
         ]
       },
       {
         "phrase": "，降水概率4",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          67
+          38,
+          60
         ]
       },
       {
         "phrase": "降水概率45",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          67
+          38,
+          60
         ]
       },
       {
         "phrase": "水概率45%",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          67
+          38,
+          60
         ]
       },
       {
         "phrase": "概率45%，",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          67
+          38,
+          60
         ]
       },
       {
         "phrase": "率45%，出",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          67
+          38,
+          60
         ]
       },
       {
         "phrase": "45%，出门",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          67
+          38,
+          60
         ]
       },
       {
         "phrase": "5%，出门记",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          67
+          38,
+          60
         ]
       },
       {
         "phrase": "%，出门记得",
         "turns": [
+          17,
           19,
-          22,
-          43,
-          67
+          38,
+          60
         ]
       },
       {
         "phrase": "有12%，基",
         "turns": [
-          33,
-          39,
-          45,
-          69
+          30,
+          35,
+          40,
+          62
         ]
       },
       {
         "phrase": "镇上肯定挤。",
         "turns": [
           1,
-          25,
-          49
+          22,
+          43
         ]
       },
       {
         "phrase": "都这个点了才",
         "turns": [
           2,
-          26,
-          50
+          23,
+          44
         ]
       },
       {
         "phrase": "啊，辛苦了。",
         "turns": [
           2,
-          26,
-          50
+          23,
+          44
         ]
       },
       {
         "phrase": "一般比同期定",
         "turns": [
           3,
-          27,
-          51
+          24,
+          45
         ]
       },
       {
         "phrase": "般比同期定期",
         "turns": [
           3,
-          27,
-          51
+          24,
+          45
         ]
       },
       {
         "phrase": "明天（10月",
         "turns": [
           8,
-          22,
-          69
+          19,
+          62
         ]
       },
       {
         "phrase": "天（10月2",
         "turns": [
           8,
-          22,
-          69
+          19,
+          62
         ]
       },
       {
         "phrase": "（10月2号",
         "turns": [
           8,
-          22,
-          69
+          19,
+          62
         ]
       },
       {
         "phrase": "10月2号）",
         "turns": [
           8,
-          22,
-          69
+          19,
+          62
         ]
       },
       {
         "phrase": "是阴天，19",
         "turns": [
           8,
-          39,
-          45
+          35,
+          40
         ]
       },
       {
         "phrase": "都这个点了还",
         "turns": [
-          11,
-          36,
-          51
+          9,
+          32,
+          45
         ]
       },
       {
         "phrase": "这个点了还没",
         "turns": [
-          11,
-          36,
-          51
+          9,
+          32,
+          45
         ]
       },
       {
         "phrase": "个点了还没睡",
         "turns": [
-          11,
-          36,
-          51
+          9,
+          32,
+          45
         ]
       },
       {
         "phrase": "嗯什么嗯，都",
         "turns": [
-          12,
-          37,
-          61
+          10,
+          33,
+          55
         ]
       },
       {
         "phrase": "过十二点了还",
         "turns": [
-          12,
-          61,
-          68
+          10,
+          55,
+          61
         ]
       },
       {
         "phrase": "十二点了还不",
         "turns": [
-          12,
-          61,
-          68
+          10,
+          55,
+          61
         ]
       },
       {
         "phrase": "二点了还不睡",
         "turns": [
-          12,
-          61,
-          68
+          10,
+          55,
+          61
         ]
       },
       {
         "phrase": "点了还不睡，",
         "turns": [
-          12,
-          61,
-          71
+          10,
+          55,
+          63
         ]
       },
       {
         "phrase": "了还不睡，明",
         "turns": [
-          12,
-          61,
-          71
+          10,
+          55,
+          63
         ]
       },
       {
         "phrase": "还不睡，明天",
         "turns": [
-          12,
-          61,
-          71
+          10,
+          55,
+          63
         ]
       },
       {
         "phrase": "不睡，明天不",
         "turns": [
-          12,
-          61,
-          71
+          10,
+          55,
+          63
         ]
       },
       {
         "phrase": "，那我就陪你",
         "turns": [
-          17,
-          41,
-          65
+          15,
+          37,
+          59
         ]
       },
       {
         "phrase": "有毛毛雨，1",
         "turns": [
+          17,
           19,
-          22,
-          43
+          38
         ]
       },
       {
         "phrase": "过十二点了。",
         "turns": [
-          20,
-          28,
-          52
+          18,
+          25,
+          46
         ]
       },
       {
         "phrase": "明天不是国庆",
         "turns": [
-          23,
-          37,
-          57
+          20,
+          33,
+          51
         ]
       },
       {
         "phrase": "天不是国庆吗",
         "turns": [
-          23,
-          37,
-          57
+          20,
+          33,
+          51
         ]
       },
       {
         "phrase": "不是国庆吗，",
         "turns": [
-          23,
-          37,
-          57
+          20,
+          33,
+          51
         ]
       },
       {
         "phrase": "都凌晨十二点",
         "turns": [
-          27,
-          33,
-          37
+          24,
+          30,
+          33
         ]
       },
       {
         "phrase": "，基本不用担",
         "turns": [
-          27,
-          33,
-          69
+          24,
+          30,
+          62
         ]
       },
       {
         "phrase": "基本不用担心",
         "turns": [
-          27,
-          33,
-          69
+          24,
+          30,
+          62
         ]
       },
       {
         "phrase": "%，基本不用",
         "turns": [
-          33,
-          45,
-          69
+          30,
+          40,
+          62
         ]
       },
       {
         "phrase": "不用带伞。\n",
         "turns": [
-          33,
-          45,
-          57
+          30,
+          40,
+          51
         ]
       },
       {
         "phrase": "用带伞。\n\n",
         "turns": [
-          33,
-          45,
-          57
+          30,
+          40,
+          51
         ]
       },
       {
         "phrase": "成都这边是阴",
         "turns": [
-          39,
-          45,
-          69
+          35,
+          40,
+          62
         ]
       },
       {
         "phrase": "都这边是阴天",
         "turns": [
-          39,
-          45,
-          69
+          35,
+          40,
+          62
         ]
       },
       {
         "phrase": "这边是阴天，",
         "turns": [
-          39,
-          45,
-          69
+          35,
+          40,
+          62
         ]
       }
     ],
-    "repeatedPhraseRate": 1.479,
-    "longestSameStructureRun": 4,
+    "repeatedPhraseRate": 1.365,
+    "longestSameStructureRun": 3,
     "alarms": [
-      "连续 4 轮回复同结构（同一长度档 + 同样有没有问号）"
+      "连续 3 轮回复同结构（同一长度档 + 同样有没有问号）"
     ],
-    "questionBand": "above"
+    "questionBand": "in-band"
   },
   "perRepeat": [
     {
       "run": 1,
       "turns": 28,
-      "spokenTurns": 24,
-      "questionRate": 0.625,
+      "spokenTurns": 21,
+      "questionEndingRate": 0.476,
+      "questionRate": 0.571,
       "bannedTemplateRate": 0,
       "silenceRate": 0.077,
-      "charsP50": 27.5,
-      "charsMax": 414
+      "charsP50": 30,
+      "charsMax": 414,
+      "repeatedPhrases": 3
     },
     {
       "run": 2,
       "turns": 28,
-      "spokenTurns": 24,
-      "questionRate": 0.583,
+      "spokenTurns": 21,
+      "questionEndingRate": 0.429,
+      "questionRate": 0.524,
       "bannedTemplateRate": 0,
       "silenceRate": 0.077,
-      "charsP50": 26.5,
-      "charsMax": 396
+      "charsP50": 33,
+      "charsMax": 396,
+      "repeatedPhrases": 19
     },
     {
       "run": 3,
       "turns": 28,
-      "spokenTurns": 23,
-      "questionRate": 0.652,
+      "spokenTurns": 21,
+      "questionEndingRate": 0.476,
+      "questionRate": 0.619,
       "bannedTemplateRate": 0,
       "silenceRate": 0.115,
-      "charsP50": 32,
-      "charsMax": 424
+      "charsP50": 34,
+      "charsMax": 424,
+      "repeatedPhrases": 7
     }
   ]
 }

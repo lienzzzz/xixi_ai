@@ -6,8 +6,10 @@
 **不可替换**的是长期状态与行为策略（WorldState、Memory、FutureHook、SelfModel、RelationshipModel、
 RoutineModel、Proactive policy、Conversation state）。
 
-当前进度（2026-09-30）：**M0 文本 Harness 已验收；噪声鲁棒语音前端、摄像头在场检测（M6）、
-现场测试控制台、主动开口（M5-lite）与多段回复均已落地并真机验证**；
+当前进度（2026-10-01）：**M0 文本 Harness 已验收；噪声鲁棒语音前端、摄像头在场检测（M6）、
+现场测试控制台、主动开口（主动性 V2：硬底线 + 模型读空气）与多段回复均已落地并真机验证**；
+「真人感」改造（提示词改成「身份与说话方式」、回复容量 180 → 480 字、制品清洗）已落地并有**同口径的前后对比**
+（见 [`docs/benchmarks/realism-metrics.md`](docs/benchmarks/realism-metrics.md)）；
 记忆（M4）、唤醒词（M2）、模型驱动的人格学习（M3）与完整 M5 尚未开始。
 
 > 完整设计与实施方案见 [`xixi_ai_companion_project_plan.md`](xixi_ai_companion_project_plan.md)；
@@ -24,7 +26,7 @@ node scripts/install-dsh-profile.ts           # 装项目内 DSH profile（.dsh/
 Copy-Item .env.example .env                   # 填入 MIMO_API_KEY（.env 已被 gitignore，绝不提交）
 
 npm test                                      # 全部离线测试（不花 API 费用）
-                                              #   项数以末行为准（2026-09-30 实测点 245 项、全绿；空载约 15–20s）
+                                              #   项数以末行为准（不写死数字）
 npm run field-test                            # 👉 现场测试控制台：http://127.0.0.1:8792
 ```
 
@@ -67,11 +69,48 @@ npm run eval:conversation:judge            # 对话质量评测（含评审模�
 | 人格基线持久化 | 重启只补缺不覆盖（§33「重启后持久人格恢复 100%」） |
 | **噪声鲁棒语音前端** | 去直流 + 120 Hz 零相位高通 + 噪声底自适应门限；`npm run voice:noise`：**SNR ≥ 3 dB 时 4 条夹具全部检出、平均字符相似度 0.805** |
 | **摄像头在场检测（M6）** | `node scripts/verify-camera-presence.ts --seconds 20`：本地抓帧 → 帧差动 + YuNet → `presence.changed` + world_state 投影；真机 640×480 约 39 fps |
-| **多段回复（ADR-0010）** | `segments.ts` 纯函数分段器（≤3 段、单段 ≤60 字、段间 250–1200ms 默认 450）；文字与播放计划真按段，**TTS 仍整条合成** |
-| **主动开口（M5-lite）** | `ProactiveEngine` 九道硬门禁 + `proactive.decision` 审计 + 先记后播；五个触发源全部能过线（在场 0.58 / 沉默 0.49 / 时间钩子 0.51 / 话题池 0.50 / 随机闲聊 0.47，默认阈值 0.495） |
-| **不编造可核查的事实** | 提示词 `HARD_POLICY` 第 7 条 + 引擎层闸门（无工具却出现具体数值就扣住并改说修复句）；台账核对「含具体值的轮次都伴随工具调用」 |
+| **多段回复（ADR-0010）** | `segments.ts` 纯函数分段器（**最多 8 段、块长 ≤60 字 → 容量 480 字**，段间 250–1200ms 默认 450；容量内每段 ≤60，`>8` 组时尾段合并并置 `mergedOverflow`，**该段可超 60**——反例 279 字 → 8 段、最长 62）；文字与播放计划真按段，**TTS 仍整条合成** |
+| **主动开口（ADR-0009 + ADR-0011）** | **两层**：硬底线（静默时段 / 6h 与当日**次数**额度 / DND / 隐私与同意 / 场景与音频路径）由程序判定，模型不能绕过；底线之上**由模型读空气决定说不说**，确定性社会预算只给候选与建议（`BELOW_RECOMMENDATION` 是建议不是否决）+ `proactive.decision` 审计 + 先记后播。**金额级费用上限尚未实现**（次数额度是当前的费用代理） |
+| **不编造可核查的事实** | 提示词 `HARD_POLICY` 的「可核查的具体事实」那条（关键词锚点，不再按编号引用）+ 引擎层闸门（无工具却出现具体数值就扣住并改说修复句）；台账核对「含具体值的轮次都伴随工具调用」 |
+| **制品清洗（`REPLY_HYGIENE`）** | 工具调用标记与外文推理在进 TTS / 日志 / 工作记忆前被程序剔除（`sanitizeSpokenReply`）；整轮只剩制品 → 沉默，并发出 `REPLY_HYGIENE` 审计通知。**产线入口尚未订阅 `onNotice`**（见 `docs/progress.md` §4） |
 | **「看一眼」（视觉）** | `UserTurnInput.images` → OpenAI 风格 `image_url`（data URL）；真机实测能描述画面内容；DSH 路径发不了图时**明确报错**而不是静默丢图 |
-| 质量过程 | 245 项离线测试全绿；[`docs/review/`](docs/review/) 有 43 份评审报告（含复审与再复审），[`docs/verification/`](docs/verification/) 有独立验证报告 |
+| 质量过程 | `npm test` 全绿（**项数以末行为准**）；[`docs/review/`](docs/review/) 有评审报告（含复审与再复审），[`docs/verification/`](docs/verification/) 有独立验证报告，[`docs/benchmarks/`](docs/benchmarks/realism-metrics.md) 有可重跑的基准与前后对比 |
+
+## 「真人感」改造成什么样了（含前后对比）
+
+改造前（V0.1）的病征是「每轮都像客服」：稳定前缀是一张编号规则清单（还带着 `verbosity=0.4` 这样的裸参数），
+一轮最多 3 段 × 60 字，长解释被挤成 2–3 大块（实测单段最长 **341 字**），同一句话反复收尾。
+改造后（P1，2026-10-01）：前缀换成**「身份与说话方式」的散文**（0 条编号）+ 一段紧凑的安全边界，
+回复容量 **180 → 480 字**（8 段 × 块长 60），工具标记与英文推理在**程序层**被剔除。
+
+**同一批语料、同一工具、同一口径**的前后对比（口径定义与完整数字见 [`docs/benchmarks/realism-metrics.md`](docs/benchmarks/realism-metrics.md)）：
+
+| 指标（84 轮语料） | 改造前 V0.1 | 改造后 |
+|---|---:|---:|
+| 提问率（**主口径**＝末句以问号收尾；分母只算她真正说出来的轮，程序写的修复句与沉默都不进分母） | **45.8%**（33/72） | **46.0%**（29/63） |
+| 交付分段的最长单段 | **341 字** | **170 字** |
+| 「AI 套话」词表出现率 | 0% | 0% |
+| 三次重复的提问率均值 | 46.2%（**n=3**，极差 30.3pt） | 46.0%（**n=3**，极差 4.7pt） |
+| 20 轮同一输入里的复述（逐字重复句 / 重复短语） | 有（「了，量完血压」出现在 3 轮） | **0** |
+
+**怎么自己复跑**（前两条不花钱，读的是已捕获的转录；第三条是真实现场重跑）：
+
+```powershell
+node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v02-wip.json   # 改造后
+node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v01-vanilla.json # 改造前（同语料）
+node scripts/eval-realism.ts --corpus=all --repeat=3 --label v02                          # 现场重跑（真实调用）
+```
+
+**亲耳亲眼看**：终端里 `npm run chat` 连聊 20 轮；改造前的同一批输入原文留在
+[`docs/benchmarks/v01/raw-chat-real-20turns.txt`](docs/benchmarks/v01/raw-chat-real-20turns.txt)，
+现在用同一批输入重跑的命令是
+`node scripts/chat.ts < docs/benchmarks/v01/input-chat-20turns.txt`（真实调用），
+输出再用 `node scripts/benchmarks/v01-text-metrics.ts <输出文件>` 量长度与复述。
+
+**还没到位的（别当成已完成）**：提问率主口径两次都在 46% 左右，**贴着 30–50% 的上沿**；
+把全部 10 次捕获算进来，主口径极差是 **15.8%–63.2%（跨带）**，跨带来自输入差异——
+**「落在 30–50%」只在「同语料重复」的前提下成立**；产线入口还没订阅 `onNotice`，
+所以「程序剔掉制品导致沉默」在页面上暂不可区分（见 [`docs/progress.md`](docs/progress.md) §4）。
 
 ## 现场测试前须知（已知限制，先说清楚）
 
@@ -117,7 +156,7 @@ config/                   xixi.example.yaml（方案 §42）
 scripts/                  安装、验收、演示与现场测试控制台（field-test.ts 是控制台入口）
 tests/                    unit / integration / perception / console / scenarios / replay
 docs/                     README（地图）、architecture、event-contracts、testing、progress、handoff、
-                          design/、adr/、recon/、review/、verification/
+                          design/、adr/、recon/、review/、verification/、benchmarks/
 ```
 
 ## 设计要点
@@ -125,7 +164,7 @@ docs/                     README（地图）、architecture、event-contracts、
 - **Harness 隔离**：只有 `packages/brain-adapter` 与 `apps/brain-dsh` 知道 DSH 存在；其余代码只看到领域词汇（铁律 9）。
 - **事件日志是唯一事实来源**：对话轮次就是 `conversation.turn` 事件，不另建表，避免同一事实两份真相。
 - **持久人格是「恢复」不是「重置」**：每次启动只补缺失的属性，已有值永不覆盖。
-- **模型只做判断，规则由程序负责**：主动开口的九道硬门禁是纯函数，模型拿不到它们，也无法绕过（铁律 1/3）。
+- **模型只做判断，规则由程序负责**：主动开口的**硬底线**（静默时段 / 额度 / 隐私 / 场景）是纯函数，模型拿不到、也无法绕过（铁律 1/3）；底线之上「说不说」由模型读空气决定，确定性评分只给建议（ADR-0011）。
 - **失败要说人话**：未知参数、未知字段、发不了图、摄像头不可用、空帧——一律中文报错或具名拒绝，
   **不允许静默忽略或静默降级**。
 - **默认关闭深度思考**：MiMo 服务端默认开启思考，路由用 `reasoning: off` + `reasoningEfforts` 明确关闭（§46.1）。
@@ -139,6 +178,13 @@ docs/                     README（地图）、architecture、event-contracts、
 - 现场验收的**扬声器**项在修正口径后判 FAIL：能量比 2.41 dB < 10 dB，测的是「笔记本扬声器→笔记本麦克风」的**回采余量**，
   **不代表用户对麦克风说话能否被听到**（口径说明见 [`docs/recon/field-test-report-2026-09-30.md`](docs/recon/field-test-report-2026-09-30.md) 顶部）。
 - 主动开口的内容目前只由「事实 + 模型现编」生成，**没有记忆驱动的长期话题**（M4 之后再补）。
+- **主动性 V2 的两项验收未达标**：pack Phase 5 的 12 小时时间线里，内容口径 generic 话题占比 **33.3%**（目标 ≤20%），
+  且**「连续两次没人回应后显著降频」不成立**（被忽视的一天与有人回应的一天都是 9 次）；t9 的独立验证判 failed，
+  六条缺陷（F1–F6）的修复任务是 t18（未开始）。**不要读成「Phase 5 已通过」**——
+  判定表与可重跑命令见 [`docs/verification/t9-proactive-v2-verification-2026-10-01.md`](docs/verification/t9-proactive-v2-verification-2026-10-01.md)。
+- **`onNotice` 没有产线消费者**：程序改写/剔除她说的话时（`UNBACKED_FACT_CLAIM` / `REPLY_HYGIENE`）
+  发出的审计通知，页面与日志都还没接；「为什么沉默」因此暂不可区分（`SILENCE_ARTIFACT_ONLY` 只是评审提出的候选名字，代码里不存在）。
+- **金额级费用上限未实现**：主动开口的额度是**次数**（6 小时 / 当日），它是当前的费用代理。
 
 ## 许可
 

@@ -93,6 +93,34 @@ resume 的两个硬约束（相同 cwd、相同 profile）在 `CliDshTransport` 
 静默判定是 `isSilenceReply()`：去掉 `。．.!！?？`、空白与引号后，等于 `[静默]` 或为空即静默（`src/mimo.ts` 的 `SILENCE_TOKEN`）。
 `ConversationEngine` 还会在引擎层再兜底一次（切分后的 `[`+`静默`+`]` 也不会漏出去），见 [conversation.md](conversation.md)。
 
+### 4.1 制品清洗：文本流不是「模型说什么就播什么」（t7，2026-10-01）
+
+**来由**：V0.1 基线在真机语音路径上抓到两种**会被念出来**的制品（`docs/benchmarks/v01-baseline.md` §4）：
+整段回复就是 `<tool_call><function=get_weather>…` 标记（4 批 8 个天气轮里 7 轮），
+以及一整段**英文自我推理**（末尾才接中文台词）。前者来自「这条路径没给模型工具」——
+模型于是把工具调用写成了正文；后者是思维链泄漏。
+
+**程序层闸门（铁律 1：边界归程序，不靠提示词自觉）**：`packages/model-adapters/src/reply-hygiene.ts` 的
+`sanitizeSpokenReply(text, {language})` 在**任何消费者之前**动手，返回 `{text, removedChars, …}`：
+
+| 制品 | 处理 | 依据 |
+|---|---|---|
+| 工具调用标记（`<tool_call>…</tool_call>`、函数调用片段） | 整段剔除 | 工具只经结构化 `tool_calls` 通道生效，「报幕」不是她的话 |
+| 非中文的自我推理（语言不匹配的长段） | 整段剔除 | 铁律 5 的意图：私有推理不该被说出来（这里更糟——直接念出来） |
+| 剔完什么都不剩 | 该轮按 §55 转成 **沉默** | 沉默是一等输出 |
+| 剔掉一部分 | 剩下的中文正文照常进 TTS / 日志 / 工作记忆 | 不因为一句话脏就整轮作废 |
+
+清洗发生在 `packages/conversation/src/engine.ts`（`ConversationEngine.respond()`），所以**无论哪个适配器**
+产出的文本都过同一道闸；剔除量 > 0 时发一条审计通知
+`onNotice({code:'REPLY_HYGIENE', detail:'回复里剔除了…'})`。
+
+**已知缺口（文档只写现状）**：通知**发得出来，但没人接**——产线入口
+（`scripts/chat.ts` / `serve-chat.ts` / `field-test.ts` / `voice-turn.ts`）都还没传 `onNotice`，
+于是控制台/日志里「她本来想调工具、没有结果所以没说」与「她自己选择沉默」**同形**；
+评审建议的修法之一是给轮次加一个可区分的原因码，**候选名字 `SILENCE_ARTIFACT_ONLY` 在代码里并不存在**
+（它是方案，不是现状）。出处与要求的修法见 `docs/review/reply-hygiene-review-2026-10-01.md`，
+未完成项记在 [`progress.md`](../progress.md) §4。
+
 ## 5. 工具层（§27）
 
 接口在 `packages/brain-adapter/src/tools.ts`：
@@ -226,6 +254,12 @@ FatherModel/RelationshipModel/FutureHooks 恢复（这些领域对象尚不存�
 - DSH 路径的提示词拼装是 `composeTask` 占位（§26 的正式拼装由 `packages/conversation` 的 `PromptAssembler` 负责，直连路径已用上）。
   （**DSH 路径的天气工具已在本轮补齐**，见 §5。）
 - 本地 ASR / TTS 兜底、模型私有推理之外的失败话术。
+- **`onNotice` 在产线上没有消费者**（`REPLY_HYGIENE` 与 `UNBACKED_FACT_CLAIM` 两条审计通知都发给调用方，
+  但 `scripts/chat.ts` / `serve-chat.ts` / `field-test.ts` / `voice-turn.ts` 都没订阅）——
+  于是「程序改写了她说的话」在页面与日志里与「模型本来就这么说」同形（见 §4.1 与
+  `docs/review/reply-hygiene-review-2026-10-01.md`）。
+- **`SILENCE_ARTIFACT_ONLY` 不存在**：那是评审提出的候选原因码（给「整轮只剩制品 → 沉默」一个可区分的原因），
+  代码里没有；轮次目前仍只报 `SILENCE`。
 - `MimoClient.#post` 会把「缺密钥」误标成 `NETWORK`（§7 的 KNOWN GAP）。
 - `brain-adapter` 无 type check（无 `tsc --noEmit`），类型错误只在运行时暴露（progress §6）。
 
@@ -250,13 +284,13 @@ FatherModel/RelationshipModel/FutureHooks 恢复（这些领域对象尚不存�
 |---|---|---|
 | 入口 | `POST /api/field/look` | 主动开口的 composer（`createModelComposer({vision})`） |
 | 走哪条链 | `ConversationEngine.respond({images})` —— 和打字/说话同一轮 | **绕过引擎**，直接 `engine.buildPrompt()` + `adapter.handleUserTurn({images})` |
-| 门禁与状态机 | 照常：`shouldAcceptTurn` 接受判定、`conversation.decision` 审计、两条 `conversation.turn`、ADR-0010 分段、`onSegment` 逐段 TTS 全部生效 | 不由它决定说不说——**先说后挂图**：候选已经过了 `ProactiveEngine.consider` 的九道硬门禁（含冷却/额度/静默），图只是这次已放行的投递上的附加物 |
+| 门禁与状态机 | 照常：`shouldAcceptTurn` 接受判定、`conversation.decision` 审计、两条 `conversation.turn`、ADR-0010 分段、`onSegment` 逐段 TTS 全部生效 | 不由它决定说不说——**先说后挂图**：候选已经过了 `ProactiveEngine.consider` 的**硬底线**（静默时段 / 额度 / DND / 隐私 / 场景与音频路径），图只是这次已放行的投递上的附加物 |
 | 审计 | 上传记录 `outcome` = 模型真实 action（`SPEAK`／`no-text:SILENCE`／`failed:…`） | 上传记录 `outcome` = **`auto-look`**（同一张 `system.health` 表，`trigger=auto`） |
 | 频率 | 你按几次就几次 | 受主动开口门禁约束（冷却/6h/当日额度）——没有单独的看视频率开关 |
 | 控制台状态 | 写进右栏「对话记录」（`source=看一眼（manual）`），回复朗读 | 写进右栏「主动开口」那条，那一行会多出「附了 1 张静帧」（`imageUsed=true`） |
 
 **两者共同的隐私口径**：都是「一张、当前、内存里的帧」；都不落盘、都不连续、都留一条不含图像的记录。
-**差别只在「谁决定说」**：手动看是你在对话里问了一句（所以受会话门禁与状态机管），自主看是西西自己决定开口（所以受主动开口硬门禁管）。
+**差别只在「谁决定说」**：手动看是你在对话里问了一句（所以受会话门禁与状态机管），自主看是西西自己决定开口（所以受主动开口的**硬底线 + 读空气**管，见 [ADR-0011](../adr/0011-proactive-decision-ownership.md)）。
 读完这张表就该知道：**想审计「西西自己看没看」，查 `trigger=auto` 且 `outcome=auto-look` 的记录**；手动看则去看 `trigger=manual` 那一串。
 
 ## 维护规则
@@ -265,6 +299,7 @@ FatherModel/RelationshipModel/FutureHooks 恢复（这些领域对象尚不存�
 |---|---|
 | `packages/brain-adapter/src/types.ts` | §1、§2（方法清单与状态）、§3（对比表的结构字段） |
 | `packages/conversation/src/engine.ts`（`RespondInput.images` 等一轮输入） | §8.1，并同步 `tests/unit/core/engine-image-passthrough.test.ts` |
+| `packages/model-adapters/src/reply-hygiene.ts`（工具标记/外文推理清洗）或引擎里的 `REPLY_HYGIENE` 通知 | §4.1、§8（未实现清单），并同步 `tests/unit/core/reply-hygiene.test.ts`、`tests/unit/core/engine-reply-hygiene.test.ts` |
 | `packages/brain-adapter/src/mimo.ts` | §3、§4（流式/工具循环/action 语义）、§7 |
 | `packages/brain-adapter/src/dsh.ts`、`apps/brain-dsh/src/transport.ts` | §2、§3、§7（`TRANSPORT_FAILED`/`TIMEOUT`/`INVALID_RESPONSE` 触发点） |
 | `packages/brain-adapter/src/tools.ts` 或新增工具 | §5（工具表、参数封闭、注册表） |

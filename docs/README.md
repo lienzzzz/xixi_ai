@@ -44,11 +44,21 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
   现场测试控制台 → `data/field-test/`（chat 与试用页可用 `XIXI_CHAT_DATA_DIR` / `XIXI_WEB_DATA_DIR` 覆盖；
   控制台用 `--data-dir` / `--presence-data-dir`）。**在 chat 里设的人格与历史不会带到控制台**——
   别以为功能没生效，要在哪个入口用就在哪个入口再设一次（或改 `config/xixi.example.yaml` 的基线再 seed）。
-- **本轮新增的两项特性怎么用**：① **多段回复**（`config/xixi.example.yaml` 的 `reply`：`max_segments: 3`、
-  `segment_max_chars: 60`、`gap_ms: 450`；终端 `npm run chat` 已接逐段播放，试用页/语音脚本仍整段合成）；
-  ② **主动性**（人格 `proactivity` 默认 **0.85** → 阈值 `0.45 + 0.30 × (1 − proactivity)` = **0.495**；
+- **本轮新增的两项特性怎么用**：① **多段回复**（`config/xixi.example.yaml` 的 `reply`：`max_segments: 8`、
+  `segment_max_chars: 60`、`gap_ms: 450`；**「块长」与「容量」是两件事**：块长 60 字 = 一次播报的粒度，
+  容量 = 8 × 60 = **480 字**。贪心按句边界打包，`≤8` 组时每段 `≤60`；`>8` 组时自第 7 组起合并进最后一段、
+  `mergedOverflow = true`，该段**可以超过 60 字**（最小反例 279 字 = 9 句 × 31 → 8 段、最长 62；
+  断言在 `tests/unit/core/reply-segments.test.ts`）。终端 `npm run chat` 已接逐段播放，试用页/语音脚本仍整段合成）；
+  ② **主动性**（人格 `proactivity` 默认 **0.85** → 确定性评分只给候选与依据；**硬底线仍由程序判定**：
+  静默时段 / 6 小时与当日**次数**额度 / 隐私与同意——**金额级费用上限尚未实现**；
+  底线之上是否开口由模型读空气决定，见 [`adr/0011`](adr/0011-proactive-decision-ownership.md)；
   控制台「配置」栏可调高/调低，**一键关闭**就是不开「自动考虑」开关或点停用；每次开口/被拦都落
   `conversation.decision` 事件，可回答「为什么今天没说话」）。
+- **「真人感」改造成什么样了（含前后对比）**：稳定前缀改成「身份与说话方式」的散文（0 条编号）+ 压缩安全段，
+  回复容量 180 → 480 字，工具标记与英文推理在**程序层**被剔除（`REPLY_HYGIENE` 通知）。
+  可重跑的对比与数字见 [`benchmarks/realism-metrics.md`](benchmarks/realism-metrics.md)：
+  改造前的转录不用花钱就能复算——
+  `node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v01-vanilla.json`。
 
 **还没验的部分**：M6 的**真人**在场自测尚未由人跑过（合成场景已测），命令见 `progress.md` 的「未完成项」。
 
@@ -63,9 +73,10 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | 5 | 按需读 [`design/`](design/README.md) | 领域模型 / 对话层 / 大脑与模型 / 语音 / 安全隐私 | 按需 |
 | 6 | [`adr/`](adr/) | 为什么这样选（半年后不要推翻已验证的决策） | 按需 |
 | 7 | [`recon/`](recon/) | 外部依赖的**原始实测报告**（DSH、MiMo、Pipecat、LiveKit、设备、现场环境、摄像头选型、现场测试报告） | 按需 |
-| 8 | [`verification/`](verification/) | **独立验证**报告（不是实现者自述）：三态判定（通过/失败/未测）、可重跑命令 | 按需 |
-| 9 | [`review/`](review/) | **评审**报告：verdict + findings（F 编号 / 严重度）+ 复审结论 | 按需 |
-| 10 | [`../xixi_ai_companion_project_plan.md`](../xixi_ai_companion_project_plan.md) | 方案原文（57 节）。**注意：它是设计意图，不是现状** | 按需 |
+| 8 | [`benchmarks/`](benchmarks/realism-metrics.md) | **基准与前后对比**：真人感指标口径、黄金对话语料接入、改造前后同口径对比 | 按需 |
+| 9 | [`verification/`](verification/) | **独立验证**报告（不是实现者自述）：三态判定（通过/失败/未测）、可重跑命令 | 按需 |
+| 10 | [`review/`](review/) | **评审**报告：verdict + findings（F 编号 / 严重度）+ 复审结论 | 按需 |
+| 11 | [`../xixi_ai_companion_project_plan.md`](../xixi_ai_companion_project_plan.md) | 方案原文（57 节）。**注意：它是设计意图，不是现状** | 按需 |
 
 本轮新增的报告（都已登记在上表目录里）：
 
@@ -79,18 +90,23 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | [`verification/field-test-verification-2026-09-30.md`](verification/field-test-verification-2026-09-30.md) | 现场测试控制台的独立验证 |
 | [`review/proactive-and-segments-review-2026-09-30.md`](review/proactive-and-segments-review-2026-09-30.md) | 主动引擎与多段回复的评审（铁律 3 / 费用 / 隐私） |
 | [`review/three-column-console-review-2026-09-30.md`](review/three-column-console-review-2026-09-30.md) | 三栏界面与一键启用的评审（子进程与隐私） |
+| [`benchmarks/realism-metrics.md`](benchmarks/realism-metrics.md) | 真人感指标（提问率 / 长度分布 / 禁用模板率）的唯一口径、黄金对话接入、改造前后对比与复现命令 |
+| [`review/p1-prompt-length-review-2026-10-01.md`](review/p1-prompt-length-review-2026-10-01.md) 与 [`…-rereview`](review/p1-prompt-length-rereview-2026-10-01.md) | P1 提示词与长度策略的评审与复审（F1 文档漂移 → 由本收口任务执行；F2 口径 / F3 安全措辞 / F4 claim 已修） |
+| [`review/reply-hygiene-review-2026-10-01.md`](review/reply-hygiene-review-2026-10-01.md) | 工具标记 / 英文推理清洗的评审（`REPLY_HYGIENE` 已实现但**产线尚无消费者**——见 `progress.md` §4） |
+| [`verification/t4-realism-verification-2026-10-01.md`](verification/t4-realism-verification-2026-10-01.md) | 「真人感」改造的独立验证：三次输入、主口径提问率、铁律未削弱 |
 
 ## 2. 权威性排序（冲突时按这个判）
 
 ```text
 1. 代码与测试          ← 唯一事实来源
 2. docs/recon/*        ← 对外部系统（模型/框架/设备）的原始实测，带命令与数字
-3. docs/verification/* ← 独立验证（不是实现者自述）：三态判定 + 可重跑命令
-4. docs/review/*       ← 评审与复审：verdict + findings（F 编号/严重度）
-5. docs/progress.md    ← 项目状态与结论，人写，可能与代码滞后
-6. docs/design/*       ← 设计说明，滞后风险更高
-7. docs/adr/*          ← 决策记录，除非决策被明确推翻，否则仍然有效
-8. xixi_ai_companion_project_plan.md  ← 方案意图，与现状不符的地方**以现状为准**
+3. docs/benchmarks/*   ← 基准与前后对比：指标定义、同口径的改造前后数字（定义只有一份实现）
+4. docs/verification/* ← 独立验证（不是实现者自述）：三态判定 + 可重跑命令
+5. docs/review/*       ← 评审与复审：verdict + findings（F 编号/严重度）
+6. docs/progress.md    ← 项目状态与结论，人写，可能与代码滞后
+7. docs/design/*       ← 设计说明，滞后风险更高
+8. docs/adr/*          ← 决策记录，除非决策被明确推翻，否则仍然有效
+9. xixi_ai_companion_project_plan.md  ← 方案意图，与现状不符的地方**以现状为准**
 ```
 
 **发现文档与代码不一致时：以代码为准，并立即修正文档**（不要反过来改代码去迎合文档）。
@@ -106,6 +122,9 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | `packages/domain/src/personality.ts`（属性集合） | `design/domain-model.md`、`config/xixi.example.yaml`、`design/conversation.md` 的指令映射 |
 | `packages/conversation/src/fsm.ts`（状态/超时/判定） | `design/conversation.md`、`tests/unit/conversation-fsm.test.ts` |
 | `packages/conversation/src/prompt.ts`（§26 顺序/指令） | `design/conversation.md`、`tests/unit/prompt.test.ts` |
+| `packages/conversation/src/segments.ts`（段数上限/块长/容量） | `design/conversation.md` §7、[`adr/0010`](adr/0010-multi-segment-replies.md) 的修订记录、本文件 §0 与 `README.md` 的「多段回复」行 |
+| `packages/model-adapters/src/reply-hygiene.ts` 或引擎的清洗/通知 | `design/brain-and-models.md` §4、`design/conversation.md` 的通知表、`progress.md` |
+| `scripts/lib/realism-metrics.ts` 或 `scripts/eval-realism.ts`（指标口径/语料） | [`benchmarks/realism-metrics.md`](benchmarks/realism-metrics.md) 的口径段、`tests/scenarios/realism-metrics.test.ts` |
 | `packages/brain-adapter/src/types.ts`（§25 接口） | `design/brain-and-models.md`、`architecture.md` |
 | `packages/brain-adapter/src/tools.ts` 或新增工具 | `design/security-and-privacy.md`（工具权限）、`design/brain-and-models.md`、`config/xixi.example.yaml`（若需配置） |
 | `packages/model-adapters/src/mimo.ts`（含 `chatJson` 策略） | `design/brain-and-models.md`、`recon/mimo-api-probe-2026-09-29.md`（若发现新缺陷） |
@@ -117,6 +136,7 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | 任何 `scripts/verify-*.ts` / `eval-*.ts` / `voice-*.ts` | [`testing.md`](testing.md) 的脚本表、`README.md` 的命令段、`AGENTS.md` §7 |
 | 里程碑推进（做完 M2/M3/…） | `progress.md` §0/§1、`architecture.md` 的「未实现」列表、相关 `design/*` |
 | 新增/更新 `docs/verification/**` 或 `docs/review/**` | 本文件 §1 的报告表、`progress.md` 的「评审与验证汇总」 |
+| 新增/更新 `docs/benchmarks/**`（基准、指标口径、前后对比） | 本文件 §1 的报告表与 §2 的权威性排序、`progress.md` §0 |
 | 新增外部依赖 | 新 ADR + `AGENTS.md` 铁律 12 的引用 |
 | 修改方案里的既定原则 | **不要做**；如有异议写新 ADR 说明 |
 

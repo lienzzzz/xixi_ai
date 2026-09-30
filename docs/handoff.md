@@ -13,13 +13,13 @@
 
 西西是一个**长期陪伴型语音智能体**的原型（不是聊天机器人）。当前完成到「**初步验证阶段**」：
 
-- **文本对话流畅**：多轮连贯、有人格、会主动沉默、能查真实天气；
+- **文本对话流畅**：多轮连贯、有人格、会主动沉默、能查真实天气；**2026-10-01 起提示词前缀＝「身份与说话方式」（散文 + 紧凑安全段），回复容量 180 → 480 字**，同一批语料的提问率主口径 45.8% → 46.0%、单段最长 341 → 170 字（对比命令见 [`benchmarks/realism-metrics.md`](benchmarks/realism-metrics.md)）；
 - **语音链路可用**：浏览器麦克风 → VAD → ASR → 对话 → TTS，打断判定实测 192ms；
 - **重启不忘事**：会话、轮次、人格都在 SQLite，两个独立进程验证过；
 - **摄像头在场检测可用（M6 最小版）**：帧差动 + YuNet 人脸确认，全在本机跑，状态写成 `presence.changed` 并投影到 `world_state`（带 TTL），离线回归在默认门禁里（`npm run test:perception`，项数看末行）；
 - **Harness 可替换**：DSH 与直连 MiMo 两套实现共用 `BrainAdapter` 接口（实时走直连，见 ADR-0008）。
 
-未实现：唤醒词、长期记忆、主动问候、模型驱动的人格学习（分别属 M2/M4/M5/M3）；摄像头在场检测的**「真人站在镜头前被检出」这一步尚未实测**（摄像头朝天，见 [`design/perception.md` §8.3](design/perception.md)）。
+未实现：唤醒词、长期记忆、模型驱动的人格学习（分别属 M2/M4/M3）；主动开口的**机制**（主动性 V2）已落地，但 **pack Phase 5 的两项时间线验收未达标**（generic 话题 33.3% > 20%、两次未回应后不降频，六条缺陷待修，见 [`verification/t9`](verification/t9-proactive-v2-verification-2026-10-01.md)）；摄像头在场检测的**「真人站在镜头前被检出」这一步尚未实测**（摄像头朝天，见 [`design/perception.md` §8.3](design/perception.md)）。
 ⚠️ 现场设备验收结论已修正：扬声器按「能量比」口径只有 ~2.4 dB（<10 dB）→ **判 FAIL**（旧的 12.97 dB PASS 是帧级分位口径的乐观上界），见 [`recon/field-test-report-2026-09-30.md`](recon/field-test-report-2026-09-30.md) 顶部「口径变更说明」。
 
 ## 2. 五分钟自证（照抄即可）
@@ -50,7 +50,9 @@ npm run voice:bargein                # 0 次调用：打断判定延迟（纯本
 |---|---|---|
 | 事件契约（`xixi.event.v1`，3 类事件） | ✅ 完成 | `npm test`（contracts 用例含 fail-closed 与漂移检查） |
 | 领域持久化（事件日志/会话/人格基线/迁移） | ✅ 完成 | `npm test`（迁移幂等、篡改检测、人格只补缺） |
-| 对话层（FSM §12/§13 + Prompt §26 + 沉默 §55） | ✅ 完成 | `npm test` + `npm run chat` |
+| 对话层（FSM §12/§13 + Prompt §26 + 沉默 §55） | ✅ 完成（P1 改版：前缀＝身份与说话方式 + 安全段；历史只走 messages） | `npm test` + `npm run chat` |
+| 「真人感」指标与前后对比 | ✅ 有可重跑口径（三分指标 + 黄金对话语料） | `node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v01-vanilla.json`（改造前，不花钱）与同目录的 `-v02-wip.json`；完整对比见 [`benchmarks/realism-metrics.md`](benchmarks/realism-metrics.md) |
+| 制品清洗（工具标记 / 英文推理） | ✅ 程序层已落地（`REPLY_HYGIENE`）；⚠️ 产线未订阅 `onNotice` | `npm test`（`tests/unit/core/engine-reply-hygiene.test.ts`）；缺口见 `progress.md` §4 |
 | 人格可调并体现在行为 | ✅ 完成 | `eval:conversation:judge`（低/高话多组长度差 **2.57×**：22.3 字 vs 57.3 字，见 `docs/progress.md` §0） |
 | 只读工具（时间/天气） | ✅ 完成 | `node scripts/probe-tools.ts` |
 | 直连 MiMo 实时路径（流式 + 工具循环） | ✅ 完成 | `npm run chat` |
@@ -63,7 +65,7 @@ npm run voice:bargein                # 0 次调用：打断判定延迟（纯本
 | 扬声器真正静音的延迟（§33 P50<500ms） | ⛔ 未验收 | 需要设备 |
 | 唤醒词 / 搭话判定（§13 完整版） | ⛔ 未实现（M2） | — |
 | 长期记忆 / 纠正（§10） | ⛔ 未实现（M4） | — |
-| 主动问候（§15） | ⛔ 未实现（M5） | — |
+| 主动开口（§15，主动性 V2） | ⚠️ 机制已落地，**pack Phase 5 两项验收未达标；六条缺陷未修** | 机制：硬底线（程序）+ 模型读空气（ADR-0011）——`npm test` 的门禁用例、`node scripts/eval-realism.ts` 的 G07/G12 用例可复跑。**未达标**：内容口径 generic 话题 **33.3%**（目标 ≤20%）、**「连续两次没回应后显著降频」不成立**（被忽视的一天与有人回应的一天都是 9 次）；六条 findings（F1–F6，含「沉默候选吃光 tick」与「读空气问询吃光当日额度」）**尚未修复**，修复任务 t18、复验 t19。**判定与数字**：[`verification/t9-proactive-v2-verification-2026-10-01.md`](verification/t9-proactive-v2-verification-2026-10-01.md)（**不得写成已通过**） |
 | 摄像头在场检测（§M6） | ✅ 最小可用（真人实测未做） | `npm run test:perception`（离线，含转发 Python 回归；项数看末行）；真机自检 `node scripts/verify-camera-presence.ts --seconds 15`；接口见 [`design/perception.md`](design/perception.md) §8.3（真人站镜头前那一步未完成） |
 | 模型驱动的人格学习（§7.4） | ⛔ 未实现（M3） | 目前只有管理员 `overrideSelfProfile` |
 | 类型检查（`tsc --noEmit`） | ⛔ 未接入 | Node 直接跑 `.ts`，类型错误只在运行时暴露 |
@@ -102,8 +104,14 @@ npm run voice:bargein                # 0 次调用：打断判定延迟（纯本
 
 ## 6. 下一件事（如果只做一件事）
 
-**做 M2 的唤醒与搭话判定**，因为它是当前最大缺口，且已被证明**不能外包**：
-Pipecat 与 LiveKit 的 VAD/EOU 都无法区分电视与真人（电视 p=0.91~0.92 被判「说完」），
+**把 `onNotice` 接进产线**（小而具体，立刻提升可解释性），然后**做 M2 的唤醒与搭话判定**（当前最大缺口）：
+
+`REPLY_HYGIENE` / `UNBACKED_FACT_CLAIM` 两条审计通知已经发得出来，但 `scripts/chat.ts` / `serve-chat.ts` /
+`field-test.ts` / `voice-turn.ts` 都没订阅它们——于是「程序改写了她说的话」与「模型本来就这么说」在页面与日志里
+**同形**，用户只看到「西西选择沉默」。最小修法（评审给了两个选项）见
+[`review/reply-hygiene-review-2026-10-01.md`](review/reply-hygiene-review-2026-10-01.md)，未完成项记在 `progress.md` §4。
+
+**M2 为什么不能外包**：Pipecat 与 LiveKit 的 VAD/EOU 都无法区分电视与真人（电视 p=0.91~0.92 被判「说完」），
 而「嗯。」这类 backchannel 两家都判错（Pipecat 甚至根本检不到）。
 
 建议第一步（可在没有任何模型调用的情况下做完）：
@@ -115,7 +123,7 @@ Pipecat 与 LiveKit 的 VAD/EOU 都无法区分电视与真人（电视 p=0.91~0
 
 ## 7. 动代码前的检查清单
 
-- [ ] 读过 `AGENTS.md` 的铁律（尤其：模型不能改规则/权限、主动行为必须过硬门禁、事件是唯一事实来源）
+- [ ] 读过 `AGENTS.md` 的铁律（尤其：模型不能改规则/权限、主动行为在**硬底线**上必须过程序判定、事件是唯一事实来源）
 - [ ] `npm test` 是绿的（**项数以末行为准**——2026-09-30 实测点 223 项；耗时以实跑为准，本机空载约 15s），知道哪些用例覆盖你要改的地方
 - [ ] 新行为**先写测试**（离线可跑），真实 API 验证放 `scripts/verify-*` / `eval-*`，不进 `npm test`
 - [ ] 不新增依赖，或新增时写清新 ADR 与理由

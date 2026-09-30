@@ -126,6 +126,13 @@ interface RoundRecord extends RealismTurn {
   readonly model: string;
   /** Delivered segments (ADR-0010), recorded so "长解释是 3 大块还是 8 小块" survives replay. */
   readonly segmentChars?: readonly number[] | undefined;
+  /**
+   * Which repetition this round belongs to (1-based). Recorded so a replay can
+   * rebuild `perRepeat` exactly instead of showing `NaN%` for the per-run table
+   * (the field is missing in recordings made before 2026-10-01, hence the
+   * scenario-restart fallback in `groupRepeats`).
+   */
+  readonly run?: number | undefined;
 }
 
 interface GateOutcome {
@@ -420,7 +427,7 @@ async function runAll(): Promise<RunResult> {
         }
         const turns = golden.turns ?? [];
         const result = await runScenario(golden.id, turns, golden.personality);
-        rounds.push(...result.rounds);
+        rounds.push(...result.rounds.map((round) => ({ ...round, run })));
         if (QUALITY_CHECKS) violations.push(...result.violations, ...checkGoldenExpectations(golden, result.rounds, result.replyChars));
         if (run === 1 && golden.notRunnableReason !== undefined) {
           skipped.push({ id: `${golden.id}(部分)`, title: golden.title, reason: golden.notRunnableReason });
@@ -435,24 +442,14 @@ async function runAll(): Promise<RunResult> {
           // only quiet-mode if the engine is actually suspended.
           if (scenario.id === 'quiet-mode' && index === 1) engine.quiet();
         });
-        rounds.push(...result.rounds);
+        rounds.push(...result.rounds.map((round) => ({ ...round, run })));
         if (QUALITY_CHECKS) violations.push(...result.violations);
       }
     }
 
     const runMetrics = measureRealism(rounds.slice(runStart));
-    perRepeat.push({
-      run,
-      turns: runMetrics.turns,
-      spokenTurns: runMetrics.spokenTurns,
-      questionEndingRate: runMetrics.questionEndingRate,
-      questionRate: runMetrics.questionRate,
-      bannedTemplateRate: runMetrics.bannedTemplateRate,
-      silenceRate: runMetrics.silenceRate,
-      charsP50: runMetrics.charsP50,
-      charsMax: runMetrics.charsMax,
-      repeatedPhrases: runMetrics.repeatedPhrases.length,
-    });
+    perRepeat.push(summariseRun(run, rounds.slice(runStart)));
+    void runMetrics;
   }
 
   const metrics = measureRealism(rounds);
@@ -530,21 +527,26 @@ function bandOf(percent: number): string {
   return percent < 30 ? '低于 30–50% 参考带' : percent > 50 ? '高于 30–50% 参考带' : '落在 30–50% 参考带内';
 }
 
-function repeatTable(result: RunResult): string {  if (result.perRepeat.length <= 1) return '';
+function repeatTable(result: RunResult): string {
+  return repeatTableFor(result.perRepeat);
+}
+
+function repeatTableFor(perRepeat: readonly RepeatSummary[]): string {
+  if (perRepeat.length <= 1) return '';
   const lines: string[] = [];
   lines.push('');
-  lines.push(`### 1.1 逐次重复（同一语料跑 ${result.perRepeat.length} 次，看抖动）`);
+  lines.push(`### 1.1 逐次重复（同一语料跑 ${perRepeat.length} 次，看抖动）`);
   lines.push('');
   lines.push('| 第几次 | 轮数 | 开口 | 提问率（主：问句收尾） | 提问率（辅：含问号） | 禁用模板率 | 沉默率 | 字数 P50 | 最大 | 重复短语（本次内） |');
   lines.push('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|');
-  for (const run of result.perRepeat) {
+  for (const run of perRepeat) {
     lines.push(
       `| ${run.run} | ${run.turns} | ${run.spokenTurns} | ${formatPercent(run.questionEndingRate)} | ${formatPercent(run.questionRate)} | ${formatPercent(run.bannedTemplateRate)} | ` +
         `${formatPercent(run.silenceRate)} | ${run.charsP50} | ${run.charsMax} | ${run.repeatedPhrases} |`,
     );
   }
-  const primary = result.perRepeat.map((run) => Math.round(run.questionEndingRate * 1000) / 10);
-  const secondary = result.perRepeat.map((run) => Math.round(run.questionRate * 1000) / 10);
+  const primary = perRepeat.map((run) => Math.round(run.questionEndingRate * 1000) / 10);
+  const secondary = perRepeat.map((run) => Math.round(run.questionRate * 1000) / 10);
   const spread = (values: readonly number[]): number => Math.round((Math.max(...values) - Math.min(...values)) * 10) / 10;
   const mean = (values: readonly number[]): number => Math.round((values.reduce((sum, value) => sum + value, 0) / values.length) * 10) / 10;
   lines.push('');
@@ -575,7 +577,8 @@ function cell(text: string): string {
   return text.replace(/\|/g, '\\|').replace(/\n/g, ' ').replace(/`/g, '′');
 }
 
-function reportMarkdown(result: RunResult): string {  const lines: string[] = [];
+function reportMarkdown(result: RunResult): string {
+  const lines: string[] = [];
   lines.push(`# 真人感指标评测（${result.label}，${result.date}）`);
   lines.push('');
   lines.push(`最后更新：${result.date}`);
@@ -701,6 +704,68 @@ function reportMarkdown(result: RunResult): string {  const lines: string[] = []
   return lines.join('\n');
 }
 
+/**
+ * One run's summary. Shared by the live path and the replay path, because a
+ * `perRepeat` entry written by an older version of this file is exactly what
+ * produced `NaN%` in the per-run table.
+ */
+function summariseRun(run: number, turns: readonly RealismTurn[]): RepeatSummary {
+  const metrics = measureRealism(turns);
+  return {
+    run,
+    turns: metrics.turns,
+    spokenTurns: metrics.spokenTurns,
+    questionEndingRate: metrics.questionEndingRate,
+    questionRate: metrics.questionRate,
+    bannedTemplateRate: metrics.bannedTemplateRate,
+    silenceRate: metrics.silenceRate,
+    charsP50: metrics.charsP50,
+    charsMax: metrics.charsMax,
+    repeatedPhrases: metrics.repeatedPhrases.length,
+  };
+}
+
+/**
+ * Split a recording back into repetitions.
+ *
+ * Preferred source is the per-round `run` index recorded since 2026-10-01. When
+ * it is absent (older JSON), fall back to the corpus structure: every repetition
+ * starts with the corpus's first scenario at turn 0, so a round that opens the
+ * first scenario again is a boundary. That is deterministic and matches how the
+ * runner iterates, but it is a reconstruction — the re-render below writes the
+ * `run` index back so the next replay does not have to guess.
+ */
+function groupRepeats(rounds: readonly RoundRecord[]): { groups: number[][]; rebuilt: RoundRecord[] } {
+  const hasRunIndex = rounds.length > 0 && rounds.every((round) => typeof round.run === 'number');
+  if (hasRunIndex) {
+    const byRun = new Map<number, number[]>();
+    rounds.forEach((round, index) => {
+      const run = round.run ?? 1;
+      const list = byRun.get(run) ?? [];
+      list.push(index);
+      byRun.set(run, list);
+    });
+    return {
+      groups: [...byRun.entries()].sort((a, b) => a[0] - b[0]).map(([, list]) => list),
+      rebuilt: [...rounds],
+    };
+  }
+
+  const firstId = rounds[0]?.scenario;
+  const groups: number[][] = [];
+  const runOf = new Array<number>(rounds.length).fill(1);
+  rounds.forEach((round, index) => {
+    const startsNewRepeat = index > 0 && round.scenario === firstId && round.index === 0;
+    if (startsNewRepeat || groups.length === 0) groups.push([]);
+    groups[groups.length - 1]?.push(index);
+    runOf[index] = groups.length;
+  });
+  return {
+    groups,
+    rebuilt: rounds.map((round, index) => ({ ...round, run: runOf[index] ?? 1 })),
+  };
+}
+
 function main(): void {
   if (replayPath !== null) {
     const saved = JSON.parse(readFileSync(replayPath, 'utf8')) as RunResult;
@@ -708,20 +773,25 @@ function main(): void {
     // splitter, which is exactly what makes the replay an A/B instrument (run it
     // in the V0.1 worktree for V0.1 chunking, in the current tree for the new one).
     const limits = resolveReplyLimits(config.reply as unknown as Record<string, unknown>);
-    const rounds = saved.rounds.map((round) =>
+    const withSegments = saved.rounds.map((round) =>
       (round.segmentChars ?? []).length > 0 || round.reply === null
         ? round
         : { ...round, segmentChars: splitReplyIntoSegments(round.reply, limits).segments.map((segment) => replyChars(segment)) },
     );
+    const { groups, rebuilt } = groupRepeats(withSegments);
+    const rounds = rebuilt;
+    const perRepeat = groups.map((group, index) => summariseRun(index + 1, group.map((position) => rounds[position] as RoundRecord)));
     const metrics = measureRealism(rounds);
-    console.log(`复算 ${replayPath}（label=${saved.label}，adapter=${saved.adapter}，${rounds.length} 轮）`);
+    console.log(`复算 ${replayPath}（label=${saved.label}，adapter=${saved.adapter}，${rounds.length} 轮，${perRepeat.length} 次重复）`);
     console.log(metricsBlock(metrics));
+    if (perRepeat.length > 1) console.log(repeatTableFor(perRepeat));
     if (has('re-render')) {
       mkdirSync(outDir, { recursive: true });
       const base = join(outDir, `realism-${saved.date}-${saved.label}`);
-      writeFileSync(`${base}.json`, JSON.stringify({ ...saved, rounds }, null, 2), 'utf8');
-      writeFileSync(`${base}.md`, reportMarkdown({ ...saved, rounds, metrics }), 'utf8');
-      console.log(`\n已用当前渲染器重写报告：${base}.md（原始记录同步为含分段数据的版本）`);
+      const rendered: RunResult = { ...saved, rounds, metrics, perRepeat };
+      writeFileSync(`${base}.json`, JSON.stringify({ ...rendered, repeat: perRepeat.length }, null, 2), 'utf8');
+      writeFileSync(`${base}.md`, reportMarkdown(rendered), 'utf8');
+      console.log(`\n已用当前渲染器重写报告：${base}.md（原始记录同步为含分段数据与 run 序号的版本）`);
     } else {
       console.log('\n（只复算，不写文件；要重写报告加 --re-render）');
     }

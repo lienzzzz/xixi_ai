@@ -298,4 +298,5 @@ manual audio hardware tests 三档；`AGENTS.md` 第 2 节也要求「联网验�
 | `python -m voice_edge.loopback <wav> <out.wav>` | 0 | 扬声器播放 + 麦克风录回；相对判据（语音带抬升 ≥10 dB 或相关 ≥0.3）+ Core Audio 静音状态；`verdict` 不是 `ok` 时说明是「静音端点」「音量不足」还是「没渲染」 |
 | `npm run turns -- data/chat/xixi.sqlite 6` | 0 | 直接查事件日志里的最近轮次（含 `tool_name` 审计） |
 | `node scripts/probe-tools.ts` | 2 次 | 诊断「模型有没有请求工具、适配器有没有真的执行」 |
+| `node scripts/eval-realism.ts --corpus=all --repeat=3 --label v02` | 84 轮 × 3 次 | **真人感指标**：跑 pack 的 12 条黄金对话 + 仓库语料，输出提问率（主口径＝末句以问号收尾；辅口径＝含问号）、回复长度四档分布、禁用模板出现率、沉默率、重复短语与交付分段；写 `docs/benchmarks/realism-<日期>-<label>.{md,json}`。`--replay <旧 JSON>` **不花钱复算**（`--re-render` 顺带用当前渲染器重写报告）、`--fake` 离线自检（**要加 `--out %TEMP%\<dir>`**，别往 `docs/benchmarks/` 写一次性产物）、`--no-gate` 只测量。口径、局限与前后对比见 [`benchmarks/realism-metrics.md`](benchmarks/realism-metrics.md) |
 

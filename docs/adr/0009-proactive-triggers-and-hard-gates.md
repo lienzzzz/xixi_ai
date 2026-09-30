@@ -1,7 +1,10 @@
 # ADR-0009：主动行为的触发源与硬门禁（更激进，但安全底线不动）
 
-- 状态：已接受（2026-09-30）
-- 相关：方案 §2.3 / §15 / §16、[ADR-0003](0003-raw-events-vs-memory.md)、[ADR-0005](0005-brain-session-mapping-in-domain.md)、[docs/design/conversation.md](../design/conversation.md)、`config/xixi.example.yaml`
+- 状态：已接受（2026-09-30）；**部分被取代（2026-10-01）**——见文末「修订记录」与
+  [ADR-0011](0011-proactive-decision-ownership.md)：第 1 条与第 3 条里「通过所有门禁才允许开口、
+  分数低于阈值就一票否决」的**决策归属**已改（硬底线仍由程序判定；底线之上由模型读空气决定，
+  评分只作建议）。第 2 条触发源、第 4 条的分数构成、第 6 条审计契约继续有效。
+- 相关：方案 §2.3 / §15 / §16、[ADR-0003](0003-raw-events-vs-memory.md)、[ADR-0005](0005-brain-session-mapping-in-domain.md)、[ADR-0011](0011-proactive-decision-ownership.md)、[docs/design/conversation.md](../design/conversation.md)、`config/xixi.example.yaml`
 - 归属：**M5**。本 ADR 定义契约与默认值；**程序侧已按它落地**（订正 2026-09-30）：`packages/conversation/src/proactive.ts`
   的 `ProactiveEngine` 逐条过第 3 条的九门禁、算第 4 条的分数与阈值、落第 6 条的 `proactive.decision` 审计，
   `config.proactive` 段已被读取。**仍未落地的两半**：候选生成器（第 2 条的事实输入还没有生产者）与内容生成
@@ -123,4 +126,20 @@
   改本 ADR 第 5 条的参数时必须同步改 `config/xixi.example.yaml`，否则两边会不一致。
 - 「更激进」的代价是更频繁的打扰；兜底是 6 小时/当日额度与负面反馈倍率，以及不动 `quiet_hours` 这条底线。
 - `docs/design/conversation.md` §6 的「主动开口（§15）无代码」一行已按落地情况改写（程序侧已落地、内容侧未落地）；
+
+## 修订记录 — 2026-10-01（P5，`3d42777`）
+
+**追加，不改写上面的历史结论**；冲突处以 [ADR-0011](0011-proactive-decision-ownership.md) 为准。
+
+- **决策归属改了**：原第 1 条「只有通过门禁才调用模型」「分数低于阈值即否决」把「说不说」交给了程序。
+  ADR-0011 把这件事拆成两层——① **硬底线**（静默时段 / 6 小时与当日**次数**额度 / DND / 隐私与同意 /
+  场景与音频路径 / 同一候选重复）仍由**程序**判定，模型不能加宽；② **底线之上由模型读空气决定是否开口**，
+  确定性评分（社会预算）只产出 `recommendation: 'speak' | 'hold'` 与依据。
+- **术语改名**：`SCORE_BELOW_THRESHOLD` → **`BELOW_RECOMMENDATION`**（它是「建议」，不是「否决」）；
+  冷却 / 话题重复 / 未回应从「门禁」变成**扣分项**（热聊中的接话不再被 18 分钟冷却挡住）。
+- **不变的部分**：第 2 条的触发源、第 4 条的分数构成（权重与阈值公式）、第 6 条的
+  `proactive.decision` 审计契约（仍只存 `reason_code`、分数与程序渲染的中文 `basis`，**不存模型推理**）、
+  「先记后播」的至多一次投递，以及 `quiet_hours` 这条**不可被任何人格或模型放宽**的底线。
+- **`config/xixi.example.yaml` 的 `proactive` 段仍是唯一事实来源**（`parseProactiveSettings` 读取）；
+  第 5 条里的阈值公式（`0.45 + 0.30 × (1 − proactivity)`）现用于**建议线**，不再是开关。
   本 ADR 是那次实现的依据。

@@ -2,7 +2,7 @@
 
 > 更新规则：每完成一个可独立理解的步骤就立刻追加/更新本文，写清「做了什么、验证结果、下一步、已知问题」。
 > 这台机器偶发蓝屏，**本文是崩溃后恢复工作的唯一依据**。
-> 最后更新：2026-09-30（集成收口 t11）— **现场测试可用：一条命令起控制台 + 三栏界面 + 一键启用摄像头在场 + 主动开口（全部先过硬门禁）；噪声鲁棒前端给出可复现成功边界 SNR ≥ 3 dB**
+> 最后更新：2026-10-01（集成收口 t5）— **「真人感」改造落地并有同口径前后对比**（提示词＝身份与说话方式 + 紧凑安全段、回复容量 180→480 字、制品清洗、主动性改两层）；指标口径唯一化（主口径＝末句以问号收尾）
 > 权威来源：本文件的数字来自当次命令输出；与代码冲突时以代码为准，并立即修正本文。
 
 ## 0. 结论表（objective）
@@ -19,8 +19,9 @@
 | 打断（§14.2） | 离线模拟：判定延迟 **192ms**（§33 目标 <500ms），播放截断于 992ms，丢弃 4128ms 未播音频 | ✅（判定层面） |
 | 重启恢复 | 两个独立进程，第二个逐字复现第一个的回答（M0 验收，`npm run verify:m0`） | ✅ |
 | **摄像头在场检测（M6）** | 合成场景 + 真机子进程实测：帧差动 + YuNet → `presence.changed` → `world_state` 投影；一键启用/停用可复现 | ✅（**真人**在场自测未跑，见 §4） |
-| **主动开口（M5-lite）** | 常驻考虑循环 + 模型生成内容 + TTS 逐段发声；**全部先过确定性硬门禁**；5 次 tick 只放行 1 条 | ✅ |
-| **多段回复** | `reply.max_segments=3 / segment_max_chars=60 / gap_ms=450`；字符零丢失；状态机一轮只推进一次 | ✅（终端已接分段播放） |
+| **主动开口（ADR-0009 + ADR-0011）** | **两层**：硬底线（静默时段 / 6h 与当日**次数**额度 / DND / 隐私与同意 / 场景与音频路径）由程序判定、模型不能绕；底线之上**由模型读空气决定说不说**，确定性社会预算只给建议（`BELOW_RECOMMENDATION`）；5 次 tick 只放行 1 条 | ✅ |
+| **多段回复** | `reply.max_segments=8 / segment_max_chars=60 / gap_ms=450`（**块长 60、容量 8×60=480 字**）；容量内每段 ≤60，`>8` 组时尾段合并 + `mergedOverflow`（该段可超 60）；字符零丢失；状态机一轮只推进一次 | ✅（终端已接分段播放） |
+| **「真人感」（P1，2026-10-01）** | 稳定前缀 = **身份与说话方式**（散文、0 编号）+ 紧凑安全段；容量 180→480 字；工具标记/英文推理在程序层剔除。同语料同口径：提问率主口径 45.8%→46.0%（各 n=1 次运行；三次重复均值 46.2% vs 46.0%）、单段最长 341→170 字、20 轮复述 0（详见 §2.18） | ✅（**提问率仍贴 30–50% 上沿**，见 §4） |
 | **现场测试控制台（一条命令）** | `npm run field-test` → http://127.0.0.1:8792；三栏界面 + 一键启用 + 设备自检引导 | ✅ |
 | 真实麦克风 / 扬声器（人耳） | 回环「回采余量」实测能量比 **2.41 dB < 10 dB** → 判 FAIL；**这不代表用户对麦克风说话能否被听到**（见 §0 用户须知与 §2.14） | ⚠️ 需人耳确认 |
 | 唤醒词 / 长期记忆 / 模型侧主动候选 | 未实现（M2 / M4 / M5 的模型侧），本轮刻意不做 | ⛔ |
@@ -55,8 +56,8 @@
 | M0 DSH + MiMo 文本 Harness | **已完成（验收通过）** |
 | M1 前置 spike（Python + 语音框架选型） | **已完成**：ADR-0007 选 Pipecat，参数与结论均有实测支撑 |
 | M1 语音闭环（前端→VAD→ASR→对话→TTS + 打断） | **可用**：夹具链路通过 + 抗噪前端与成功边界已实测（§2.13）；真实麦克风的人耳确认仍未做 |
-| 对话层（会话 FSM + Prompt 组装 + 工具 + 多段回复） | **已完成**：多轮连续性、沉默、人格可调、只读工具、多段回复（ADR-0010） |
-| **M5-lite 主动开口**（常驻考虑循环 + 硬门禁 + 真发声） | **已完成（部分）**：候选只来自事实、门禁原样生效、内容由模型生成；**模型侧候选生成、长期记忆、FutureHook 仍未做** |
+| 对话层（会话 FSM + Prompt 组装 + 工具 + 多段回复） | **已完成（P1 改版）**：多轮连续性、沉默、人格可调、只读工具、多段回复（ADR-0010，**容量 480 字**）；提示词前缀＝身份与说话方式 + 紧凑安全段 |
+| **主动性 V2**（硬底线 + 模型读空气 + 真发声） | **已完成（部分，两项验收未达标）**：硬底线原样生效、底线之上由模型决定、内容由模型生成；**但 pack Phase 5 的 generic 占比 33.3%（≤20% 未达标）与「两次未回应后降频」不成立**（t9 判 failed，修复任务 t18 未开始）；模型侧候选评估、长期记忆、FutureHook、无人值守守护进程仍未做 |
 | **M6 摄像头在场检测** | **已完成（部分）**：帧差动 + YuNet → `presence.changed` → `world_state` 投影 + 一键启用；**真人自测未跑**（§4） |
 | M2 唤醒词 / M3 人格学习 / M4 记忆 | 未开始 |
 | 现场测试控制台（三栏 + 一键启用 + 设备自检） | **已完成**：`npm run field-test`（§2.15） |
@@ -160,12 +161,17 @@ compat: { thinkingFormat: deepseek, requiresReasoningContentOnAssistantMessages:
 
 - `ConversationStateMachine`（§12/§13）：IDLE 需唤醒或强直呼；ENGAGING/ACTIVE/LINGERING 期间无需再喊名字；
   静默容忍度按人格缩放跟进窗口（tolerance 0 → 15s，1 → 1.5×30s）；`SUSPENDED` 支持「今天安静点」。全部时钟注入，可重放。
-- `PromptAssembler`（§26）：稳定前缀（不可变硬策略 + 西西身份 + 人格 → 具体说话要求）与变化后缀（时间/会话状态/最近对话/当前这句）分离，
-  同一人格下前缀逐字节稳定（利于 §46.3 的 provider 缓存）；同时输出结构化 `sections` 供 Debug UI 展示「模型到底看到了什么」。
+- `PromptAssembler`（§26，**P1 改版 2026-10-01**）：稳定前缀 = `CORE_IDENTITY`（身份与说话方式，散文）→ 名字 →
+  `HARD_POLICY`（压缩安全段，关键词锚点）→ 说话方式（人格→**词描述**）；变化后缀 = 当前情境 / 用户这句话。
+  **裸人格参数（`verbosity=0.4` 这类）与【最近对话】二次展开都已删除**：历史只以 `history` 的真实角色数组
+  交给适配器，模型每轮只看到一次；`sections` 五个名字 = `core-identity` / `safety-policy` / `effective-style` /
+  `world-state` / `current-turn`。同一人格下前缀逐字节稳定（§46.3 的 provider 缓存）。
 - `ConversationEngine`：接受判定 → 组装 prompt → 调适配器 → 记录事件 → 更新状态；
   **§55 的沉默在引擎层兜底**：无论适配器报什么，只要整句是 `[静默]` 就转成 SILENCE，
   且流式分片（实测 MiMo 会把 `[静默]` 拆成 `[`+`静默`+`]`）也不会漏出去或被 TTS 念出来。
-- 人格参数会渲染成具体指令（低 verbosity → 「通常 1 句」，高 → 「3~5 句」），这正是 §39.4 要求的「行为验证」而非「数据库验证」。
+- 人格参数会渲染成**词描述**的说话要求（低 verbosity → 「说话偏简短：一句能说完就别硬凑第二句。」，
+  高 → 「愿意多说几句…」；**不再出现句数或裸参数**，单测断言每条指令不含数字与参数名），
+  这正是 §39.4 要求的「行为验证」而非「数据库验证」。
 - 测试：`tests/unit/conversation-fsm.test.ts`、`tests/unit/prompt.test.ts`、`tests/integration/conversation-engine.test.ts`。
 
 ### 2.9 语音闭环（本轮新增，`services/voice-edge` + `scripts/voice-*.ts`）
@@ -260,16 +266,36 @@ compat: { thinkingFormat: deepseek, requiresReasoningContentOnAssistantMessages:
   2. 默认播放端点**出厂就是静音的**（勘测实测），本轮已解除；采集增益默认 +5.5 dB，噪声底几乎 1:1 跟着它走，
      建议设 0 dB（控制台只提示、不修改系统设置）。
 
-### 2.15 多段回复（ADR-0010）与主动开口（M5-lite）+ 三栏控制台
+### 2.15 多段回复（ADR-0010）与主动开口（ADR-0009 + ADR-0011）+ 三栏控制台
 
-- **多段回复**：`config/xixi.example.yaml` 的 `reply: {max_segments: 3, segment_max_chars: 60, gap_ms: 450}`
-  （代码里被 `resolveReplyLimits(config.reply)` 夹进 ADR-0010 的硬上限）。独立验证（t43）：
-  `onSegment` 与 `onTextChunk` 互斥（chunks=0）、85/127/230 字分别 2/3/3 段、**字符零丢失**、
+- **多段回复**：`config/xixi.example.yaml` 的 `reply: {max_segments: 8, segment_max_chars: 60, gap_ms: 450}`
+  （代码里被 `resolveReplyLimits(config.reply)` 夹进 ADR-0010 的硬上限；**上限由 3 提高到 8**，见该 ADR 的修订记录）。
+  两个词要分清：**块长** = 一次播报粒度（60 字），**容量** = 8 × 60 = **480 字**；`>8` 组时尾段合并、`mergedOverflow=true`
+  且该段**可超 60 字**（最小反例 279 字 = 9 句 × 31 → 8 段、最长 62，断言在 `tests/unit/core/reply-segments.test.ts`）。
+  独立验证（t43）：`onSegment` 与 `onTextChunk` 互斥（chunks=0）、字符零丢失、
   该轮事件恰好 1 user + 1 assistant + 1 decision（**状态机只推进一次**）。
   **接线现状**：终端 `scripts/chat.ts` **已接**分段播放（`onSegment`）；试用页与 `voice-turn.ts` 仍整段 `synthesize(turn.text)`。
-- **主动开口（M5-lite）**：`ProactiveLoop`（默认关）+ 候选只来自事实（在场 / 会话悬置 / 时间钩子 / 话题池 / 随机闲聊）；
-  **判定全部走同一条 `ProactiveEngine.consider`**（铁律 3），内容由模型在 `deliver` 接缝里生成、失败回退固定句。
-  真机实测：`presence_arrived` PASSED（2 段真音频 430KB + 290KB）→ 随后 4 次 tick 全被 `QUOTA_DAY_EXCEEDED` 拦（当日额度=1）。
+- **主动开口（V2，2026-10-01）**：`ProactiveLoop`（默认关）+ 候选只来自事实（在场 / 会话悬置 / 时间钩子 / 话题池 / 随机闲聊）；
+  **判定走同一条 `ProactiveEngine.consider`，但语义已改成两层**（[ADR-0011](adr/0011-proactive-decision-ownership.md)）：
+  ① 硬底线（静默时段 / 6h 与当日**次数**额度 / DND / 隐私与同意 / 场景与音频路径 / 同一候选重复）由程序判定，
+  模型不能加宽；② 底线之上**由模型读空气决定说不说**，确定性社会预算（话题质量分 / 相关性 / 新鲜度 / 读空气 /
+  互动度 / 主动性 − 打扰代价 / 话题重复 / 未回应惩罚）只产出 `recommendation: speak | hold`。
+  冷却、话题重复、未回应**从门禁降级为扣分项**（`BELOW_RECOMMENDATION` 是建议不是否决）；审计事件多记
+  `primary_signal`、每项信号、`decided_by` 与程序渲染的中文 `basis`，**仍不存模型推理**。内容由模型在 `deliver`
+  接缝里生成、失败回退固定句，投递「先记后播」（崩溃不重发）。
+  ⚠️ **没有金额级费用上限**：额度是**次数**，它只是费用代理（见 §6）。
+- **主动性 V2 的两项未达标 + 六条缺陷（t9 独立验证，2026-10-01；**未修完，不得写成已通过**）**：
+  pack Phase 5 的 12 小时时间线验收里有 **2 项目标没达到**——① 内容口径的 **generic 话题占比 33.3%**（目标 ≤20%；
+  引擎口径 0% 是结构性的，见下面的 F3，**不能用来宣称达标**）；② **「连续两次没人回应后显著降频」不成立**：
+  被忽视的一天与有人回应的一天说了**同样多的 9 次**，机制探针显示「1 条未回应」与「3 条未回应」拿到同一个 **0.45** 惩罚，
+  标准候选照样 `PASSED`。t9 因此判 **failed**，并明确「不建议宣布 Phase 5 验收通过」。
+  **六条缺陷（t9 §5，全部尚未修复）**：F1 high（被扣分的候选吃光 tick，`future_hook_due` 0/3）、F2 high（未回应惩罚饱和、量级不够）、
+  F3 medium（`topicRef = trigger` 让 generic 指标结构性失效，永远不可能失败）、F4 medium（「读空气」的问询吃光当日额度：
+  40 次「不说」之后当天不再开口）、F5 medium（pack §14.3 的「热聊中接话」在生产候选里到不了）、F6 low（打扰代价只是分数：
+  两条消息可以隔 1–2 分钟）。**修复进展：尚未开始**——修复任务 **t18**（依赖 t13/t15）仍 pending，复验是 **t19**；
+  ADR-0011 已按 t9 的判定如实记录（提交 `efa6dbe`）。**报告与全部数字**：
+  [`verification/t9-proactive-v2-verification-2026-10-01.md`](verification/t9-proactive-v2-verification-2026-10-01.md)
+  （§7 是判定表、§5 是六条 findings、§9 是可重跑命令）。
 - **人格强度与「怎么调、怎么关」**：`personality.base.proactivity` 默认 **0.85**（代码 `DEFAULT_PROACTIVITY = 0.85`），
   阈值 `0.45 + 0.30 × (1 − proactivity)` = **0.495**（核对：`git grep -n "DEFAULT_PROACTIVITY" -- packages`）。
   控制台「配置」栏可调 proactivity / talkativeness / verbosity（写入 `self_profile` + `self_profile_history`，
@@ -291,7 +317,8 @@ compat: { thinkingFormat: deepseek, requiresReasoningContentOnAssistantMessages:
 
 ### 2.17 不许编造可核查的具体事实（t111 落地 + t117 按评审收紧）
 
-**机制（两层）**：提示词层 `HARD_POLICY` 第 7 条要求「天气/气温/降水概率/风力/空气质量/新闻/日程/别人说的话」
+**机制（两层）**：提示词层 `HARD_POLICY` 的「可核查的具体事实」那条（P1 起不再按编号引用）要求
+「天气/气温/降水概率/风力/空气质量/新闻/日程/别人说的话」
 只能来自工具结果，要说必须先调用工具查，查不到就说不知道；程序层 `ConversationEngine` 的
 `findUnbackedFactClaims()` / `screenUnbackedFacts()` 是确定性闸门——本轮没有工具调用却出现「只有查得到才知道的具体值」时，
 文本被扣住（不进 TTS、不写 `conversation.turn`、不改工作记忆），改说修复句并给调用方
@@ -334,6 +361,52 @@ data/web-chat/xixi.sqlite: 伴随工具 1 / 无工具 1
 与「伴随工具 2 / 无工具 1」；**复算时三个库都要扫，否则会少一条无工具的（`data/web-chat` 10:09:40）
 和一条伴随工具的（`data/web-chat` 10:04）**。以主引用那条命令为准。
 
+### 2.18 「真人感」改造与前后对比（P1 + P1c，2026-10-01）
+
+**改了什么**（三处，都在 P1）：① 稳定前缀从**编号规则清单**改成 `CORE_IDENTITY`（身份与说话方式，散文）
++ `HARD_POLICY`（压缩安全段，关键词锚点），裸人格参数与【最近对话】二次展开删除；
+② 回复容量 3×60=180 → **8×60=480 字**（块长仍 60；`>8` 组时尾段合并，见 §2.15 与 ADR-0010 修订记录）；
+③ 工具标记与英文推理在**程序层**剔除（`sanitizeSpokenReply` → `REPLY_HYGIENE` 通知；整轮只剩制品则沉默）。
+
+**指标怎么量（唯一口径，别再各说各话）**——实现只有一份：`scripts/lib/realism-metrics.ts` + `scripts/eval-realism.ts`：
+
+- **分母**：`action === 'SPEAK'` 且文本非空且**不是引擎修复句**（`UNBACKED_FACT_REPLY`）的**开口轮**；
+  沉默轮与修复句都不进分母（否则会拿程序写的那句话当模型的行为）。
+- **提问率主口径**＝**末句以问号收尾**（带内判定用它）；**辅口径**＝回复里含问号，只作参考。
+- **长度**＝去空白字符数；另有**交付分段**（每轮段数 + 单段字数，ADR-0010 的真实结果）。
+- **禁用模板率**＝命中 13 条「AI 套话」词表的开口轮占比（每条都写明为什么算套话）。
+
+**前后对比（同一批 84 轮语料、同一工具、同一模型；两次运行各 84 轮）**：
+
+| 指标 | 改造前 V0.1（`882f745`） | 改造后 P1（`995ed42` 快照） |
+|---|---:|---:|
+| 提问率（**主口径**） | **45.8%**（33/72） | **46.0%**（29/63） |
+| 提问率（辅口径，仅参考） | 69.4% | 57.1% |
+| 逐次重复的主口径 | 28.0 / 58.3 / 52.2（均值 46.2%，**n=3**，极差 30.3pt） | 47.6 / 42.9 / 47.6（均值 46.0%，**n=3**，极差 4.7pt） |
+| 回复字数 P50 / 最大 | 47.5 / 422 | 33 / 424 |
+| **交付分段的最长单段** | **341 字** | **170 字** |
+| 禁用模板出现率 | 0% | 0% |
+| 沉默率 | 3.8% | 9.0% |
+
+**20 轮同一输入的口语对比**（t2 采集，输入同为 `docs/benchmarks/v01/input-chat-20turns.txt`）：
+复述 **0**（重复句子 0、重复短语 0、与上一轮最大公共子串 4/7 字）vs V0.1 的 10 字复述 +
+「了，量完血压」出现在第 12/16/19 轮；段数分布 `{1段:12, 2段:4, 3段:3, 4段:1}` 与 `{1段:6, 2段:8, 3段:1, 4段:3, 5段:2}`
+vs V0.1 的 `{1段:3, 2段:7, 3段:9}`；P50 101 → 46/80.5 字，最大 177 → 166/216；知识题 5 段 216 字**不丢字**。
+
+**可重跑（不花钱，读已捕获的转录）**：
+
+```powershell
+node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v01-vanilla.json   # 改造前
+node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v02-wip.json        # 改造后
+```
+
+**如实说明（别把它读成「提问率已达标」）**：主口径下改造前后都在 **46%** 附近，**贴着 30–50% 带宽的上沿**；
+把全部 10 次捕获（3×V0.1 重复 + 3×P1 重复 + t4 两次 20 轮 + t6 在 v02 两份转录上的两次）算进来，
+主口径极差是 **15.8%–63.2%（跨带）**——**「落在 30–50%」只在「同语料重复」的前提下成立**，
+跨带来自输入差异（t17 的 O1 更正了 captain 早先的「8 次独立捕获」措辞）。
+逐条口径与全部数字见 [`benchmarks/realism-metrics.md`](benchmarks/realism-metrics.md)；独立验证见
+[`verification/t4-realism-verification-2026-10-01.md`](verification/t4-realism-verification-2026-10-01.md)。
+
 ## 2b. 评审与验证汇总（本轮）
 
 **四份实现评审的 verdict 与 findings 去向**（findings 编号与严重度取自各自报告；「闭环」= 复审已 pass）：
@@ -352,6 +425,16 @@ data/web-chat/xixi.sqlite: 伴随工具 1 / 无工具 1
 **独立验证（不是实现者自述）**：`docs/verification/` 下 2 份——多段回复与主动性门禁（t43：27/27 门禁用例、
 投递恰好 1 次、崩溃后绝不重发、6h 额度实测 4 = 配置上限）、现场测试控制台（t4 的独立验证）。
 **评审报告**共 20+ 份在 `docs/review/`（含 6 份复审），verdict 分布与观测都留在各自文件里。
+
+**2026-10-01 一轮（P1 提示词/长度 + P1c 指标 + 主动性 V2 + 制品清洗）**：
+
+| 任务 | 报告 | verdict | 去向 |
+|---|---|---|---|
+| t6 评审 P1 提示词与长度策略 | [`review/p1-prompt-length-review-2026-10-01.md`](review/p1-prompt-length-review-2026-10-01.md) | needs_revision | F2 口径 / F3 安全措辞 / F4 claim → **t16** 修复；**F1 文档漂移 → 本收口任务 t5** |
+| t17 复审 | [`review/p1-prompt-length-rereview-2026-10-01.md`](review/p1-prompt-length-rereview-2026-10-01.md) | **pass** | 三条 finding 独立复核成立且可复现；O1 更正了「8 次独立捕获」的措辞（已落 §2.18 与 benchmarks 文档） |
+| t7 评审制品清洗 | [`review/reply-hygiene-review-2026-10-01.md`](review/reply-hygiene-review-2026-10-01.md) | needs_revision | `REPLY_HYGIENE` 无产线消费者 → 记入 §4 未完成项（**未修**，文档如实写缺口） |
+| t4 独立验证「真人感」 | [`verification/t4-realism-verification-2026-10-01.md`](verification/t4-realism-verification-2026-10-01.md) | **通过** | 三次输入独立复算、铁律未削弱；它自己的提问率主口径结论与 §2.18 同源 |
+| t9 独立验证主动性 V2 | [`verification/t9-proactive-v2-verification-2026-10-01.md`](verification/t9-proactive-v2-verification-2026-10-01.md) | **failed**（引擎机制成立，但 pack Phase 5 两项时间线验收未达标） | 两项未达标与六条缺陷已如实写入 §1/§2.15；修复任务 **t18**（pending）、复验 **t19**（pending）；ADR-0011 已记录（`efa6dbe`）——**不得写成已通过** |
 
 **t29 负责的三份文件（`docs/testing.md` / `README.md` / `docs/handoff.md`）**：本轮只做**最终一致性核对**，
 未重复修改（遵守派单约束）。**核对结论（当时）：仍有漂移，需另派单订正**——（现已在 t90/t94 收尾，见下）
@@ -373,6 +456,10 @@ data/web-chat/xixi.sqlite: 伴随工具 1 / 无工具 1
 | 会话与 Harness 会话的映射放在领域层、按 provider 键控 | 换 Harness 不丢「同一个西西」 | ADR-0005 |
 | Node 原生 TS + `node:sqlite`，唯一运行依赖 `js-yaml` | 减少工具链与依赖面（这台机器易崩） | ADR-0006 |
 | 每轮一个 `dsh` 进程 | 让「重启恢复」成为默认行为而非特例；延迟代价在 M1 用常驻宿主解决 | ADR-0001 / 本文 2.2 |
+| 提示词前缀说「**她是谁、怎么说话**」，不是编号规则清单 | V0.1 的 `回答通常 1~3 句` 这类规则把每轮都压成同一种形状（客服感的来源）；安全边界改成紧凑散文 + 关键词锚点，靠测试钉住而不是靠编号 | 本文 2.18 / [design/conversation.md](design/conversation.md) §2 |
+| 回复上限 3 段 → **8 段**（块长仍 60，容量 180 → 480 字） | 长解释不该被挤成 2–3 大块（V0.1 实测单段最长 341 字）；上限本身继续保留（防刷屏、保打断窗口） | [ADR-0010](adr/0010-multi-segment-replies.md) 修订记录 |
+| 主动行为的**决策归属**：硬底线归程序，底线之上归模型读空气 | 「高主动性 ≠ 高频打扰」不能靠单一阈值一票否决；冷却/话题重复/未回应改成扣分项，审计仍只存 `reason_code` 与分数 | [ADR-0011](adr/0011-proactive-decision-ownership.md) |
+| 真人感指标**口径唯一**：分母＝真正说出来的开口轮，主口径＝末句以问号收尾 | 旧口径（含问号、把引擎修复句算成模型行为）会把 46% 读成 62–70%，同一份数据得出相反结论 | 本文 2.18 / [benchmarks/realism-metrics.md](benchmarks/realism-metrics.md) |
 
 ## 4. 下一步 / 未完成项
 
@@ -404,6 +491,22 @@ data/web-chat/xixi.sqlite: 伴随工具 1 / 无工具 1
    当前只有管理员的 `overrideSelfProfile`（控制台面板走的就是它），**模型驱动的学习尚未实现**。
 8. **M4 Memory**：当前只有会话内工作记忆（最近 8 轮）；长期记忆、纠正优先级、FutureHook 都还没有。
 9. 已知待补：`tsc --noEmit` 类型检查、`tests/replay/`（§22.3 回放属 M5）。
+10. **`onNotice` 没有产线消费者（P1 遗留，2026-10-01）**：`REPLY_HYGIENE`（工具标记/英文推理被剔除）与
+    `UNBACKED_FACT_CLAIM`（未核实的具体值被扣住）两条审计通知都发给调用方，但
+    `scripts/chat.ts` / `serve-chat.ts` / `field-test.ts` / `voice-turn.ts` 都没传 `onNotice`——
+    于是「程序改写了她说的话」在页面与日志里与「模型本来就这么说」同形。评审建议的最小修法见
+    [`review/reply-hygiene-review-2026-10-01.md`](review/reply-hygiene-review-2026-10-01.md)（F，requiredFix 二选一）。
+11. **`SILENCE_ARTIFACT_ONLY` 只是候选名字**：给「整轮只剩制品 → 沉默」一个可区分的原因码是评审提的方案之一，
+    **代码里并不存在**；现在轮次仍只报 `SILENCE`。落文档时不要写成已实现。
+12. **提问率口径缺单测（t17 的 O2）**：「修复句不进分母」「主口径 ≠ 辅口径时按主口径判带」这两条夹具建议补进
+    `tests/scenarios/realism-metrics.test.ts`；现在删掉修复句排除也不会红。该文件不在本轮 inScope。
+13. **指标模块的跨包相对导入（t17 的 O3）**：`scripts/lib/realism-metrics.ts` 直接
+    `../../packages/conversation/src/engine.ts` 取「修复句的唯一定义」（全仓唯一一处相对跨包导入，理由与披露见 t16 回报）。
+    建议后续在 `packages/conversation/src/index.ts` 补一行 re-export 再改回 `@xixi/conversation`。
+14. **登记缺口（已收尾）**：`scripts/eval-realism.ts` 已登记进 `docs/testing.md` 的脚本表与「真实 API 验收」行
+    （t5 收口时补），`AGENTS.md` §7 由队长补。**重放路径的 `NaN%` 缺陷已修**（运行时记 `run` 序号、
+    重放按序号重算 `perRepeat`，老 JSON 回退到「按 scenario 序列重启切分」），两份 benchmarks 报告的逐次表可复核，
+    修法与该缺陷的留档见 [`benchmarks/realism-metrics.md`](benchmarks/realism-metrics.md) §6。
 
 ## 5. 已完成的委派
 
