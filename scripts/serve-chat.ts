@@ -21,18 +21,23 @@ import { openXixiStore } from '@xixi/domain';
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
 import {
   ConsoleError,
+  DEFAULT_LOOP_INTERVAL_MS,
+  MIN_LOOP_INTERVAL_MS,
   PROACTIVE_PANEL_CSS,
+  ProactiveLoop,
   SEGMENT_TTS_NOTE,
   XIXI_DB_ENTRIES,
   applyAndPersistProactivePatch,
   databaseNoteHtml,
   effectiveProactivity,
   handleVoiceTurn,
+  lastUserTurnAt,
   proactiveConsoleState,
   proactiveDrill,
   proactivePanelHtml,
   proactivePanelScript,
   pruneVoiceDir,
+  readPresence,
   retentionPolicy,
   restoreProactiveSettings,
   segmentPlan,
@@ -120,6 +125,45 @@ function proactivePayload(): ProactiveConsoleState & { readonly ok: true } {
       now: new Date(),
       proactivity: effectiveProactivity(store.selfProfile()),
     }),
+  };
+}
+
+// Resident consideration loop (t70): same core as the console, off until the page asks for it.
+let turnInFlight = false;
+const presenceStorePath = join(REPO_ROOT, 'data');
+const loopSynthesize = TTS_ENABLED && client.hasKey ? async (text: string): Promise<Buffer> => await client.synthesize(text) : undefined;
+const proactiveLoop = new ProactiveLoop({
+  store,
+  readSettings: () => proactiveSnapshot.settings,
+  readState: () => engine.state,
+  readInFlightTurn: () => turnInFlight,
+  readProactivity: () => effectiveProactivity(store.selfProfile()),
+  readPresence: async () => {
+    const view = await readPresence({ store: openXixiStore({ dataDir: presenceStorePath }) });
+    return view === null ? null : { present: view.present, updatedAt: view.updatedAt, source: view.source };
+  },
+  readLastUserTurnAt: () => lastUserTurnAt(store, session.sessionId),
+  readSessionId: () => session.sessionId,
+  replyLimits: config.reply,
+  synthesize: loopSynthesize,
+  log: (line) => console.log(line),
+});
+function loopPayload(cursor: number): Record<string, unknown> {
+  const since = proactiveLoop.messagesSince(Number.isFinite(cursor) ? cursor : 0);
+  return {
+    ok: true,
+    status: proactiveLoop.status(),
+    cursor: since.cursor,
+    entries: since.entries,
+    minIntervalMs: MIN_LOOP_INTERVAL_MS,
+    defaultIntervalMs: DEFAULT_LOOP_INTERVAL_MS,
+    tts: {
+      available: loopSynthesize !== undefined,
+      note:
+        loopSynthesize !== undefined
+          ? '放行时会用真实 TTS 逐段合成，并在页面上逐条播出来。'
+          : '当前没有可用密钥或朗读被关掉：放行时只显示文字，不会发声（这会在每条记录里写明）。',
+    },
   };
 }
 
@@ -262,6 +306,20 @@ const server = createServer((request, response) => {
       }
       if (request.method === 'GET' && url.pathname === '/api/proactive') {
         json(response, 200, proactivePayload());
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/api/proactive/loop') {
+        json(response, 200, loopPayload(Number(url.searchParams.get('cursor') ?? '0')));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/proactive/loop') {
+        const body = (await readBody(request)) as Record<string, unknown>;
+        const action = typeof body['action'] === 'string' ? body['action'] : 'tick';
+        if (action === 'start') proactiveLoop.start(typeof body['intervalMs'] === 'number' ? body['intervalMs'] : undefined);
+        else if (action === 'stop') proactiveLoop.stop();
+        else if (action === 'tick') await proactiveLoop.tickOnce();
+        else throw new ConsoleError('UNKNOWN_LOOP_ACTION', `不认识的循环操作「${action}」`, '可用：start（开始自动考虑）、stop（停止）、tick（立刻考虑一次）');
+        json(response, 200, loopPayload(Number(body['cursor'] ?? 0)));
         return;
       }
       if (request.method === 'POST' && url.pathname === '/api/proactive/settings') {
@@ -528,8 +586,17 @@ function add(role, text, meta, source) {
  * pause, and every bubble carries 「第 i/N 段 · 间隔 xms」 so a user watching the screen can
  * tell "还有一段没到" from "只回了一句".
  */
-function addSegmented(role, label, segments, gapMs, meta) {
-  const list = Array.isArray(segments) && segments.length > 0 ? segments : [''];
+/**
+ * A spoken proactive message also belongs in the conversation log (t70): the shared panel
+ * calls this hook when the resident loop actually says something, so the page shows
+ * 「主动开口」 in the same stream as replies — with the same per-segment playback.
+ */
+window.pxOnProactiveMessage = function (entry) {
+  if (!entry || entry.speak !== true) return;
+  addSegmented('xixi', '主动开口', entry.segments, entry.gapMs, '触发源 ' + entry.trigger + ' · 分数 ' + entry.score + '/' + entry.threshold);
+};
+
+function addSegmented(role, label, segments, gapMs, meta) {  const list = Array.isArray(segments) && segments.length > 0 ? segments : [''];
   const badgeText = label ? label + ' · 第 1/' + list.length + ' 段' : null;
   const first = add(role, list[0], null);
   const wrap = first.parentElement;

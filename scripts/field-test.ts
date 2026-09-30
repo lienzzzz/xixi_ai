@@ -1918,6 +1918,48 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   const turns: ConsoleTurn[] = [];
   const startedAt = new Date().toISOString();
 
+  // -------------------------------------------------- resident consideration loop (t70)
+  // Off until the page asks for it. Everything it needs is a *reader* — the loop never caches
+  // settings or the FSM state, so a knob saved a second ago (or a conversation that just
+  // started) is honoured on the very next tick.
+  let turnInFlight = false;
+  const loopSynthesize =
+    ttsEnabled && client.hasKey ? async (text: string): Promise<Buffer> => await client.synthesize(text) : undefined;
+  const proactiveLoop = new ProactiveLoop({
+    store,
+    readSettings: () => proactiveSnapshot.settings,
+    readState: () => engine.state,
+    readInFlightTurn: () => turnInFlight,
+    readProactivity: () => effectiveProactivity(store.selfProfile()),
+    readPresence: async () => {
+      const view = await readPresence({ store: getPresenceStore() });
+      return view === null ? null : { present: view.present, updatedAt: view.updatedAt, source: view.source };
+    },
+    readLastUserTurnAt: () => lastUserTurnAt(store, session.sessionId),
+    readSessionId: () => session.sessionId,
+    replyLimits: config.reply,
+    synthesize: loopSynthesize,
+    log,
+  });
+  function loopPayload(cursor: number): Record<string, unknown> {
+    const since = proactiveLoop.messagesSince(Number.isFinite(cursor) ? cursor : 0);
+    return {
+      ok: true,
+      status: proactiveLoop.status(),
+      cursor: since.cursor,
+      entries: since.entries,
+      minIntervalMs: MIN_LOOP_INTERVAL_MS,
+      defaultIntervalMs: DEFAULT_LOOP_INTERVAL_MS,
+      tts: {
+        available: loopSynthesize !== undefined,
+        note:
+          loopSynthesize !== undefined
+            ? '放行时会用真实 TTS 逐段合成，并在页面上逐条播出来。'
+            : '当前没有可用密钥或朗读被关掉：放行时只显示文字，不会发声（这会在每条记录里写明）。',
+      },
+    };
+  }
+
   const deps: VoiceDeps = {
     python: DEFAULT_PYTHON,
     voiceDir,
@@ -2068,6 +2110,25 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
           json(response, 200, proactivePayload());
           return;
         }
+        if (request.method === 'GET' && url.pathname === '/api/field/proactive/loop') {
+          json(response, 200, loopPayload(Number(url.searchParams.get('cursor') ?? '0')));
+          return;
+        }
+        if (request.method === 'POST' && url.pathname === '/api/field/proactive/loop') {
+          const body = (await readBody(request)) as Record<string, unknown>;
+          const action = typeof body['action'] === 'string' ? body['action'] : 'tick';
+          if (action === 'start') {
+            proactiveLoop.start(typeof body['intervalMs'] === 'number' ? body['intervalMs'] : undefined);
+          } else if (action === 'stop') {
+            proactiveLoop.stop();
+          } else if (action === 'tick') {
+            await proactiveLoop.tickOnce();
+          } else {
+            throw new ConsoleError('UNKNOWN_LOOP_ACTION', `不认识的循环操作「${action}」`, '可用：start（开始自动考虑）、stop（停止）、tick（立刻考虑一次）');
+          }
+          json(response, 200, loopPayload(Number(body['cursor'] ?? 0)));
+          return;
+        }
         if (request.method === 'POST' && url.pathname === '/api/field/proactive/settings') {
           const body = (await readBody(request)) as Record<string, unknown>;
           const applied = applyAndPersistProactivePatch({
@@ -2160,7 +2221,15 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
           const body = await readBody(request);
           const text = (body.text ?? '').trim();
           if (text.length === 0) throw new ConsoleError('EMPTY_MESSAGE', '没有输入文字', '在输入框里打一句话再按发送');
-          const turn = await engine.respond({ sessionId: session.sessionId, text, addressed: engine.state === 'IDLE' });
+          // While a turn is being answered, the loop must treat 「最近有对话」 as true (t70): the
+          // gate reads this flag, so 西西 cannot talk over a reply that is still being produced.
+          turnInFlight = true;
+          let turn: Awaited<ReturnType<typeof engine.respond>>;
+          try {
+            turn = await engine.respond({ sessionId: session.sessionId, text, addressed: engine.state === 'IDLE' });
+          } finally {
+            turnInFlight = false;
+          }
           let audio: string | null = null;
           if (ttsEnabled && body.speak !== false && turn.action === 'SPEAK' && turn.text !== null && client.hasKey) {
             audio = (await client.synthesize(turn.text)).toString('base64');
@@ -3038,6 +3107,369 @@ export function effectiveProactivity(profile: Readonly<Record<string, unknown>> 
   return typeof value === 'number' && Number.isFinite(value) ? value : DEFAULT_PROACTIVITY;
 }
 
+// ---------------------------------------------------- resident consideration loop (t70)
+//
+// M5-lite: the console may run the consideration loop by itself. It is **off by default** and
+// every candidate it builds is fact-based (the presence projection, the time since the last user
+// turn, a documented clock hook) — no model is asked to invent something to say, so 「西西怎么
+// 突然说话了」 has an answer that can be checked against the log. When the gates let a candidate
+// through, the line goes through the *same* TTS path a reply uses and is played segment by
+// segment (ADR-0010); when they block it, the page shows the first blocked gate and its reason.
+
+/** Fixed clock hooks (console-side source): 「到点了」 statements, not opinions. */
+export const PROACTIVE_CLOCK_HOOKS: readonly { readonly minutes: number; readonly line: string; readonly intent: string }[] = Object.freeze([
+  { minutes: 9 * 60, line: '现在是上午 9 点。要我把今天要做的事记一条吗？', intent: 'morning_hook' },
+  { minutes: 12 * 60 + 30, line: '现在是中午 12 点半。记得吃点东西，别又拖到下午。', intent: 'lunch_hook' },
+  { minutes: 18 * 60 + 30, line: '现在是傍晚 6 点半。今天的事到这儿就算告一段落了。', intent: 'evening_hook' },
+  { minutes: 21 * 60, line: '现在是晚上 9 点。要不要我帮你把明天的事记一下？', intent: 'night_hook' },
+]);
+
+/** How long without a user turn before 「长时间没人说话」 becomes a candidate. */
+export const PROACTIVE_DANGLING_AFTER_MINUTES = 10;
+
+export interface ProactiveCandidatePlan {
+  readonly candidate: ProactiveCandidate;
+  /** The sentence the candidate would speak (factual, checkable against the log/clock). */
+  readonly line: string;
+  /** Where the fact comes from, for the page's 「这条凭什么说」 line. */
+  readonly fact: string;
+  /** Segment plan for that line (ADR-0010), so the page knows what it will hear. */
+  readonly segments: readonly string[];
+  readonly gapMs: number;
+}
+
+export interface ProactiveCandidateContext {
+  readonly now: Date;
+  /** Presence projection (M6). `present === true` is what 「有人到家」 needs. */
+  readonly presence: { readonly present: boolean | null; readonly updatedAt: string | null; readonly source?: string | null } | null;
+  /** When the last user turn happened (from the event log); `null` = this store has no turns. */
+  readonly lastUserTurnAt: Date | null;
+  /** True when a conversation is open right now (the engine blocks it anyway; this only orders). */
+  readonly inConversation: boolean;
+  readonly limit?: number;
+}
+
+/**
+ * Build the candidates the loop may consider, in priority order (§16).
+ *
+ * Deliberately dumb and factual: each entry traces back to a row in the log or to the clock.
+ */
+export function buildProactiveCandidates(context: ProactiveCandidateContext): ProactiveCandidatePlan[] {
+  const plans: ProactiveCandidatePlan[] = [];
+  const day = localDayOf(context.now);
+  const minutes = context.now.getHours() * 60 + context.now.getMinutes();
+  const limit = context.limit ?? 3;
+
+  // 1. presence_arrived — the projection says someone is home.
+  if (context.presence?.present === true) {
+    plans.push(
+      planFor(
+        'presence_arrived',
+        `${day}-presence`,
+        // Long enough to be spoken in two segments (ADR-0010), so the page really shows the
+        // pause between them instead of one clip.
+        '哎，你回来啦。今天外面挺冷的，我看你外套都没穿厚。要不要先喝口热水暖暖手？对了，你要问的那件事我也记着呢，等你想说的时候再问我。',
+        `在场投影：present=true（更新于 ${context.presence.updatedAt ?? '—'}）`,
+        // A greeting right after someone walks in is a strong candidate on every axis — and the
+        // numbers are the §15.4 ones, not a thumb on the scale to sneak past the threshold.
+        {
+          event_salience: 1,
+          social_value: 1,
+          novelty: 0.8,
+          memory_relevance: 0.6,
+          time_since_last_interaction: 1,
+          user_receptiveness: 0.9,
+          future_hook_bonus: 0.5,
+        },
+      ),
+    );
+  }
+
+  // 2. conversation_dangling — nobody has said anything for a while.
+  const silentMinutes = context.lastUserTurnAt === null ? null : Math.round((context.now.getTime() - context.lastUserTurnAt.getTime()) / 60_000);
+  if (silentMinutes === null || silentMinutes >= PROACTIVE_DANGLING_AFTER_MINUTES) {
+    const line = silentMinutes === null ? '家里安静了一会儿了，我在。' : `你上次说话是 ${silentMinutes} 分钟前了，还好吗？`;
+    plans.push(
+      planFor(
+        'conversation_dangling',
+        `${day}-dangling-${Math.floor(minutes / 30)}`,
+        line,
+        `事件日志：上一条 user 轮次在 ${context.lastUserTurnAt?.toISOString() ?? '（这个库还没有轮次）'}`,
+        { time_since_last_interaction: 1, social_value: 0.8, memory_relevance: 0.5, user_receptiveness: 0.7 },
+      ),
+    );
+  }
+
+  // 3. future_hook_due — a documented clock hook, valid for 30 minutes after the minute.
+  const hook = PROACTIVE_CLOCK_HOOKS.find((entry) => minutes >= entry.minutes && minutes < entry.minutes + 30);
+  if (hook !== undefined) {
+    plans.push(
+      planFor(
+        'future_hook_due',
+        `${day}-hook-${hook.minutes}`,
+        hook.line,
+        `时钟：本地时间 ${formatClockMinutes(minutes)} 命中固定钩子 ${formatClockMinutes(hook.minutes)}`,
+        { event_salience: 0.8, future_hook_bonus: 1, social_value: 0.6, user_receptiveness: 0.8 },
+        hook.intent,
+      ),
+    );
+  }
+
+  return plans.slice(0, limit);
+}
+
+function planFor(
+  trigger: ProactiveTrigger,
+  slug: string,
+  line: string,
+  fact: string,
+  components: Readonly<Record<string, number>>,
+  intent?: string,
+): ProactiveCandidatePlan {
+  const split = splitReplyIntoSegments(line);
+  return {
+    candidate: { candidateId: `loop-${trigger}-${slug}`, trigger, components, topicRef: trigger, intent: intent ?? trigger },
+    line,
+    fact,
+    segments: split.segments,
+    gapMs: split.gapMs,
+  };
+}
+
+export interface ProactiveLoopEntry {
+  readonly at: string;
+  readonly candidateId: string;
+  readonly trigger: string;
+  readonly triggerLabel: string;
+  readonly speak: boolean;
+  readonly reasonCode: string;
+  readonly reasonLabel: string;
+  readonly nextStep: string;
+  readonly score: number;
+  readonly threshold: number;
+  readonly gates: readonly ProactiveGateRow[];
+  readonly text: string | null;
+  readonly segments: readonly string[];
+  readonly gapMs: number;
+  /** One entry per segment: a playable base64 WAV, or `null` when that segment could not be made. */
+  readonly audio: readonly (string | null)[] | null;
+  /** Why there is no audio (no key, `--no-tts`, a TTS error) — never silently empty. */
+  readonly audioNote: string | null;
+  readonly fact: string;
+}
+
+export interface ProactiveLoopOptions {
+  readonly store: XixiStore;
+  readonly readSettings: () => ProactiveSettings;
+  readonly readState: () => ConversationState;
+  readonly readInFlightTurn?: () => boolean;
+  readonly readProactivity: () => number;
+  readonly readPresence: () => Promise<{ readonly present: boolean | null; readonly updatedAt: string | null; readonly source?: string | null } | null>;
+  readonly readLastUserTurnAt: () => Date | null;
+  readonly readSessionId: () => string | null;
+  readonly replyLimits?: Readonly<Record<string, unknown>> | undefined;
+  readonly synthesize?: ((text: string) => Promise<Buffer>) | undefined;
+  readonly intervalMs?: number | undefined;
+  readonly now?: (() => Date) | undefined;
+  readonly log?: ((line: string) => void) | undefined;
+}
+
+/** The page cannot make this hammer the gates: 5 s is the floor, 30 s the default. */
+export const MIN_LOOP_INTERVAL_MS = 5_000;
+export const DEFAULT_LOOP_INTERVAL_MS = 30_000;
+/** How many entries the pages keep (memory only; the event log is the durable record). */
+const LOOP_HISTORY_LIMIT = 40;
+
+/**
+ * A resident consideration loop for the console (t70).
+ *
+ * One tick = build candidates → consider the first one → deliver (TTS + page message) or record
+ * why it was blocked. Everything the engine enforces (switch, quiet hours, cooldown, quotas,
+ * topic window, conversation active, score) is untouched: the loop only supplies candidates and
+ * an id that makes re-delivery impossible (`loop-<trigger>-…`, rejected by ALREADY_DELIVERED).
+ */
+export class ProactiveLoop {
+  readonly #options: ProactiveLoopOptions;
+  readonly #entries: ProactiveLoopEntry[] = [];
+  #timer: NodeJS.Timeout | null = null;
+  #intervalMs: number;
+  #ticking = false;
+  #startedAt: string | null = null;
+  #ticks = 0;
+
+  constructor(options: ProactiveLoopOptions) {
+    this.#options = options;
+    this.#intervalMs = clampInterval(options.intervalMs ?? DEFAULT_LOOP_INTERVAL_MS);
+  }
+
+  get running(): boolean {
+    return this.#timer !== null;
+  }
+
+  get intervalMs(): number {
+    return this.#intervalMs;
+  }
+
+  status(): { readonly running: boolean; readonly intervalMs: number; readonly ticks: number; readonly startedAt: string | null; readonly entries: number } {
+    return { running: this.running, intervalMs: this.#intervalMs, ticks: this.#ticks, startedAt: this.#startedAt, entries: this.#entries.length };
+  }
+
+  entries(): readonly ProactiveLoopEntry[] {
+    return this.#entries;
+  }
+
+  /** Entries the page has not seen yet (`cursor` = how many it already has). */
+  messagesSince(cursor: number): { readonly cursor: number; readonly entries: readonly ProactiveLoopEntry[] } {
+    const from = Math.max(0, Math.min(cursor, this.#entries.length));
+    return { cursor: this.#entries.length, entries: this.#entries.slice(from) };
+  }
+
+  start(intervalMs?: number): void {
+    if (intervalMs !== undefined) this.#intervalMs = clampInterval(intervalMs);
+    if (this.#timer !== null) return;
+    this.#startedAt = new Date().toISOString();
+    this.#options.log?.(`[proactive-loop] 开始自动考虑：每 ${Math.round(this.#intervalMs / 1000)} 秒一次（默认关，随时可停）`);
+    void this.tickOnce();
+    this.#timer = setInterval(() => void this.tickOnce(), this.#intervalMs);
+    // A resident loop must not keep a script alive by itself (tests, `--self-test`).
+    this.#timer.unref?.();
+  }
+
+  stop(): void {
+    if (this.#timer === null) return;
+    clearInterval(this.#timer);
+    this.#timer = null;
+    this.#options.log?.('[proactive-loop] 已停止自动考虑');
+  }
+
+  /**
+   * One consideration, exposed for the page's 「立刻考虑一次」 button and for tests.
+   *
+   * Returns the entry (spoken or blocked), or `null` when no candidate could be built.
+   */
+  async tickOnce(): Promise<ProactiveLoopEntry | null> {
+    if (this.#ticking) return null; // a slow TTS call must not overlap the next tick
+    this.#ticking = true;
+    try {
+      const now = this.#options.now?.() ?? new Date();
+      this.#ticks += 1;
+      const presence = await this.#options.readPresence();
+      const plans = buildProactiveCandidates({
+        now,
+        presence,
+        lastUserTurnAt: this.#options.readLastUserTurnAt(),
+        inConversation: this.#options.readState() !== 'IDLE' || (this.#options.readInFlightTurn?.() ?? false),
+      });
+      if (plans.length === 0) {
+        this.#options.log?.('[proactive-loop] 这一次没有可说的候选（没有事实支撑就不开口）');
+        return null;
+      }
+      for (const plan of plans) {
+        const entry = await this.#consider(plan, now);
+        if (entry.reasonCode === 'ALREADY_DELIVERED') continue; // this source was used: try the next
+        this.#push(entry);
+        this.#options.log?.(
+          entry.speak
+            ? `[proactive-loop] 开口：${entry.triggerLabel}（分数 ${entry.score} ≥ ${entry.threshold}）「${entry.text ?? ''}」`
+            : `[proactive-loop] 被拦：${entry.triggerLabel} → ${entry.reasonCode}（${entry.reasonLabel}）`,
+        );
+        return entry;
+      }
+      return null;
+    } finally {
+      this.#ticking = false;
+    }
+  }
+
+  async #consider(plan: ProactiveCandidatePlan, now: Date): Promise<ProactiveLoopEntry> {
+    const settings = this.#options.readSettings();
+    let delivered: string | null = null;
+    const engine = new ProactiveEngine({ store: this.#options.store, settings, clock: () => now });
+    const outcome = await engine.consider({
+      candidate: plan.candidate,
+      at: now,
+      conversationState: this.#options.readState(),
+      inFlightTurn: this.#options.readInFlightTurn?.() ?? false,
+      proactivity: this.#options.readProactivity(),
+      sessionId: this.#options.readSessionId(),
+      deliver: () => {
+        delivered = plan.line;
+      },
+    });
+    const split = delivered === null ? null : splitReplyIntoSegments(delivered, resolveReplyLimits(this.#options.replyLimits));
+    const segments = split?.segments ?? [];
+    const gapMs = split?.gapMs ?? 0;
+    let audio: (string | null)[] | null = null;
+    let audioNote: string | null = null;
+    if (outcome.speak) {
+      if (this.#options.synthesize === undefined) {
+        audioNote = '只显示文字：朗读关闭（--no-tts）或没有可用密钥，所以这次没有合成语音。';
+      } else {
+        // Per segment on purpose: the page plays them with `gapMs` between them, which is what
+        // ADR-0010 means by segmented speech (one clip per segment, not one clip split later).
+        const clips: (string | null)[] = [];
+        for (const segment of segments) {
+          try {
+            clips.push((await this.#options.synthesize(segment)).toString('base64'));
+          } catch (error) {
+            clips.push(null);
+            audioNote = `第 ${clips.length} 段合成失败：${error instanceof Error ? error.message : String(error)}`;
+          }
+        }
+        audio = clips;
+      }
+    }
+    return {
+      at: now.toISOString(),
+      candidateId: plan.candidate.candidateId,
+      trigger: plan.candidate.trigger,
+      triggerLabel: PROACTIVE_TRIGGER_LABELS[plan.candidate.trigger],
+      speak: outcome.speak,
+      reasonCode: outcome.reasonCode,
+      reasonLabel: PROACTIVE_GATE_LABELS[outcome.reasonCode],
+      nextStep: PROACTIVE_GATE_NEXT_STEPS[outcome.reasonCode],
+      score: outcome.score,
+      threshold: outcome.threshold,
+      gates: proactiveGateRows(outcome.reasonCode),
+      text: delivered,
+      segments,
+      gapMs,
+      audio,
+      audioNote,
+      fact: plan.fact,
+    };
+  }
+
+  #push(entry: ProactiveLoopEntry): void {
+    this.#entries.push(entry);
+    while (this.#entries.length > LOOP_HISTORY_LIMIT) this.#entries.shift();
+  }
+}
+
+function clampInterval(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_LOOP_INTERVAL_MS;
+  return Math.max(MIN_LOOP_INTERVAL_MS, Math.min(value, 60 * 60_000));
+}
+
+/** When the last *user* turn happened, straight from the event log (t70's 「长时间没人说话」). */
+export function lastUserTurnAt(store: XixiStore, sessionId?: string | null): Date | null {
+  // `readEvents` can filter by session itself; the envelope field is `session_id` (snake_case,
+  // per the schema) — reading `event.sessionId` here silently matched nothing the first time.
+  const events = store.readEvents({
+    type: 'conversation.turn',
+    ...(sessionId === undefined || sessionId === null ? {} : { sessionId }),
+    limit: Number.MAX_SAFE_INTEGER,
+  });
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event === undefined) continue;
+    const payload = event.payload as Record<string, unknown>;
+    if (payload['role'] !== 'user') continue;
+    return new Date(event.timestamp);
+  }
+  return null;
+}
+
 /**
  * Which database each entry point uses.
  *
@@ -3094,6 +3526,11 @@ export function databaseNoteHtml(currentDir: string): string {
   negative: 'px-neg',
   proactivity: 'px-proactivity',
   proactivityNow: 'px-proactivity-now',
+  loopEnabled: 'px-loop-enabled',
+  loopInterval: 'px-loop-interval',
+  loopTick: 'px-loop-tick',
+  loopStatus: 'px-loop-status',
+  loopLog: 'px-loop-log',
   triggers: 'px-triggers',
   save: 'px-save',
   off: 'px-off',
@@ -3137,6 +3574,15 @@ export function proactivePanelHtml(): string {
       <span class="muted" id="${id.status}"></span>
     </div>
     <div id="${id.result}"></div>
+    <h3 style="margin:12px 0 4px; font-size:14px">常驻自动考虑（M5-lite，默认关）</h3>
+    <div class="muted">打开后每 N 秒自己构造一个候选并过一遍九道门禁。候选只来自<b>事实</b>（在场投影 / 上次说话过了多久 / 固定时钟钩子），不靠模型编内容；放行时用真实 TTS 逐段合成并在下面逐条播放（段间停 segmentGapMs），被拦时写清第一道命中的门禁与中文原因。</div>
+    <div style="margin:8px 0">
+      <label><input type="checkbox" id="${id.loopEnabled}" /> 开始自动考虑</label>
+      <label>间隔（秒）<input type="number" id="${id.loopInterval}" min="5" max="3600" step="5" /></label>
+      <button id="${id.loopTick}">立刻考虑一次</button>
+      <span class="muted" id="${id.loopStatus}"></span>
+    </div>
+    <div id="${id.loopLog}" class="muted">还没有自动考虑的记录。</div>
     <h3 style="margin:12px 0 4px; font-size:14px">每道门禁的判定（按引擎的固定顺序）</h3>
     <div id="${id.gates}" class="muted">还没有判定记录。</div>
     <h3 style="margin:12px 0 4px; font-size:14px">最近的考虑记录（来自事件日志，可审计）</h3>
@@ -3282,11 +3728,138 @@ async function pxDrill() {
     if (target) target.innerHTML = '<div class="muted">' + drill.nextStep + '</div>';
   }
 }
+
+/* ---------------------------------------------------------------- resident loop (t70) */
+PX.loopCursor = null;
+PX.audioTimers = [];
+
+/* Play one synthesized clip per segment, gapMs apart — the audible half of ADR-0010. */
+function pxPlayClips(clips, gapMs) {
+  if (!clips || clips.length === 0) return;
+  var index = 0;
+  var next = function () {
+    if (index >= clips.length) return;
+    var clip = clips[index];
+    index += 1;
+    if (clip) {
+      try {
+        var audio = new Audio('data:audio/wav;base64,' + clip);
+        audio.addEventListener('ended', function () { PX.audioTimers.push(setTimeout(next, gapMs)); });
+        void audio.play();
+        return;
+      } catch (error) { /* fall through to the timer-only path */ }
+    }
+    PX.audioTimers.push(setTimeout(next, gapMs));
+  };
+  next();
+}
+
+function pxLoopStatus(payload) {
+  var node = document.getElementById(PX.ids.loopStatus);
+  var box = document.getElementById(PX.ids.loopEnabled);
+  if (box) box.checked = payload.status.running === true;
+  if (node) {
+    node.textContent = (payload.status.running ? '运行中' : '已停止')
+      + '（间隔 ' + Math.round(payload.status.intervalMs / 1000) + 's，已考虑 ' + payload.status.ticks + ' 次）'
+      + '｜' + (payload.tts && payload.tts.available ? '会真的发声' : '只显示文字：' + ((payload.tts && payload.tts.note) || ''));
+  }
+}
+
+/** One loop entry as a page row: what it decided, why, what it said, and the audio if any. */
+function pxLoopEntry(entry) {
+  var log = document.getElementById(PX.ids.loopLog);
+  if (!log) return;
+  if (log.classList.contains('muted')) { log.className = ''; log.innerHTML = ''; }
+  var row = document.createElement('div');
+  row.style.margin = '8px 0';
+  row.style.padding = '8px 10px';
+  row.style.borderRadius = '10px';
+  row.style.border = '1px solid ' + (entry.speak ? '#2f5c3a' : '#5c4a22');
+  row.style.background = entry.speak ? '#14231a' : '#231f14';
+  var head = document.createElement('div');
+  head.innerHTML = '<b>' + (entry.speak ? '主动开口' : '被拦下') + '</b>'
+    + ' · ' + entry.triggerLabel + ' <span class="muted">(' + entry.trigger + ')</span>'
+    + ' · 分数 ' + entry.score + '/' + entry.threshold
+    + ' · ' + entry.reasonCode + '（' + entry.reasonLabel + '）'
+    + ' · ' + new Date(entry.at).toLocaleTimeString();
+  row.appendChild(head);
+  var fact = document.createElement('div');
+  fact.className = 'muted';
+  fact.textContent = '依据：' + entry.fact + '｜候选 ' + entry.candidateId;
+  row.appendChild(fact);
+  if (entry.speak) {
+    var body = document.createElement('div');
+    body.style.marginTop = '4px';
+    row.appendChild(body);
+    pxPlaySegments(body, entry.segments, entry.gapMs, '主动开口');
+    if (entry.audio) pxPlayClips(entry.audio, entry.gapMs);
+    if (entry.audioNote) {
+      var note = document.createElement('div');
+      note.className = 'muted';
+      note.textContent = entry.audioNote;
+      row.appendChild(note);
+    }
+    // Let a host page (the trial page) also show it in its own conversation log.
+    if (typeof window.pxOnProactiveMessage === 'function') window.pxOnProactiveMessage(entry);
+  } else {
+    var why = document.createElement('div');
+    why.style.marginTop = '4px';
+    why.textContent = entry.nextStep;
+    row.appendChild(why);
+    var blocked = (entry.gates || []).filter(function (gate) { return gate.status === 'blocked'; });
+    if (blocked.length > 0) {
+      var gates = document.createElement('div');
+      gates.className = 'muted';
+      gates.textContent = '第一道命中的门禁：' + blocked[0].label + '（' + blocked[0].code + '）';
+      row.appendChild(gates);
+    }
+  }
+  log.insertBefore(row, log.firstChild);
+}
+
+async function pxLoopPoll() {
+  var url = PX.base + '/proactive/loop' + (PX.loopCursor === null ? '' : '?cursor=' + PX.loopCursor);
+  var payload = await (await fetch(url)).json();
+  if (payload.ok === false) { return; }
+  pxLoopStatus(payload);
+  var first = PX.loopCursor === null;
+  PX.loopCursor = payload.cursor;
+  if (first) return; // a reload must not replay everything the loop did before it
+  for (var i = 0; i < payload.entries.length; i += 1) pxLoopEntry(payload.entries[i]);
+}
+
+async function pxLoopToggle() {
+  var box = document.getElementById(PX.ids.loopEnabled);
+  var seconds = Number(pxVal('loopInterval'));
+  var action = box && box.checked ? 'start' : 'stop';
+  var payload = await pxPost('/proactive/loop', { action: action, intervalMs: (isFinite(seconds) && seconds > 0 ? seconds : 30) * 1000 });
+  if (payload.ok === false) { pxStatus('自动考虑操作失败：' + payload.error); return; }
+  pxLoopStatus(payload);
+  pxStatus(action === 'start' ? '已开始自动考虑' : '已停止自动考虑');
+}
+
+async function pxLoopTick() {
+  var payload = await pxPost('/proactive/loop', { action: 'tick', cursor: PX.loopCursor === null ? 0 : PX.loopCursor });
+  if (payload.ok === false) { pxStatus('立刻考虑失败：' + payload.error); return; }
+  pxLoopStatus(payload);
+  var first = PX.loopCursor === null;
+  PX.loopCursor = payload.cursor;
+  if (!first) for (var i = 0; i < payload.entries.length; i += 1) pxLoopEntry(payload.entries[i]);
+}
+
 (function pxWire() {
   var save = document.getElementById(PX.ids.save); if (save) save.addEventListener('click', function () { void pxSave(); });
   var off = document.getElementById(PX.ids.off); if (off) off.addEventListener('click', function () { void pxSave({ enabled: false }, '已一键关闭主动开口'); });
   var drill = document.getElementById(PX.ids.drill); if (drill) drill.addEventListener('click', function () { void pxDrill(); });
+  var loopBox = document.getElementById(PX.ids.loopEnabled);
+  if (loopBox) {
+    loopBox.checked = false; // 默认关：页面刷新/重开不会自己开始说话
+    loopBox.addEventListener('change', function () { void pxLoopToggle(); });
+  }
+  var loopTick = document.getElementById(PX.ids.loopTick); if (loopTick) loopTick.addEventListener('click', function () { void pxLoopTick(); });
   void pxLoad();
+  void pxLoopPoll();
+  PX.loopPoller = setInterval(function () { void pxLoopPoll(); }, 2000);
 })();
 `;
 }
