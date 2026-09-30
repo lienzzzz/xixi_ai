@@ -31,48 +31,15 @@ import {
   recordLookOnce,
   restoreVisionSettings,
   retentionPolicy,
-  type LiveCameraHandle,
-  type LiveCameraRunner,
 } from '../../scripts/field-test.ts';
 import { loadConfig } from '../../scripts/lib/harness.ts';
+import { fakeLiveRunner, frameLine } from './live-camera-fixture.ts';
 
 function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
 const JPEG_BASE64 = 'ZmFrZS1qcGVnLWJ5dGVz';
-
-function frameLine(options: { readonly width: number; readonly height: number; readonly bytes: number }): string {
-  return JSON.stringify({
-    type: 'frame',
-    at: '2026-09-30T16:20:00.000+08:00',
-    frame_index: 3,
-    present: true,
-    state: 'present',
-    confidence: 0.9,
-    changed: false,
-    motion_ratio: 0.01,
-    faces: 1,
-    detect_ms: 7,
-    jpeg_bytes: options.bytes,
-    width: options.width,
-    height: options.height,
-    jpeg: JPEG_BASE64,
-  });
-}
-
-/** A camera child the test can push frames into (no camera, no Python). */
-function fakeLiveRunner(): { readonly runner: LiveCameraRunner; push: (line: string) => void } {
-  let onLine: ((line: string) => void) | null = null;
-  const runner: LiveCameraRunner = {
-    start(options) {
-      onLine = options.onLine;
-      const handle: LiveCameraHandle = { pid: 8123, kill: () => {}, write: () => {} };
-      return handle;
-    },
-  };
-  return { runner, push: (line) => onLine?.(line) };
-}
 
 /** A brain that records what it was sent and answers like a model that looked. */
 function recordingBrain(): { readonly adapter: FakeBrainAdapter; readonly calls: { images?: readonly { mediaType: string; base64: string }[]; text: string }[] } {

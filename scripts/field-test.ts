@@ -1998,6 +1998,8 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
     return {
       status: liveSensors.status(),
       frame: liveSensors.frame(),
+      // t103: 「拿不到画面」 must be visible as its own fact, never as 「没人」.
+      cameraProblem: liveSensors.cameraProblem(),
       loop: proactiveLoop.status(),
       vision: visionPayload(),
       ttsEnabled: ttsOn,
@@ -2119,7 +2121,21 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   }
 
   async function statePayload(): Promise<Record<string, unknown>> {
-    const presence = await readPresence({ store: getPresenceStore() });
+    const presenceView = await readPresence({ store: getPresenceStore() });
+    const cameraProblem = liveSensors.cameraProblem();
+    // t103: while the camera cannot deliver a picture, the presence card must not read as a normal
+    // 「没人在场」 — the honest answer is 「未知」, with the reason attached. The projection's own
+    // fields (`present`, `stale`, `updatedAt`) are left untouched, so nothing is hidden.
+    const presence =
+      cameraProblem === null
+        ? presenceView
+        : {
+            ...presenceView,
+            mode: 'camera-problem' as const,
+            text: `未知（摄像头交不出画面：${cameraProblem.kind}）`,
+            note: `${cameraProblem.title}｜${cameraProblem.note}`,
+            overriddenByCameraProblem: true,
+          };
     const address = server.address();
     const port = typeof address === 'object' && address !== null ? address.port : options.port;
     return {
@@ -2141,6 +2157,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       ttsEnabled: ttsOn,
       ttsAvailable: ttsOn && client.hasKey,
       live: liveSensors.status(),
+      cameraProblem,
       liveLoop: proactiveLoop.status(),
       vision: visionPayload(),
       reportDir,
@@ -3580,6 +3597,52 @@ export const LIVE_PRIVACY_NOTE =
   '摄像头画面不保存图像：每一帧只在内存里编码、经 localhost 发给这个页面，不产生图像文件、不上传；' +
   '但在场事件（presence.changed）与 world_state 投影照常写进本地库——事件才是产品，画面只是给你看的。关掉「启用」后子进程一起退出。';
 
+// ---------------------------------------------------- 「摄像头交不出画面」 (t103)
+//
+// A camera that returns nothing (lens covered, the privacy shutter/F-key switched off, the device
+// unplugged, or another program holding it) is not the same fact as an empty room — but the page
+// used to show it the same way, so 「没人」 was read as "nobody is home" while the picture was
+// simply missing. These strings are plain text (t86: the same constants go into the page and into
+// JSON), and the page puts them in a red block next to the picture.
+
+/** The one sentence a user must not misread: no picture is not 「房间没人」. */
+export const CAMERA_PROBLEM_TITLE = '摄像头现在交不出画面（不是房间没人）';
+/** Three things that actually fix this on a laptop, in the order that costs least. */
+export const CAMERA_PROBLEM_STEPS: readonly string[] = Object.freeze([
+  '① 看镜头是不是被挡住了，以及机身/键盘上的电控隐私开关（很多笔记本有遮挡片或 F 键开关，指示灯亮才是真的在工作）',
+  '② 按一下键盘上的相机隐私快捷键（各家不同，常见 F8 / F10 / Fn+F8；不确定就两个都试一次）',
+  '③ 拔插摄像头（USB）或重启一次；仍不行就换一个 USB 口，或换 --camera-index',
+]);
+/** The command that shows what the camera is really delivering, frame by frame. */
+export const CAMERA_PROBE_COMMAND = 'python -m perception_edge.run --probe-frames 10';
+/** Why this is not 「无人」, in one line, for the block itself. */
+export const CAMERA_PROBLEM_NOTE =
+  '这条提示只说「拿不到画面」，不等于「房间没人」：在修好之前，请不要把在场状态当成事实（在场投影读不到新的画面，会慢慢过期）。';
+
+/** Which kind of "no picture" we are looking at. */
+export type CameraProblemKind = 'unavailable' | 'no-frames' | 'empty-frames';
+
+export interface CameraProblem {
+  readonly kind: CameraProblemKind;
+  readonly title: string;
+  readonly note: string;
+  /** The three checks, verbatim (the page renders them as an ordered list). */
+  readonly steps: readonly string[];
+  readonly command: string;
+  /** What the child said, when it said something (its own Chinese reason, or OpenCV's warning). */
+  readonly childNote: string | null;
+  /** How long this state has been visible, in seconds (null when it just appeared). */
+  readonly forSeconds: number | null;
+}
+
+/** How long a running child may deliver nothing before the console calls it a camera problem. */
+export const CAMERA_PROBLEM_GRACE_MS = 6_000;
+/**
+ * Signatures of "the camera itself is the problem" in a child's output: its own Chinese message,
+ * or OpenCV's backend warnings (`can't be used to capture by index`, `VIDEOIO`, `out of range`).
+ */
+const CAMERA_UNAVAILABLE_PATTERN = /摄像头不可用|CameraUnavailable|can't be used to capture|VIDEOIO|out of range|被占用|无法打开/i;
+
 /**
  * The live camera process + the最新一帧 it produced (t78).
  *
@@ -3794,6 +3857,47 @@ export class LiveSensors {
       height: frame.height,
       bytes: frame.jpegBytes,
     };
+  }
+
+  /**
+   * Is the camera failing to deliver a picture (t103)?
+   *
+   * `null` means "no known problem" — either frames with a picture are arriving, or nothing has
+   * been started yet (which the page shows as 「未启用」, a third state, not a fault). Otherwise:
+   *
+   *   * `unavailable`  — the child said so (its own Chinese message or OpenCV's backend warning),
+   *                     or it exited with the perception edge's "no camera" code (2);
+   *   * `no-frames`    — it has been running for `CAMERA_PROBLEM_GRACE_MS` and produced nothing;
+   *   * `empty-frames` — frames arrive but carry no picture (`hasPicture === false`).
+   *
+   * The distinction matters because 「没人」 (the room is empty) and 「拿不到画面」 (the camera
+   * cannot deliver) are different facts, and only one of them is about the room.
+   */
+  cameraProblem(): CameraProblem | null {
+    if (!this.#running && this.#handle === null && this.#frames === 0 && this.#startedAt === null) return null; // never started
+    const note = this.#lastNote;
+    const forSeconds = (): number | null => {
+      if (this.#startedAt === null) return null;
+      const started = new Date(this.#startedAt).getTime();
+      if (Number.isNaN(started)) return null;
+      return Math.max(0, Math.round(((this.#options.now?.() ?? new Date()).getTime() - started) / 1000));
+    };
+    const noteLooksLikeCamera = note !== null && CAMERA_UNAVAILABLE_PATTERN.test(note);
+    const exitLooksLikeCamera = this.#exited && this.#exitCode === 2;
+    if (noteLooksLikeCamera || exitLooksLikeCamera) {
+      return { kind: 'unavailable', title: CAMERA_PROBLEM_TITLE, note: CAMERA_PROBLEM_NOTE, steps: CAMERA_PROBLEM_STEPS, command: CAMERA_PROBE_COMMAND, childNote: note, forSeconds: forSeconds() };
+    }
+    if (this.#running && this.#frames === 0 && this.#startedAt !== null) {
+      const started = new Date(this.#startedAt).getTime();
+      const elapsed = Number.isNaN(started) ? 0 : (this.#options.now?.() ?? new Date()).getTime() - started;
+      if (elapsed >= CAMERA_PROBLEM_GRACE_MS) {
+        return { kind: 'no-frames', title: CAMERA_PROBLEM_TITLE, note: CAMERA_PROBLEM_NOTE, steps: CAMERA_PROBLEM_STEPS, command: CAMERA_PROBE_COMMAND, childNote: note, forSeconds: forSeconds() };
+      }
+    }
+    if (this.#frames > 0 && this.#lastFrame !== null && this.#lastFrame.dataUrl.length === 0) {
+      return { kind: 'empty-frames', title: CAMERA_PROBLEM_TITLE, note: CAMERA_PROBLEM_NOTE, steps: CAMERA_PROBLEM_STEPS, command: CAMERA_PROBE_COMMAND, childNote: note, forSeconds: forSeconds() };
+    }
+    return null;
   }
 }
 
@@ -4131,6 +4235,17 @@ export const PROACTIVE_RANDOM_SMALLTALK_CHANCE = 0.15;
  *      falls back to the domain default (`DEFAULT_PRESENCE_TTL_SECONDS`, 60 s) rather than to
  *      "trust it forever" — `scripts/serve-chat.ts` reads presence without passing a TTL, and that
  *      path must stay correct too.
+ *
+ * **The `stale` flag wins over this function's own arithmetic** (t105): when the caller hands us a
+ * projection from the domain store, rule 2 short-circuits on `stale === true` and the timestamps are
+ * never compared. The store uses a **greater-or-equal** rule
+ * (`packages/domain/src/store.ts`: `stale: Date.parse(now) >= Date.parse(staleAfter)` in
+ * `worldState()` / `worldStateEntries()`), so exactly on the boundary
+ * (`updatedAt + ttlSeconds === now`) the console path says **not fresh** while rule 4 below
+ * (`ageMs > ttlSeconds * 1000`) would have said "still inside the TTL". The two judgements are
+ * therefore *not* identical at that one instant — the difference points the safe way (we would
+ * rather not claim 「刚到家」), but do not treat them as the same rule: change one, read the other.
+ * Check with `git grep -n "stale: Date.parse" -- packages/domain/src/store.ts`.
  */
 export function presenceFreshness(
   presence: ProactiveCandidateContext['presence'],
@@ -4145,6 +4260,9 @@ export function presenceFreshness(
   if (presence === null) return { fresh: false, reason: '库里还没有在场投影', ageSeconds: null, ttlSeconds };
   if (presence.present !== true) return { fresh: false, reason: `在场投影说 present=${String(presence.present)}`, ageSeconds: null, ttlSeconds };
   if (presence.stale === true) {
+    // The flag outranks the arithmetic below: even when the local TTL comparison would still call
+    // this "inside the window", the domain store has already judged it expired at the boundary
+    // (`>=`). See the function header — the two rules differ only at that instant.
     return { fresh: false, reason: `在场投影已被标为过期（T ${ttlSeconds}s）`, ageSeconds: null, ttlSeconds };
   }
   if (presence.updatedAt === null || presence.updatedAt === undefined) {
@@ -5324,6 +5442,44 @@ async function pxLoopTick() {
 
 /* ---------------------------------------------------------------- 启用 + 传感器（t78） */
 
+/**
+ * t103: show 「摄像头交不出画面」 as its own state, never as 「房间没人」.
+ *
+ * The block is filled from the payload's cameraProblem field; when there is none, it disappears.
+ * The presence headline is replaced by 「未知（摄像头交不出画面）」 in that state, because "the
+ * camera cannot deliver a picture" says nothing about whether somebody is home.
+ */
+function pxCamProblem(problem) {
+  var box = document.getElementById('px-cam-problem');
+  if (!box) return;
+  if (!problem) { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  var title = document.getElementById('px-cam-problem-title');
+  if (title) title.textContent = problem.title;
+  var note = document.getElementById('px-cam-problem-note');
+  if (note) note.textContent = problem.note;
+  var steps = document.getElementById('px-cam-problem-steps');
+  if (steps) {
+    steps.innerHTML = '';
+    for (var i = 0; i < problem.steps.length; i += 1) {
+      var li = document.createElement('li');
+      li.textContent = problem.steps[i];
+      steps.appendChild(li);
+    }
+  }
+  var command = document.getElementById('px-cam-problem-command');
+  if (command) command.textContent = problem.command;
+  var raw = document.getElementById('px-cam-problem-raw');
+  if (raw) {
+    raw.textContent = '子进程说：' + (problem.childNote || '（没有输出）')
+      + '｜判据：' + problem.kind
+      + (problem.forSeconds === null ? '' : '，已经这样 ' + problem.forSeconds + 's');
+  }
+  // And the headline above must stop claiming anything about the room.
+  var presence = document.getElementById('presence-text');
+  if (presence) presence.textContent = '未知（摄像头交不出画面，不是「没人」）';
+}
+
 /** Append one line to the 对话记录 column (the user's own turns come from renderTurn above). */
 function pxAppendConversation(who, text, segments, gapMs, label) {
   var box = document.getElementById('turns');
@@ -5390,6 +5546,8 @@ function pxLiveSensors(payload) {
     var presenceText = document.getElementById('presence-text');
     if (presenceText) presenceText.textContent = frame.present ? '有人在场（实时）' : '没看到人（实时）';
   }
+  // t103 last, so it wins over the frame wording: 「交不出画面」 is not 「没看到人」.
+  pxCamProblem(payload.cameraProblem || null);
 }
 
 async function pxLiveRefresh() {
@@ -5611,6 +5769,13 @@ ${PROACTIVE_PANEL_CSS}
 
     <section class="card">
       <h2>摄像头在场状态（M6）与实时画面</h2>
+      <div class="err" id="px-cam-problem" style="display:none; border-color:#7a3b12; background:#2a1a0d; color:#ffd9ad">
+        <b id="px-cam-problem-title">摄像头现在交不出画面（不是房间没人）</b>
+        <div class="muted" id="px-cam-problem-note" style="margin-top:6px"></div>
+        <ol class="steps" id="px-cam-problem-steps" style="margin:6px 0 0"></ol>
+        <div class="muted" style="margin-top:6px">自查命令（在 services/perception-edge 下跑）：<code id="px-cam-problem-command"></code></div>
+        <div class="muted" id="px-cam-problem-raw" style="margin-top:6px"></div>
+      </div>
       <img id="px-cam" alt="摄像头实时画面" style="width:100%; max-width:480px; border-radius:10px; background:#0b0d11; border:1px solid #262a33; display:block" />
       <div class="muted" id="px-cam-note">未启用：点上面的「启用」开始——摄像头实时画面只在内存里显示，不写任何文件。</div>
       <div class="big" id="presence-text" style="margin-top:8px">—</div>
