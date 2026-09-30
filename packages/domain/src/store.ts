@@ -57,7 +57,19 @@ export interface WorldStateEntry {
 }
 
 export interface WorldStateQuery {
-  /** Override "now" (tests, replays). Defaults to the store clock. */
+  /**
+   * Override "now" (tests, replays). Defaults to the store clock.
+   *
+   * **Give it an ISO-8601 string with milliseconds and an explicit offset** — the same shape the
+   * row's `updatedAt` / `staleAfter` use. Do **not** pass a `Date`: `stale` is computed as
+   * `Date.parse(now) >= Date.parse(staleAfter)`, and a `Date` reaches `Date.parse` through
+   * `Date#toString`, which **drops the milliseconds**. Measured on this machine (t102) that shifted
+   * a boundary by 410 ms; the loss is anywhere in 0–999 ms depending on the moment, e.g.
+   * `node -e "const d=new Date(); console.log(Date.parse(d.toString())-d.getTime())"` prints a
+   * negative number (−576 when this comment was written). A store-level boundary test must inject a
+   * **string**: take the row's own `staleAfter` (same string → `stale === true`, the boundary case)
+   * and/or 1 ms before it, never a `Date` or a `toISOString()`-less form.
+   */
   readonly now?: string;
 }
 
@@ -717,6 +729,8 @@ export class XixiStore {
     const row = this.#db.prepare('SELECT * FROM world_state WHERE key = ?').get(key) as unknown;
     if (row === undefined) return null;
     const stored = toWorldStateEntry(row as WorldStateRow);
+    // `query.now` must be a string: a `Date` here loses its milliseconds on the way into
+    // `Date.parse` (see `WorldStateQuery.now`), which silently moves this boundary.
     const now = query.now ?? this.#now();
     const staleAfter = addSecondsToIso(stored.updatedAt, stored.ttlSeconds);
     return {
@@ -733,6 +747,7 @@ export class XixiStore {
     const rows = this.#db.prepare('SELECT * FROM world_state ORDER BY key').all() as unknown as WorldStateRow[];
     return rows.map((row) => {
       const entry = toWorldStateEntry(row);
+      // Same rule as `worldState()` above: the override is a string, not a `Date`.
       const now = query.now ?? this.#now();
       const staleAfter = addSecondsToIso(entry.updatedAt, entry.ttlSeconds);
       return {
