@@ -1,7 +1,7 @@
 # 对话层：FSM、提示词组装与沉默
 
 > 最后更新：2026-09-30
-> 权威来源：`packages/conversation/src/{fsm,prompt,engine,personality}.ts`、`packages/brain-adapter/src/{types,tools,mimo}.ts`、`packages/contracts/schemas/events/conversation.decision.v1.json`、`packages/domain/src/store.ts`
+> 权威来源：`packages/conversation/src/{fsm,prompt,engine,personality,segments,proactive}.ts`、`packages/brain-adapter/src/{types,tools,mimo}.ts`、`packages/contracts/schemas/events/conversation.decision.v1.json`、`packages/domain/src/store.ts`
 > 若与代码不一致，以代码为准，并请立即修正本文件
 
 对话层负责**确定性的一半**（铁律 1）：该不该接这句话、模型能看到什么、说了要不要落库。
@@ -237,7 +237,9 @@ HARD_POLICY（不可变硬策略，常量）
    只要 `isSilenceReply(text)` 为真（去掉空白与标点后为空、或恰好等于 `[静默]`），就把
    `action` 强制改成 `SILENCE`、`text` 落为 `null`、`toolName` 也落为 `null`。
    **这条规则属于引擎，不属于适配器**——适配器可以忘记它，控制符也不会漏进 TTS 或转写文本。
-3. **TTS 层**：`RespondHooks.onTextChunk` 只在确认不是沉默控制符时才被调用。
+3. **TTS 层**：`RespondHooks.onTextChunk` 只在确认不是沉默控制符时才被调用。多段播放的
+   `RespondHooks.onSegment`（§7）一旦被传入，引擎就**不再发 `onTextChunk`**——两个音频出口互斥，
+   否则同一次回复会被播两遍；压住 `[静默]` 前缀的判定与分层照旧（只是不再把内容放手给 `onTextChunk`）。
 
 **为什么必须在引擎层**：`MimoBrainAdapter.#interpret()` 会因为「有工具调用」而把 action 判成 `TOOL`，
 `DshBrainAdapter` 则依赖 transport 判定的 `action`。两套适配器都可能把 `[静默]` 当成正常文本，
