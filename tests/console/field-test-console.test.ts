@@ -259,6 +259,15 @@ test('the page is Chinese, self-describing and carries the boot state', () => {
   assert.ok(page.includes('data/field-test'), 'and names its own database path');
   assert.ok(page.includes('px-quiet-start'), 'and carries the proactive knobs');
   assert.ok(page.includes('延迟分段'), 'the per-stage latency line is part of the UI');
+  // User-reported (2026-09-30): pressing the mic button moved it, because the hint text shared the
+  // button's flex row and the button's own label changed on press. Pin the stable-layout rules.
+  assert.ok(page.includes('footer #hint { flex-basis:100%'), 'the hint takes its own line so the controls row never reflows');
+  assert.ok(page.includes('footer #mic { min-width:108px'), 'and the mic button keeps its width while its label changes');
+  // …and the recording stays playable in the page, with its level, so 「未识别到」 is diagnosable
+  // (was: the user saw 「未识别到」 and had no way to hear what had actually been captured).
+  assert.ok(page.includes('▶ 播放我这次录音'), 'the page offers playback of the recording it just made');
+  assert.ok(page.includes('peakDbfsOf') && page.includes('levelAdvice'), 'and reports the recorded peak level with advice');
+  assert.ok(page.includes('录音音量正常') && page.includes('几乎没录到声音'), 'the advice covers both ends');
   assert.doesNotMatch(page, /\$\{/, 'no un-interpolated template placeholders leak into the served HTML');
 });
 

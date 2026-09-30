@@ -5758,8 +5758,12 @@ export function buildFieldPage(boot: FieldBootstrap): string {
   .tag.fail { background:#2a1414; color:#ff9d9d; }
   .tag.skipped { background:#20242c; color:#9aa3b2; }
   footer { border-top:1px solid #262a33; padding:12px 16px; position:sticky; bottom:0; background:#0f1115; }
-  footer form { max-width:900px; margin:0 auto; display:flex; gap:8px; flex-wrap:wrap; }
+  footer form { max-width:900px; margin:0 auto; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   footer input[type=text] { flex:1; min-width:200px; }
+  /* The controls row must not reflow: the mic button's own label changes (按住说 → 松开发送) and the
+     hint text changes on every step, so pin the button width and push the hint onto its own line. */
+  footer #mic { min-width:108px; }
+  footer #hint { flex-basis:100%; margin-top:2px; }
   .steps { margin:0; padding-left:18px; line-height:1.8; }
   .err { border:1px solid #5c2222; background:#2a1414; color:#ffd7d7; padding:10px; border-radius:10px; margin-top:8px; white-space:pre-wrap; }
   details { margin-top:6px; }
@@ -5925,6 +5929,7 @@ var BOOT = ${bootJson};
 var state = null;
 var micCtx = null, micAnalyser = null, micStream = null, micLevels = [], micTimer = null;
 var recorder = null;
+var recordingUrls = [];
 
 ${proactivePanelScript('/api/field')}
 
@@ -5973,6 +5978,22 @@ function renderTurn(turn) {
     var said = document.createElement('div');
     said.textContent = '听到：' + turn.transcript;
     item.appendChild(said);
+  }
+  if (turn.audioUrl) {
+    // Play back what this page actually recorded (browser memory only, never uploaded beyond the
+    // same /api/voice call) — the direct answer to "为什么显示未识别到".
+    var listen = document.createElement('div');
+    listen.style.marginTop = '4px';
+    var play = document.createElement('button');
+    play.type = 'button';
+    play.textContent = '▶ 播放我这次录音（' + turn.audioSeconds.toFixed(1) + 's，峰值 ' + fmtDbfs(turn.audioPeakDbfs) + ' dBFS）';
+    play.onclick = function () { new Audio(turn.audioUrl).play().catch(function () {}); };
+    listen.appendChild(play);
+    var advice = document.createElement('span');
+    advice.className = 'muted';
+    advice.textContent = ' ' + levelAdvice(turn.audioPeakDbfs);
+    listen.appendChild(advice);
+    item.appendChild(listen);
   }
   if (turn.reply) {
     var reply = document.createElement('div');
@@ -6162,6 +6183,26 @@ async function startRecording() {
   el('hint').textContent = '正在录音…（松开按钮结束）';
 }
 
+/** Peak level of the just-recorded audio, in dBFS (0 = full scale). -Infinity when silent. */
+function peakDbfsOf(samples) {
+  var peak = 0;
+  for (var i = 0; i < samples.length; i += 1) {
+    var value = samples[i] < 0 ? -samples[i] : samples[i];
+    if (value > peak) peak = value;
+  }
+  return peak > 0 ? 20 * Math.log10(peak) : -Infinity;
+}
+
+function fmtDbfs(dbfs) { return isFinite(dbfs) ? dbfs.toFixed(1) : '-∞'; }
+
+/** Turn a recorded peak level into one sentence the user can act on. */
+function levelAdvice(dbfs) {
+  if (!isFinite(dbfs) || dbfs < -50) return '这一轮几乎没录到声音（峰值接近静音）：检查麦克风是否被静音、是否离得太远。';
+  if (dbfs < -35) return '录音峰值偏低（' + fmtDbfs(dbfs) + ' dBFS）：靠近麦克风一点，或把系统输入增益调高。';
+  if (dbfs < -20) return '录音峰值略低（' + fmtDbfs(dbfs) + ' dBFS）：噪声大时容易被判成没有语音，靠近一点会更稳。';
+  return '录音音量正常（峰值 ' + fmtDbfs(dbfs) + ' dBFS）；若仍识别不到，多半是噪声或吐字问题。';
+}
+
 function encodeWav(samples, sampleRate) {
   var buffer = new ArrayBuffer(44 + samples.length * 2);
   var view = new DataView(buffer);
@@ -6200,24 +6241,35 @@ async function stopRecording() {
   var merged = new Float32Array(total);
   var offset = 0;
   for (var j = 0; j < current.chunks.length; j += 1) { merged.set(current.chunks[j], offset); offset += current.chunks[j].length; }
-  el('hint').textContent = '录音 ' + seconds.toFixed(1) + 's，正在识别…';
+  // Keep the recording in this page so the user can hear what the machine actually got — the most
+  // direct answer to "为什么显示未识别到". It never leaves the browser: the same bytes are what the
+  // upload already sends, and nothing is written to disk.
+  var wav = encodeWav(merged, current.sampleRate);
+  var audioUrl = URL.createObjectURL(new Blob([wav], { type: 'audio/wav' }));
+  recordingUrls.push(audioUrl);
+  while (recordingUrls.length > 5) URL.revokeObjectURL(recordingUrls.shift());
+  var peak = peakDbfsOf(merged);
+  el('hint').textContent = '录音 ' + seconds.toFixed(1) + 's（峰值 ' + fmtDbfs(peak) + ' dBFS），正在识别…';
   clearError('page-error');
   try {
-    var response = await post('/api/voice', { audioBase64: toBase64(encodeWav(merged, current.sampleRate)), speak: BOOT.ttsEnabled });
+    var response = await post('/api/voice', { audioBase64: toBase64(wav), speak: BOOT.ttsEnabled });
     var data = await response.json();
     if (data.ok === false) {
       showError('page-error', data.error.message, data.error.hint);
-      el('hint').textContent = '这一轮没有成功：' + data.error.message;
+      el('hint').textContent = '这一轮没有成功：' + data.error.message + '（' + levelAdvice(peak) + '）';
       return;
     }
     renderTurn({
       kind: 'voice', at: data.at, action: data.action, actionText: data.actionText, reason: data.reason, reasonText: data.reasonText,
       transcript: data.transcript, reply: data.reply, state: data.state, stages: data.stages,
       segmentsTotal: data.segmentsTotal, segmentsUsed: data.segmentsUsed, droppedSegments: data.droppedSegments,
-      privacyNote: data.privacy.note
+      privacyNote: data.privacy.note,
+      audioUrl: audioUrl, audioSeconds: seconds, audioPeakDbfs: peak
     });
     if (data.audio) { new Audio('data:audio/wav;base64,' + data.audio).play().catch(function () {}); }
-    el('hint').textContent = '说完松开即发送。';
+    el('hint').textContent = data.reason === 'NO_SPEECH_DETECTED'
+      ? '没识别到语音：' + levelAdvice(peak) + ' 点右栏那条的「▶ 播放我这次录音」听一下录到了什么。'
+      : '说完松开即发送。';
     await refreshState();
   } catch (error) {
     showError('page-error', '上传失败：' + error.message, '确认启动现场测试的终端还在运行');
