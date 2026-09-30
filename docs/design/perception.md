@@ -274,6 +274,59 @@ E:\worker2\.venvs\cv4\Scripts\python.exe -c "import sqlite3,json;c=sqlite3.conne
 `node scripts/verify-camera-presence.ts --seconds 15`（`data/` 是 gitignore 的本机目录）。
 合成帧以后一律进 `data/perception/self-test.sqlite`，不会再混进这个库。
 
+### 8.4 打不开摄像头时：数秒内退出 + 一句中文原因（t89 实测）
+
+**复现命令（唯一可靠的那条）**：
+
+```powershell
+node scripts/verify-camera-presence.ts --camera-index -1 --seconds 3
+```
+
+期望结果：**约 3.5 秒内退出，退出码 `2`**，stderr 是一段中文（不是 OpenCV 的英文警告）。
+本机七次实测：`exit=2`，耗时 3.51 / 3.70 / 3.71 / 3.73 / 3.79 / 3.83 / 3.92 秒；
+另有一次 4.53 秒（当时本机摄像头被其它进程争用，读帧变慢）——所以判据写成「约 3.5 秒、
+5 秒内一定返回」而不是一个死数。不带包装直接跑模块
+（`python -m perception_edge.run --camera-index -1 --seconds 3`）实测 3.55 / 3.59 秒。
+
+> **为什么是 `-1`，而不是 `--camera-index 99`**：本机 DSHOW 对越界索引**不稳定**——
+> 实测把 `--camera-index 99`（以及 `9`）指向不存在的设备时，子进程有时会**静默打开设备 0**，
+> 于是照常抓帧、照常写事件、甚至给出一次 `verdict: PASS`。用一个「看起来一定失败」的越界索引
+> 去验证失败路径，可能得到**假成功**。`-1` 在本机每次都真的打不开（**十次**复现全部 `exit=2`），
+> 所以失败路径的复现固定用 `-1`；`99` / `9` 只适合观察「越界索引会发生什么」，不适合验证失败退出。
+
+**两个超时预算（谁等了多久）**：
+
+| 层 | 预算 | 怎么改 |
+|---|---|---|
+| 子进程（`perception_edge.run`）等设备 | 默认 **3.0 秒**（`CAMERA_OPEN_TIMEOUT_SECONDS`） | 任何调用方可用 `--camera-open-timeout <秒>` 调小 |
+| 验收脚本给子进程的设备预算 | **2.5 秒**（`CHILD_CAMERA_OPEN_TIMEOUT_S`，脚本通过 `--camera-open-timeout` 传给子进程） | 改脚本常量。脚本自己还要 1–1.5 秒探测解释器与开库，所以子进程预算必须小于「端到端目标」 |
+| 验收脚本的看门狗（子进程整体超时） | `max(1, --seconds) × 1000 + 15000` 毫秒（`--live` 时 `+ 20000`） | 只在子进程真卡住（例如驱动不返回）时触发：结束子进程，按中文超时说明以 `exit 2` 退出，不会无限等 |
+
+**用户/调用方实际看到的那段中文**（stderr 原文；第二行由 `run.py` 打印，验收脚本再包一层）：
+
+```text
+摄像头在场检测 FAILED：没有可用的摄像头。
+摄像头不可用（已等待 2.5 秒后放弃，不会一直重试）：打不开摄像头 index=-1 backend=CAP_DSHOW：设备不存在、被别的程序占用，或 Windows 隐私设置里禁止了摄像头（设置 → 隐私和安全性 → 相机）。
+提示：先关掉占用摄像头的程序（相机 App / 会议软件 / 其它预览窗口），再重试；本机通常只有 1 个摄像头（索引 0），用别的索引一定打不开——要专门验证「打不开时会不会快速失败」，可以用 --camera-index -1。
+可能原因：设备不存在 / 被别的程序占用（相机 App、会议软件、另一个预览窗口）/ Windows 隐私设置禁止了相机。
+先关掉占用摄像头的程序，或换 --camera-index（环境变量 XIXI_PERCEPTION_PYTHON 可指定解释器）。
+```
+
+第二行里的秒数是**子进程自己的等待预算**（实测：2.5 s 预算打印「已等待 2.5 秒」、3.0 s 预算打印
+「已等待 3.1 秒」），不是手写的固定值。
+
+**为什么只看到中文**：OpenCV 打不开时会先往 stderr 打印一行英文
+（`[ WARN:0@0.121] global cap.cpp:477 cv::VideoCapture::open VIDEOIO(DSHOW): …`）。现在有两层处理：
+`run.py` 在 `main()` 开头把 OpenCV 自己的日志级别设为静默；验收脚本再把子进程 stderr 里的原生
+警告行（匹配 `[ WARN:` / `global *.cpp:` / `VIDEOIO(`）滤掉。实测三次运行的 stderr 里原生英文
+警告数为 **0**。另外子进程的 stdout/stderr 被强制成 UTF-8（否则中文会按 Windows ANSI 代码页
+编码进管道、调用方按 UTF-8 解码得到乱码），子进程环境里还额外设了 `PYTHONUTF8=1` /
+`PYTHONIOENCODING=utf-8`。
+
+**失败不留下读数**：启动事件（`reason=camera_started`）写在**摄像头打开成功之后**，所以打不开时
+事件日志里一条都不写（实测 `presence.changed` 数量为 0），只有中文说明 + `exit 2`。此前版本会先写
+一条 `present=false` 的启动记录——那是一次「我们从没取到的读数」。
+
 ### 8.3 还没做的那一步（未完成项，明确标注）
 
 **「真人站在镜头前能否被检出」尚未验证。** 当前摄像头朝天，画面里没有人；
@@ -328,3 +381,4 @@ E:\worker2\.venvs\cv4\Scripts\python.exe -c "import sqlite3,json;c=sqlite3.conne
 | `packages/domain/src/migrations/002_world_state.sql` 的列/TTL | §6（并同步 [`domain-model.md`](domain-model.md) §5） |
 | `presence.changed` 的 payload 形状 | **必须**新增 `v2` schema、升 `SCHEMA_VERSION`、更新漂移测试，并同步 §5 与 [`../event-contracts.md`](../event-contracts.md) |
 | `perception_edge/semantic.py` 从 stub 变成实现 | §2、§7（必须写清触发条件、单帧大小、审计记录） |
+| 摄像头打不开时的等待预算 / 中文文案 / 看门狗（`run.py` 的 `CAMERA_OPEN_TIMEOUT_SECONDS`、`--camera-open-timeout`；脚本的 `CHILD_CAMERA_OPEN_TIMEOUT_S` 与看门狗） | §8.4（时长、文案原文与「为什么不能用 99/9 复现」都在那一节；改预算就要改这一节的数字） |
