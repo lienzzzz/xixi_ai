@@ -2777,6 +2777,30 @@ function printStartup(handle: FieldServerHandle, info: { offline: boolean; ttsEn
   console.log(`${line}\n`);
 }
 
+/** `--help` output. Kept beside the CLI so the flags and the text cannot drift apart. */
+const FIELD_TEST_USAGE = `西西 · 现场测试控制台 —— 用法
+
+  npm run field-test                      打开控制台（默认 http://127.0.0.1:8792，只监听本机）
+  npm run field-test -- --port 8793       换端口（等价：XIXI_FIELD_PORT=8793）
+  npm run field-test -- --offline         没有 MIMO_API_KEY 也能用页面：ASR/对话模型换成替身，不花钱
+  npm run field-test -- --no-tts          关闭回复朗读
+  npm run field-test -- --dsh             走 DSH Harness 路径（慢，实时对话不建议）
+  npm run field-test -- --no-open         不自动打开浏览器（非交互终端本来就不会打开）
+
+  node scripts/field-test.ts --self-test      离线自检：隐私/多段语音/页面/报告，24 项，不碰麦克风、不联网
+                                              exit 0 = 全过；有任何一项失败会 exit 1
+  node scripts/field-test.ts --acceptance     真机设备验收（麦克风 → 扬声器 → 摄像头），逐项打印通过/失败与下一步，
+                                              报告写入 docs/recon/field-test-report-<日期>.md；有失败项时 exit 1
+  node scripts/field-test.ts --help           显示这份说明后退出（不启动服务、不占端口）
+
+页面里能看到：麦克风实时电平与噪声底（含校准门限）、摄像头在场状态（未接入时显示「未接入」而不是报错）、
+每轮的延迟分段（VAD / ASR / 首字 / 总时长）与最终动作（含 SILENCE 与拒绝原因）、以及设备验收引导。
+
+环境变量：XIXI_FIELD_PORT 默认端口；XIXI_PYTHON 语音 VAD 用的 Python；
+          XIXI_PROBE_PYTHON / XIXI_AUDIO_PYTHON 设备探测与声学回环用的 Python（默认 .venvs/field-probe 与 .venvs/voice-livekit）。
+隐私：整段录音不落盘（只在系统临时目录存在到 VAD 结束，随后删除），语音段仅在 config 授权时保留；
+      详见页面「隐私与保留策略」一节与 config/xixi.yaml 的 privacy / memory 字段。`;
+
 async function main(argv: string[]): Promise<number> {
   const valueOf = (flag: string, fallback: string): string => {
     const index = argv.indexOf(flag);

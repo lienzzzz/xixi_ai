@@ -18,9 +18,17 @@
  *   4. a tier where every measured clip failed (that is the documented boundary, and the
  *      run must fail rather than report a passing average).
  *
+ * Offline modes (`--fake` / `--dry-run` / `XIXI_FAKE_ASR=1`) are **not** a noise-robustness
+ * verdict, and must not look like a broken feature: ASR is a deterministic stub, so rules 1,
+ * 2 and 4 cannot apply (the stub's transcript can never match the fixture text). Those
+ * records are reported as observations only. What still has to hold offline is the plumbing —
+ * at least one clip measured, and rule 3 (endpoint delay is a VAD property, measured without
+ * any ASR). If the plumbing holds, the run exits 0 with an explicit 「离线 / 仅验证管线」 line;
+ * if it does not, it exits 1. The real-ASR verdict is unchanged.
+ *
  * Usage:
  *   node scripts/verify-voice-noise.ts                      # clean + every noisy tier, real ASR
- *   node scripts/verify-voice-noise.ts --fake               # offline: everything except the real ASR call
+ *   node scripts/verify-voice-noise.ts --fake               # offline: plumbing only, exits 0
  *   node scripts/verify-voice-noise.ts --tiers 18,6         # only those SNR tiers
  *   node scripts/verify-voice-noise.ts --nr                 # A/B: with the noise-reduction stage on
  *   node scripts/verify-voice-noise.ts --dry-run            # VAD + scoring plumbing, no API calls
@@ -394,6 +402,20 @@ const boundary = passingTiers.length > 0
   ? Math.min(...passingTiers.map((summary) => Number.parseFloat(summary.tier)))
   : null;
 
+/**
+ * Offline runs cannot judge quality (the ASR is a stub), so the failure codes are split:
+ * similarity / detection are observations, everything else (endpoint delay, and any future
+ * structural check) still has to hold. This is what keeps `--fake` from reporting a false
+ * "broken" while also keeping it from being a rubber stamp.
+ */
+const offline = fake || dryRun;
+const QUALITY_ONLY_OFFLINE = /^(SIMILARITY<|NO_SPEECH_DETECTED)/;
+const qualityOnlyFailures = offline ? failing.filter((row) => row.failures.every((code) => QUALITY_ONLY_OFFLINE.test(code))) : [];
+const structuralFailures = offline ? failing.filter((row) => row.failures.some((code) => !QUALITY_ONLY_OFFLINE.test(code))) : failing;
+const detectedClips = results.filter((row) => row.detected).length;
+const pipelineOk = results.length > 0 && structuralFailures.length === 0;
+const exitCode = offline ? (pipelineOk ? 0 : 1) : failing.length > 0 ? 1 : 0;
+
 const report = {
   seed: {
     fakeAsr: fake,
@@ -407,10 +429,67 @@ const report = {
     noiseSource: manifest.noiseSource,
     python: PYTHON,
   },
+  /** Which criteria a reader may apply to this run. Offline runs apply far fewer. */
+  mode: offline ? 'offline-plumbing' : 'real-asr',
+  /**
+   * The run verdict, and it always agrees with the exit code: PASS/FAIL for real ASR,
+   * PIPELINE-OK/PIPELINE-BROKEN offline. Nobody can read a bare "FAIL" out of an offline
+   * run and conclude the feature is broken.
+   */
+  verdict: offline ? (pipelineOk ? 'PIPELINE-OK' : 'PIPELINE-BROKEN') : failing.length === 0 ? 'PASS' : 'FAIL',
+  /**
+   * The noise-robustness verdict — the one the real-ASR run judges. Offline it is still
+   * computed and reported, but `applies` is false and the run verdict above is what the
+   * exit code follows.
+   */
+  quality: {
+    verdict: failing.length === 0 ? 'PASS' : 'FAIL',
+    applies: !offline,
+    failingClips: failing.length,
+    measuredClips: results.length,
+    threshold: minSimilarity,
+    why: offline
+      ? '相似度判据在离线模式下不适用：ASR 是确定性桩，转写文本与期望文本必然不同，所以这里不会是 PASS，但它不代表功能坏了'
+      : '真实 MiMo ASR 的转写与夹具原文做字符级相似度比较（≥ 阈值即通过）',
+  },
+  criteria: {
+    transcriptSimilarity: offline
+      ? {
+          applies: false,
+          threshold: minSimilarity,
+          why: '相似度判据在离线模式下不适用：ASR 被替换为确定性桩，转写文本与期望文本必然不同，所以 SIMILARITY / NO_SPEECH_DETECTED 只作为观察记录，不代表功能坏了',
+        }
+      : { applies: true, threshold: minSimilarity, why: '真实 MiMo ASR 的转写与夹具原文做字符级相似度比较' },
+    speechDetection: offline
+      ? { applies: false, why: '离线模式只记录检出/未检出，不据此判定；真实检出率请跑真实 ASR 模式' }
+      : { applies: true, why: '真实 ASR 模式下列 1（没有语音段）算失败' },
+    endpointDelay: { applies: true, maxMs: maxEndpointDelayMs, why: '端点延迟是 VAD 的属性，不依赖 ASR，所以离线模式同样必须成立' },
+    tierBoundary: offline
+      ? { applies: false, why: 'SNR 边界由相似度决定，离线模式下没有意义' }
+      : { applies: true, why: '某一档全部失败即判定该档不过，成功边界取最高的通过档' },
+  },
+  offlineSummary: offline
+    ? {
+        verdict: pipelineOk ? 'PIPELINE-OK' : 'PIPELINE-BROKEN',
+        notAQualityVerdict: true,
+        qualityCriterionApplies: false,
+        measuredClips: results.length,
+        detectedClips,
+        notDetectedClips: results.length - detectedClips,
+        qualityOnlyFailureClips: qualityOnlyFailures.length,
+        structuralFailureClips: structuralFailures.length,
+        qualityOnlyFailures: qualityOnlyFailures.map((row) => ({ id: row.id, tier: row.tier, failures: row.failures })),
+        structuralFailures: structuralFailures.map((row) => ({ id: row.id, tier: row.tier, failures: row.failures })),
+        nextStep: '要判定噪声鲁棒性（相似度边界），请跑真实 ASR：npm run voice:noise（会花钱）',
+        verdictRule: '离线判定 = 至少测到 1 条夹具 且 没有结构性问题（端点延迟超限等）；相似度/检出率只记录，不判定',
+      }
+    : null,
   boundary: {
-    claim: boundary === null
-      ? 'no SNR tier passed with the current thresholds; see failures'
-      : `SNR_inband ≥ ${boundary} dB 时，干净/噪声夹具的平均字符相似度 ≥ ${minSimilarity}，且没有片段漏检或超长端点`,
+    claim: `${offline ? '（离线模式：以下边界只用桩 ASR 计算，不代表真实噪声鲁棒性）' : ''}${
+      boundary === null
+        ? 'no SNR tier passed with the current thresholds; see failures'
+        : `SNR_inband ≥ ${boundary} dB 时，干净/噪声夹具的平均字符相似度 ≥ ${minSimilarity}，且没有片段漏检或超长端点`
+    }`,
     lowestPassingTierDb: boundary,
     passingTiers: passingTiers.map((summary) => summary.tier),
     failingTiers: summaries.filter((summary) => summary.tier !== 'clean' && summary.verdict === 'FAIL').map((summary) => summary.tier),
@@ -425,14 +504,32 @@ const report = {
     similarity: row.similarity,
     failures: row.failures,
   })),
-  verdict: failing.length === 0 ? 'PASS' : 'FAIL',
-  note: fake || dryRun
-    ? '离线模式：ASR 被替换为确定性桩，只有 VAD/切片/评分/报告链路被验证（真实转写需去掉 --fake/--dry-run）'
+  exitCode,
+  note: offline
+    ? '离线模式（--fake/--dry-run）：ASR 被替换为确定性桩。**这不是噪声鲁棒性判定**——相似度判据在离线模式下不适用（见 criteria.transcriptSimilarity），离线的 SIMILARITY/NO_SPEECH_DETECTED 只作观察；只要管线跑通（≥1 条夹具 + 无端点延迟类结构性问题）就以 exit 0 结束。真实转写与真实边界需要去掉 --fake/--dry-run。'
     : '真实 MiMo ASR（mimo-v2.5-asr）；只有 VAD 检测到的语音段被上传（§20.1）',
 };
 
 writeFileSync(outPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
 printEvidence('噪声鲁棒性验证（干净 + 噪声夹具 → 前端 → VAD → ASR）', report);
+
+if (offline) {
+  if (!pipelineOk) {
+    console.error(`\n离线模式（--fake/--dry-run）判定：管线未跑通 → exit 1`);
+    console.error(`  测量 ${results.length} 条夹具，其中结构性问题 ${structuralFailures.length} 条（相似度类不算）：`);
+    for (const row of structuralFailures.slice(0, 10)) console.error(`   - ${row.id} [${row.tier}] ${row.failures.join(', ')}`);
+    if (results.length === 0) console.error('   - 一条夹具都没测到：检查 --tiers / manifest。measuredByDefault');
+    console.error(`  结构性问题不受离线模式豁免（端点延迟是 VAD 属性，不依赖 ASR），必须修。`);
+    process.exit(1);
+  }
+  console.log(`\n离线模式（--fake/--dry-run）结论：管线已跑通 → exit 0`);
+  console.log(`  这不是「噪声鲁棒性判定」：相似度判据在离线模式下不适用（ASR 是确定性桩，转写与期望文本必然不同）。`);
+  console.log(`  本次测量 ${results.length} 条夹具：检出语音 ${detectedClips} 条、未检出 ${results.length - detectedClips} 条（只记录，不判定）；`);
+  console.log(`  质量类记录 ${qualityOnlyFailures.length} 条（同样不算失败，逐条见报告 offlineSummary.qualityOnlyFailures）；`);
+  console.log(`  结构性问题（端点延迟 > ${maxEndpointDelayMs}ms 等）0 条。`);
+  console.log(`  ${report.offlineSummary?.nextStep ?? ''}`);
+  process.exit(0);
+}
 
 if (failing.length > 0) {
   console.error(`\n噪声鲁棒性验证 FAILED：${failing.length} 条夹具未通过（详见 failureList）`);

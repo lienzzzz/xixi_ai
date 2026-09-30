@@ -114,8 +114,37 @@ export class ConversationEngine {
     return this.#adapter;
   }
 
-  get state(): ConversationState {
+  /**
+   * The conversation state **as of now**, not as of the last transition.
+   *
+   * Why reads advance the clock: the FSM only expires timed states when someone
+   * calls `tick`, and no production caller ever did — `chat.ts`, `serve-chat.ts`
+   * and `scripts/field-test.ts` read `engine.state` to decide whether the next
+   * utterance is a wake-up. After a pause longer than the follow-up window the
+   * getter returned the remembered `LINGERING`, the callers computed
+   * `addressed = false`, and the user's first sentence after the pause was
+   * `REJECTED_NOT_ADDRESSED` while their second was accepted (t19 / t6 F1).
+   *
+   * Trade-offs, stated explicitly:
+   *   * this is a getter with a side effect — it advances injected time. That is
+   *     inherent: the value it reports is time-dependent, and the alternative
+   *     (every caller remembering to `tick`) is exactly what failed.
+   *   * it also re-reads the personality window, because the window decides when
+   *     the state expires: an admin override that raises `silence_tolerance`
+   *     must not be able to produce an early expiry on a read. Cost is one small
+   *     indexed SELECT; `serve-chat`'s `/api/state` already reads the profile.
+   *   * therefore a caller must not read state after closing the store.
+   *   * `respond()` does not use this: it ticks at the turn's own `at` (replay
+   *     must follow the supplied timestamp, not the wall clock).
+   */
+  #advance(now: Date = this.#clock()): ConversationState {
+    this.#syncSilenceTolerance();
+    this.#fsm.tick(now.getTime());
     return this.#fsm.state;
+  }
+
+  get state(): ConversationState {
+    return this.#advance();
   }
 
   /** How long the follow-up window currently is, personality included (§12.2). */
@@ -124,6 +153,9 @@ export class ConversationEngine {
   }
 
   snapshot(): ReturnType<ConversationStateMachine['snapshot']> {
+    // Same reason as `state`: the snapshot a caller reads must describe now, so
+    // `snapshot().state` and `state` can never disagree about the same instant.
+    this.#advance();
     return this.#fsm.snapshot();
   }
 
@@ -227,7 +259,9 @@ export class ConversationEngine {
       identityName: this.#config.identity.name,
       personality: this.#store.selfProfile(),
       world: worldStateLite(at, this.#config.identity.timezone, this.#offsetMinutes),
-      conversationState: this.#fsm.state,
+      // Advanced at the turn's own timestamp, not the wall clock: replay must
+      // follow the supplied `at`, which is also what `respond()` decides with.
+      conversationState: this.#advance(at),
       turnIndex: session.turnCount,
       history: this.workingMemory(input.sessionId),
       userText: input.text,
