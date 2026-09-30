@@ -1,148 +1,217 @@
-# 架构（M0 切片）
+# 架构（当前实现）
 
-> 本文只描述**仓库里真实存在**的东西。里程碑总览见 [`progress.md`](progress.md)，
-> 事件契约细节见 [`event-contracts.md`](event-contracts.md)，测试分层见 [`testing.md`](testing.md)，
-> 决策依据见 [`adr/`](adr/)。上游依据：《方案》[§24 仓库结构](../xixi_ai_companion_project_plan.md)、§25、§34。
+> 最后更新：2026-09-30
+> 权威来源：`packages/**`、`apps/brain-dsh/**`、`services/voice-edge/**`、`scripts/**`、`tests/**`；`docs/progress.md`（结论与数字）、`docs/recon/*`（外部系统实测）、`docs/adr/0001`~`0008`
+> 若与代码不一致，以代码为准，并请立即修正本文件
 
-## 1. M0 是什么
+**一句话**：西西能听（浏览器麦克风 → VAD → ASR）、能判断该不该说话（确定性 FSM）、能说得像家里人（§26 提示词 + 人格指令）、能不说（§55 沉默）、能在重启后还是同一个西西（事件日志 + 人格基线 + Harness 会话映射）。
 
-一句话：**「文字 → Harness → 模型 → 结构化工具调用 → 回答」跑通了，并且两个独立进程之间能恢复同一段会话与同一份人格。**
+本文描述的是**现状**。方案原文 [`../xixi_ai_companion_project_plan.md`](../xixi_ai_companion_project_plan.md) 里的 WorldState、Memory、FutureHook、ProactiveEngine、唤醒词、摄像头都**尚未实现**，见 §7。
 
-对应《方案》§34 的 M0 验收：
-
-```text
-输入文字 -> DSH -> MiMo -> structured tool -> answer
-restart  -> session recover
-```
-
-M0 刻意只做这一条纵向切片。它**不是**聊天机器人、不是语音助手、没有记忆、没有主动行为。
-它的价值在于把两条缝先钉死：领域层与 Harness 的缝（[ADR-0001](adr/0001-dsh-as-replaceable-harness.md)），
-以及事件契约与传输的缝（[ADR-0004](adr/0004-in-process-event-bus-for-poc.md)）。
-
-## 2. 一轮文本的完整路径
+## 1. 仓库里真实存在的部分
 
 ```text
-调用方（scripts/verify-m0.ts、未来的 voice-edge / debug-console）
-  │  ① store.recordTurn(user)                     → events + conversation_sessions（同一事务）
-  │  ② adapter.handleUserTurn({sessionId, text, context})
-  ▼
-DshBrainAdapter                          packages/brain-adapter/src/dsh.ts
-  │  ③ store.brainSessionId(sessionId, 'dsh')    → 要 resume 的 harness 会话 id 或 null
-  │  ④ transport.turn(DshTurnRequest)            （provider 名默认 'dsh'）
-  ▼
-CliDshTransport                          apps/brain-dsh/src/transport.ts
-  │  ⑤ composeTask(request)                      → 身份 / 有效人格 / 时区 / 最近对话 + 用户输入
-  │  ⑥ spawn(node, [dshBin.js, --profile xixi, --json, (--session-id <id>), <task>])
-  │       env: DSH_HOME = <repo>/.dsh  +  MIMO_API_KEY（来自 .env / 进程环境）
-  ▼
-DSH 0.1.7-rc.2（profile xixi：dsh-base + dsh-headless + dsh-xixi-tool）
-  │  ⑦ llm-pi-ai 路由 mimo → https://api.xiaomimimo.com/v1（api: openai-completions）
-  │  ⑧ 模型决定调用工具 xixi_get_current_time（plugins/xixi-tools/index.js）
-  │  ⑨ 工具结果回灌模型，生成最终回答
-  ▼
-stdout 上的 NDJSON（--json）
-  │  ⑩ parseDshJsonLines(stdout)                 → sessionId / toolCalls / finalText / eventTypes
-  ▼
-DshTurnResponse → DshBrainAdapter
-  │  ⑪ 校验 requestId 必须是本轮的；否则 BrainError('INVALID_RESPONSE')
-  │  ⑫ 若 harness 给出新会话 id → store.attachBrainSession(sessionId, 'dsh', id)
-  │  ⑬ 组装 BrainTurnResult { action, text, toolName, provider, model, brainSessionId, latencyMs }
-  ▼
-调用方
-  │  ⑭ store.recordTurn(assistant, result.action, result.text, result.toolName)
-  │  ⑮ store.recordHealth('brain-dsh', 'ok', …)
-  ▼
-回答
+packages/contracts/       事件信封 + 3 类 payload schema + fail-closed 校验器（唯一契约来源）
+packages/domain/          唯一写 SQLite 的包：events / 会话投影 / 人格基线 / 迁移执行器 / 配置 / 时钟
+packages/conversation/    FSM（§12/§13）+ PromptAssembler（§26）+ ConversationEngine（一轮的编排）
+packages/brain-adapter/   BrainAdapter 接口 + MimoBrainAdapter（实时）+ DshBrainAdapter + Fake/Scripted 替身 + 只读工具
+packages/model-adapters/  MimoClient（chat/chatStream/transcribe/synthesize/chatJson）+ WeatherClient（Open-Meteo）
+apps/brain-dsh/           CliDshTransport（每轮一个 dsh 进程）+ profile patch（MiMo 路由 + 最小插件集）
+plugins/xixi-tools/       DSH 侧工具插件（当前只有 xixi_get_current_time）
+services/voice-edge/      voice_edge/segment.py（Silero VAD 分段 CLI）+ loopback.py（设备回环）+ config.py
+scripts/                  serve-chat.ts（试用页）/ chat.ts / voice-turn.ts / voice-bargein.ts / eval-* / verify-*
+tests/                    unit / integration / scenarios（corpus.ts），replay 目录仍为空
 ```
 
-要点：
+只有 `packages/brain-adapter` 与 `apps/brain-dsh` 知道 DSH 存在（`packages/brain-adapter/src/index.ts`、`apps/brain-dsh/src/index.ts`）——铁律 9。
 
-- **每轮一个 `dsh` 子进程**（`CliDshTransport`，`kind = 'dsh-cli'`）。
-  代价是整轮 4–6s，收益是「重启恢复」成为默认行为而不是特例；
-  M1 因实时语音延迟会换成常驻宿主进程（`docs/progress.md` 第 6 节）。
-- **`action` 由传输层判定**：`final` 文本非空 → `SPEAK`；无文本但有工具调用 → `TOOL`；
-  两者都空 → `SILENCE`（§55 沉默是一等输出）。领域层的 `TurnAction` 也含 `BACKCHANNEL` / `WAIT`，
-  M0 的判定逻辑尚未产生这两个取值。
-- **`composeTask` 是 M0 的占位拼装**：身份 + 全部有效人格 + 时区 + `recentTurns(sessionId, 8)`。
-  §26 的正式分层拼装（Core Identity → SelfModel → Relationship → WorldState → …）属 M1。
-- **resume 的两个硬约束被固定为常量**：`cwd = REPO_ROOT`、`profile = 'xixi'`。
-  实测从别的 cwd 或别的 profile 组合 resume 会被 DSH 拒绝
-  （[`docs/recon/dsh-integration-2026-09-29.md`](recon/dsh-integration-2026-09-29.md) §3）。
+## 2. 两个大脑实现，同一个 `BrainAdapter` 接口
 
-## 3. 持久化的一侧
+接口定义在 [`types.ts`](../packages/brain-adapter/src/types.ts) 的 `BrainAdapter`：`provider`、`describe()`、
+`handleUserTurn()`，以及四个**已声明但抛 `NOT_IMPLEMENTED`** 的能力。
 
-`packages/domain` 是唯一写 SQLite 的包（`node:sqlite`，WAL）。
-`001_initial.sql` 只建 M0 真正需要的四张表，不预埋未使用的表：
+```mermaid
+flowchart TD
+  E["ConversationEngine.respond()"] -->|"UserTurnInput{prompt}"| I{{"BrainAdapter 接口<br/>provider + describe + handleUserTurn"}}
+  I --> A["MimoBrainAdapter<br/>provider = 'mimo-direct'"]
+  I --> B["DshBrainAdapter<br/>provider = 'dsh'"]
+  I --> F["FakeBrainAdapter<br/>provider = 'fake'"]
+  A --> A1["MimoClient.chatStream()<br/>https://api.xiaomimimo.com/v1"]
+  A1 --> A2["工具循环 ≤2 轮<br/>程序执行只读工具"]
+  B --> B1["DshTransport.turn()"]
+  B1 --> B2["CliDshTransport<br/>spawn(node, dsh/lib/bin.js --profile xixi --json)"]
+  B2 --> B3["profile xixi → llm-pi-ai 路由 mimo → 同一 MiMo 端点"]
+  B -.->|"store.brainSessionId / attachBrainSession"| S[("XixiStore<br/>conversation_sessions")]
+```
+
+两套实现的差别（其余代码看不到这个差别）：
+
+| | `DshBrainAdapter` | `MimoBrainAdapter` |
+|---|---|---|
+| 源码 | [`dsh.ts`](../packages/brain-adapter/src/dsh.ts) | [`mimo.ts`](../packages/brain-adapter/src/mimo.ts) |
+| `provider` | `'dsh'` | `'mimo-direct'` |
+| 调用方式 | 每轮 spawn 一个 `dsh` 进程，NDJSON 一次性返回 | 一次 HTTP 流式请求，逐 delta 产出 chunk |
+| 会话记忆 | 交给 DSH：`--session-id` + 落库的 `brain_session_id` | 自己组装 messages：`system` + history + `user`（`#messages()`） |
+| 流式 | 无（整段回复一次性 `splitIntoChunks` 回放） | 有（`chatStream`，首字 0.3~1.2s，`docs/adr/0008`） |
+| 工具 | DSH 插件注册表（`plugins/xixi-tools/index.js`） | 适配器内循环（`#executeTool`，≤2 轮，只读） |
+| 实测每轮 | **4~7 秒**（`docs/adr/0008-realtime-path-direct-mimo.md`） | 首字 0.3~1.2s；总时长 P50 2.5s / P95 5.1s（`docs/progress.md` §0） |
+| 提示词 | DSH 自带 agent 框架提示词 + profile patch 的 persona | 完全由 `PromptAssembler` 掌握 |
+| 用在 | `npm run verify:m0` / `verify:provider` / `--dsh` 开关 | `npm run chat`、`npm run web`、`voice:turn`（默认） |
+
+**为什么实时走直连**（[ADR-0008](adr/0008-realtime-path-direct-mimo.md)）：方案 §33 要求「用户语音结束到开始回应 P50 < 2.5s」，
+而每轮启动 harness profile 的 4~7 秒无法达标；直连后提示词输入 token 从 3515（DSH 的编码 Agent 提示词）降到 307——
+后者不只是省钱，而是**人设正确性**（陪伴角色不能被框架话术带跑）。DSH 没有被删除：它留在 M0 已验收的 Harness 路径，
+以及将来需要会话 / 工具 / 子代理机制的元智能体（Observer、MemoryExtractor、Reflection）。
+
+代价：直连路径必须自己负责会话历史、工具轮数上限、结构化输出健壮性（`MimoClient.chatJson` 的本地校验 + 回退，
+见 `docs/progress.md` §2.11）。
+
+## 3. 一次文本对话回合的完整数据流
+
+文本入口有两个：试用页 `POST /api/turn`（`scripts/serve-chat.ts`）与终端 `npm run chat`（`scripts/chat.ts`）。
+
+```mermaid
+sequenceDiagram
+  participant U as 浏览器 / 终端
+  participant E as ConversationEngine
+  participant P as PromptAssembler
+  participant M as BrainAdapter
+  participant S as XixiStore
+
+  U->>E: respond({sessionId, text, addressed})
+  E->>E: fsm.shouldAcceptTurn()  §13 判定
+  alt 未接受
+    E-->>U: accepted=false, reason, action=SILENCE（不写任何事件）
+  else 接受
+    E->>E: fsm.onUserTurn() → ACTIVE
+    E->>S: getSession() + recentTurns(limit 8)
+    E->>P: assemble(§26)
+    E->>S: recordTurn(user)  事件 + turn_count 投影（同一事务）
+    E->>M: handleUserTurn({sessionId, text, prompt})
+    M-->>E: 流式 text chunk…（TTS 可提前开始）
+    E->>E: 跨分片识别 [静默]，抑制控制符
+    E->>S: recordTurn(assistant)  事件 + 投影（同一事务）
+    E->>E: fsm.onReplyCompleted() → LINGERING
+    E-->>U: {action, text, provider, model, latencyMs, firstTokenMs, prompt}
+  end
+```
+
+要点（每条都对应代码）：
+
+- **判定先于模型**：`IDLE` 时未直呼直接拒绝，连事件都不写；这是「电视里的声音不进对话历史」的机制
+  （`tests/integration/conversation-engine.test.ts` 断言 `store.eventCount() === 0`）。
+- **`prompt` 是唯一喂给模型的上下文来源**：`ConversationEngine.buildPrompt()` 组装的
+  `{system, history, user}` 直接作为 `UserTurnInput.prompt` 传下去；`System`=稳定前缀，`user`=变化后缀。
+  适配器不接收 `context`（`BrainContext.worldState` 因此仍然闲置，属 M1+）。
+- **事件落库在适配器两侧各一次**：用户轮次在调用模型**之前**写（`recordTurn(user, SPEAK)`），
+  助手轮次在拿到结果后写（`action` 可能已被引擎改写为 `SILENCE`）。
+- **§55 沉默在引擎层兜底**：无论适配器报 `SPEAK` 还是 `SILENCE`，只要整句是 `[静默]` 就转成 `SILENCE`
+  并把 `text` / `toolName` 落为 `null`（`packages/conversation/src/engine.ts`）。
+- **事件里不存延迟与提示词**：`conversation.turn` payload 只有
+  `session_id / turn_index / role / action / text / tool_name`；`latencyMs`、`firstTokenMs`、`prompt`
+  只随本次返回值交给调用方（试用页把它们显示在气泡下方）。
+- **健康事件只在安静模式与进程收尾时写**：`ConversationEngine.quiet()` 与各脚本收尾调用 `recordHealth`；
+  普通轮次不写 `system.health`。
+- **Latency 分布**：`docs/progress.md` §0 记录 P50 2.5s / P95 5.1s（总时长），首字 P50 1.2s / P95 2.9s。
+
+## 4. 一次语音回合的完整数据流
+
+```mermaid
+flowchart LR
+  MIC["浏览器 getUserMedia<br/>echoCancellation + noiseSuppression"] --> WAV["AudioContext 采集 → 16-bit PCM WAV<br/>（serve-chat.ts 内联的 encodeWav/base64）"]
+  WAV --> API["POST /api/voice"]
+  API --> W1["写 data/voice-web/capture-*.wav"]
+  W1 --> VAD["python -m voice_edge.segment<br/>Silero VAD（ADR-0007 基线）"]
+  VAD -->|"segments[0]"| SL["sliceWav 只取语音段<br/>data/voice-web/speech-*.wav（§20.1 只上传语音段）"]
+  SL --> ASR["MimoClient.transcribe()<br/>mimo-v2.5-asr"]
+  ASR --> ENG["同一个 ConversationEngine.respond()"]
+  ENG --> TTS["MimoClient.synthesize()<br/>mimo-v2.5-tts"]
+  TTS --> PLAY["new Audio('data:audio/wav;base64,…').play()"]
+```
+
+- VAD 基线来自 [ADR-0007](adr/0007-voice-stack-pipecat.md) 的实测：`confidence=0.7`、`start_secs=0.2`、
+  **`stop_secs=0.6`**（默认 0.2 会在中文句子里的 352ms 逗号停顿处提前 1440ms 判定说完）、**`min_volume=0.0`**
+  （默认 0.6 会多花 320~480ms 才开始判语音）。参数在 [`config.py`](../services/voice-edge/voice_edge/config.py)。
+- 「没有语音」是一个**结果**而不是崩溃：`segment.py` 以退出码 2 表示 `segments: []`，
+  Node 侧把 `0` 与 `2` 都当成功，页面返回 `reason: 'NO_SPEECH_DETECTED'` 并提示音量/设备问题，
+  不会假装听懂（`scripts/serve-chat.ts` 的 `runVad` / `handleVoice`）。
+- **浏览器采集是必要的，不是偏好**：Python `sounddevice` 路径在本机拿不到语音
+  （录音 99.5% 能量在 100Hz 以下，见 [`recon/device-acceptance-2026-09-30.md`](recon/device-acceptance-2026-09-30.md)）。
+- **一次性进程而非常驻服务**：每次 VAD 都要付一次 Python 冷启动（`segment.py` 特意把 `loadMs` 与 `processMs`
+  分开输出，只有后者算实时延迟）。常驻语音服务属下一步。
+- 打断（§14.2）目前是**离线测量**：`scripts/voice-bargein.ts` 用夹具模拟「西西正在说话时用户开口」，
+  判定延迟 **192ms**，把播放截断点写成 WAV 作为可审计证据。**扬声器真正静音的延迟未验收**（§33 的 P50 < 500ms）。
+
+## 5. 持久化：SQLite 里的四张表
+
+唯一写库的包是 `packages/domain`（`node:sqlite`，`PRAGMA journal_mode=WAL`、`foreign_keys=ON`、`busy_timeout=5000`）。
+迁移文件是 [`001_initial.sql`](../packages/domain/src/migrations/001_initial.sql)，字段级说明见 [`design/domain-model.md`](design/domain-model.md)。
 
 | 表 | 角色 | 关键列 |
 |---|---|---|
-| `events` | **唯一事实来源**；对话轮次也是事件 | `sequence`（自增主键）、`event_id UNIQUE`、`event_type`、`schema_version`、`timestamp`、`source`、`room`、`actor`、`confidence`、`correlation_id`、`session_id`、`payload_json` |
-| `conversation_sessions` | **可重建的投影**（不是事实来源） | `session_id` PK、`turn_count`、`ended_at`、`brain_provider`、`brain_session_id`、`idx_sessions_brain` |
-| `self_profile` | 人格基线（21 个属性，来自§7.2） | `property` PK、`value`、`source`、`updated_at` |
-| `self_profile_history` | 人格变更历史（§7.5） | `change_id`、`before_value` / `after_value`、`source_type`、`confidence` |
+| `events` | **唯一事实来源**；对话轮次就是事件 | `sequence` 自增主键、`event_id UNIQUE`、`event_type`、`schema_version`、`timestamp`、`source`、`room`、`actor`、`confidence`、`correlation_id`、`session_id`、`payload_json`；索引 `idx_events_type_sequence` / `idx_events_session` / `idx_events_correlation` |
+| `conversation_sessions` | **可重建的投影**（不是事实来源） | `session_id` PK、`started_at`、`last_activity_at`、`ended_at`、`turn_count`、`brain_provider`、`brain_session_id`；索引 `idx_sessions_brain (brain_provider, brain_session_id)` |
+| `self_profile` | 有效人格基线（21 个属性，§7.2） | `property` PK、`schema_version`、`value`、`source`、`updated_at` |
+| `self_profile_history` | 人格变更历史（§7.5） | `change_id` PK、`before_value`、`after_value`、`source_type`、`source_event_id`、`summary`、`confidence`、`created_at` |
 
-关键不变量：
+**「对话轮次即事件、没有 `conversation_turns` 表」的取舍**（[ADR-0003](adr/0003-raw-events-vs-memory.md)）：
+建轮次表意味着同一事实两份真相——纠正、重放、迁移都要双份维护。因此：
 
-- **`recordTurn` 在同一个事务里追加事件并更新投影**，两者不可能不一致。
-- **`seedSelfProfile` 只补缺、不覆盖**（`ON CONFLICT(property) DO NOTHING`）：
-  重启是恢复不是重置（§33「重启后持久人格恢复 100%」）。学习/调整引擎属 M3。
-- **迁移执行器**：`NNN_name.sql`，逐条事务执行，记录 sha256；已应用迁移内容被改动就拒绝启动
-  （`MIGRATION_CHECKSUM_MISMATCH`，§47.3）。`schema_migrations` 表由执行器自己维护，不属于任何迁移文件。
-- **`schema_version` 列**存在于全部四张表（铁律 10）。
+- 一轮 = 一条 `conversation.turn` 事件；「最近 N 轮」用
+  `SELECT … WHERE event_type='conversation.turn' AND session_id=? ORDER BY sequence DESC LIMIT ?` 再 `reverse()` 得到；
+- `session_id` 列由 `appendEvent` 从 payload 的 `session_id` 提取（`sessionIdOf`）以便建索引，不重复存事实；
+- `recordTurn` 把「追加事件」与「更新投影（`turn_count`、`last_activity_at`）」放在**同一个事务**里
+  （`BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`），投影不可能与日志不一致；
+- 代价是「第 N 轮」变成查询成本，并且**没有外键**保证投影一致性：将来若有第二条写路径，必须同样进入该事务。
 
-恢复入口是 `XixiStore.resume(sessionId?)`：返回 `{ session, turns, personality }`
-（`latestSession` + `recentTurns(…, 8)` + `selfProfile()`）。
+另外两条不变量：
 
-## 4. 两个独立进程的重启证明
+- `seedSelfProfile` 只补缺（`ON CONFLICT(property) DO NOTHING`），重启是**恢复**而不是重置；
+  `overrideSelfProfile` 是管理员覆盖（写 history），**模型驱动的人格学习（M3）尚未实现**。
+- 已发布迁移被改写就拒绝启动：`migrate()` 记录每个文件的 sha256，内容变动抛 `MIGRATION_CHECKSUM_MISMATCH`（§47.3、铁律 10）。
 
-`scripts/verify-m0.ts` 用 `spawn(process.execPath, [脚本, --phase=…])` **先后启动两个子进程**，
-父进程只读它们打印的 `EVIDENCE ` 行：
+`XixiStore.resume()` 是恢复入口：`latestSession()` + `recentTurns(…, 8)` + `selfProfile()`。
 
-| 阶段 | 做什么 | 期望 |
+## 6. 进程、端口与调用关系
+
+| 进程 / 入口 | 触发方式 | 说明 |
 |---|---|---|
-| 进程 1 `--phase=fresh` | 记录用户轮次 → DSH → MiMo → 工具调用 → 记录助手轮次与 health 事件 → 退出 | `toolName === 'xixi_get_current_time'`、有 `brainSessionId`、人格非空、事件 3 条 |
-| 进程 2 `--phase=resume` | 全新进程打开同一个 SQLite，问「只回复你上一条消息的完整内容本身」 | 同一 `sess_…`、同一 harness 会话 id、人格逐项一致、`turnCount ≥ 4`、助手文本规范化后包含进程 1 的回答 |
+| 试用页 HTTP 服务 | `npm run web`（`scripts/serve-chat.ts`） | 监听 **`127.0.0.1:8791`**（`--port` 或 `XIXI_WEB_PORT` 可改）；提供 `/`、`/api/state`、`/api/turn`、`/api/voice`、`/api/quiet`、`/api/session` |
+| 终端对话 | `npm run chat [-- --fake/--dsh]` | 同进程内直接调用 `ConversationEngine`，无 HTTP |
+| DSH 子进程 | 默认**不启动**；仅 `--dsh` 或 `verify:*` 时 | `CliDshTransport` 用 `spawn(process.execPath, [dsh/lib/bin.js, --profile, xixi, --json, …])`，`cwd = REPO_ROOT`、`DSH_HOME = <repo>/.dsh`；每轮一个进程，进程间不常驻 |
+| Python VAD | 每次语音回合 | `spawn(<repo>/.venvs/voice-pipecat/Scripts/python.exe, ['-m','voice_edge.segment', wav])`，`cwd = services/voice-edge`（因此该目录必须在 cwd 才能 import `voice_edge`）；见 `scripts/serve-chat.ts`、`scripts/voice-turn.ts` |
+| SQLite | 进程内 | 试用页 `data/web-chat/xixi.sqlite`、终端 `data/chat/xixi.sqlite`、语音脚本 `data/voice/xixi.sqlite`（`openXixiStore({dataDir})`） |
 
-为什么这个证明有效：**断言在父进程里，子进程看不到**。
-进程 2 没有内存可以继承，也没有任何提示词告诉它答案应该是什么；
-它必须通过 `conversation_sessions.brain_session_id` 让 DSH 用 `--session-id` 载入同一段会话，
-模型才能逐字复现上一条回复。`docs/progress.md` §0 记录的真实输出：
-进程 1 回答 `2026-09-29T15:13:51.620Z`（latency 6.3s，事件 3 条），
-进程 2 沿用同一 `sess_6a233a16-…` 与 `session-a75b1195-…`，逐字复现，`turnCount 4`、事件 6 条。
+即：**浏览器（页面 + 麦克风）→ Node 试用页进程 → （可选）DSH 子进程 / MiMo HTTP / Python VAD 子进程**。
+没有任何常驻 broker，也没有 `EventBus` 抽象：写入方在进程内直接调用领域层（[ADR-0004](adr/0004-in-process-event-bus-for-poc.md)）。
 
-离线版本（不花 API 费用）是 `npm run demo:m0:restart`：同样的两进程结构，
-但用 `FakeBrainAdapter` / 直接写库，验证会话、轮次与人格的恢复。
+## 7. 明确**未实现**的部分，以及将来插在哪里
 
-## 5. 明确「没有建」的东西
-
-M0 **不存在**以下能力，任何文档或对话都不应暗示它们已经可用：
-
-| 未建 | 现状 | 会落在哪 |
+| 未实现 | 现状证据 | 将来插在哪 |
 |---|---|---|
-| WorldState（当前世界投影） | 无表、无代码 | M6（摄像头 presence）第一次产生；`BrainContext.worldState` 字段已声明但 M0 传空 |
-| Memory（提取 / 检索 / 纠正） | 无表、无代码；`extractMemories` 抛 `NOT_IMPLEMENTED(M4)` | M4（§10、§18） |
-| ProactiveEngine（候选 / 硬门禁 / 社交预算） | 无代码；`evaluateProactiveCandidate` 抛 `NOT_IMPLEMENTED(M5)` | M5（§15） |
-| Conversation FSM（IDLE/LISTENING/…） | 无代码；`action` 只由「有没有文本/工具调用」判定 | M1（§12） |
-| 语音（VAD / ASR / TTS / 打断） | 无代码；本机 Python 3.14 与 Pipecat 不兼容，是 M1 前置 | M1（§46.1、§46.4） |
-| 唤醒词 / 声纹 / 摄像头 | 无代码；`config/xixi.example.yaml` 里 `features.*` 全是 `false` | M2 / M6 / M7 |
-| 事件回放测试 | `tests/replay/` 为空 | M5（§22.3） |
-| 事件总线（MQTT） | 无代码；事件由调用方在同一进程内直接落库 | 出现第二个服务时（[ADR-0004](adr/0004-in-process-event-bus-for-poc.md)） |
-| `tsc --noEmit` 类型检查 | 无 `tsconfig.json` | M1 之前（[ADR-0006](adr/0006-runtime-and-dependency-choices.md)） |
+| **WorldState**（当前世界投影） | 无表、无代码；`BrainContext.worldState` 字段已声明但引擎从不传 `context`，因此始终为空 | M6 摄像头 presence 第一次产生；`presence.changed` schema 已存在并在测试中使用 |
+| **Memory**（提取 / 检索 / 纠正） | 无表、无代码；`extractMemories` / `reflect` 调用即抛 `BrainError('NOT_IMPLEMENTED', milestone: 'M4')` | M4：新增 `002_*.sql`，保留 `sourceEventIds` 指回 `events`；`MemoryCandidate` 形状已固定 |
+| **FutureHook** | 无表、无代码；只存在于 `MemoryCandidate.type` 与 `ReflectionResult.futureHooks` 的类型里 | M4/M5，与 Memory 同一批迁移 |
+| **ProactiveEngine**（候选 / 硬门禁 / 社交预算） | 无代码；`evaluateProactiveCandidate` 抛 `NOT_IMPLEMENTED(M5)` | M5（§15）：确定性硬门禁 + `proactive_decisions` 表（§22.1 Decision Trace，只存 `reason_code` 与分数） |
+| **唤醒词 / 搭话判定（§13 完整版）** | 无代码；`config/xixi.example.yaml` 的 `features.wake_word: false`，试用页用「发送 / 按住🎤」按钮当作直呼 | M2：ADR-0007 已实测两个语音框架**都无法区分电视与真人**，必须自己做（唤醒词 + 说话人相似度 + 会话状态 + 语义承接融合） |
+| **摄像头 presence** | 无代码；`features.camera_presence: false` | M6：perception-edge 发 `presence.changed` |
+| **模型驱动的人格学习（§7.4）** | 只有管理员 `overrideSelfProfile`；`interpretFeedback` 抛 `NOT_IMPLEMENTED(M3)` | M3：Feedback Interpreter（结构化输出 + 受控增量 + history + 回滚） |
+| **事件回放（§22.3）** | `tests/replay/` 目录为空 | M5；因为轮次就是事件，不需要先做数据搬迁 |
+| **常驻语音服务** | 每次 VAD 都新建 Python 进程 | 下一步：把一次性 CLI 换成常驻进程，去掉冷启动 |
+| **`tsc --noEmit` 类型检查** | 无 `tsconfig.json`，类型错误只在运行时暴露 | M1 之前（[ADR-0006](adr/0006-runtime-and-dependency-choices.md)） |
 
-`BrainAdapter` 上四个未实现能力（`evaluateProactiveCandidate` / `interpretFeedback` /
-`extractMemories` / `reflect`）**签名已固定，调用时抛 `BrainError('NOT_IMPLEMENTED')` 并注明里程碑**——
-这是「诚实的缺口」而不是静默的桩函数。
+四个未实现能力的**签名已经固定**，调用时抛带 `milestone` 的类型化错误——诚实的缺口，不是静默的桩函数。
 
-## 6. 后续里程碑的插接点
+## 维护规则
 
-| 里程碑 | 插在哪 | 已有的形状 |
-|---|---|---|
-| M1 实时语音 + 打断 | `CliDshTransport` 换成常驻宿主（同一 `DshTransport` 接口，新 `kind`）；新增 voice-edge，调用同一个 `BrainAdapter`；`composeTask` 换成 §26 的分层拼装 | `BrainTurnStream` 已是 `AsyncIterable`，`splitIntoChunks` 已实现（TTS 可在整句生成前开始） |
-| M2 Wake / Addressing | voice-edge 内部；产出事件前用确定性门禁 | `config.features.wake_word` 已存在（false） |
-| M3 SelfModel | 实现 `interpretFeedback`；写 `self_profile` + `self_profile_history`（表已在） | `FeedbackDecision.scope`（`session_override` / `persistent_soft` / `persistent_explicit`）与 `expires` 已声明 |
-| M4 Memory + Relationship | 实现 `extractMemories` / `reflect`；新增 `002_*.sql` 建记忆表，保留 `sourceEventIds` 指回 `events` | `MemoryCandidate` 已含 `type` / `confidence` / `sensitivity` / `ttl` / `sourceEventIds` |
-| M5 FutureHook + Proactive + 回放 | 实现 `evaluateProactiveCandidate`；新增 `proactive_decisions` 表（§22.1 的 Decision Trace）；填 `tests/replay/` | `ProactiveDecision.reasonCode`（只存 reason code 与分数，铁律 5） |
-| M6 摄像头 presence | perception-edge 发 `presence.changed`（schema 已存在并在测试中使用）；投影出 WorldState | `presence.changed.v1.json` + `BrainContext.worldState` |
-| M7 噪声与声纹 | voice-edge 侧 | `config.features.speaker_verification` |
+统一规则见 [`design/README.md`](design/README.md#维护规则)。改本文件时对照：
 
-新增事件类型或新增表都遵守同一条规则：**只新增、不改写**（事件新版本文件、迁移新编号文件）。
+| 改动 | 必须同步的本文件小节 |
+|---|---|
+| 新增/替换 `BrainAdapter` 实现，或改 `packages/brain-adapter/src/types.ts` | §2（含实现对照表） |
+| 改 `packages/conversation/src/engine.ts` 的一轮编排、或事件落库时机 | §3 |
+| 改 `services/voice-edge/**`、VAD 基线、`scripts/*voice*`、试用页语音端点 | §4、§6 |
+| 改 `packages/domain/src/migrations/*.sql` 或表职责 | §5（并同步 [`design/domain-model.md`](design/domain-model.md)） |
+| 改 `scripts/serve-chat.ts` 的端口/端点、新增子进程或常驻服务 | §6 |
+| 任何里程碑推进（M2~M6）或新增未实现能力 | §7（做完的从表里移走，新增的写进去） |
+| 新增事件类型或迁移 | §5 与 [`event-contracts.md`](event-contracts.md) |

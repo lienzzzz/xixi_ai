@@ -1,0 +1,659 @@
+{
+  "name": "xixi-field-test",
+  "id": "xixi-field-test",
+  "description": "让「西西」在这台真机上可被用户直接测试：噪声鲁棒的语音前端（麦克风噪音大是首要风险）、摄像头在场检测（M6）、现场测试控制台与设备验收、独立验证与评审，并全程同步文档。完成标准：用户能用一条命令启动现场测试，用真实麦克风/扬声器/摄像头跑通对话，并拿到可判读的结果与报告。",
+  "captainSessionId": "session-ce202c3d-4c72-4666-9cbf-4a1686b6890e",
+  "createdAt": 1790734783155,
+  "phase": "running",
+  "members": [
+    {
+      "id": "",
+      "name": "voice-engineer",
+      "role": "语音前端工程师（Python / 噪声鲁棒）",
+      "provider": "opencode-go",
+      "model": "deepseek-v4.1-flash",
+      "reasoningEffort": "high",
+      "joinedAt": 1790734783155,
+      "status": "idle"
+    },
+    {
+      "id": "",
+      "name": "vision-engineer",
+      "role": "视觉/在场检测工程师（M6）",
+      "provider": "opencode-go",
+      "model": "deepseek-v4.1-flash",
+      "reasoningEffort": "high",
+      "joinedAt": 1790734783155,
+      "status": "idle"
+    },
+    {
+      "id": "",
+      "name": "app-engineer",
+      "role": "应用与现场测试控制台工程师",
+      "provider": "opencode-go",
+      "model": "deepseek-v4.1-flash",
+      "reasoningEffort": "high",
+      "joinedAt": 1790734783155,
+      "status": "idle"
+    },
+    {
+      "id": "87f031bd-09e3-422d-9dda-1f55d40a2ea1",
+      "name": "verifier",
+      "role": "独立验证与评审员",
+      "provider": "opencode-go",
+      "model": "deepseek-v4.1-flash",
+      "reasoningEffort": "high",
+      "joinedAt": 1790734783155,
+      "status": "working"
+    },
+    {
+      "id": "58106f44-4b44-40f7-94b5-aac577904e78",
+      "name": "core-engineer",
+      "role": "核心层工程师（对话引擎/契约/工具接线）",
+      "provider": "opencode-go",
+      "model": "deepseek-v4.1-flash",
+      "reasoningEffort": "high",
+      "joinedAt": 1790734858943,
+      "status": "working"
+    },
+    {
+      "id": "",
+      "name": "reviewer",
+      "role": "变更评审员（契约/铁律/文档一致性）",
+      "provider": "opencode-go",
+      "model": "deepseek-v4.1-flash",
+      "reasoningEffort": "high",
+      "joinedAt": 1790735006513,
+      "status": "idle"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "t1",
+      "profileSeedId": "T0",
+      "subject": "设备与依赖勘测（现场测试地面事实）",
+      "description": "在这台机器上测出后续工作必须依赖的地面事实，写成 docs/recon/field-test-environment-2026-09-30.md（带命令与数字，允许结论是\"不可用\"）：\n1) 麦克风：枚举输入设备；录 5 秒环境噪声，给出 RMS、峰值、频谱分带（0-100/100-300/300-3400/3400+ Hz）与噪声底 dBFS；判断\"噪音大\"具体是什么噪声（低频隆隆声/宽带嘶嘶声/工频谐波）。\n2) 扬声器：确认默认输出设备与可用采样率；用我们已有的 tests/audio-fixtures/*.wav 播放并说明是否需要用户调音量（不要假设能听见）。\n3) 摄像头：用 Python（优先 opencv-python-headless 或 av）枚举摄像头、抓一帧、报告分辨率与抓帧耗时；把帧存到 data/ 供后续测试。\n4) 检测器可行性：评估在本机 CPU 上做\"人物在场\"检测的可行路径（OpenCV Haar / YuNet ONNX / onnxruntime 上的轻量检测模型），报告是否需要下载模型、模型大小、单帧耗时。\n5) 明确列出：哪些结论是实测、哪些是推断。\n约束：不得引入需要 GPU 的依赖；不得把任何画面/音频上传；只在 .venvs 与 data/ 下操作；安装依赖前先说明理由。",
+      "status": "in_progress",
+      "assignee": "verifier",
+      "dependencies": [],
+      "attempt": 1,
+      "createdAt": 1790734783155,
+      "updatedAt": 1790734828428,
+      "attemptId": "59312c42-7559-4281-aef0-84c0c4a7be85",
+      "reassigning": false,
+      "output": "开始设备与依赖勘测（麦克风/扬声器/摄像头/检测器可行性）"
+    },
+    {
+      "id": "t2",
+      "subject": "噪声鲁棒语音前端 + 噪声测试数据 + 边界证据",
+      "description": "背景：用户将在这台机器上用真实麦克风测试，并明确说「麦克风噪音很大」。现有基线（ADR-0007）只在干净合成夹具上验证过，噪声下会怎样是未知的，这是本轮第一风险。\n\n要求：\n1) 加入标准抗噪步骤并给出实测依据：去直流 + 高通（截止频率用测量选择）+ 基于噪声底的增益/门限自适应。保留 ADR-0007 的 VAD 参数理由；若为噪声改参数，必须重新测量并更新 docs/design/voice.md（必要时提 ADR 修订）。\n2) 新增噪声底校准入口（如 python -m voice_edge.calibrate）：录 N 秒环境噪声，输出分带能量与建议参数（JSON）。\n3) 生成噪声条件下的测试数据：对 tests/audio-fixtures/ 的中文夹具叠加不同 SNR 的噪声（可用实测录到的噪声作为噪声源），落到 tests/audio-fixtures/noisy/，记录每条 SNR。\n4) 新增 scripts/verify-voice-noise.ts：对干净与噪声夹具分别跑 VAD→ASR，输出转写、与原文的字符级相似度、端点延迟、失败清单；退出码反映成败。\n5) 纯函数部分（高通、噪声底估算、参数推导）必须有离线单元测试。\n\n硬约束：只上传 VAD 检测到的语音段；不引入需要 GPU 的依赖；不改 packages/conversation 与 packages/brain-adapter 的接口语义；同步 docs/design/voice.md 与 docs/progress.md 并让 npm run check:docs 通过。\n若某个 SNR 下确实无法识别，如实报告并给出边界，不要删掉困难样本。",
+      "status": "pending",
+      "assignee": "voice-engineer",
+      "dependencies": [
+        "t1"
+      ],
+      "attempt": 0,
+      "createdAt": 1790734876924,
+      "updatedAt": 1790734915192,
+      "kind": "implementation",
+      "objective": "让语音前端在「麦克风噪音很大」的真实条件下仍可用：加入可测量的抗噪处理、噪声底校准与噪声条件下的回归测试，并给出可复现的成功边界（SNR vs 转写相似度）。",
+      "inScope": [
+        "services/voice-edge/",
+        "scripts/voice-turn.ts",
+        "scripts/voice-bargein.ts",
+        "scripts/voice-device-check.ts",
+        "scripts/verify-voice-noise.ts",
+        "tests/audio-fixtures/",
+        "tests/unit/voice/",
+        "docs/design/voice.md"
+      ],
+      "outOfScope": [
+        ".env",
+        ".agent-teams/",
+        "xixi_ai_companion_project_plan.md",
+        "packages/conversation/",
+        "packages/brain-adapter/",
+        "packages/model-adapters/",
+        "plugins/"
+      ],
+      "acceptance": [
+        "语音前端加入去直流 + 高通 + 噪声底自适应处理，参数有实测依据（不是拍脑袋），并在 docs/design/voice.md 写清来源",
+        "新增噪声底校准入口（如 python -m voice_edge.calibrate），在真实麦克风上可运行并输出 JSON（分带能量 + 建议参数）",
+        "tests/audio-fixtures/noisy/ 下生成 ≥3 个 SNR 档的中文噪声夹具，每条记录 SNR 与生成方式",
+        "scripts/verify-voice-noise.ts 对干净与噪声夹具输出转写文本、字符级相似度、端点延迟与失败清单，退出码反映成败",
+        "给出可复现的成功边界（例如 SNR≥X dB 时相似度≥0.6），困难样本不得删除",
+        "纯函数（高通/噪声底估算/参数推导）有离线单元测试（放 tests/unit/voice/），npm test 全绿",
+        "npm run check:docs 通过；docs/design/voice.md 已更新；完成回报里给出可直接粘贴进 docs/progress.md 的段落文本（进度文档由集成任务单写，避免并发覆盖）"
+      ],
+      "verify": [
+        "npm test",
+        "npm run check:docs",
+        "node scripts/verify-voice-noise.ts"
+      ],
+      "deliverables": [
+        "services/voice-edge/voice_edge/",
+        "scripts/verify-voice-noise.ts",
+        "tests/audio-fixtures/noisy/",
+        "tests/unit/",
+        "docs/design/voice.md",
+        "docs/progress.md"
+      ],
+      "revisions": [
+        {
+          "at": 1790734915192,
+          "by": "captain",
+          "reason": "路径重叠检查要求任务之间的 inScope 互不冲突：原 inScope 含 tests/ 与 docs/progress.md，会与视觉任务（tests/）及集成任务（docs/progress.md）冲突。按「进度文档由集成任务单写、每个实现任务只写自己的设计文档与测试子目录」重切路径，同时把验收标准补全为可核对条款。",
+          "fields": [
+            "acceptance",
+            "inScope"
+          ],
+          "previous": {
+            "acceptance": [
+              "语音前端加入去直流 + 高通 + 噪声底自适应处理，参数有实测依据（不是拍脑袋），并在 docs/design/voice.md 写清来源",
+              "新增噪声底校准入口（如 python -m voice_edge.calibrate），在真实麦克风上可运行并输出 JSON（分带能量 + 建议参数）",
+              "tests/audio-fixtures/noisy/ 下生成 ≥3 个 SNR 档的中文噪声夹具，每条记录 SNR 与生成方式",
+              "scripts/verify-voice-noise.ts 对干净与噪声夹具输出转写文本、字符级相似度、端点延迟与失败清单，退出码反映成败",
+              "给出可复现的成功边界（例如 SNR≥X dB 时相似度≥0.6），困难样本不得删除",
+              "纯函数（高通/噪声底估算/参数推导）有离线单元测试，npm test 全绿",
+              "npm run check:docs 通过，且 docs/design/voice.md 与 docs/progress.md 已更新"
+            ],
+            "inScope": [
+              "services/voice-edge/",
+              "scripts/voice-turn.ts",
+              "scripts/voice-bargein.ts",
+              "scripts/voice-device-check.ts",
+              "scripts/verify-voice-noise.ts",
+              "tests/audio-fixtures/",
+              "tests/unit/",
+              "docs/design/voice.md",
+              "docs/progress.md"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "t3",
+      "subject": "摄像头在场检测 M6（本地检测 + presence 事件 + WorldState-lite）",
+      "description": "目标：M6 的最小可用版本——西西知道「家里有没有人」以及「人什么时候出现/离开」，并且完全在本地完成。\n\n要求：\n1) 新建 services/perception-edge（Python）：周期性从默认摄像头抓帧，本地做「有人/无人」检测，状态变化时产出 presence.changed 事件写入事件日志（复用现有 contracts；若确需新事件类型，必须新建版本化 schema 并更新漂移测试）。\n2) 检测器选型由你决定并写理由与实测：候选为 OpenCV Haar、YuNet ONNX（人脸，体积小）、onnxruntime 上的轻量检测模型。必须报告模型来源、大小、是否需要下载、单帧耗时、CPU 占用。**禁止引入 torch**。T0 的勘测结论是输入。\n3) 连续视频绝不上云：本地只做检测；「按需语义分析」（截图交多模态模型）只留接口与注释，本任务不实现调用。\n4) 防抖：短暂遮挡/误检不得导致频繁事件（例如连续 N 帧一致才切换），参数与理由写进文档。\n5) WorldState-lite 投影：新增迁移把当前在场状态投影进库（含 value/source/updated_at/confidence/TTL，对应方案 §5.3），并说明历史仍由事件日志保存。\n6) 离线回归测试放 tests/perception/：生成或准备测试图像（合成图或公开测试图，注明来源与许可），覆盖有人/无人/误检边角，必须离线可跑。\n7) 新增 scripts/verify-camera-presence.ts：抓真实摄像头若干秒，输出 presence 事件、帧率与耗时；无摄像头或被占用时给出明确失败信息。\n\n路径约定（避免并发改同一文件）：你只写 services/perception-edge/、packages/domain/src/、packages/contracts/、scripts/verify-camera-presence.ts、tests/perception/、docs/design/perception.md、docs/recon/camera-detector-choice-2026-09-30.md。\n**不要改 docs/progress.md 与 docs/architecture.md**（由集成任务单写）：把结论写成回报里可直接粘贴的段落。\n\n硬约束：不得新增高风险能力；不得把画面写进仓库（data/ 已 gitignore）；npm run check:docs 必须通过。",
+      "status": "pending",
+      "assignee": "vision-engineer",
+      "dependencies": [
+        "t1"
+      ],
+      "attempt": 0,
+      "createdAt": 1790734936571,
+      "updatedAt": 1790734983456,
+      "kind": "implementation",
+      "objective": "实现 M6 的本地摄像头在场检测：从默认摄像头抓帧、本地判断有人/无人、状态变化写成 presence.changed 事件，并投影出可查询的当前 WorldState-lite；全程不把连续视频上传。",
+      "inScope": [
+        "services/perception-edge/",
+        "packages/domain/src/migrations/",
+        "packages/domain/src/",
+        "scripts/verify-camera-presence.ts",
+        "tests/perception/",
+        "docs/design/perception.md",
+        "docs/recon/camera-detector-choice-2026-09-30.md"
+      ],
+      "outOfScope": [
+        ".env",
+        ".agent-teams/",
+        "xixi_ai_companion_project_plan.md",
+        "packages/conversation/",
+        "packages/model-adapters/",
+        "packages/contracts/",
+        "plugins/",
+        "docs/progress.md",
+        "docs/architecture.md"
+      ],
+      "acceptance": [
+        "services/perception-edge 能从默认摄像头周期抓帧并在本地判定有人/无人；连续视频不外传",
+        "检测器选型有书面理由与实测（模型来源/大小/是否需下载/单帧耗时/CPU 占用），且未引入 torch",
+        "状态变化写成 presence.changed 事件（复用现有契约；如新增事件类型必须新建版本化 schema 并更新漂移测试）",
+        "数据库有当前在场投影（迁移文件），含 value/source/updated_at/confidence/TTL 语义，并说明历史仍由事件日志保存",
+        "防抖：短暂遮挡或单帧误检不产生状态翻转（参数与理由写进文档）",
+        "离线回归测试覆盖有人/无人/误检边角（放 tests/perception/），图片来源与许可已注明，npm test 全绿",
+        "scripts/verify-camera-presence.ts 抓真实摄像头输出事件、帧率与耗时，无摄像头时给出明确失败信息",
+        "npm run check:docs 通过；docs/design/perception.md 与 docs/recon/camera-detector-choice-2026-09-30.md 已更新；回报里给出可直接粘贴进 docs/progress.md 与 docs/architecture.md 的段落文本"
+      ],
+      "verify": [
+        "npm test",
+        "npm run check:docs",
+        "node scripts/verify-camera-presence.ts"
+      ],
+      "deliverables": [
+        "services/perception-edge/",
+        "packages/domain/src/migrations/002_*.sql",
+        "scripts/verify-camera-presence.ts",
+        "docs/design/perception.md",
+        "docs/recon/camera-detector-choice-2026-09-30.md",
+        "tests/perception/"
+      ],
+      "revisions": [
+        {
+          "at": 1790734983456,
+          "by": "captain",
+          "reason": "packages/contracts/** 与核心任务（新增 conversation.decision 事件类型）冲突，并发修改同一契约文件会互相覆盖。契约变更统一由核心任务负责：视觉任务默认复用现有 presence.changed；若确需新事件类型，回报 captain 由我串行安排。",
+          "fields": [
+            "inScope",
+            "outOfScope"
+          ],
+          "previous": {
+            "inScope": [
+              "services/perception-edge/",
+              "packages/domain/src/migrations/",
+              "packages/domain/src/",
+              "packages/contracts/schemas/",
+              "packages/contracts/src/",
+              "scripts/verify-camera-presence.ts",
+              "tests/perception/",
+              "docs/design/perception.md",
+              "docs/recon/camera-detector-choice-2026-09-30.md"
+            ],
+            "outOfScope": [
+              ".env",
+              ".agent-teams/",
+              "xixi_ai_companion_project_plan.md",
+              "packages/conversation/",
+              "packages/model-adapters/",
+              "plugins/",
+              "docs/progress.md",
+              "docs/architecture.md"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "t4",
+      "subject": "现场测试控制台（单命令入口 + 引导式设备验收 + 隐私修正）",
+      "description": "目标：用户拿到的应该是「一条命令就能试」的现场测试入口，而不是一堆脚本；同时修掉本轮审计发现的两处真实隐私/功能缺陷。\n\n要求：\n1) 新增 scripts/field-test.ts（`npm run field-test`）：一条命令启动现场测试页面与后端，打印清晰的中文说明（地址、如何说话、如何看结果、如何结束）。\n2) 页面必须显示：麦克风实时电平与噪声底（用 voice-engineer 的校准能力，若尚未就绪则先用简单 RMS 并标注）、摄像头在场状态（读 presence 投影，若视觉任务尚未就绪则显示「未接入」而不是报错）、每轮延迟分段与最终动作（含 SILENCE 与拒绝原因）。\n3) 设备验收引导：按「麦克风 → 扬声器 → 摄像头」顺序自检，每项给出通过/失败与下一步动作；结果写成 docs/recon/field-test-report-<date>.md。\n4) **隐私修正（审计发现，属方案 §20.1）**：现在 /api/voice 先把整段录音写盘再做 VAD（data/voice-web/capture-*.wav），无语音时也已落盘，且没有任何清理。请改成「不落原始整段录音」或「只在内存里跑 VAD、仅落语音段」，并加保留期/清理逻辑（读取 config 的 memory/privacy 字段或引入明确默认值，写清理由）。\n5) **多段语音**：/api/voice 与 scripts/voice-turn.ts 现在只取 segments[0]，后续语音段被静默丢弃。改为使用全部语音段（拼接或顺序处理），或至少在响应里明确报告被丢弃的段数与原因。\n6) 修正审计发现的过期数字：docs/testing.md 第 3 节「当前 36 项」、README.md 未完成项里的「36 项」「tests/scenarios 尚为空」、docs/handoff.md 的人格效果「2.4×」。\n7) 无麦克风/无摄像头/无密钥时给可读错误（中文），不要白屏或堆栈。\n\n路径约定：你只写 scripts/field-test.ts、scripts/serve-chat.ts、tests/console/、docs/testing.md、docs/handoff.md、README.md、docs/recon/field-test-report-*.md。**不要改 docs/progress.md**（集成任务单写），把进度段落写在回报里。",
+      "status": "pending",
+      "assignee": "app-engineer",
+      "dependencies": [
+        "t1"
+      ],
+      "attempt": 0,
+      "createdAt": 1790734936606,
+      "updatedAt": 1790734936606,
+      "kind": "implementation",
+      "objective": "把项目变成「用户一条命令即可现场测试」的形态：单一入口 + 可读的实时状态页（麦克风电平/噪声底、摄像头在场、每轮延迟与动作）+ 引导式设备验收；同时修掉本轮审计发现的隐私与多语音段缺陷。",
+      "inScope": [
+        "scripts/field-test.ts",
+        "scripts/serve-chat.ts",
+        "tests/console/",
+        "docs/testing.md",
+        "docs/handoff.md",
+        "README.md",
+        "docs/recon/field-test-report-2026-09-30.md"
+      ],
+      "outOfScope": [
+        ".env",
+        ".agent-teams/",
+        "xixi_ai_companion_project_plan.md",
+        "packages/",
+        "services/",
+        "plugins/",
+        "docs/progress.md",
+        "docs/architecture.md"
+      ],
+      "acceptance": [
+        "一条命令启动现场测试入口，页面只监听 127.0.0.1，中文界面，非工程师也能看懂每个数字的含义",
+        "页面显示：麦克风实时电平与噪声底、摄像头在场状态、每轮延迟分段（VAD/ASR/首字/总时长）、最终动作（含沉默与拒绝原因）",
+        "内置设备验收引导（麦克风→扬声器→摄像头），逐项给出通过/失败与下一步动作，并写出报告文件（如 docs/recon/field-test-report-<date>.md）",
+        "隐私修正：/api/voice 不再把整段录音先落盘再 VAD；无语音时磁盘上不留下原始录音；只保留（或显式清理）语音段并说明保留策略",
+        "多语音段不再静默丢弃：/api/voice 与 voice-turn.ts 使用全部语音段（或明确报告被丢弃的段数与原因）",
+        "修正已知过期数字：docs/testing.md §3 的「36 项」、README.md 未完成项里的「36 项」「tests/scenarios 尚为空」、docs/handoff.md 的人格效果「2.4×」→ 与实际一致（当前 npm test 63 项、corpus 已存在、2.57×）",
+        "npm test 与 npm run check:docs 全绿；页面在无麦克风/无摄像头/无模型密钥时给出可读错误而不是白屏"
+      ],
+      "verify": [
+        "npm test",
+        "npm run check:docs",
+        "node scripts/field-test.ts --self-test"
+      ],
+      "deliverables": [
+        "scripts/field-test.ts",
+        "scripts/serve-chat.ts",
+        "tests/console/",
+        "docs/testing.md",
+        "docs/handoff.md",
+        "README.md",
+        "docs/recon/field-test-report-*.md"
+      ]
+    },
+    {
+      "id": "t5",
+      "subject": "核心接线缺陷修复（人格接线 / 可审计拒绝 / DSH 工具齐平 / 错误分类保真）",
+      "description": "来源：本轮两个文档子代理的审计（见 docs/design/conversation.md 的「接线现状（易踩）」与 docs/design/brain-and-models.md 的「未实现」小节）。这些都是**真实代码缺陷**，不是文档问题。\n\n要做的事：\n1) **silence_tolerance 从未接进 FSM**（最高优先，属「人格可调」的核心承诺）：packages/conversation/src/fsm.ts 的 lingerMs 会按 silenceTolerance 缩放，但 ConversationEngine 构造 FSM 时不读取 store.selfProfile() 的 silence_tolerance；默认值恰好也是 0.7，所以「忘记接线」看不出来。请接上，并让测试经由引擎验证。\n2) **scripts/chat.ts 只在第一句传 addressed:true**：first 落成 false 后不再复用，跟进窗口超时回 IDLE 后，后续输入会被 REJECTED_NOT_ADDRESSED。请修成与 serve-chat.ts 一致的语义（IDLE 时需叫醒、会话开着按继续），并给出前后对比与复现命令。\n3) **被拒绝的轮次完全不落事件**：engine.ts 在 accepted===false 时直接 return，事件日志查不到「为什么没接受这句话」。新增一个版本化事件类型（例如 conversation.decision.v1；契约文件不可原地修改，需新增 schema 并同步注册表与漂移测试），记录 accepted/reason/action 与必要分值；不要存模型私有推理（铁律 5）。\n4) **DSH 路径没有天气工具**：plugins/xixi-tools/index.js 只注册 xixi_get_current_time，走 --dsh 时问天气会退化成编造/回避。补齐 xixi_get_weather（只读、参数封闭 additionalProperties:false、与直连路径同一数据源策略）。\n5) **适配器错误分类丢失**：只有 TIMEOUT 保留，AUTH/RATE_LIMIT/QUOTA 全被映射成 PROVIDER_FAILED。请保真传递（BrainError 增加对应 code 或带上原始 code），并加单元测试，便于 §21 降级做区分。\n6) **死码与语义诚实**：BrainError.SESSION_MISMATCH 只声明从未抛出（要么用要么删）；BACKCHANNEL/WAIT 没有任何生产者（要么给出确定性规则，要么明确标注并测试固化）。\n\n路径约定：你只写 packages/conversation/src/、packages/brain-adapter/src/、packages/contracts/（含新增 schema 与注册表）、plugins/xixi-tools/、scripts/chat.ts、tests/unit/core/、tests/integration/conversation-engine.test.ts、tests/unit/conversation-fsm.test.ts、docs/design/conversation.md、docs/design/brain-and-models.md。\n**不要改 docs/progress.md**（集成任务单写）；把进度段落写进回报。不改 services/、scripts/serve-chat.ts、scripts/voice-*.ts（属其他成员）。",
+      "status": "in_progress",
+      "assignee": "core-engineer",
+      "dependencies": [],
+      "attempt": 1,
+      "createdAt": 1790734998008,
+      "updatedAt": 1790735005708,
+      "kind": "implementation",
+      "objective": "修掉审计发现的真实接线缺陷：让人格参数（silence_tolerance）真正影响会话行为、修复 CLI 的 addressed 语义、让被拒绝的轮次可审计、补齐 DSH 路径的天气工具、保真适配器错误分类，并清理死码与不诚实的语义标注。",
+      "inScope": [
+        "packages/conversation/src/",
+        "packages/brain-adapter/src/",
+        "packages/contracts/schemas/",
+        "packages/contracts/src/",
+        "plugins/xixi-tools/",
+        "scripts/chat.ts",
+        "tests/unit/core/",
+        "tests/integration/conversation-engine.test.ts",
+        "tests/unit/conversation-fsm.test.ts",
+        "docs/design/conversation.md",
+        "docs/design/brain-and-models.md"
+      ],
+      "outOfScope": [
+        ".env",
+        ".agent-teams/",
+        "xixi_ai_companion_project_plan.md",
+        "services/",
+        "scripts/serve-chat.ts",
+        "scripts/voice-turn.ts",
+        "scripts/voice-bargein.ts",
+        "scripts/voice-device-check.ts",
+        "docs/progress.md",
+        "docs/architecture.md"
+      ],
+      "acceptance": [
+        "silence_tolerance 真正接进 FSM：ConversationEngine 从持久化人格读取并传入，且有测试证明「不同人格值 → 不同跟进窗口」是经由引擎生效的（不是测试里手工构造 FSM 参数）",
+        "scripts/chat.ts 的 addressed 语义修复：跟进窗口超时回到 IDLE 后，下一句仍能被正确判定与接受；给出复现命令与修复前后对比",
+        "被拒绝的轮次可审计：新增版本化事件类型（或等价机制）记录 accepted=false 及其 reason，使事件日志能回答「为什么没接受这句话」；遵守铁律 5（只存 reason_code 与分值，不存模型私有推理）",
+        "DSH 路径工具齐平：plugins/xixi-tools 增加 xixi_get_weather（只读、参数封闭、与直连路径同一数据源），使 --dsh 问天气不再编造或回避",
+        "适配器错误分类保真：ModelError 的 AUTH/RATE_LIMIT/QUOTA 不再一律变成 PROVIDER_FAILED（BrainError 增加对应 code 或保留原始 code），有单元测试覆盖",
+        "死码与语义诚实：BrainError.SESSION_MISMATCH 要么被真实使用要么删除；BACKCHANNEL/WAIT 要么给出确定性生产者，要么在代码注释与 docs/design/brain-and-models.md 里明确「当前无生产者」并用测试固化该事实",
+        "npm test 全绿（新增测试放 tests/unit/core/ 或既有 conversation 测试文件），npm run check:docs 通过，docs/design/conversation.md 与 docs/design/brain-and-models.md 已更新"
+      ],
+      "verify": [
+        "npm test",
+        "npm run check:docs",
+        "npm run verify:provider"
+      ],
+      "deliverables": [
+        "packages/conversation/src/",
+        "packages/brain-adapter/src/",
+        "packages/contracts/schemas/",
+        "packages/contracts/src/",
+        "plugins/xixi-tools/",
+        "scripts/chat.ts",
+        "tests/unit/core/",
+        "tests/integration/conversation-engine.test.ts",
+        "tests/unit/conversation-fsm.test.ts",
+        "docs/design/conversation.md",
+        "docs/design/brain-and-models.md"
+      ],
+      "attemptId": "585830dc-9b7c-4473-80cb-f719db5f635c",
+      "reassigning": false
+    },
+    {
+      "id": "t6",
+      "subject": "独立验证：噪声语音 / 摄像头在场 / 现场控制台 / 核心接线修复",
+      "description": "你是独立验证方。目标：在**这台真机**上验证四个实现任务是否真的达到了各自验收标准，并给出可复核的证据。\n\n方法要求：\n1) 逐条对照实现任务的 acceptance，输出「通过/失败/未测」三态判定，绝不把未验证写成通过。\n2) **独立复现**：不采信实现者的回报。至少对每条标准自己执行一次（命令、读代码、看事件日志、看磁盘文件）。\n3) 设备侧验证：麦克风（注意用户说明「噪音很大」）、扬声器、摄像头。若设备不可用，写清原因（例如录音分带能量几乎全在 100Hz 以下）与建议动作。\n4) 数据侧验证：使用 tests/audio-fixtures/（含 noisy/）、tests/perception/ 的测试图，说明数据来源与生成方式。\n5) 隐私侧验证：确认 /api/voice 不再把整段录音落盘（检查 data/voice-web/ 在无语音与有语音两种情况下的文件变化）、确认连续视频没有外传（检查出网调用点）。\n6) 事件侧验证：用 node scripts/show-turns.ts 或直接查 SQLite，确认「被拒绝的轮次」现在可审计、reason 可查。\n7) 发现的每个缺陷：给出最小复现命令 + 影响面 + 建议严重度，写进报告，并在回报里单独列出（不要自行改实现代码）。\n\n路径约定：只写 docs/verification/ 下的文件。不要改实现代码、不要改 docs/progress.md。\n\n注意：验证要花真实调用（ASR/TTS/对话）。优先用可离线复现的检查（VAD、事件日志、磁盘、单元测试），把真实调用集中在少数关键路径上，并在报告里记录调用了哪些。",
+      "status": "pending",
+      "assignee": "verifier",
+      "dependencies": [
+        "t2",
+        "t3",
+        "t4",
+        "t5"
+      ],
+      "attempt": 0,
+      "createdAt": 1790735020101,
+      "updatedAt": 1790735020101,
+      "kind": "verification",
+      "objective": "在真机上独立验证四个实现任务的验收标准是否达成，产出三态结论表（通过/失败/未测）、可复核证据与未验证项清单，并如实报告设备（麦克风噪声/扬声器/摄像头）的真实表现。",
+      "inScope": [
+        "docs/verification/"
+      ],
+      "outOfScope": [
+        ".env",
+        ".agent-teams/",
+        "xixi_ai_companion_project_plan.md",
+        "packages/",
+        "services/",
+        "scripts/",
+        "plugins/",
+        "tests/",
+        "docs/progress.md",
+        "docs/architecture.md"
+      ],
+      "acceptance": [
+        "对四个实现任务（t2 语音/t3 视觉/t4 控制台/t5 核心）逐条核对验收标准，每条给出「通过/失败/未测」与证据（命令 + 关键输出 + 文件与行号）",
+        "关键结论独立复现：不采信实现者的自述，至少对每条验收标准自己跑一次命令或读一次代码",
+        "在真实设备上验证（麦克风噪声条件下的识别、扬声器回放、摄像头在场），或明确写出设备不可用及具体原因与建议动作",
+        "使用生成的测试数据验证：噪声夹具、在场/不在场测试图，并说明数据生成方式",
+        "明确列出「未验证项」与「不确定结论」，不得把未验证写成通过",
+        "发现缺陷时给出最小复现命令与影响面，交回 captain 决定是否修复（不要自行放宽标准或改实现）",
+        "证据落 docs/verification/field-test-verification-2026-09-30.md，包含每条验收标准的结论表与全部未验证项"
+      ],
+      "deliverables": [
+        "docs/verification/field-test-verification-2026-09-30.md"
+      ]
+    },
+    {
+      "id": "t7",
+      "subject": "评审：噪声鲁棒语音前端（t2）",
+      "description": "评审对象：t2（噪声鲁棒语音前端 + 噪声测试数据 + 边界证据），由 voice-engineer 实现，已由 verifier 独立验证。\n\n你是第二双眼睛，不是复述实现者的总结。重点：\n1) 逐条核对 t2 的验收标准，判断「真的满足」还是「文字上满足」（例如：噪声夹具是否真的带不同 SNR？verify 脚本退出码是否真的反映成败？成功边界是否有数据支撑？）。\n2) 复核 verifier 的结论：它的证据够不够？有没有把未测当通过？\n3) 铁律与隐私：只上传 VAD 检测到的语音段；不得外传连续音视频；未新增高风险能力；未引入 GPU 依赖。\n4) 文档诚实性：docs/design/voice.md 的每个参数是否都有实测出处；有没有把「未实现」写成「已实现」；npm run check:docs 是否真的绿。\n5) needs_revision 时，findings 必须可执行（给出文件、行号、最小修复要求），不要写泛泛的「建议加强测试」。\n\n路径约定：只写 docs/review/voice-implementation-review-2026-09-30.md。不要改实现代码、不要改其他人的文档。",
+      "status": "pending",
+      "assignee": "reviewer",
+      "dependencies": [
+        "t6"
+      ],
+      "attempt": 0,
+      "createdAt": 1790735043324,
+      "updatedAt": 1790735043324,
+      "kind": "review",
+      "round": 1,
+      "objective": "Review whether the latest implementation satisfies the user goal",
+      "inScope": [
+        "docs/review/voice-implementation-review-2026-09-30.md"
+      ],
+      "outOfScope": [
+        ".env",
+        ".agent-teams/",
+        "packages/",
+        "services/",
+        "scripts/",
+        "plugins/",
+        "tests/",
+        "docs/progress.md",
+        "docs/design/"
+      ],
+      "acceptance": [
+        "逐条核对 t2 的 7 条验收标准，指出哪些是真正被满足、哪些只是文字上满足",
+        "复核 verifier 的结论：检查其证据是否足以支撑结论，是否把「未测」写成「通过」",
+        "铁律与隐私检查：只上传语音段、无连续音视频外传、未新增高风险能力、未引入 GPU 依赖",
+        "文档诚实性检查：docs/design/voice.md 是否把未实现写成已实现、参数是否有实测出处、npm run check:docs 是否真的绿",
+        "结论落 docs/review/voice-implementation-review-2026-09-30.md，含结论表与 findings 清单"
+      ],
+      "deliverables": [
+        "docs/review/voice-implementation-review-2026-09-30.md"
+      ],
+      "reviewedTaskId": "t2"
+    },
+    {
+      "id": "t8",
+      "subject": "评审：摄像头在场检测 M6（t3）",
+      "description": "评审对象：t3（摄像头在场检测 M6），由 vision-engineer 实现，已由 verifier 独立验证。\n\n重点：\n1) 逐条核对 t3 的验收标准。特别检查：是否真的复用了 presence.changed 契约（而不是偷偷新增未版本化的事件）；是否真的没有把连续视频/画面外传或写进仓库；防抖参数是否有实测理由而不是拍脑袋。\n2) 复核 verifier 的结论：摄像头结论是否有真实抓帧证据；有没有「无摄像头」就草率判通过。\n3) 铁律与隐私：连续视频绝不上云；未新增高风险能力；未引入 torch/需要 GPU 的依赖；data/ 下画面未进 git。\n4) 文档诚实性：docs/design/perception.md 与 docs/recon/camera-detector-choice-2026-09-30.md 是否把推断写成实测；模型来源、大小、许可是否写清；WorldState-lite 的 TTL 语义是否真的落地。\n5) needs_revision 时，findings 必须可执行（文件、行号、最小修复要求）。\n\n路径约定：只写 docs/review/perception-implementation-review-2026-09-30.md。不要改实现代码与其他人文档。",
+      "status": "pending",
+      "assignee": "reviewer",
+      "dependencies": [
+        "t6"
+      ],
+      "attempt": 0,
+      "createdAt": 1790735043361,
+      "updatedAt": 1790735043361,
+      "kind": "review",
+      "round": 1,
+      "objective": "Review whether the latest implementation satisfies the user goal",
+      "inScope": [
+        "docs/review/perception-implementation-review-2026-09-30.md"
+      ],
+      "outOfScope": [
+        ".env",
+        ".agent-teams/",
+        "packages/",
+        "services/",
+        "scripts/",
+        "plugins/",
+        "tests/",
+        "docs/progress.md",
+        "docs/design/"
+      ],
+      "acceptance": [
+        "逐条核对 t3 的 8 条验收标准，尤其：是否真的复用了 presence.changed 契约、是否真的没有外传画面、防抖参数是否有理由",
+        "复核 verifier 的结论：摄像头在场结论是否有真实抓帧证据，是否只在无摄像头时草率结论",
+        "铁律与隐私检查：连续视频不上云、未新增高风险能力、未引入 torch/GPU 依赖、画面未进仓库",
+        "文档诚实性检查：docs/design/perception.md 与 docs/recon/camera-detector-choice-2026-09-30.md 是否把推断写成实测、模型来源与许可是否写清",
+        "结论落 docs/review/perception-implementation-review-2026-09-30.md，含结论表与 findings 清单"
+      ],
+      "deliverables": [
+        "docs/review/perception-implementation-review-2026-09-30.md"
+      ],
+      "reviewedTaskId": "t3"
+    },
+    {
+      "id": "t9",
+      "subject": "评审：现场测试控制台与隐私修正（t4）",
+      "description": "评审对象：t4（现场测试控制台 + 隐私修正），由 app-engineer 实现，已由 verifier 独立验证。\n\n重点：\n1) 逐条核对 t4 的验收标准。**隐私修正必须亲自验证**：分别发一次「无语音」与「有语音」的 /api/voice 请求，检查 data/voice-web/ 前后文件变化，确认无语音时不留原始整段录音，并确认保留/清理策略真的生效（不是只写在注释里）。\n2) 多语音段：构造或使用一段含两处停顿的音频，确认不再静默丢弃后续语音段（或响应里明确报告丢弃段数与原因）。\n3) 复核 verifier 的结论：控制台是否被真实运行过，而不是只读代码判断。\n4) 文档诚实性：docs/testing.md 第 3 节的「36 项」、README.md 未完成项的「36 项」「tests/scenarios 尚为空」、docs/handoff.md 的「2.4×」是否都已改成与实际一致。\n5) needs_revision 时，findings 必须可执行（文件、行号、最小修复要求）。\n\n路径约定：只写 docs/review/console-implementation-review-2026-09-30.md。不要改实现代码与其他人文档。",
+      "status": "pending",
+      "assignee": "reviewer",
+      "dependencies": [
+        "t6"
+      ],
+      "attempt": 0,
+      "createdAt": 1790735062171,
+      "updatedAt": 1790735062171,
+      "kind": "review",
+      "round": 1,
+      "objective": "Review whether the latest implementation satisfies the user goal",
+      "inScope": [
+        "docs/review/console-implementation-review-2026-09-30.md"
+      ],
+      "outOfScope": [
+        ".env",
+        ".agent-teams/",
+        "packages/",
+        "services/",
+        "scripts/",
+        "plugins/",
+        "tests/",
+        "docs/progress.md",
+        "docs/design/"
+      ],
+      "acceptance": [
+        "逐条核对 t4 的 7 条验收标准，尤其：隐私修正是否真的生效（无语音时磁盘不留原始录音）、多语音段是否真的不再丢弃、过期数字是否真的改正",
+        "复核 verifier 的结论：控制台结论是否基于真实运行（而不是只读代码）",
+        "亲自验证隐私修正：跑一次无语音请求与一次有语音请求，检查 data/voice-web/ 的文件变化并记录",
+        "文档诚实性检查：docs/testing.md / docs/handoff.md / README.md 的数字与实际一致（当前 npm test 63 项、corpus 已存在、人格效果 2.57×）",
+        "结论落 docs/review/console-implementation-review-2026-09-30.md，含结论表与 findings 清单"
+      ],
+      "deliverables": [
+        "docs/review/console-implementation-review-2026-09-30.md"
+      ],
+      "reviewedTaskId": "t4"
+    },
+    {
+      "id": "t10",
+      "subject": "评审：核心接线缺陷修复（t5）",
+      "description": "评审对象：t5（核心接线缺陷修复），由 core-engineer 实现，已由 verifier 独立验证。\n\n重点：\n1) 逐条核对 t5 的验收标准。**silence_tolerance 必须确认是经由 ConversationEngine 真实生效**（例如通过引擎跑两轮、改变 store 中的人格值、观察跟进窗口或状态变化），而不是测试里手工给 FSM 传参。\n2) **CLI 缺陷**：复现「跟进窗口超时回到 IDLE 后再输入」的场景，给出修复前后的行为对比。\n3) **可审计性**：在事件日志里查询被拒绝轮次的 reason（给出命令与输出）。检查新事件类型是否属于版本化 schema、注册表与漂移测试是否同步、有没有违反「已发布契约不可原地修改」。\n4) **工具齐平**：确认 plugins/xixi-tools 的天气工具是只读、参数封闭、与直连路径同一数据源策略；不要为了齐平而放宽权限。\n5) **错误分类保真**：确认 AUTH/RATE_LIMIT/QUOTA 不再一律变 PROVIDER_FAILED，并有测试覆盖。\n6) needs_revision 时，findings 必须可执行（文件、行号、最小修复要求）。\n\n路径约定：只写 docs/review/core-wiring-review-2026-09-30.md。不要改实现代码与其他人文档。",
+      "status": "pending",
+      "assignee": "reviewer",
+      "dependencies": [
+        "t6"
+      ],
+      "attempt": 0,
+      "createdAt": 1790735062224,
+      "updatedAt": 1790735062224,
+      "kind": "review",
+      "round": 1,
+      "objective": "Review whether the latest implementation satisfies the user goal",
+      "inScope": [
+        "docs/review/core-wiring-review-2026-09-30.md"
+      ],
+      "outOfScope": [
+        ".env",
+        ".agent-teams/",
+        "packages/",
+        "services/",
+        "scripts/",
+        "plugins/",
+        "tests/",
+        "docs/progress.md",
+        "docs/design/"
+      ],
+      "acceptance": [
+        "逐条核对 t5 的 7 条验收标准；重点确认 silence_tolerance 是「经由引擎真实生效」而不是只在测试里传参",
+        "亲自验证 CLI 缺陷修复：复现「跟进窗口超时回 IDLE 后再输入」的场景，确认修复前后行为差异",
+        "亲自验证可审计性：在事件日志里查到被拒绝轮次的 reason（给出查询命令与输出）",
+        "契约检查：新增事件类型是否为版本化 schema、是否同步了注册表与漂移测试、是否遵守「不原地修改已发布契约」",
+        "结论落 docs/review/core-wiring-review-2026-09-30.md，含结论表与 findings 清单"
+      ],
+      "deliverables": [
+        "docs/review/core-wiring-review-2026-09-30.md"
+      ],
+      "reviewedTaskId": "t5"
+    },
+    {
+      "id": "t11",
+      "subject": "集成收口：进度/架构/索引更新 + 现场测试前用户须知",
+      "description": "集成与收口：把四个实现任务与验证/评审结论合并成用户可直接使用的交付状态。\n\n要求：\n1) docs/progress.md：合并 t2/t3/t4/t5 的进度段落；更新 §0 结论表与 §1 里程碑状态（M1 语音闭环、M6 摄像头在场、现场测试入口）；写入实测数字与**未验证项**；修正 §2.1 的过期表述（「仅有 Python 3.14.7」）。\n2) docs/architecture.md：数据流加入摄像头在场检测（抓帧→本地判定→presence.changed→WorldState-lite 投影）；契约部分加入新事件类型（conversation.decision）；更新「未实现」列表（唤醒词、长期记忆、主动问候等仍在）。\n3) docs/README.md 与 docs/design/README.md：把新增文档（design/perception.md、docs/verification/*、docs/review/*）登记进索引，保持「文档地图」可用。\n4) 「现场测试前用户须知」：写清一条启动命令、操作步骤（先设备自检、再对话、如何看麦克风电平与噪声底、如何看摄像头状态）、如何判读通过/失败、已知限制（麦克风噪声、摄像头被占用、模型限流导致的延迟波动）。放在 docs/README.md 显著位置。\n5) 汇总四份评审与验证报告：哪些结论已通过、哪些是未验证项、有无遗留缺陷需用户知晓。\n\n路径约定：你只写 docs/progress.md、docs/architecture.md、docs/README.md、docs/design/README.md。不要改实现代码、不要改其他成员目录下的文档。",
+      "status": "pending",
+      "assignee": "app-engineer",
+      "dependencies": [
+        "t6",
+        "t7",
+        "t8",
+        "t9",
+        "t10"
+      ],
+      "attempt": 0,
+      "createdAt": 1790735091326,
+      "updatedAt": 1790735091326,
+      "kind": "integration",
+      "objective": "把四个实现任务、独立验证与四份评审的结论集成为用户可直接使用的交付状态：进度与架构文档更新到位、新增文档登记进索引、给出「现场测试前用户须知」，并保证 npm test 与 check:docs 全绿。",
+      "inScope": [
+        "docs/progress.md",
+        "docs/architecture.md",
+        "docs/README.md",
+        "docs/design/README.md"
+      ],
+      "outOfScope": [
+        ".env",
+        ".agent-teams/",
+        "xixi_ai_companion_project_plan.md",
+        "packages/",
+        "services/",
+        "scripts/",
+        "plugins/",
+        "tests/",
+        "README.md",
+        "docs/handoff.md",
+        "docs/testing.md",
+        "docs/design/voice.md",
+        "docs/design/conversation.md",
+        "docs/design/brain-and-models.md",
+        "docs/design/perception.md"
+      ],
+      "acceptance": [
+        "docs/progress.md 更新：合并四个实现任务的进度段落，更新 §0 结论表与 §1 里程碑状态，记录实测数字与「未验证项」，并修正已知不一致（如 §2.1 仍写「仅有 Python 3.14.7」）",
+        "docs/architecture.md 更新：加入摄像头在场检测（M6）的数据流、加入新的事件类型（conversation.decision）、更新「未实现」列表",
+        "docs/README.md 与 docs/design/README.md 索引更新：把新增的设计文档、验证报告与评审报告登记进文档地图",
+        "形成「现场测试前用户须知」：一条启动命令、操作步骤、如何判读结果、已知限制与设备前置条件（麦克风噪声、摄像头占用等），写入 docs/README.md 的显著位置",
+        "汇总四份评审结论与验证报告要点，明确哪些结论已通过、哪些是未验证项",
+        "npm test 全绿且 npm run check:docs 通过"
+      ],
+      "deliverables": [
+        "docs/progress.md",
+        "docs/architecture.md",
+        "docs/README.md",
+        "docs/design/README.md"
+      ]
+    }
+  ],
+  "taskSeq": 11,
+  "approvedAt": 1790734820362
+}
