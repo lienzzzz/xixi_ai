@@ -230,13 +230,22 @@ node scripts/verify-camera-presence.ts --help
 - `--require-transition`：整个运行期没有**真实状态转换**（只有启动记录）就判失败——
   这是「人真的站在镜头前」那一步用的。
 
-**已知的遗留数据（点名说明，不要当成现场证据）**：`data/perception/field-test.sqlite` 里
-有 **4 条合成事件**，来自早期版本（那时 `--self-test` 还写同一个库）：两条
-`reason=present_confirmed`（`motion_ratio=0.148` / `0.0318`，无人脸证据）与两条
-`reason=absent_confirmed`，时间戳在 `2026-09-30T12:04:1x`。同一库里另有 3 条
-`reason=camera_started`（2 条来自真实摄像头空场景、1 条来自同一批合成运行）。它们是
-`data/` 下的本机台账（gitignore，不进仓库），**当前不再被执行路径产生**；评审或消费方若需要
-干净台账，删掉这个文件重跑一次 `--seconds 15` 即可，或按时间戳筛选 `12:04:1x` 之后的记录。
+**台账现状（实测，可复核）**：`data/perception/field-test.sqlite` 里现在只有 **5 条
+`reason=camera_started`** 记录，全部来自真实摄像头的空场景运行，**没有任何合成事件**。
+历史上曾有 4 条合成事件（早期版本 `--self-test` 还写同一个库：2 条
+`reason=present_confirmed`（`motion_ratio=0.148` / `0.0318`，无人脸证据）+ 1 条
+`reason=absent_confirmed`，时间戳 `2026-09-30T12:04:1x`），它们已在本次补正中**逐条删除**，
+并按「最后一条事件 → 投影」重建了 `world_state`，日志与投影重新一致。
+
+复核命令（不需要 Python 之外的依赖）：
+
+```powershell
+E:\worker2\.venvs\cv4\Scripts\python.exe -c "import sqlite3,json;c=sqlite3.connect('data/perception/field-test.sqlite');print(c.execute(\"select timestamp,payload_json from events where event_type='presence.changed' order by sequence\").fetchall())"
+```
+
+如果要一条绝对干净的台账：删掉 `data/perception/field-test.sqlite` 再跑一次
+`node scripts/verify-camera-presence.ts --seconds 15`（`data/` 是 gitignore 的本机目录）。
+合成帧以后一律进 `data/perception/self-test.sqlite`，不会再混进这个库。
 
 ### 8.3 还没做的那一步（未完成项，明确标注）
 

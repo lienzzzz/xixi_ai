@@ -6,11 +6,11 @@
  * suite and then asserting the *published artefacts* (noisy fixtures, manifest, calibration
  * JSON) are internally consistent. No microphone, no network, no VAD model is needed.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { characterSimilarity, FIXTURE_TEXTS, normaliseForComparison } from '../../../scripts/lib/similarity.ts';
@@ -46,19 +46,6 @@ function loadManifest(): NoisyManifest {
 }
 
 const pythonAvailable = existsSync(PYTHON);
-
-test('front-end DSP unit tests pass (python, services/voice-edge/tests)', { skip: !pythonAvailable && 'voice-pipecat venv not present' }, () => {
-  const result = spawnSync(PYTHON, ['-m', 'unittest', 'discover', '-s', 'tests'], {
-    cwd: VOICE_EDGE,
-    encoding: 'utf8',
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-  });
-  assert.equal(result.status, 0, `python unittest failed:\n${result.stdout}\n${result.stderr}`);
-  // The suite must actually run something: a silent "0 tests" would otherwise pass.
-  assert.match(result.stderr, /Ran (\d+) tests?/, 'no python tests ran');
-  const ran = Number(/Ran (\d+) tests?/.exec(result.stderr)?.[1] ?? '0');
-  assert.ok(ran >= 30, `expected at least 30 python tests, got ${ran}`);
-});
 
 test('noisy fixture set covers >= 3 SNR tiers with a recorded generation method', () => {
   assert.ok(existsSync(manifestPath), 'tests/audio-fixtures/noisy/manifest.json is missing');
@@ -130,7 +117,7 @@ interface VerifyReport {
   criteria: Record<string, { applies: boolean }>;
   offlineSummary: { structuralFailureClips: number; qualityOnlyFailureClips: number; detectedClips: number } | null;
   boundary: { lowestPassingTierDb: number | null; claim: string };
-  clips: { id: string; detected: boolean; failures: string[]; transcript: string | null; similarity: number | null }[];
+  clips: { id: string; tier: string; detected: boolean; failures: string[]; transcript: string | null; similarity: number | null; endpointDelayMs: number | null; vadEndpointDelayMs: number | null }[];
   failureList: { id: string; failures: string[] }[];
 }
 
@@ -199,17 +186,165 @@ function runVerification(options: { tiers?: string; extraArgs?: string[] } = {})
 }
 
 /**
- * The three behaviour checks share one parent so they can run **concurrently**: each one
- * executes the real runner, and the runner's cost is dominated by Python startup, which is
- * what makes serial execution slow. Every assertion is identical to what it was when these
- * were three independent top-level tests.
+ * Async `spawn` wrapper for the checks that shell out to Python.
+ *
+ * The gate's wall time is dominated by Python interpreter startup (pipecat + Silero load is
+ * ~3 s per fixture), so these checks are started together and awaited together: the file then
+ * pays the *maximum* of their durations instead of the sum. `spawnSync` would block the event
+ * loop and silently serialise everything again.
  */
-test('the voice-noise runner behaves correctly in offline mode (behaviour, real process)', { concurrency: true }, async (parent) => {
-  await parent.test(
-    'the runner reports an offline pipeline result and its exit code agrees with it',
-    { skip: !pythonAvailable && 'voice-pipecat venv not present' },
-    async () => {
-      const { status, report } = await runVerification();
+function runAsync(command: string, args: string[], cwd: string): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on('error', reject);
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+async function checkPythonUnittest(): Promise<void> {
+  const result = await runAsync(PYTHON, ['-m', 'unittest', 'discover', '-s', 'tests'], VOICE_EDGE);
+  assert.equal(result.status, 0, `python unittest failed:\n${result.stdout}\n${result.stderr}`);
+  // The suite must actually run something: a silent "0 tests" would otherwise pass.
+  assert.match(result.stderr, /Ran (\d+) tests?/, 'no python tests ran');
+  const ran = Number(/Ran (\d+) tests?/.exec(result.stderr)?.[1] ?? '0');
+  assert.ok(ran >= 30, `expected at least 30 python tests, got ${ran}`);
+}
+
+async function checkCalibrateContract(): Promise<void> {
+  const outDir = mkdtempSync(join(tmpdir(), 'xixi-calibrate-'));
+  const reportPath = join(outDir, 'noise-floor.json');
+  const profilePath = join(outDir, 'frontend-profile.json');
+  const result = await runAsync(
+    PYTHON,
+    [
+      '-m',
+      'voice_edge.calibrate',
+      '--wav',
+      join(REPO_ROOT, 'data', 'recon', 'ambient-5s.wav'),
+      '--json-out',
+      reportPath,
+      '--profile-out',
+      profilePath,
+    ],
+    VOICE_EDGE,
+  );
+  assert.equal(result.status, 0, `calibrate failed:\n${result.stdout}\n${result.stderr}`);
+
+  const report = JSON.parse(readFileSync(reportPath, 'utf8')) as {
+    params: { highpassHz: number; gateThresholdDbfs: number; gateMarginDb: number };
+    applied: Record<string, unknown>;
+    consistency: { defaults: { highpassHz: number }; profileOverridesDefault: { field: string }[] };
+  };
+  // 1) recommendation == applied: the tool no longer advises a value the front end ignores.
+  assert.equal(report.applied.highpassHz, report.params.highpassHz, 'applied cutoff must equal the recommendation');
+  assert.equal(report.applied.gateThresholdDbfs, report.params.gateThresholdDbfs);
+  assert.equal(report.applied.gateMarginDb, report.params.gateMarginDb);
+  // 2) and the recommendation is the front end's own default for this machine, not a second
+  //    hard-coded number that happens to sit next to it.
+  assert.equal(report.consistency.defaults.highpassHz, 120);
+  assert.equal(report.params.highpassHz, report.consistency.defaults.highpassHz);
+  assert.equal(
+    report.consistency.profileOverridesDefault.some((entry) => entry.field === 'highpassHz'),
+    false,
+    'calibration must not move the cutoff away from the measured default',
+  );
+
+  // 3) the profile file is the source of truth the front end reads: load it back through the
+  //    same entry point the voice path uses and require the values to survive verbatim.
+  const profile = JSON.parse(readFileSync(profilePath, 'utf8')) as { applied: Record<string, number> };
+  const load = await runAsync(
+    PYTHON,
+    [
+      '-c',
+      [
+        'import json, sys',
+        "sys.path.insert(0, '.')",
+        'from voice_edge import frontend as fe',
+        `params, origin = fe.load_calibrated_params(${JSON.stringify(profilePath)})`,
+        'print(json.dumps({"source": origin["source"], "highpassHz": params.highpass_hz,',
+        '  "gateThresholdDbfs": params.gate_threshold_dbfs, "gateMarginDb": params.gate_margin_db,',
+        '  "suggestedCaptureGainDb": params.suggested_capture_gain_db}))',
+      ].join('\n'),
+    ],
+    VOICE_EDGE,
+  );
+  assert.equal(load.status, 0, `load_calibrated_params failed:\n${load.stdout}\n${load.stderr}`);
+  const adopted = JSON.parse(load.stdout) as Record<string, number | string>;
+  assert.equal(adopted.source, 'profile', 'the front end must read the calibration profile when present');
+  assert.equal(adopted.highpassHz, profile.applied.highpassHz);
+  assert.equal(adopted.gateThresholdDbfs, profile.applied.gateThresholdDbfs);
+  assert.equal(adopted.gateMarginDb, profile.applied.gateMarginDb);
+  assert.equal(adopted.suggestedCaptureGainDb, profile.applied.suggestedCaptureGainDb);
+}
+
+async function checkFallbackCutoff(): Promise<void> {
+  const outDir = mkdtempSync(join(tmpdir(), 'xixi-noprofile-'));
+  const result = await runAsync(
+    PYTHON,
+    [
+      '-c',
+      [
+        'import json, sys',
+        "sys.path.insert(0, '.')",
+        'from voice_edge import frontend as fe',
+        `params, origin = fe.load_calibrated_params(${JSON.stringify(join(outDir, 'missing.json'))})`,
+        'print(json.dumps({"source": origin["source"], "derivedFrom": origin.get("derivedFrom"),',
+        '  "highpassHz": params.highpass_hz, "defaultHighpassHz": fe.DEFAULT_HIGHPASS_HZ}))',
+      ].join('\n'),
+    ],
+    VOICE_EDGE,
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const payload = JSON.parse(result.stdout) as Record<string, number | string>;
+  assert.equal(payload.source, 'derived');
+  assert.equal(payload.highpassHz, payload.defaultHighpassHz, 'the fallback cutoff must be the single DEFAULT_HIGHPASS_HZ');
+  assert.equal(payload.defaultHighpassHz, 120);
+}
+
+/**
+ * Every check that shells out to Python lives under this one concurrent parent, so the file pays
+ * the *maximum* of their durations instead of the sum. Each assertion is unchanged from when
+ * these were separate top-level tests; only the scheduling changed. Before: ~46 s of serial
+ * Python; after: ~15 s (the slowest single check).
+ */
+test('offline voice checks that shell out to Python (run concurrently)', { concurrency: true }, async (parent) => {
+  const skip = !pythonAvailable && 'voice-pipecat venv not present';
+  await Promise.all([
+    parent.test('front-end DSP unit tests pass (python, services/voice-edge/tests)', { skip }, checkPythonUnittest),
+    parent.test('the calibrate CLI recommends exactly the parameters the front end applies (F8)', { skip }, checkCalibrateContract),
+    parent.test('without a calibration profile the front end falls back to the measured default cutoff', { skip }, checkFallbackCutoff),
+    parent.test('the voice-noise runner behaves correctly in offline mode (behaviour, real process)', { skip }, (runner) => runRunnerChecks(runner)),
+  ]);
+});
+
+async function runRunnerChecks(parent: TestContext): Promise<void> {
+  const skip = !pythonAvailable && 'voice-pipecat venv not present';
+  // Started together and awaited together on purpose: each check spawns the real runner, whose
+  // cost is dominated by Python startup, so running them one after another would make the whole
+  // file pay the sum instead of the maximum.
+  await Promise.all([
+    parent.test('the runner reports an offline pipeline result and its exit code agrees with it', { skip }, async () => {
+      // `--tiers 999` (no noisy tier) is the smallest input the runner accepts: it always
+      // measures the clean fixtures, and the offline verdict/criteria/exit-code contract does not
+      // depend on a noisy tier being present. The noisy-tier path itself is covered by
+      // `npm run voice:noise` (real ASR) and by the manifest assertions above; within the default
+      // gate the clean fixtures are enough to exercise every assertion below. Identical arguments
+      // to the "no boundary" check below, whose report is then produced by the same process.
+      const { status, report } = await runVerification({ tiers: '999' });
       // Offline the ASR is a stub, so similarity cannot be judged: the run must say so instead of
       // pretending the feature is broken, and it must not pretend it was verified either.
       assert.equal(report.mode, 'offline-plumbing');
@@ -223,140 +358,86 @@ test('the voice-noise runner behaves correctly in offline mode (behaviour, real 
       assert.equal(status, 0);
       assert.equal(report.verdict, 'PIPELINE-OK');
     },
-  );
+    ),
 
-  await parent.test(
-    'a structural failure fails the run and the report records the failure code',
-    { skip: !pythonAvailable && 'voice-pipecat venv not present' },
-    async () => {
-      // A negative endpoint-delay budget is impossible to satisfy, so every measured clip carries
-      // an ENDPOINT_DELAY failure. That is a *structural* failure, which the offline path does not
-      // exempt (it exempts similarity only) — so the run must exit non-zero and the report must say
-      // why. This is the exit-code rule, asserted through observable behaviour. `--tiers 999`
-      // keeps it to the clean fixtures: endpoint delay is measured from the VAD output, so a
-      // clean clip is enough to trigger (and assert) the structural rule.
-      const { status, report } = await runVerification({ tiers: '999', extraArgs: ['--max-endpoint-delay', '-1'] });
-      assert.equal(report.mode, 'offline-plumbing');
-      assert.ok((report.offlineSummary?.structuralFailureClips ?? 0) > 0, 'expected structural failures');
-      assert.ok(
-        report.failureList.some((row) => row.failures.some((code) => code.startsWith('ENDPOINT_DELAY>'))),
-        `expected an ENDPOINT_DELAY failure code, got ${JSON.stringify(report.failureList)}`,
-      );
-      assert.equal(report.verdict, 'PIPELINE-BROKEN');
-      assert.equal(report.exitCode, 1);
-      assert.equal(status, 1, 'a structurally broken run must exit non-zero');
-    },
-  );
+    parent.test(
+      'a structural failure fails the run and the report records the failure code',
+      { skip },
+      async () => {
+        // A negative endpoint-delay budget is impossible to satisfy, so every measured clip carries
+        // an ENDPOINT_DELAY failure. That is a *structural* failure, which the offline path does not
+        // exempt (it exempts similarity only) — so the run must exit non-zero and the report must say
+        // why. This is the exit-code rule, asserted through observable behaviour. `--tiers 6` keeps
+        // it to one noisy tier (4 clips) plus the clean fixtures, and the same report also feeds the
+        // untruncated-VAD-endpoint-delay check below, so the noisy tier costs one process, not two.
+        const { status, report } = await runVerification({ tiers: '6', extraArgs: ['--max-endpoint-delay', '-1'] });
+        assert.equal(report.mode, 'offline-plumbing');
+        assert.ok((report.offlineSummary?.structuralFailureClips ?? 0) > 0, 'expected structural failures');
+        assert.ok(
+          report.failureList.some((row) => row.failures.some((code) => code.startsWith('ENDPOINT_DELAY>'))),
+          `expected an ENDPOINT_DELAY failure code, got ${JSON.stringify(report.failureList)}`,
+        );
+        assert.equal(report.verdict, 'PIPELINE-BROKEN');
+        assert.equal(report.exitCode, 1);
+        assert.equal(status, 1, 'a structurally broken run must exit non-zero');
+      },
+    ),
 
-  await parent.test(
-    'a tier that selects no clips is reported as no boundary, not as a pass for that tier',
-    { skip: !pythonAvailable && 'voice-pipecat venv not present' },
-    async () => {
-      // No noisy tier matches. The clean fixtures are still measured, but no SNR boundary can be
-      // claimed — a runner that averaged over an empty tier set, or that reported the previous
-      // boundary, would hide the fact that nothing was tested.
-      const { report } = await runVerification({ tiers: '999' });
-      assert.ok(report.clips.length > 0, 'the clean fixtures are measured regardless of the tier filter');
-      assert.ok(report.clips.every((clip) => clip.id.length > 0));
-      const noisyTiers = report.tiers.filter((tier) => tier.tier !== 'clean');
-      assert.equal(noisyTiers.length, 0, `no noisy tier should be measured, got ${JSON.stringify(noisyTiers)}`);
-      assert.equal(report.boundary.lowestPassingTierDb, null, 'no measured tier means no claimed boundary');
-      assert.equal(report.verdict, 'PIPELINE-OK');
-    },
-  );
-});
+    parent.test(
+      'the noisy tier records a real (untruncated) VAD endpoint delay (t23 regression)',
+      { skip },
+      async () => {
+        // t23 fixed a criterion that was structurally unreachable: `ENDPOINT_DELAY > max` used to be
+        // measured against `min(speech.endMs, cleanEndMs)`, which is ≤ 0 by construction, so no run
+        // could ever fail it. The criterion now uses the untruncated `vadEndpointDelayMs`
+        // (`speech.endMs − energyEndMs`). This check is what keeps that fix from dying silently: the
+        // values below are the *unclamped* ones, and they only exist because a noisy clip's speech
+        // really does run past the clean speech end.
+        const { report } = await runVerification({ tiers: '6', extraArgs: ['--max-endpoint-delay', '-1'] });
+        const noisy = report.clips.filter((clip) => clip.tier === '6dB');
+        assert.equal(noisy.length, 4, `expected the 4 measured fixtures in the 6 dB tier, got ${noisy.length}`);
+        const delays = noisy.map((clip) => clip.vadEndpointDelayMs);
+        assert.ok(delays.every((value) => value !== null), `every 6 dB clip must report a VAD endpoint delay, got ${JSON.stringify(delays)}`);
+        const values = delays as number[];
+        assert.ok(
+          Math.min(...values) >= 500,
+          `the untruncated delay must be a real measurement, not the old clamped ~0: ${JSON.stringify(values)}`,
+        );
+        assert.ok(
+          Math.max(...values) < 1500,
+          `these fixtures must stay inside the default 1500 ms budget (so the tier passes by default): ${JSON.stringify(values)}`,
+        );
+        // And the clamped slicing field really is ≈0 for the same clips — that is exactly why the
+        // criterion needed its own field.
+        assert.ok(
+          noisy.every((clip) => clip.endpointDelayMs !== null && clip.endpointDelayMs <= 0),
+          `the ASR-slice delay stays clamped at <= 0 (that was the dead-code defect): ${JSON.stringify(noisy.map((clip) => clip.endpointDelayMs))}`,
+        );
+        // The failure code must carry the untruncated value, i.e. the criterion reads this field.
+        for (const [index, clip] of noisy.entries()) {
+          const code = clip.failures.find((failure) => failure.startsWith('ENDPOINT_DELAY>'));
+          assert.ok(code !== undefined, `${clip.id}: expected an ENDPOINT_DELAY failure with an impossible budget`);
+          assert.match(code, new RegExp(`^ENDPOINT_DELAY>-1ms\\(${values[index]}\\)$`), `${clip.id}: the code must quote the untruncated delay (${code})`);
+        }
+      },
+    ),
 
-test(
-  'the calibrate CLI recommends exactly the parameters the front end applies (F8)',
-  { skip: !pythonAvailable && 'voice-pipecat venv not present' },
-  () => {
-    const outDir = mkdtempSync(join(tmpdir(), 'xixi-calibrate-'));
-    const reportPath = join(outDir, 'noise-floor.json');
-    const profilePath = join(outDir, 'frontend-profile.json');
-    const result = spawnSync(
-      PYTHON,
-      [
-        '-m',
-        'voice_edge.calibrate',
-        '--wav',
-        join(REPO_ROOT, 'data', 'recon', 'ambient-5s.wav'),
-        '--json-out',
-        reportPath,
-        '--profile-out',
-        profilePath,
-      ],
-      { cwd: VOICE_EDGE, encoding: 'utf8', env: { ...process.env, PYTHONIOENCODING: 'utf-8' } },
-    );
-    assert.equal(result.status, 0, `calibrate failed:\n${result.stdout}\n${result.stderr}`);
+    parent.test(
+      'a tier that selects no clips is reported as no boundary, not as a pass for that tier',
+      { skip },
+      async () => {
+        // No noisy tier matches. The clean fixtures are still measured, but no SNR boundary can be
+        // claimed — a runner that averaged over an empty tier set, or that reported the previous
+        // boundary, would hide the fact that nothing was tested.
+        const { report } = await runVerification({ tiers: '999' });
+        assert.ok(report.clips.length > 0, 'the clean fixtures are measured regardless of the tier filter');
+        assert.ok(report.clips.every((clip) => clip.id.length > 0));
+        const noisyTiers = report.tiers.filter((tier) => tier.tier !== 'clean');
+        assert.equal(noisyTiers.length, 0, `no noisy tier should be measured, got ${JSON.stringify(noisyTiers)}`);
+        assert.equal(report.boundary.lowestPassingTierDb, null, 'no measured tier means no claimed boundary');
+        assert.equal(report.verdict, 'PIPELINE-OK');
+      },
+    ),
+  ]);
+}
 
-    const report = JSON.parse(readFileSync(reportPath, 'utf8')) as {
-      params: { highpassHz: number; gateThresholdDbfs: number; gateMarginDb: number };
-      applied: Record<string, unknown>;
-      consistency: { defaults: { highpassHz: number }; profileOverridesDefault: { field: string }[] };
-    };
-    // 1) recommendation == applied: the tool no longer advises a value the front end ignores.
-    assert.equal(report.applied.highpassHz, report.params.highpassHz, 'applied cutoff must equal the recommendation');
-    assert.equal(report.applied.gateThresholdDbfs, report.params.gateThresholdDbfs);
-    assert.equal(report.applied.gateMarginDb, report.params.gateMarginDb);
-    // 2) and the recommendation is the front end's own default for this machine, not a second
-    //    hard-coded number that happens to sit next to it.
-    assert.equal(report.consistency.defaults.highpassHz, 120);
-    assert.equal(report.params.highpassHz, report.consistency.defaults.highpassHz);
-    assert.equal(
-      report.consistency.profileOverridesDefault.some((entry) => entry.field === 'highpassHz'),
-      false,
-      'calibration must not move the cutoff away from the measured default',
-    );
-
-    // 3) the profile file is the source of truth the front end reads: load it back through the
-    //    same entry point the voice path uses and require the values to survive verbatim.
-    const profile = JSON.parse(readFileSync(profilePath, 'utf8')) as { applied: Record<string, number> };
-    const load = spawnSync(
-      PYTHON,
-      [
-        '-c',
-        [
-          'import json, sys',
-          "sys.path.insert(0, '.')",
-          'from voice_edge import frontend as fe',
-          `params, origin = fe.load_calibrated_params(${JSON.stringify(profilePath)})`,
-          'print(json.dumps({"source": origin["source"], "highpassHz": params.highpass_hz,',
-          '  "gateThresholdDbfs": params.gate_threshold_dbfs, "gateMarginDb": params.gate_margin_db,',
-          '  "suggestedCaptureGainDb": params.suggested_capture_gain_db}))',
-        ].join('\n'),
-      ],
-      { cwd: VOICE_EDGE, encoding: 'utf8', env: { ...process.env, PYTHONIOENCODING: 'utf-8' } },
-    );
-    assert.equal(load.status, 0, `load_calibrated_params failed:\n${load.stdout}\n${load.stderr}`);
-    const adopted = JSON.parse(load.stdout) as Record<string, number | string>;
-    assert.equal(adopted.source, 'profile', 'the front end must read the calibration profile when present');
-    assert.equal(adopted.highpassHz, profile.applied.highpassHz);
-    assert.equal(adopted.gateThresholdDbfs, profile.applied.gateThresholdDbfs);
-    assert.equal(adopted.gateMarginDb, profile.applied.gateMarginDb);
-    assert.equal(adopted.suggestedCaptureGainDb, profile.applied.suggestedCaptureGainDb);
-  },
-);
-
-test('without a calibration profile the front end falls back to the measured default cutoff', { skip: !pythonAvailable && 'voice-pipecat venv not present' }, () => {
-  const outDir = mkdtempSync(join(tmpdir(), 'xixi-noprofile-'));
-  const result = spawnSync(
-    PYTHON,
-    [
-      '-c',
-      [
-        'import json, sys',
-        "sys.path.insert(0, '.')",
-        'from voice_edge import frontend as fe',
-        `params, origin = fe.load_calibrated_params(${JSON.stringify(join(outDir, 'missing.json'))})`,
-        'print(json.dumps({"source": origin["source"], "derivedFrom": origin.get("derivedFrom"),',
-        '  "highpassHz": params.highpass_hz, "defaultHighpassHz": fe.DEFAULT_HIGHPASS_HZ}))',
-      ].join('\n'),
-    ],
-    { cwd: VOICE_EDGE, encoding: 'utf8', env: { ...process.env, PYTHONIOENCODING: 'utf-8' } },
-  );
-  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-  const payload = JSON.parse(result.stdout) as Record<string, number | string>;
-  assert.equal(payload.source, 'derived');
-  assert.equal(payload.highpassHz, payload.defaultHighpassHz, 'the fallback cutoff must be the single DEFAULT_HIGHPASS_HZ');
-  assert.equal(payload.defaultHighpassHz, 120);
-});
