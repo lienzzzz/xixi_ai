@@ -1678,6 +1678,42 @@ export function stripNextPrefix(text: string): string {
   return text.replace(/^\s*下一步[：:]\s*/, '');
 }
 
+/**
+ * The fixed 「口径变更说明」 every generated acceptance report starts with.
+ *
+ * Why it is emitted by the generator instead of hand-written into the report: the speaker
+ * verdict's *definition* changed between the t4 delivery (frame-level dB percentile →
+ * PASS) and the t21 correction (energy ratio → FAIL). A reader comparing two reports sees
+ * PASS turn into FAIL and cannot tell whether the machine or the measurement changed —
+ * so the explanation has to survive every regeneration, exactly like the verdict does.
+ */
+const ACCEPTANCE_CRITERIA_NOTE: readonly string[] = [
+  '## 口径变更说明（先看这一节，再看下面的逐项数字）',
+  '',
+  '**扬声器结论在 t4 交付时为 PASS、t21 修正口径后为 FAIL——变的是测量口径，不是机器；旧口径高估了声学余量。**',
+  '',
+  '| | t4 交付时（旧口径） | t21 修正后（现行口径） | 为什么变 |',
+  '|---|---|---|---|',
+  '| 扬声器判据 | **帧级 dB 分位**：最响的 50 ms 帧 − 静音窗平均 ≈ 12.97 dB → PASS | **能量比**（主判据）：播放窗平均带内功率 − 静音窗平均带内功率 → **见下面的逐项表**（本机实测 ~2–3 dB，< 10 dB 即 FAIL） | 分位只看「最响的那一瞬间」，是**乐观上界**；能量比是整段平均，才对应 ASR 真正拿到的信噪比 |',
+  '',
+  '旧口径虚增约 9 dB，两个原因叠加：',
+  '',
+  '1. **分位本身是乐观上界**：帧级 p95 取的是播放窗里最响的 50 ms 帧，比平均功率之比天然高 8–10 dB（t6 复核实测 11.83 vs 2.69 dB）。',
+  '2. **旧的静音参考窗偏「太低」**：旧实现只取播放前 0.6 s 的帧电平均值，而采集刚启动那一段有爬升（电平偏低），把噪声参考压低 → 相对差被进一步放大。现在改成「前置 1.0 s + 尾部 1.0 s 的平均带内功率」，三个窗的电平都写在证据里，可以自己复算。',
+  '',
+  '**这不是「功能坏了」**：程序确实把音频送到了输出流（WASAPI 回采相关见逐项表），麦克风也确实能听到最响的那些帧；不达标的是**平均声学余量**——本机麦克风自噪偏高（勘测实测麦克风只比噪声底高 0.8–2.6 dB），扬声器一侧没有问题。',
+  '',
+  '**改善路径（做完任一条再重跑本报告就会更新数字）**：',
+  '',
+  '1. 确认输出音量 ≥ 50% 且扬声器没有被物理静音；',
+  '2. 麦克风离扬声器 0.3–1 m，避开正对风扇/机箱；',
+  '3. 把**输入采集增益**设为 0 dB（「声音设置 → 输入」；当前读数见下面麦克风一项——控制台只显示并提示，不会替你改系统设置）；',
+  '4. 仍不达标时用外接麦克风（本机内置阵列的自噪是瓶颈）。',
+  '',
+  '本节由报告生成器固定输出（`renderAcceptanceReport` 的 `ACCEPTANCE_CRITERIA_NOTE`），**重跑 `--acceptance` 不会丢失**。',
+  '',
+];
+
 /** Render the acceptance result as the Markdown report the task asks for. */
 export function renderAcceptanceReport(report: AcceptanceReport, extra: { readonly privacyNotes?: readonly string[]; readonly calibration?: CalibrationView | null } = {}): string {
   const lines: string[] = [];
@@ -1689,6 +1725,7 @@ export function renderAcceptanceReport(report: AcceptanceReport, extra: { readon
   lines.push(`- 探测用 Python：\`${String(report.environment.probePython ?? '?')}\`（设备端点/麦克风/摄像头）、\`${String(report.environment.audioPython ?? '?')}\`（声学回环）`);
   lines.push(`- **总体结论：${report.overall === 'pass' ? '通过（PASS）' : '未通过（FAIL，逐项见下）'}**`);
   lines.push('');
+  lines.push(...ACCEPTANCE_CRITERIA_NOTE);
   lines.push('| 顺序 | 项目 | 结论 | 摘要 |');
   lines.push('|---|---|---|---|');
   for (const item of [...report.items].sort((a, b) => a.order - b.order)) {
@@ -2947,7 +2984,21 @@ export async function runSelfTest(options: { log?: (line: string) => void } = {}
     check('F6：复测同时报最差/均值/最好', speaker.checks.some((item: { detail: string }) => item.detail.includes('最差') && item.detail.includes('均值') && item.detail.includes('最好')) && (speaker.evidence.trialStats as { trials: number }).trials === 3, JSON.stringify((speaker.evidence.trialStats as { energyRatioDb: unknown }).energyRatioDb));
     check('总体结论与报告落盘', report.overall === 'fail' && typeof report.reportPath === 'string' && existsSync(report.reportPath), String(report.reportPath));
     const reportText = typeof report.reportPath === 'string' && existsSync(report.reportPath) ? readFileSync(report.reportPath, 'utf8') : '';
-    check('报告文件含逐项结论、证据与复现方式', reportText.includes('现场测试报告') && reportText.includes('下一步动作') && reportText.includes('复现方式') && reportText.includes('假 PASS'), `报告 ${reportText.split('\n').length} 行`);
+    // One check, several contract properties: the report must carry its items, its evidence, the
+    // reproduction commands, the false-PASS rationale — and the 口径变更说明 the generator emits
+    // (kept in the same assertion on purpose: adding a separate item would bump the self-test
+    // count in three docs that quote it, which is the drift t9 flagged).
+    check(
+      '报告文件含逐项结论、证据、复现方式与「口径变更说明」',
+      reportText.includes('现场测试报告') &&
+        reportText.includes('下一步动作') &&
+        reportText.includes('复现方式') &&
+        reportText.includes('假 PASS') &&
+        reportText.includes('口径变更说明') &&
+        reportText.includes('t4 交付时为 PASS、t21 修正口径后为 FAIL') &&
+        reportText.includes('ACCEPTANCE_CRITERIA_NOTE'),
+      `报告 ${reportText.split('\n').length} 行，含口径变更说明（重跑 --acceptance 不会丢）`,
+    );
 
     // ---- F7: endpoint readings (capture gain) visible --------------------------
     const endpoints = (await (await fetch(`${base}/api/field/endpoints`)).json()) as Record<string, any>;
@@ -3035,8 +3086,10 @@ const FIELD_TEST_USAGE = `西西 · 现场测试控制台 —— 用法
   npm run field-test -- --dsh             走 DSH Harness 路径（慢，实时对话不建议）
   npm run field-test -- --no-open         不自动打开浏览器（非交互终端本来就不会打开）
 
-  node scripts/field-test.ts --self-test      离线自检：隐私/多段语音/页面/报告，24 项，不碰麦克风、不联网
-                                              exit 0 = 全过；有任何一项失败会 exit 1
+  node scripts/field-test.ts --self-test      离线自检：隐私 / 多段语音 / 页面 / 报告 / 设备口径，不碰麦克风、不联网
+                                              exit 0 = 全过；有任何一项失败会 exit 1。
+                                              项数会随回归断言增加（已经漂移过一次：24 → 31），所以这里
+                                              **不写死数字**——看它最后一行的「自检结果：N 项通过」。
   node scripts/field-test.ts --acceptance     真机设备验收（麦克风 → 扬声器 → 摄像头），逐项打印通过/失败与下一步，
                                               报告写入 docs/recon/field-test-report-<日期>.md；有失败项时 exit 1
   node scripts/field-test.ts --help           显示这份说明后退出（不启动服务、不占端口）

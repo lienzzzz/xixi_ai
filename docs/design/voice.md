@@ -258,9 +258,12 @@ recon 实测「夹具电平（−24.6 dBFS）下麦克风只比噪声底高 0.8�
 
 **端点延迟这一列的当前实测（`node scripts/verify-voice-noise.ts`，逐条值来自 `clips[].vadEndpointDelayMs`；
 F2 修复后该列**不再恒为 0**）：**
-- **离线与真实 ASR 两次运行给出完全相同的值**（端点延迟只由 VAD + 能量门限决定，与 ASR 无关）：
-  离线 `--fake --tiers 6` 与真实 ASR 都得到 6 dB 档 1056/1376/1472/1088、干净档 728/704/864/704。
-  所以「不花钱也能复核这一列」：`node scripts/verify-voice-noise.ts --fake --tiers 6`。
+- **端点延迟只由 VAD + 能量门限决定，与 ASR 无关**：代码依据是 `scripts/verify-voice-noise.ts`
+  只用到 `speech.endMs` 与 `segmentation.energyEndMs` 两个量（VAD 分段与校准门限），
+  转写结果不参与这个数的计算。因此 **`--fake` 报出的这一列就是真实 ASR 会得到的值**，离线一次即可复核：
+  `node scripts/verify-voice-noise.ts --fake --tiers 6`（6 dB 档 1056/1376/1472/1088）。
+  真实 ASR 的那份报告也留在盘上、可以直接查：`data/voice/verify-voice-noise.json`
+  （`mode: "real-asr"`，`clips[].vadEndpointDelayMs`；同一批夹具逐条值与离线一致）。
 - **与历史网格（`frontend-vad-grid.json`）的差异要说明**：网格记录的 6 dB 档 1056/1376/1088/1472 与当前一致，
   但 3 dB 档网格只有 `direct-question` 一条有效（1088），当前 4 条都有值（104/128/−64/96）；
   0 dB 档网格全为 null，当前 4 条都有值。差异来自 `voice_edge.segment` 在 F2 前后对
@@ -276,7 +279,8 @@ F2 修复后该列**不再恒为 0**）：**
 **可复现的成功边界（写死）**：
 
 > **SNR_inband ≥ 3 dB 时，4 条中文夹具全部检出，平均字符相似度 0.805（≥0.6）。
-> 端点延迟不是这个边界的判据**（3 dB 档只有 1 条能算出端点延迟，值 1088 ms；见上表的逐条值列）。
+> 端点延迟不是这个边界的判据**（3 dB 档 4 条逐条值为 104 / 128 / −64 / 96 ms，最大 128；
+> `frontend-vad-grid.json` 里的 1088 是修复前的历史记录，见上表逐条值列）。
 > 0 dB 时仍能全部检出但转写质量掉到 0.491（个别夹具只吐出一个语气词）；−6 dB 完全不可用。
 
 （`report.boundary.claim` 由脚本自动写入，它只声明「相似度 + 无漏检 + 无超长端点」三件事，
@@ -286,9 +290,9 @@ F2 修复后该列**不再恒为 0**）：**
 三个已知的测量约定：
 - **困难样本不删**：`tests/audio-fixtures/noisy/` 里的 0 dB 与 −6 dB 档全部保留
   （`tests/unit/voice/frontend.test.ts` 有一条测试专门守住「最低 SNR 档必须仍在盘上」）。
-- **端点延迟在噪声下会变晚，而且逐条差异大**：干净档逐条 600/512/512/480 ms（均值 750），
-  6 dB 档逐条 1056/1376/1472/1088 ms（均值 1248、最大 1472），3 dB 档只有 1 条可算（1088 ms）；
-  0 dB 与 −6 dB 档一条都算不出。所以任何「本档端点延迟 = 某个均值」的写法都不成立，
+- **端点延迟在噪声下会变晚，而且逐条差异大**：干净档逐条 728 / 704 / 864 / 704 ms（均值 750），
+  6 dB 档逐条 1056 / 1376 / 1472 / 1088 ms（均值 1248、最大 1472），3 dB 档 4 条逐条为 104 / 128 / −64 / 96 ms（最大 128）；
+  0 dB 档 4 条逐条 72 / −32 / −352 / 64 ms（最大 72），−6 dB 档 0 条（全部漏检）。所以任何「本档端点延迟 = 某个均值」的写法都不成立，
   本文件一律给逐条值（最大）。
 - **端点延迟的口径（F2 修正后）**：判据用的 `vadEndpointDelayMs = speech.endMs − energyEndMs`（**不截断**，
   与 `voice_edge.segment` 的 `segments[].endpointDelayMs`、`frontend-vad-grid.json` 同一定义），
