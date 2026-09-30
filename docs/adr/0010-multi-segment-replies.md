@@ -4,10 +4,12 @@
 - 相关：方案 §12 / §33 / §46.1 / §55、[ADR-0008](0008-realtime-path-direct-mimo.md)、[docs/design/conversation.md](../design/conversation.md)、`config/xixi.example.yaml`
 - 归属：**M5**（本 ADR 定义语义与上限；**引擎侧已按它落地**——订正 2026-09-30：`packages/conversation/src/segments.ts`
   的确定性分段器、`RespondHooks.onSegment` 的逐段播放、以及 `ConversationEngine.respond` 在最后一段播完后才进
-  `LINGERING` 的时序；M1–M9 都有断言。**播放侧尚未接线**：没有任何生产入口传 `onSegment`
-  （核对：`git grep -n "onSegment" -- scripts services apps plugins`，订正时无命中），TTS 仍按整段文本合成
-  （`synthesize(turn.text)`），所以真机上听到的还是一整段。分段器是导出的纯函数，界面层可以直接调用它做
-  「分几段、段间多少 ms」的展示，但那不等于播放已经分段。）
+  `LINGERING` 的时序；M1–M9 都有断言。**播放侧已接了一半**（订正 2026-09-30）：`scripts/chat.ts` 传了
+  `onSegment`，回复在终端里**逐段打印、段间真的等 `gapMs`**；**音频出口仍未接线**——试用页
+  `scripts/serve-chat.ts` 与 `scripts/voice-turn.ts` 都还没传它，TTS 仍按整段文本合成（`synthesize(turn.text)`），
+  所以真机扬声器里听到的还是一整段。核对命令：`git grep -n "onSegment" -- scripts packages`
+  （生产入口只命中 `scripts/chat.ts`，另有引擎与测试）。分段器是导出的纯函数，界面层可以直接调用它做
+  「分几段、段间多少 ms」的展示，但那不等于音频已经分段。）
 
 ## Decision
 
@@ -44,13 +46,15 @@
 - 现状（订正 2026-09-30）：**引擎侧已有**分段上限与段间间隔——`ConversationEngine.respond` 在写完那条 assistant
   记录之后、`fsm.onReplyCompleted()` 之前逐段 await `RespondHooks.onSegment`（时序见
   [`conversation.md`](../design/conversation.md) §5 的 ⑨′ 步），间隔作为播放器参数随每段下发。
-  **播放侧仍未接线**：没有任何生产入口传 `onSegment`（见归属段的核对命令），TTS 仍是 `synthesize(turn.text)`
-  一次合成整段；分段器可以被界面层直接调用来做分段展示，但真机听到的还是一整段。
+  **播放侧只接了文本出口**：`scripts/chat.ts` 传了 `onSegment`（终端逐段打印 + 真等 `gapMs`），
+  但音频出口仍走 `synthesize(turn.text)` 一次合成整段——试用页 `scripts/serve-chat.ts` 与 `scripts/voice-turn.ts`
+  都还没接（核对：`git grep -n "onSegment" -- scripts packages`，见归属段）。
+  分段器可以被界面层直接调用来做分段展示，但真机扬声器里听到的还是一整段。
 - 当初的触发点（本轮实测）：单段长回复在真机上的表现是「一口气说完」，用户插不上话，也更容易被 `[静默]`
   兜底逻辑当成一整段处理。
 - 已发布契约必须保持不变：`conversation.turn.v1` / `conversation.decision.v1` 都是 `additionalProperties: false`，
   所以「多段」**不能**变成「多条轮次事件」，否则 `turn_index`、工作记忆与跟进窗口的语义都会被改掉（铁律 10 也要求新增而非就地改）。
-- 当初的前提（订正 2026-09-30：**这条前提尚未兑现**）：语音侧（ADR-0007/ADR-0008）按段合成与播放只需要一个
+- 当初的前提（订正 2026-09-30：**文本出口已按这条前提接线，音频出口还没兑现**）：语音侧（ADR-0007/ADR-0008）按段合成与播放只需要一个
   播放器参数（段间间隔），不需要新的模型能力——这是把它做成程序契约的前提。实际接线见上一条。
 - 「更自然」的目标不能靠「多段」本身实现：段数没有上限时，一段回复可以被切成十几段，反而更像机器人在刷屏。
   因此上限定为 3 段，并要求 M8 的打断窗口始终存在。
@@ -68,7 +72,8 @@
 - **已落地**（订正 2026-09-30）：一个确定性分段器（纯函数，覆盖 M1/M2/M4/M5 的边界）、`RespondHooks.onSegment`
   的逐段播放（含段间 `gapMs`），以及「一轮只推进一次」的断言（M6/M7/M8）——见
   `tests/unit/core/reply-segments.test.ts` 与 `tests/integration/conversation-engine.test.ts`。
-- **仍需**：把音频出口接到 `onSegment`——目前没有任何生产入口传它（见归属段的核对命令），TTS 仍整段合成。
+- **仍需**：把**音频出口**接到 `onSegment`——`scripts/chat.ts` 已经接了（终端逐段），但试用页
+  `scripts/serve-chat.ts` 与 `scripts/voice-turn.ts` 仍整段合成（核对：`git grep -n "onSegment" -- scripts packages`，见归属段）。
 - **事件契约无需改动**：`conversation.turn` 与 `conversation.decision` 的形状不变，既有审计测试继续成立。
 - `config/xixi.example.yaml` 的 `reply` 段已被读取：`packages/conversation/src/segments.ts` 的 `resolveReplyLimits()`
   只在上限内夹紧，`ConversationEngine` 构造时读入；改本 ADR 的上限或默认值时必须同步改它，否则两边不一致。

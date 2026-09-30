@@ -360,7 +360,7 @@ decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值�
 |---|---|
 | 唤醒词与搭话判定（§13 完整版） | §13 的 **POC 判定规则已实现**（`shouldAcceptTurn`，见 §1）；**唤醒词检测本身无代码**——`addressed` 由 UI 按钮/语料给出（M2） |
 | 主动开口（§15） | **程序侧已落地（t41），内容侧还没有**：`packages/conversation/src/proactive.ts` 的 `ProactiveEngine` 逐条过硬门禁（[ADR-0009](../adr/0009-proactive-triggers-and-hard-gates.md) 的九条）、每次判定落一条 `proactive.decision` 审计、投递「先记后播」（重启不重发同一条），`config` 的 `proactive` 段也已被读取。**缺口**：没有候选生成器、没有常驻的考虑循环调用方（`ProactiveEngine` 目前只有测试在调用），模型侧 `evaluateProactiveCandidate` 仍抛 `NOT_IMPLEMENTED(M5)`——即「该不该说」已由程序判定，「说什么」尚未接线 |
-| 多段回复（一轮说 1~3 段） | **引擎侧已落地（t41）**：`packages/conversation/src/segments.ts` 的确定性分段器 + `RespondHooks.onSegment` 逐段播放 + §5 的 ⑨′ 步，`config` 的 `reply` 段已被读取；契约与可测条款见 §7 与 [ADR-0010](../adr/0010-multi-segment-replies.md)。**缺口**：语音侧尚未接线——`scripts/` 的入口仍只传 `onTextChunk`（核对：`git grep -n "onSegment" -- scripts`，预期无命中），所以真机上目前仍是单段合成 |
+| 多段回复（一轮说 1~3 段） | **引擎侧已落地（t41）**：`packages/conversation/src/segments.ts` 的确定性分段器 + `RespondHooks.onSegment` 逐段播放 + §5 的 ⑨′ 步，`config` 的 `reply` 段已被读取；契约与可测条款见 §7 与 [ADR-0010](../adr/0010-multi-segment-replies.md)。**已接的**：`scripts/chat.ts`（订正 2026-09-30）传 `onSegment`，终端里逐段打印、段间真等 `gapMs`。**未接的**：音频出口——试用页 `scripts/serve-chat.ts` 与 `scripts/voice-turn.ts` 仍只传 `onTextChunk` 并用 `synthesize(turn.text)` 一次合成整段，所以扬声器里目前仍是单段合成（核对：`git grep -n "onSegment" -- scripts packages`，生产入口只命中 `scripts/chat.ts`） |
 | 长期记忆与关系（§10/§18） | 工作记忆只有 `recentTurns(limit 8)`；长期记忆属 M4 |
 | 回溯打断时的语义截断 | 只有 VAD 判定层面的离线测量（`scripts/voice-bargein.ts`） |
 | 提示词与延迟进事件日志 | 刻意不存（铁律 5 的方向：只存事实与 `reason_code`）；接受判定已按同一原则落 `conversation.decision` |
@@ -370,8 +370,10 @@ decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值�
 
 **引擎侧已实现（t41）**：`packages/conversation/src/segments.ts` 的确定性分段器、`RespondHooks.onSegment`
 逐段播放、§5 的 ⑨′ 步与 M1–M9 的断言（`tests/unit/core/reply-segments.test.ts`、
-`tests/integration/conversation-engine.test.ts`）。**语音侧还没接线**——`scripts/` 的入口仍把整段交给
-`onTextChunk` 一次合成，所以真机上的「分段说话」要等语音侧改用 `onSegment` 才会出现（见 §6）。
+`tests/integration/conversation-engine.test.ts`）。**出口侧只接了文本这一路**（订正 2026-09-30）：`scripts/chat.ts`
+已用 `onSegment` 逐段打印、段间真等 `gapMs`；**音频出口还没接线**——试用页 `scripts/serve-chat.ts` 与
+`scripts/voice-turn.ts` 仍把整段交给 `onTextChunk` 一次合成，所以真机扬声器里的「分段说话」要等它们改用
+`onSegment` 才会出现（见 §6；核对：`git grep -n "onSegment" -- scripts packages`）。
 下表同时是契约与现状判据，按 [ADR-0010](../adr/0010-multi-segment-replies.md) 实现。
 
 语义：一次用户轮次最多 **3 段**依次说出（段间留自然停顿），但**仍然只是「一轮」**——

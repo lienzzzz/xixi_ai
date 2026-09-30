@@ -2,13 +2,13 @@
 
 > 最后更新：2026-09-30
 > 权威来源：`tests/**`、`scripts/**`、`package.json` 的脚本；与代码不一致时以代码为准并立即修正本文
-> 当前状态：`npm test` → **全绿**（2026-09-30 实测 **180 项**：unit 124 + integration 30 + perception 11 + console 15；`tests/scenarios/` 是语料模块、`tests/replay/` 仍为空，都不产生用例），**不发起任何网络请求**。
+> 当前状态：`npm test` → **全绿**（2026-09-30 实测 **209 项**：unit 124 + integration 30 + perception 11 + console 44；`tests/scenarios/` 是语料模块、`tests/replay/` 仍为空，都不产生用例），**不发起任何网络请求**。
 > 壁钟：**以实跑为准**（默认门禁的目标是「可用于迭代」，**不写死秒数**，见 [`AGENTS.md` §7](../AGENTS.md)）——数字只当区间看：
-> 同日实测（`npm test` 五次）：空载 **13.6 / 13.9 / 15.9s**，同机有别的成员在跑 **18.2 / 18.6s**。
-> 关键路径曾是 `tests/unit/voice/frontend.test.ts` 的多次 Python + VAD 冷启动（单文件就要 ~21s，全量门禁因此在 27–39s 一带）；
-> **t47 把它改成常驻 Python worker**（单文件 ~9s、全量 ~15s），回退开关是 `XIXI_VAD_ONESHOT=1` / `--no-vad-worker`。
+> 同日实测（`npm test` 五次）：空载 **13.6 / 13.9 / 15.9s**，同机有别的成员在跑 **18.2 / 18.6s**；另一次空载 wall **15.4s**、`ℹ duration_ms 14686`。
+> 关键路径**历史上（t47 之前）**是 `tests/unit/voice/frontend.test.ts` 的多次 Python + VAD 冷启动（单文件就要 ~21s，全量门禁因此在 27–39s 一带）；
+> **t47 的提速来自改 runner**（`scripts/verify-voice-noise.ts` 改用常驻 Python worker；`frontend.test.ts` 一行未改，只是调用变快了）——单文件 ~10s、全量 ~15s，回退开关是 `XIXI_VAD_ONESHOT=1` / `--no-vad-worker`（归属订正见 [`AGENTS.md` §9.9](../AGENTS.md)）。
 > 因此本文早先那句「空载也要 26–30s」「<25s 目标达不到」**已作废**，不要引用（数字与做法见 [`AGENTS.md` §9.9](../AGENTS.md)）。
-> 项数与耗时都会随开发变化（本文上一版写 139 项，此后 t35/t41 等任务陆续加测试，实测已是 180 项）——**一切以 `npm test` 末行为准**：同一时刻别人在加用例，总数就会更高（测量当时工作区里没有他人未提交的测试），本文里的数字都标了实测日期与来源。
+> 项数与耗时都会随开发变化（本文上一版写 139 项、再上一版写 180 项；此后陆续加测试，**控制台一层就从 1 个文件 15 项长到 4 个文件 44 项**，2026-09-30 实测已是 209 项）——**一切以 `npm test` 末行为准**：同一时刻别人在加用例，总数就会更高（测量当时工作区里没有他人未提交的测试），本文里的数字都标了实测日期与来源。
 > 实测结论集中在 [`progress.md` §0](progress.md)：对话质量、语音闭环、打断与结构化输出都有单独脚本与证据。
 > 上游依据：《方案》§51（CI / Regression）、§52（Model Contract Testing）、§22.3（Event Replay）、§33（PoC 指标）。
 > 相关：[`architecture.md`](architecture.md)、[`event-contracts.md`](event-contracts.md)、[`ADR-0006`](adr/0006-runtime-and-dependency-choices.md)、[`ADR-0008`](adr/0008-realtime-path-direct-mimo.md)。
@@ -21,13 +21,13 @@
 | 集成 | `tests/integration/` | BrainAdapter ↔ transport ↔ store、会话引擎、离线重启恢复、主动引擎门禁与重启不重发 | 否 | **4 个文件、30 项**（2026-09-30 实测 `npm run test:integration`） |
 | 场景 | `tests/scenarios/` | 对话语料（8 场景，数据驱动），由 `scripts/eval-conversation.ts` 执行 | 执行时联网 | `corpus.ts`（**不是**空目录，也不产生 `npm test` 用例：它是数据模块） |
 | 回放 | `tests/replay/` | 导出事件区间 → 重放 → 复现决策（§22.3） | 否 | **空**（属 M5） |
-| 控制台 | `tests/console/` | 现场测试控制台的隐私保留策略、多段语音规划、在场回退、报告与错误文案（15 项） | 否 | `field-test-console.test.ts`；**已在 `npm test` 的 glob 里（t16 起）**，也可用 `npm run test:console` 单跑 |
+| 控制台 | `tests/console/` | 现场测试控制台的隐私保留策略、多段语音规划、在场回退、报告与错误文案、主动开口面板与三栏页面（2026-09-30 实测 44 项） | 否 | `field-test-console.test.ts`（15 项）、`proactive-console.test.ts`（12 项）、`proactive-loop.test.ts`（14 项）、`three-column-console.test.ts`（3 项）；**已在 `npm test` 的 glob 里（t16 起）**，也可用 `npm run test:console` 单跑（项数以末行为准） |
 | 感知 | `tests/perception/` | 摄像头在场检测的 TS 契约 + 转发 Python 回归套件（合成场景，不需要真相机，11 项） | 否 | 需要带 cv2 的 venv（`.venvs/field-probe` 或 `.venvs/cv4`，缺了**直接失败**而不是跳过）；也可用 `npm run test:perception` 单跑 |
 | 真实 API 验收 | `scripts/verify-*.ts`、`eval-conversation.ts`、`voice-*.ts` | 真实 MiMo 调用、语音闭环、打断 | **是** | 见下方「新增验证脚本」，**都不在 `npm test` 里** |
 | 真机设备验收 | `scripts/field-test.ts --acceptance` | 麦克风/扬声器/摄像头自检（pycaw + WASAPI 回环 + DSHOW） | 否 | 需要真机；结果写 `docs/recon/field-test-report-<日期>.md` |
 
 全部测试用 Node 内置 `node:test` + `node:assert/strict`，直接执行 `.ts`（无构建步骤，[ADR-0006](adr/0006-runtime-and-dependency-choices.md)）。
-进默认门禁的四层合计 **23 个 `*.test.ts`、180 项**（2026-09-30 实测；文件数：`git ls-files "tests/*/*.test.ts" "tests/**/*.test.ts"`；总数：`npm test` 末行）。
+进默认门禁的四层合计 **26 个 `*.test.ts`、209 项**（2026-09-30 实测：unit 124 + integration 30 + perception 11 + console 44；文件数：`git ls-files "tests/*/*.test.ts" "tests/**/*.test.ts"`；总数：`npm test` 末行）。
 （两条通配同样都要给，理由见上表单元行：`**` 至少要求一层子目录，只给 `**` 会漏掉直接放在层目录下的文件。）
 模型相关测试遵守 §51：验证**结构与行为**（`action` 取值、`toolName` 是否被调用、字段是否落在范围内），
 不做字符串相等断言。
@@ -129,13 +129,13 @@ harness 映射仍在，并把持久化的 harness 会话原样交给 transport�
 ## 3. 怎么跑
 
 ```powershell
-npm test                 # 全部离线测试（unit + integration + perception + console），2026-09-30 实测 139 项全绿
+npm test                 # 全部离线测试（unit + integration + perception + console），2026-09-30 实测 209 项全绿（项数以末行为准）
 npm run test:unit        # 只跑 tests/unit/**
 npm run test:integration # 只跑 tests/integration/**
 npm run test:scenarios   # tests/scenarios/**（语料模块，当前没有 *.test.ts，输出 0 项）
 npm run test:replay      # tests/replay/**（目录仍为空）
 npm run test:perception  # 只跑 tests/perception/**（会转发 Python 感知回归套件，需带 cv2 的 venv）
-npm run test:console     # 只跑 tests/console/**（15 项，已在默认门禁里）
+npm run test:console     # 只跑 tests/console/**（2026-09-30 实测 44 项，已在默认门禁里；项数以末行为准）
 
 node --test "tests/console/**/*.test.ts"   # 等价的单目录跑法（也可用上面的 npm run test:console）
 node --test tests/unit/contracts.test.ts   # 单文件
