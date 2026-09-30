@@ -33,7 +33,7 @@ const OFFSET = 480; // Asia/Shanghai
 // 14:00 local — outside the 22:30–07:00 quiet window, and comfortably inside the day.
 const AFTERNOON = new Date('2026-09-30T14:00:00+08:00');
 
-/** Seven §15.4 components at 1 → score 0.7, above the 0.585 baseline threshold. */
+/** Seven §15.4 components at 1 → score 0.7, above the 0.54 baseline threshold (ADR-0009: default proactivity 0.70). */
 const STRONG: Readonly<Record<string, number>> = {
   event_salience: 1,
   social_value: 1,
@@ -101,7 +101,8 @@ test('the score is the clamped, equal-weighted sum of the §15.4 components', ()
 });
 
 test('the threshold follows proactivity and can never fall below the 0.45 floor', () => {
-  assert.equal(proactiveThreshold(0.55), 0.585, 'the default baseline from config/xixi.example.yaml');
+  // The shipped default is 0.70 (ADR-0009), so the baseline threshold is 0.45 + 0.30 × 0.30 = 0.54.
+  assert.equal(proactiveThreshold(0.7), 0.54, 'the default baseline from config/xixi.example.yaml');
   assert.equal(proactiveThreshold(1), 0.45);
   assert.equal(proactiveThreshold(0), 0.75, 'proactivity 0 → 0.45 + 0.30');
   assert.equal(proactiveThreshold(2), 0.45, 'clamped: proactivity cannot buy a lower gate');
@@ -218,7 +219,8 @@ test('every gate lets a clean candidate through', () => {
   assert.equal(result.pass, true);
   assert.equal(result.reasonCode, 'PASSED');
   assert.equal(result.score, 0.7);
-  assert.equal(result.threshold, 0.585);
+  // `context()` leaves proactivity at DEFAULT_PROACTIVITY (0.70) → 0.45 + 0.30 × 0.30 = 0.54.
+  assert.equal(result.threshold, 0.54);
 });
 
 test('DISABLED and TRIGGER_DISABLED', () => {
