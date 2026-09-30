@@ -226,3 +226,39 @@ OpenAI-style `tools` + `tool_choice:"auto"` produces a correct `tool_calls[0]` w
 - `GET /v1/models` does not exist; the working models route is `/models` (no `/v1`) — worth encoding in the brain-adapter, which by project rule is the only place a MiMo URL may live.
 - Extra/unknown top-level body fields are ignored, so typos in parameters fail silently rather than loudly.
 - **Security:** per the workspace `AGENTS.md` §5, this key has appeared in plaintext in chat and should be treated as leaked and rotated at the Xiaomi console once these probes are done.
+
+---
+
+## 补记（2026-09-30）：`json_schema` 间歇性补白截断 —— 原报告结论需修正
+
+原报告结论 (b) 写的是「`json_schema` 可用，caveat 是 strict 未被证明强制」。
+**实际使用后发现更严重的问题，必须修正该结论**：
+
+**现象**：`response_format: {"type":"json_schema", ...}` 会**间歇性**返回
+「先输出前几个键，然后补大量空白字符（`\t`/空格）直到耗尽 `max_completion_tokens`」的内容，
+`finish_reason: "length"`，JSON 被截断而无法解析。文本长度可达 532 字符，其中绝大部分是空白。
+
+**实测频率**（2026-09-30 本机，同一 schema 与提示词）：
+
+| 变体 | 失败次数 / 尝试次数 |
+|---|---|
+| `strict: true` | 2/3（另一次 1/3，见下） |
+| `strict: false` | 1/3 |
+
+**关键更正**：这不是 `strict` 的问题，而是**这条通道本身不稳定**。
+`strict` 既不能保证形状（实测模型会自造键名，如返回 `{score, critique}` 而不是要求的
+`{naturalness, coherence, in_character, problems}`），也不能保证可解析。
+
+**已实施的对策**（`packages/model-adapters/src/mimo.ts` 的 `MimoClient.chatJson`）：
+
+1. 先走 `json_schema(strict:false)`；
+2. 解析失败**或本地 schema 校验失败**时，回退到 `json_object`，并把 **必填键名清单**与 schema
+   一并写进提示词（只给 schema 时模型会自造键名），同时把 temperature 降到 ≤0.2；
+3. 两次都失败才抛 `ModelError('INVALID_RESPONSE')`，异常里带完整失败原因。
+
+**验收**：`npm run verify:structured-output` 连续 3 次调用全部可用（其中 2 次走到 `json_object` 回退），
+脚本同时把原始通道的缺陷当作**金丝雀**长期监测（连续 3 次正常才提示「可能已修复」）。
+最后一次运行：3/3 成功、1 次回退。
+
+**对项目的硬性结论**：**任何结构化输出都必须本地校验**（方案 §52/§53）。
+provider 的 `strict` 永远不能当作契约；`@xixi/contracts` 的 fail-closed 校验器是唯一的 gate。

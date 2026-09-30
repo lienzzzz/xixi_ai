@@ -1,7 +1,7 @@
 # ADR-0007：语音侧选 Pipecat，且唤醒/搭话/电视判别必须由我们自己判断
 
 - 状态：已接受（2026-09-29）
-- 相关：[docs/recon/pipecat-spike-2026-09-29.md](recon/pipecat-spike-2026-09-29.md)、[docs/recon/livekit-spike-2026-09-29.md](recon/livekit-spike-2026-09-29.md)、[docs/recon/mimo-api-probe-2026-09-29.md](recon/mimo-api-probe-2026-09-29.md)、[ADR-0002](adr/0002-mimo-through-dsh-pi-ai.md)
+- 相关：[Pipecat 选型实测](../recon/pipecat-spike-2026-09-29.md)、[LiveKit 对照实测](../recon/livekit-spike-2026-09-29.md)、[MiMo API 探测](../recon/mimo-api-probe-2026-09-29.md)、[ADR-0002](0002-mimo-through-dsh-pi-ai.md)、[进程与依赖选择](0006-runtime-and-dependency-choices.md)
 
 ## Decision
 

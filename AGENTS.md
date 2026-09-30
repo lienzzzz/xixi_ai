@@ -25,9 +25,11 @@
 
 ## 2. 工作方式
 
-- 先读 `docs/architecture.md` 与 `docs/progress.md`，再改接口或产品范围。
+- **接手顺序**：[`docs/README.md`](docs/README.md)（文档地图与权威性排序）→ [`docs/handoff.md`](docs/handoff.md)（现状、自证、坑、下一步）→ 再动接口或产品范围。
 - 每个可独立理解的步骤完成后，**立刻**把决策、已验证结果、下一步和已知问题写进 [`docs/progress.md`](docs/progress.md)。不要只留在对话里。
 - 关键设计决策写 ADR（`docs/adr/`），半年后的 Agent 不应推翻已验证的设计。
+- **文档与代码同步是硬要求**：改完代码按 [`docs/README.md` §3 更新触发条件](docs/README.md) 检查需要更新的文件；
+  文档只写代码里真实存在的东西，区分「设计意图」与「当前实现」，实测结论必须带数字与出处。
 - 测试必须先于集成；模型相关测试验证**结构与行为**，不是字符串相等。
 - 真实 API 测试不放进每次全量测试：离线测试默认跑，联网验证用 `npm run verify:*` 手动/夜间执行。
 
@@ -95,9 +97,10 @@ npm run voice:turn -- --wav tests/audio-fixtures/direct-question.wav
 npm run voice:turn -- --wav tests/audio-fixtures/direct-question.wav --wav tests/audio-fixtures/followup-turn.wav
 npm run voice:bargein          # §14.2 打断的离线测量（纯本地，不花 API 费用）
 
-# 调试
+# 调试与文档
 npm run turns -- data/chat/xixi.sqlite 6   # 看事件日志里的最近轮次（含 tool_name）
 node scripts/probe-tools.ts                # 诊断实时工具路径
+npm run check:docs                         # 文档一致性检查（链接/文件引用/新鲜度），提交前应跑
 ```
 
 语音侧（隔离 venv，勿用系统 Python 3.14）：

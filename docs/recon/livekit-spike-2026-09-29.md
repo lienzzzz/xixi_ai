@@ -1,11 +1,11 @@
 # LiveKit Agents 1.8.3 离线实测笔记（中文语音陪伴 PoC）
 
-产物：[RESULT.json](.spike/livekit/RESULT.json)（机器可读）；原始数据 [vad_raw.json](.spike/livekit/vad_raw.json)、
-[turn_detector_raw.json](.spike/livekit/turn_detector_raw.json)、[interruption_raw.json](.spike/livekit/interruption_raw.json)、
-[perf_raw.json](.spike/livekit/perf_raw.json)；脚本 [measure_vad.py](.spike/livekit/measure_vad.py)、
-[measure_turn_detector.py](.spike/livekit/measure_turn_detector.py)、[measure_interruption.py](.spike/livekit/measure_interruption.py)、
-[measure_perf.py](.spike/livekit/measure_perf.py)、[build_result.py](.spike/livekit/build_result.py)。
-全部写在 `E:\worker2\.spike\livekit\`，未改仓库其它文件，未用任何 API key，未装/升级依赖。
+机器可读结果已归档为 [`RESULT.json`](livekit-spike-2026-09-29.json)。
+原始逐次数据（`vad_raw.json`、`turn_detector_raw.json`、`interruption_raw.json`、`perf_raw.json`）与测量脚本
+（`measure_vad.py`、`measure_turn_detector.py`、`measure_interruption.py`、`measure_perf.py`）当时写在临时目录
+`.spike/livekit/`，**该目录已清理**（`.spike/` 在 `.gitignore` 中，属于一次性工作区）。
+关键数字与结论都保留在本笔记与 `RESULT.json` 中；需要重跑时按下面「方法」小节复现。
+本次测量未改仓库其它文件，未使用任何 API key，未安装/升级依赖。
 
 ## 方法
 - VAD：`silero.VAD.load()` 默认参数 → **16000 Hz / 512 样本（32 ms）**。夹具 24 kHz，先用库自带

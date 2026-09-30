@@ -34,12 +34,18 @@ npm install                                   # workspace 链接 + js-yaml + dsh
 node scripts/install-dsh-profile.ts           # 装项目内 DSH profile（.dsh/），幂等
 Copy-Item .env.example .env                   # 填入 MIMO_API_KEY（.env 已被 gitignore）
 
-npm test                                      # 全部离线测试，不花 API 费用
+npm run web                                   # 👉 http://127.0.0.1:8791 浏览器里对话（含按住🎤语音输入）
+npm test                                      # 全部离线测试，63 项，不花 API 费用
+npm run chat                                  # 终端对话（直连 MiMo 实时路径）
 npm run demo:m0:text                          # 离线单轮演示（FakeBrainAdapter）
-npm run demo:m0:restart                       # 离线两进程重启演示
+npm run voice:turn -- --wav tests/audio-fixtures/direct-question.wav   # 语音闭环
+npm run voice:bargein                         # 打断判定延迟（纯本地）
 npm run verify:provider                       # 一次真实调用：验证 MiMo 路由与工具调用
 npm run verify:m0                             # M0 验收：真实两进程重启恢复
+npm run eval:conversation:judge                # 对话质量评测（含评审模型）
 ```
+
+**第一次接手请读** [`docs/README.md`](docs/README.md)（文档地图）与 [`docs/handoff.md`](docs/handoff.md)（现状、自证、坑、下一步）。
 
 需要外网时可能要走代理：`$env:HTTPS_PROXY='http://127.0.0.1:7890'`、`$env:NODE_USE_ENV_PROXY='1'`。
 

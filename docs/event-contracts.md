@@ -1,8 +1,10 @@
 # 事件契约（`xixi.event.v1`）
 
-> 权威实现：[`packages/contracts`](../packages/contracts)。本文描述**已经实现并被测试覆盖**的规则。
+> 最后更新：2026-09-30
+> 权威来源：[`packages/contracts`](../packages/contracts)（schema 文件 + `src/*.ts`）；若与代码不一致，以代码为准并立即修正本文
+> 本文描述**已经实现并被测试覆盖**的规则，不是设计意图。
 > 上游依据：《方案》§23.2（统一 Envelope）、§19.1（Actor）、§47.3（Schema Version）、§55（沉默是一等输出）。
-> 相关：[`architecture.md`](architecture.md)、[`ADR-0003`](adr/0003-raw-events-vs-memory.md)、[`ADR-0004`](adr/0004-in-process-event-bus-for-poc.md)。
+> 相关：[`README.md`](README.md)（文档地图）、[`architecture.md`](architecture.md)、[`design/domain-model.md`](design/domain-model.md)、[`ADR-0003`](adr/0003-raw-events-vs-memory.md)、[`ADR-0004`](adr/0004-in-process-event-bus-for-poc.md)。
 
 ## 1. 信封（Envelope）
 
@@ -172,3 +174,15 @@ payload_json TEXT NOT NULL                   -- payload 原样序列化
 
 写路径全部发生在事务里（`BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`），
 所以「追加事件」与「更新 `conversation_sessions` 投影」不可能一半成功一半失败。
+
+---
+
+## 维护规则
+
+| 改动 | 必须同步 |
+|---|---|
+| 新增/修改 `packages/contracts/schemas/**` | 本文 §1~§4 的字段表、[`design/domain-model.md`](design/domain-model.md) 的事件小节，并把注册表与新 schema 一起更新（`src/events.ts`） |
+| 新增事件类型 | 本文 §1 的「三个类型」计数与类型清单、信封 enum、`registry…stay in sync` 漂移测试、`design/domain-model.md` |
+| 修改 `SCHEMA_VERSION` | 本文 §3、[`design/domain-model.md`](design/domain-model.md)，并新增版本化 schema 文件（**绝不原地改已发布文件**） |
+| 修改 `events` 表结构 | 本文 §7（存储与查询）、新迁移文件、[`design/domain-model.md`](design/domain-model.md) |
+| 修改 `appendEvent` / `readEvents` / `recentTurns` 行为 | 本文 §7、[`design/domain-model.md`](design/domain-model.md) |

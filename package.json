@@ -23,6 +23,7 @@
     "demo:m0:restart": "node scripts/demo-m0-restart.ts",
     "verify:provider": "node scripts/verify-provider-route.ts",
     "verify:structured-output": "node scripts/verify-structured-output.ts",
+    "check:docs": "node scripts/check-docs.ts",
     "eval:conversation": "node scripts/eval-conversation.ts",
     "eval:conversation:judge": "node scripts/eval-conversation.ts --judge",
     "voice:turn": "node scripts/voice-turn.ts",

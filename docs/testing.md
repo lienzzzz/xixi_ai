@@ -1,6 +1,8 @@
 # 测试
 
-> 当前状态（2026-09-30 复核）：`npm test` → **63 项全绿**，耗时 <1s，**不发起任何网络请求**。
+> 最后更新：2026-09-30
+> 权威来源：`tests/**`、`scripts/**`、`package.json` 的脚本；与代码不一致时以代码为准并立即修正本文
+> 当前状态：`npm test` → **63 项全绿**，耗时 <1s，**不发起任何网络请求**。
 > 实测结论集中在 [`progress.md` §0](progress.md)：对话质量、语音闭环、打断与结构化输出都有单独脚本与证据。
 > 上游依据：《方案》§51（CI / Regression）、§52（Model Contract Testing）、§22.3（Event Replay）、§33（PoC 指标）。
 > 相关：[`architecture.md`](architecture.md)、[`event-contracts.md`](event-contracts.md)、[`ADR-0006`](adr/0006-runtime-and-dependency-choices.md)、[`ADR-0008`](adr/0008-realtime-path-direct-mimo.md)。
@@ -192,6 +194,10 @@ manual audio hardware tests 三档；`AGENTS.md` 第 2 节也要求「联网验�
 | `npm run voice:bargein` | 0 | 打断判定延迟；写出被截断的播放音频作为证据 |
 | `npm run verify:structured-output` | 3~4 次 | 结构化输出契约 + MiMo 缺陷金丝雀 |
 | `npm run chat` / `--fake` / `--dsh` | 每次一轮 | 交互式验证；`--fake` 完全离线 |
+| `npm run web` / `npm run web -- --dsh` | 每次一轮 | 浏览器试用页（http://127.0.0.1:8791）；`--dsh` 切到 Harness 路径 |
+| `POST /api/voice`（试用页的🎤） | ASR + 一轮 | 浏览器采集 → VAD 只取语音段 → ASR → 对话 → TTS；无语音时返回 `NO_SPEECH_DETECTED` 而不是假装听懂 |
+| `scripts/voice-device-check.ts` | ASR + 一轮 | 设备验收：对回环录音跑全链路并与原文比对字符级相似度（≥0.5 判 PASS） |
+| `python -m voice_edge.loopback` | 0 | 扬声器播放 + 麦克风录回；`verdict` 为 `silent-capture` 即麦克风没有信号 |
 | `npm run turns -- data/chat/xixi.sqlite 6` | 0 | 直接查事件日志里的最近轮次（含 `tool_name` 审计） |
 | `node scripts/probe-tools.ts` | 2 次 | 诊断「模型有没有请求工具、适配器有没有真的执行」 |
 
