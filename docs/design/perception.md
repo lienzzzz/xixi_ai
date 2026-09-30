@@ -191,8 +191,9 @@ TypeScript 侧再用权威的 `validateEvent()` 复核一遍（`tests/perception
 - 控制台**只保留最新一帧**（旧帧直接丢弃），所以开着很久也不涨内存。
 - 「0 个图像文件」这类结论必须写清扫描范围。`scripts/verify-camera-presence.ts --live`
   会打印它真走过的四处：数据库所在目录、仓库 `data/`、`services/perception-edge/`、
-  系统临时目录（临时目录只算本次运行前后新建/改动的文件，否则别人的截图会误伤）。
-  更早的版本只扫了数据库所在目录，措辞却是「磁盘上的图像文件 0 个」——范围与结论不匹配。
+  系统临时目录。四处都只算**本次运行开始之后**新建或改动的文件（实现：`mtime >= ` 子进程启动前取的
+  运行开始时刻，`imageBaselineAtMs`），所以仓库里原有的图像（YuNet 自查图、T0 勘测抓帧）与别人的
+  截图都不会误报。更早的版本只扫了数据库所在目录，措辞却是「磁盘上的图像文件 0 个」——范围与结论不匹配。
 - **停用：被我们杀掉的子进程在 Windows 上返回 exit 1**（没有信号标记）。这是「主动停的」，
   不是失败；调用方（控制台、`verify-camera-presence.ts --live`）必须按正常停止处理，否则停用会被
   误报成验收失败。参见 `services/perception-edge/perception_edge/run.py` 的模块注释。

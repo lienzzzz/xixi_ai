@@ -3347,16 +3347,22 @@ export interface LiveCameraRunner {
 }
 
 /**
- * The privacy sentence both pages show for the live picture (t78, reworded in t81).
+ * The privacy sentence both pages show for the live picture (t78, reworded in t81, de-markdowned
+ * in t86).
  *
  * It has to be exact in both directions: **no image is saved** (a frame only ever travels through
  * memory and localhost) — *and* the presence events are still written to the local store, because
  * events are the product and the picture is only how you get to look at the camera. The first
  * version said 「不落盘」 without qualifying it, which read as "nothing is written at all".
+ *
+ * It is plain text on purpose (t86): the same string goes into the page **and** into the JSON of
+ * `/api/field/live`, so it must not contain markdown — `**…**` used to show up literally in the
+ * browser. Where emphasis is wanted, the *page* adds its own `<b>` tags around its own sentence
+ * (see the privacy card); this constant stays readable in both places.
  */
 export const LIVE_PRIVACY_NOTE =
   '摄像头画面不保存图像：每一帧只在内存里编码、经 localhost 发给这个页面，不产生图像文件、不上传；' +
-  '但**在场事件（presence.changed）与 world_state 投影照常写进本地库**——事件才是产品，画面只是给你看的。关掉「启用」后子进程一起退出。';
+  '但在场事件（presence.changed）与 world_state 投影照常写进本地库——事件才是产品，画面只是给你看的。关掉「启用」后子进程一起退出。';
 
 /**
  * The live camera process + the最新一帧 it produced (t78).
@@ -4459,8 +4465,8 @@ export const XIXI_DB_ENTRIES: readonly { readonly entry: string; readonly comman
  * moving bubbles that the audio is segmented too.
  */
 export const SEGMENT_TTS_NOTE =
-  '多段回复（ADR-0010）：文字与播放计划**真的按段**（每段之间停 450ms，页面逐条出现）。' +
-  '但**语音合成（TTS）目前仍是整条回复一次合成**，所以听感上暂时听不到段间停顿——按段合成属于下一步（M5）。';
+  '多段回复（ADR-0010）：文字与播放计划真的按段（每段之间停 450ms，页面逐条出现）。' +
+  '但语音合成（TTS）目前仍是整条回复一次合成，所以听感上暂时听不到段间停顿——按段合成属于下一步（M5）。';
 
 /** The 「本页用哪个库」block, shared by both pages. `currentDir` is the running page's own path. */
 export function databaseNoteHtml(currentDir: string): string {
