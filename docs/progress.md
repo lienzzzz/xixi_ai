@@ -186,7 +186,7 @@ compat: { thinkingFormat: deepseek, requiresReasoningContentOnAssistantMessages:
 `packages/brain-adapter/src/tools.ts` + `packages/model-adapters/src/weather.ts`：
 - `xixi_get_current_time`（L0）、`xixi_get_weather`（L1，Open-Meteo，**无需密钥**，30 分钟缓存，中文天气描述）。
 - 适配器内的工具循环：模型请求工具 → **程序**执行 → 结果回灌 → 模型再回答；未知工具名是「拒绝」而不是崩溃；最多 2 轮。
-- 实测关键点：MiMo 会**同时**返回一句开场白和 `tool_calls`（「明天成都的天气我帮你查一下。」+ 工具调用），
+- 实测关键点：MiMo 会**同时**返回一句开场白和 `tool_calls`（「明天本市的天气我帮你查一下。」+ 工具调用），
   因此「有文本」不能当作「已经回答」——这正是本轮修掉的一个真 bug（否则工具永远不执行）。
 - 实测结果：回答使用真实预报（19~25℃、降雨概率 8%），不再是凭记忆编造。
 - 未做：`tool_choice` 无法强制调用（MiMo 只支持 auto），所以工具只能靠提示词驱动 + 自行校验。

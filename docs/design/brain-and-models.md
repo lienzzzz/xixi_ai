@@ -71,7 +71,7 @@ resume 的两个硬约束（相同 cwd、相同 profile）在 `CliDshTransport` 
    于是**最后一轮没有工具可选**，模型必须给答案。
 2. 循环 `for (let round = 1; ; round += 1)`；收到完整一轮后，若 `tools === undefined || completed.toolCalls.length === 0` 就 break。
 3. 关键事实（实测，progress §2.10）：**MiMo 会同时返回一句开场白和 `tool_calls`**
-   （「明天成都的天气我帮你查一下。」+ `xixi_get_weather`）。所以代码里把「这一轮有文本」只当作候选开场白
+   （「明天本市的天气我帮你查一下。」+ `xixi_get_weather`）。所以代码里把「这一轮有文本」只当作候选开场白
    （`if (roundText.trim().length > 0) latestText = roundText`），**只有「没有 `tool_calls`」才算已回答**。
    若不这样判定，工具永远不会被执行——这是本轮修掉的一个真 bug。
 4. 工具执行由**程序**负责：`#executeTool` 在本地注册表里查找并 `await tool.execute(args, {timezone, now})`，
