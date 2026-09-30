@@ -71,7 +71,14 @@ function makeLoop(options: {
     readSettings: () => settings,
     readState: () => options.state ?? 'IDLE',
     readProactivity: () => 0.7,
-    readPresence: async () => ({ present: options.present ?? null, updatedAt: null, source: 'test' }),
+    // t98: a presence reading only counts when it is *fresh*, so the fixture carries a timestamp
+    // (5 s ago) and a TTL — a bare `present: true` is exactly the bug the freshness check blocks.
+    readPresence: async () => ({
+      present: options.present ?? null,
+      updatedAt: new Date(options.now.getTime() - 5_000).toISOString(),
+      ttlSeconds: 60,
+      source: 'test',
+    }),
     readLastUserTurnAt: () => options.lastUserTurnAt ?? null,
     readSessionId: () => options.sessionId ?? null,
     synthesize: options.synthesize,
@@ -312,9 +319,10 @@ test('candidates come from facts, and only from facts', () => {
   const midday = new Date(2026, 8, 30, 12, 5, 0);
 
   // Present now + nothing said for an hour + just after the 12:30 hook → all three sources.
+  // The presence reading is fresh (5 s old) because t98 requires that before 「有人到达」 counts.
   const rich = buildProactiveCandidates({
     now: new Date(2026, 8, 30, 12, 35, 0),
-    presence: { present: true, updatedAt: '2026-09-30T04:30:00.000Z' },
+    presence: { present: true, updatedAt: new Date(2026, 8, 30, 12, 34, 55).toISOString(), ttlSeconds: 60 },
     lastUserTurnAt: new Date(2026, 8, 30, 11, 0, 0),
     inConversation: false,
     random: () => 1, // 「随机闲聊」 is chance-based; this test is about the factual three

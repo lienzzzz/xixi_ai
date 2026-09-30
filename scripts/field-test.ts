@@ -73,7 +73,7 @@ import {
   type ConversationState,
 } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
-import { openXixiStore, type XixiConfig, type StoredEvent, type XixiStore } from '@xixi/domain';
+import { DEFAULT_PRESENCE_TTL_SECONDS, openXixiStore, type XixiConfig, type StoredEvent, type XixiStore } from '@xixi/domain';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
 import { concatWav, readWav, readWavInfo, sliceWav } from './lib/wav.ts';
@@ -1936,6 +1936,8 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   let ttsOn = ttsEnabled;
   const loopSynthesizeProvider = (): ((text: string) => Promise<Buffer>) | undefined =>
     ttsOn && client.hasKey ? async (text: string): Promise<Buffer> => await client.synthesize(text) : undefined;
+  /** The last presence reading's freshness (t98) — the page shows *why* 「有人到达」 is missing. */
+  let lastPresenceFreshness: ReturnType<typeof presenceFreshness> | null = null;
   const proactiveLoop = new ProactiveLoop({
     store,
     readSettings: () => proactiveSnapshot.settings,
@@ -1944,7 +1946,11 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
     readProactivity: () => effectiveProactivity(store.selfProfile()),
     readPresence: async () => {
       const view = await readPresence({ store: getPresenceStore() });
-      return view === null ? null : { present: view.present, updatedAt: view.updatedAt, source: view.source };
+      // `stale`/`ttlSeconds` travel with the reading: without them a leftover `present: true` row
+      // would look like someone walking in (t98).
+      const reading = view === null ? null : { present: view.present, updatedAt: view.updatedAt, source: view.source, stale: view.stale, ttlSeconds: view.ttlSeconds };
+      lastPresenceFreshness = presenceFreshness(reading, new Date());
+      return reading;
     },
     readLastUserTurnAt: () => lastUserTurnAt(store, session.sessionId),
     readRecentUserTopics: () => recentUserTopics(store, session.sessionId),
@@ -2012,6 +2018,8 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       entries: since.entries,
       minIntervalMs: MIN_LOOP_INTERVAL_MS,
       defaultIntervalMs: DEFAULT_LOOP_INTERVAL_MS,
+      // t98: whether 「有人到达」 is even possible right now, and why not when it is not.
+      presence: lastPresenceFreshness === null ? null : { ...lastPresenceFreshness },
       tts: {
         available: loopSynthesizeProvider() !== undefined,
         note:
@@ -4107,6 +4115,53 @@ export const PROACTIVE_OFFLINE_LINES: Readonly<Record<ProactiveTrigger, readonly
 /** How often 「随机闲聊」 fires when the scheduler asks (it is off in the config by default). */
 export const PROACTIVE_RANDOM_SMALLTALK_CHANCE = 0.15;
 
+/**
+ * Is this presence reading fresh enough to mean 「有人**刚**到家」 (t98)?
+ *
+ * The bug this replaces: a `present: true` row left in `world_state` long after the person left
+ * (the camera child had been stopped, or the row's TTL had simply run out) still produced a
+ * `presence_arrived` candidate, so 西西 greeted an empty room. A projection is a *statement with
+ * an expiry date*, not a fact about now — so the candidate is only built when we can prove it is
+ * still valid:
+ *
+ *   1. `present === true` — otherwise there is nothing to say;
+ *   2. the projection's own `stale` flag is not `true` (the reader already computed the age);
+ *   3. `updatedAt` parses — without a timestamp, "just arrived" cannot be proven at all;
+ *   4. the age is **within the TTL** (`updatedAt + ttlSeconds >= now`,边界含相等). A missing TTL
+ *      falls back to the domain default (`DEFAULT_PRESENCE_TTL_SECONDS`, 60 s) rather than to
+ *      "trust it forever" — `scripts/serve-chat.ts` reads presence without passing a TTL, and that
+ *      path must stay correct too.
+ */
+export function presenceFreshness(
+  presence: ProactiveCandidateContext['presence'],
+  now: Date,
+): { readonly fresh: boolean; readonly reason: string; readonly ageSeconds: number | null; readonly ttlSeconds: number } {
+  const ttlSeconds =
+    presence !== null && typeof presence.ttlSeconds === 'number' && Number.isFinite(presence.ttlSeconds) && presence.ttlSeconds >= 0
+      ? // A TTL that is *given* is used as given — including 0, which means "this statement has
+        // already expired". Only a missing/unusable TTL falls back to the domain default.
+        presence.ttlSeconds
+      : DEFAULT_PRESENCE_TTL_SECONDS;
+  if (presence === null) return { fresh: false, reason: '库里还没有在场投影', ageSeconds: null, ttlSeconds };
+  if (presence.present !== true) return { fresh: false, reason: `在场投影说 present=${String(presence.present)}`, ageSeconds: null, ttlSeconds };
+  if (presence.stale === true) {
+    return { fresh: false, reason: `在场投影已被标为过期（T ${ttlSeconds}s）`, ageSeconds: null, ttlSeconds };
+  }
+  if (presence.updatedAt === null || presence.updatedAt === undefined) {
+    return { fresh: false, reason: '在场投影没有更新时间，无法证明「刚到家」', ageSeconds: null, ttlSeconds };
+  }
+  const updatedAt = new Date(presence.updatedAt);
+  if (Number.isNaN(updatedAt.getTime())) {
+    return { fresh: false, reason: `在场投影的更新时间读不出来（${presence.updatedAt}）`, ageSeconds: null, ttlSeconds };
+  }
+  const ageMs = now.getTime() - updatedAt.getTime();
+  const ageSeconds = Math.round(ageMs / 1000);
+  if (ageMs > ttlSeconds * 1000) {
+    return { fresh: false, reason: `在场投影已过期：${ageSeconds}s 前更新，TTL 只有 ${ttlSeconds}s`, ageSeconds, ttlSeconds };
+  }
+  return { fresh: true, reason: `${ageSeconds}s 前更新，在 ${ttlSeconds}s 的 TTL 内`, ageSeconds, ttlSeconds };
+}
+
 export interface ProactiveCandidatePlan {
   readonly candidate: ProactiveCandidate;
   /** The sentence the candidate would speak (factual, checkable against the log/clock). */
@@ -4120,8 +4175,20 @@ export interface ProactiveCandidatePlan {
 
 export interface ProactiveCandidateContext {
   readonly now: Date;
-  /** Presence projection (M6). `present === true` is what 「有人到家」 needs. */
-  readonly presence: { readonly present: boolean | null; readonly updatedAt: string | null; readonly source?: string | null } | null;
+  /**
+   * Presence projection (M6). `present === true` is what 「有人到家」 needs — and it must be
+   * **fresh** (t98): `presenceFreshness` checks the projection's own `stale` flag and its TTL
+   * *before* a `presence_arrived` candidate is built at all.
+   */
+  readonly presence: {
+    readonly present: boolean | null;
+    readonly updatedAt: string | null;
+    readonly source?: string | null;
+    /** `true` when the reader already decided this row is past its TTL. */
+    readonly stale?: boolean | null;
+    /** The row's TTL; when omitted the domain default (60 s) is assumed. */
+    readonly ttlSeconds?: number | null;
+  } | null;
   /** When the last user turn happened (from the event log); `null` = this store has no turns. */
   readonly lastUserTurnAt: Date | null;
   /** True when a conversation is open right now (the engine blocks it anyway; this only orders). */
@@ -4148,14 +4215,17 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
   const minutes = context.now.getHours() * 60 + context.now.getMinutes();
   const limit = context.limit ?? 3;
 
-  // 1. presence_arrived — the projection says someone is home.
-  if (context.presence?.present === true) {
+  // 1. presence_arrived — the projection says someone is home **and the projection is still fresh**
+  // (t98: a row left over from when the camera stopped used to greet an empty room).
+  const presence = context.presence ?? null;
+  const freshness = presenceFreshness(presence, context.now);
+  if (freshness.fresh) {
     plans.push(
       planFor(
         'presence_arrived',
         `${day}-presence`,
         pickOfflineLine('presence_arrived', context),
-        `在场投影：present=true（更新于 ${context.presence.updatedAt ?? '—'}）`,
+        `在场投影：present=true（${freshness.reason}；更新于 ${presence?.updatedAt ?? '—'}）`,
         // A greeting right after someone walks in is a strong candidate on every axis — and the
         // numbers are the §15.4 ones, not a thumb on the scale to sneak past the threshold.
         {
@@ -5155,10 +5225,15 @@ function pxLoopStatus(payload) {
   var node = document.getElementById(PX.ids.loopStatus);
   var box = document.getElementById(PX.ids.loopEnabled);
   if (box) box.checked = payload.status.running === true;
+  // t98: 为什么没跟你打招呼 —— 在场投影不能当「有人到达」用时要说清原因。
+  var presenceNote = payload.presence && payload.presence.fresh !== true
+    ? '｜在场投影这次不能当「有人到达」用：' + payload.presence.reason
+    : '';
   if (node) {
     node.textContent = (payload.status.running ? '运行中' : '已停止')
       + '（间隔 ' + Math.round(payload.status.intervalMs / 1000) + 's，已考虑 ' + payload.status.ticks + ' 次）'
-      + '｜' + (payload.tts && payload.tts.available ? '会真的发声' : '只显示文字：' + ((payload.tts && payload.tts.note) || ''));
+      + '｜' + (payload.tts && payload.tts.available ? '会真的发声' : '只显示文字：' + ((payload.tts && payload.tts.note) || ''))
+      + presenceNote;
   }
 }
 
