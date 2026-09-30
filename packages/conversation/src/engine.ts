@@ -84,6 +84,12 @@ export interface RespondHooks {
    * streaming passes `onTextChunk`.
    */
   readonly onSegment?: (segment: ReplySegmentPlayback) => void | Promise<void>;
+  /**
+   * t111: a structured, non-spoken note about what the engine had to change (today: an unverified
+   * concrete claim was replaced). Never fed to TTS — it exists so the caller can audit the turn
+   * instead of guessing why the reply differs from the model's raw text.
+   */
+  readonly onNotice?: (notice: { readonly code: string; readonly detail: string }) => void | Promise<void>;
 }
 
 export interface ConversationTurn {
@@ -315,6 +321,26 @@ export class ConversationEngine {
     });
   }
 
+  /**
+   * t111: the deterministic backstop for a caller that composes a line **outside** `respond()` —
+   * today the console's proactive delivery seam, which builds its own prompt and calls the adapter
+   * directly. The rule is the same as inside `respond()`: a concrete claim that only a lookup can
+   * produce may not be spoken unless a tool actually ran in that turn.
+   *
+   * Returns the text to speak (`text`), whether it had to be replaced (`ok === false`) and the
+   * offending substrings for the audit note. Callers must not throw the claims away silently:
+   * 「说了具体数值却没有查」 should always be visible somewhere.
+   */
+  screenUnbackedFacts(
+    text: string,
+    toolName: string | null,
+  ): { readonly ok: boolean; readonly text: string; readonly claims: readonly UnbackedFactClaim[] } {
+    if (toolName !== null) return { ok: true, text, claims: [] };
+    const claims = findUnbackedFactClaims(text);
+    if (claims.length === 0) return { ok: true, text, claims: [] };
+    return { ok: false, text: UNBACKED_FACT_REPLY, claims };
+  }
+
   async respond(input: RespondInput, hooks: RespondHooks = {}): Promise<ConversationTurn> {
     const at = input.at ?? this.#clock();
     // `#advance(at)` re-reads the personality (which scales the follow-up window)
@@ -401,7 +427,24 @@ export class ConversationEngine {
       // same way — only the handoff is skipped.
       let held = '';
       let suppressed = false;
+      /** t111: did any tool actually run in this turn? Only then may a lookup-only claim stand. */
+      let toolRan = false;
+      /**
+       * t111: text holding a concrete claim that only a lookup can know is kept back until this turn
+       * proves it (a `tool` chunk arrives) or ends (then it is replaced below). Once holding starts,
+       * everything after it is held too — otherwise the next sentence would be spoken before it.
+       * The segment path never streams, so it only needs the end-of-turn decision.
+       */
+      let heldFacts = '';
       for await (const chunk of stream) {
+        if (chunk.type === 'tool') {
+          toolRan = true;
+          if (heldFacts.length > 0 && !suppressed) {
+            if (!playSegments) await hooks.onTextChunk?.(heldFacts);
+            heldFacts = '';
+          }
+          continue;
+        }
         if (chunk.type !== 'text') continue;
         if (firstChunkAt === null) firstChunkAt = Date.now();
         if (suppressed) continue;
@@ -414,18 +457,45 @@ export class ConversationEngine {
           }
           continue;
         }
+        if (heldFacts.length > 0 || (!toolRan && findUnbackedFactClaims(held).length > 0)) {
+          heldFacts += held;
+          held = '';
+          continue;
+        }
         if (!playSegments) await hooks.onTextChunk?.(held);
         held = '';
       }
       if (!playSegments && !suppressed && held.length > 0) await hooks.onTextChunk?.(held);
       const result = await stream.result;
 
+      // t111 (the「成都阴天 19 到 25 度」bug): the model asserted something only a lookup can know
+      // and never called the tool. 铁律 1/3 put this boundary in the program, not in the prompt: the
+      // claim must not reach audio, the transcript, or working memory. She says she is not sure
+      // instead, and the caller gets a notice with the offending text for the audit trail.
+      const unbackedClaims = toolRan ? [] : findUnbackedFactClaims(result.text ?? '');
+      let replyText = result.text;
+      if (unbackedClaims.length > 0) {
+        replyText = UNBACKED_FACT_REPLY;
+        heldFacts = '';
+        await hooks.onNotice?.({
+          code: 'UNBACKED_FACT_CLAIM',
+          detail: `未调用工具却给出可核查事实：${unbackedClaims.map((claim) => claim.match).join('、')}`,
+        });
+        if (!playSegments) await hooks.onTextChunk?.(UNBACKED_FACT_REPLY);
+      } else if (heldFacts.length > 0) {
+        // A tool ran after the claim was held → the sentence was backed, so it may be spoken now.
+        if (!playSegments) await hooks.onTextChunk?.(heldFacts);
+        heldFacts = '';
+      }
+
       // §55 is an engine-level rule, not an adapter's promise: whatever the adapter
       // reports, a reply that is only the silence token becomes SILENCE here, so a
-      // stray control token can never reach TTS or the transcript.
-      const silent = result.action === 'SILENCE' || result.text === null || isSilenceReply(result.text);
+      // stray control token can never reach TTS or the transcript. `replyText` (not
+      // `result.text`) is what the turn actually says, so a replaced claim never
+      // reaches the log either (t111).
+      const silent = result.action === 'SILENCE' || replyText === null || isSilenceReply(replyText);
       turnAction = silent ? 'SILENCE' : result.action;
-      turnText = silent ? null : result.text;
+      turnText = silent ? null : replyText;
       turnProvider = result.provider;
       turnModel = result.model;
 
@@ -492,6 +562,61 @@ export class ConversationEngine {
       prompt,
     };
   }
+}
+
+// ---------------------------------------------------------- unverified concrete claims (t111)
+
+/**
+ * A concrete, checkable claim the model can only know by looking it up.
+ *
+ * Field observation (2026-09-30): 主动开口 said 「成都阴天 19 到 25 度」 without ever calling
+ * `xixi_get_weather`. A number like that cannot come from the context window, so it is a
+ * fabrication — and 铁律 1/3 say the *program* owns that boundary, not the prompt alone. The
+ * prompt forbids it (see `HARD_POLICY` §7); this is the deterministic backstop.
+ */
+export interface UnbackedFactClaim {
+  readonly kind: 'temperature' | 'forecast' | 'attribution';
+  /** The offending substring, kept for the audit note (never spoken). */
+  readonly match: string;
+}
+
+/** `19 到 25 度`, `零下 3 度`, `-2℃` — temperatures, including ranges. */
+const TEMPERATURE_SIGN = '(?:(?:零下|负|[-−])\\s*)?';
+const TEMPERATURE_RANGE = new RegExp(
+  `${TEMPERATURE_SIGN}\\d{1,2}\\s*(?:到|至|~|～|-|—|–)\\s*${TEMPERATURE_SIGN}\\d{1,2}\\s*(?:度|℃|°C)`,
+);
+const TEMPERATURE_SINGLE = new RegExp(`${TEMPERATURE_SIGN}\\d{1,2}\\s*(?:度|℃|°C)`);
+/** Numbers only a measurement can produce: 概率 / 湿度 / 风力 / 空气质量 / 紫外线. */
+const FORECAST_METRIC = /(?:降水概率|降雨概率|湿度|风力|空气质量|空气指数|紫外线(?:指数)?)\s*(?:为|是|约|大概|在)?\s*\d{1,3}\s*(?:%|％|级|度)?/;
+/** Claims attributed to a source that was never consulted. */
+const ATTRIBUTION = /(?:天气预报|气象台|预报|新闻|报道|专家|医生说|医生|朋友说|别人说|他们(?:说|告诉))/;
+
+/** What she says instead of an unverified claim: no numbers, no new facts, no pretending. */
+export const UNBACKED_FACT_REPLY = '这个我记不准，不敢乱说——要不我查一下再告诉你？';
+
+/**
+ * Find concrete claims in a reply that need a tool result to be true.
+ *
+ * Deliberately narrow (t111): it only fires on *specifics* a lookup would produce — numbers with
+ * units, attributed statements — not on ordinary talk like 「今天有点冷，多穿点」. Broadening it
+ * would start blocking natural conversation, which is the opposite of the goal.
+ */
+export function findUnbackedFactClaims(text: string): UnbackedFactClaim[] {
+  const claims: UnbackedFactClaim[] = [];
+  const add = (kind: UnbackedFactClaim['kind'], match: string): void => {
+    if (!claims.some((claim) => claim.kind === kind && claim.match === match)) claims.push({ kind, match });
+  };
+  const range = TEMPERATURE_RANGE.exec(text);
+  if (range !== null) add('temperature', range[0]);
+  else {
+    const single = TEMPERATURE_SINGLE.exec(text);
+    if (single !== null) add('temperature', single[0]);
+  }
+  const metric = FORECAST_METRIC.exec(text);
+  if (metric !== null) add('forecast', metric[0]);
+  const attributed = ATTRIBUTION.exec(text);
+  if (attributed !== null) add('attribution', attributed[0]);
+  return claims;
 }
 
 function languageName(code: string): string {

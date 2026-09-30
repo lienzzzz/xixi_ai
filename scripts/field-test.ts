@@ -4602,6 +4602,12 @@ export interface ProactiveComposedContent {
   readonly note: string | null;
   /** `true` when a still frame was attached to this call (t88: only with the switch on). */
   readonly imageUsed?: boolean;
+  /**
+   * t111: the tool the model actually ran while composing this line (`null`/absent = none ran).
+   * It travels with the content so the recorded assistant turn carries the same `tool_name` the
+   * audit relies on — 「说了具体天气就必须有一次工具调用」 can then be checked in the event log.
+   */
+  readonly toolName?: string | null;
 }
 
 export interface ProactiveComposeInput {
@@ -4763,6 +4769,12 @@ export class ProactiveLoop {
     let delivered: string | null = null;
     let contentSource: ProactiveContentSource = 'fixed';
     let imageUsed = false;
+    /**
+     * t111: the tool the model ran while composing (if any). It is carried into the assistant turn
+     * so 「说了具体天气/温度就必须有一次工具调用」 can be checked in the event log, not only in the
+     * console's own report.
+     */
+    let contentToolName: string | null = null;
     let contentNote: string | null = this.#options.compose === undefined ? '离线/无密钥：用固定短句兜底（内容不经过模型）。' : null;
     const engine = new ProactiveEngine({ store: this.#options.store, settings, clock: () => now });
     const outcome = await engine.consider({
@@ -4814,6 +4826,7 @@ export class ProactiveLoop {
         contentSource = composed.source;
         contentNote = composed.note;
         imageUsed = composed.imageUsed === true;
+        contentToolName = composed.toolName ?? null;
       },
     });
     const split = delivered === null ? null : splitReplyIntoSegments(delivered, resolveReplyLimits(this.#options.replyLimits));
@@ -4847,7 +4860,7 @@ export class ProactiveLoop {
       const sessionId = this.#options.readSessionId();
       if (sessionId !== null) {
         try {
-          const recorded = this.#options.store.recordTurn({ sessionId, role: 'assistant', action: 'SPEAK', text: delivered, source: 'proactive' });
+          const recorded = this.#options.store.recordTurn({ sessionId, role: 'assistant', action: 'SPEAK', text: delivered, source: 'proactive', toolName: contentToolName });
           turnEventSequence = recorded.event.sequence;
         } catch (error) {
           contentNote = [contentNote, `没能写进对话历史：${error instanceof Error ? error.message : String(error)}`]
@@ -4968,10 +4981,26 @@ export function createModelComposer(options: {
     const text = typeof result.text === 'string' ? result.text.trim() : '';
     if (result.action !== 'SPEAK' || text.length === 0 || text.includes(SILENCE_TOKEN)) {
       options.log?.(`[proactive] 模型这次没给出可用内容（action=${result.action}）：用固定短句兜底`);
-      return { text: input.plan.line, source: 'fixed', note: `模型返回 action=${result.action}（或沉默标记）：用固定短句兜底。` };
+      return { text: input.plan.line, source: 'fixed', note: `模型返回 action=${result.action}（或沉默标记）：用固定短句兜底。`, toolName: result.toolName };
+    }
+    // t111: 主动开口 used to say 「成都阴天 19 到 25 度」 without ever calling the weather tool.
+    // A concrete claim only a lookup can produce is not allowed to leave this seam unbacked, so it
+    // is dropped *before* it is spoken (the fixed line for this trigger has no numbers of its own)
+    // — and 「凡说具体数值必有一次工具调用」 stays true in the event log. The rule lives in the
+    // engine so both delivery paths judge the same way.
+    const screened = options.engine.screenUnbackedFacts(text, result.toolName);
+    if (!screened.ok) {
+      const detail = screened.claims.map((claim) => claim.match).join('、');
+      options.log?.(`[proactive] 模型给出了未经工具核实的可核查事实（${detail}）却没有调用工具：不发出去，改用固定短句`);
+      return {
+        text: input.plan.line,
+        source: 'fixed',
+        note: `模型给出未经工具核实的可核查事实（${detail}）且没有调用工具：按 t111 改用固定短句，不把编造的数值说出去。`,
+        toolName: result.toolName,
+      };
     }
     options.log?.(`[proactive] 内容由模型生成（${result.provider}/${result.model}，${text.length} 字${vision === null ? '' : `，附 1 张静帧 ${vision.info.width}x${vision.info.height}`}）`);
-    return { text, source: 'model', note: vision === null ? null : `${vision.note}（已记入上传记录；开关打开时才可能附帧）`, imageUsed: vision !== null };
+    return { text, source: 'model', note: vision === null ? null : `${vision.note}（已记入上传记录；开关打开时才可能附帧）`, imageUsed: vision !== null, toolName: result.toolName };
   };
 }
 
