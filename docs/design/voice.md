@@ -87,7 +87,7 @@ E:\worker2\.venvs\voice-pipecat\Scripts\python.exe -m voice_edge.calibrate --wav
 E:\worker2\.venvs\voice-pipecat\Scripts\python.exe -m voice_edge.calibrate --list-devices
 ```
 
-输出（`--wav` 复算实测）：
+输出（`--wav` 复算实测，`applied`/`consistency` 两块是 F8 修复后新增）：
 
 ```json
 {"unit":"dBFS","noiseFloorDbfs":-33.24,"rawNoiseFloorDbfs":-30.00,"noiseRmsDbfs":-27.27,
@@ -96,13 +96,46 @@ E:\worker2\.venvs\voice-pipecat\Scripts\python.exe -m voice_edge.calibrate --lis
  "lowFrequencyShare":0.6208,"spectralFlatness":0.0513,"spectralTiltDbPerOctave":-5.0,
  "params":{"highpass_hz":120.0,"gate_threshold_dbfs":-18.0,"gate_margin_db":12.0,
            "suggested_capture_gain_db":0.0,"confidence":0.7,"stop_secs":0.6,"noise_reduction":false},
- "measuredEffect":{"highpassWidebandRmsReductionDb":5.33,"noiseReductionFloorReductionDb":-0.0}}
+ "applied":{"profileSchemaVersion":1,"highpassHz":120.0,"gateThresholdDbfs":-18.0,"gateMarginDb":12.0,
+            "noiseReduction":false,"oversubtraction":2.0,"gainFloor":0.06,"sampleRate":16000},
+ "consistency":{"identicalToDefaults":false,
+   "profileOverridesDefault":[{"field":"gateThresholdDbfs","default":-61.0,"applied":-18.0},
+     {"field":"gateMarginDb","default":9.0,"applied":12.0},
+     {"field":"suggestedCaptureGainDb","default":6.0,"applied":0.0},
+     {"field":"confidence","default":0.6,"applied":0.7}]},
+ "measuredEffect":{"highpassWidebandRmsReductionDb":5.33,"noiseReductionFloorReductionDb":0.58}}
 ```
 
 字段含义与给控制台（t4）的契约写在代码里：`noiseFloorDbfs` 是**去直流+高通之后**测的噪声底
 （门限与去噪都用它），`rawNoiseFloorDbfs` 是**采集原始**噪声底（决定采集增益建议）。
 两个底不能混用：把原始底喂给看「已高通信号」的噪声估计器，估计器会找不到安静帧、去噪静默失效
 （这是实测踩过的坑，注释与单测都记着）。
+
+**校准建议 = 前端实际生效值（F8 修复，2026-09-30）**。此前「工具建议的参数」与「前端真正跑的参数」
+是两处独立写的数字：`calibrate` 的建议来自实测推导，而 `segment` 的 `--highpass-hz` 默认值是硬编码的
+120，一旦推导规则改动（比如低频占比落在 20–50% 区间 → 建议 100 Hz），用户照做也会发现「没用」。
+现在二者由**同一份数据**产生，取舍如下：
+
+- **选择「让校准产物成为前端读取的来源」，而不是「把建议写死成 120」**。理由：前者在换麦克风/换房间后
+  仍然成立（重新校准即改行为），后者只能保证「今天恰好一致」。
+- `calibrate --profile-out <file>` 写出的 JSON 里新增 `applied` 块（camelCase，与控制台读的字段同名），
+  它**就是**建议本身（`params` 与 `applied` 由同一个 `FrontendParams` 生成，见 `frontend.apply_calibration`）；
+  `frontend.load_calibrated_params(profile)` 逐字段采纳 `applied`，不重新推导，所以产物不会被「二次解释」成别的值。
+- 没有校准产物时，前端回退到 `DEFAULT_HIGHPASS_HZ = 120`——这个常量**等于**本机实测噪声下
+  `derive_frontend_params` 给出的截止频率（<100 Hz 占 62% → 120 Hz，见 §1.1（1）），不再是「另一个数」。
+  两条路径的取舍写进代码注释（`frontend.py` 顶部的 `DEFAULT_HIGHPASS_HZ`）与本表。
+- 产物损坏/旧 schema（没有 `applied` 块）不会让语音路径崩：`load_calibrated_params` 在 `origin.warning` 里
+  说明原因并回退到默认，`calibrate` 的 `consistency` 块同时报告「哪些字段覆盖了默认、哪些没变」。
+- **本机实测的一致性结果**（`--wav data/recon/ambient-5s.wav`）：`applied.highpassHz = params.highpassHz = 120`、
+  `applied.gateThresholdDbfs = params.gateThresholdDbfs = −18.0`；`consistency.profileOverridesDefault`
+  只有门限/余量/增益/confidence 四项（都是实测决定的），**不含高通**——即「校准不会把截止频率挪离实测默认值」。
+- **已知边界**：`voice_edge.segment` 的 CLI 默认仍是 `--highpass-hz 120`（与默认值一致，所以不矛盾）；
+  要让它按另一份校准产物跑，显式传 `--highpass-hz <profile 的 applied.highpassHz>`。把 CLI 也接到
+  `load_calibrated_params` 上属于后续改动（会动 `segment.py` 的默认行为），本轮不在范围内，
+  这里如实写清而不是假装已经接好。
+- 证据与回归：`tests/unit/voice/frontend.test.ts` 的「the calibrate CLI recommends exactly the parameters the
+  front end applies (F8)」会真的跑 calibrate、比对 `params`/`applied`/`consistency`，再用
+  `load_calibrated_params` 把产物读回来逐字段比对——这是行为断言，不是文本扫描。
 
 #### （3）「噪声底自适应」到底改了哪两个数
 
@@ -353,7 +386,9 @@ LiveKit 全套导入 3799.6 ms、峰值 RSS 398.4 MB、turn detector 权重 **41
 |---|---|
 | `services/voice-edge/voice_edge/config.py`（基线参数） | §1（参数表与理由）、§2（端点/起始数字） |
 | `services/voice-edge/voice_edge/frontend.py`（前端纯函数） | §1.1（全部子节：截止频率、门限、去噪结论、边界数字），并重跑 `scripts/verify-voice-noise.ts` 更新边界 |
-| `services/voice-edge/voice_edge/calibrate.py`（校准入口/字段） | §1.1（2）（JSON 字段与命令） |
+| `services/voice-edge/voice_edge/calibrate.py`（校准入口/字段） | §1.1（2）（JSON 字段与命令，含 `applied`/`consistency` 与「建议=生效值」的取舍） |
+| `services/voice-edge/voice_edge/frontend.py` 的 `DEFAULT_HIGHPASS_HZ` / `apply_calibration` / `load_calibrated_params` | §1.1（2）（一致性契约与回退行为） |
+| `tests/unit/voice/frontend.test.ts` | §1.1（2）（证据与回归那条）；改了断言口径时同步说明 |
 | `services/voice-edge/voice_edge/make_noise_fixtures.py`（夹具生成） | §1.1（6）（SNR 定义与档位） |
 | `services/voice-edge/voice_edge/segment.py` | §1（实测表）、§1.1（3）（门限）、§5（`loadMs`/`processMs`、前端成本、帧长） |
 | `services/voice-edge/voice_edge/loopback.py` | §3（Python 路径、判据与实测结论） |

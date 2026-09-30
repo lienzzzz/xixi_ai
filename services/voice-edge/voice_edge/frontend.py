@@ -26,7 +26,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 import numpy as np
 
@@ -53,6 +55,26 @@ REPORT_BANDS_HZ: tuple[tuple[str, float, float], ...] = (
     ("3400-8000", 3400.0, 8000.0),
     ("above8000", 8000.0, 24_000.0),
 )
+
+#: High-pass cutoff the front end applies when no calibration profile is present.
+#:
+#: This number is the *default* only, and it is the same number `derive_frontend_params`
+#: produces for this machine's measured noise (<100 Hz = 62 % of the power → 120 Hz, see
+#: docs/design/voice.md §1.1). It used to be a literal duplicated in the segment CLI, which is
+#: exactly how a calibration tool ends up recommending one cutoff while the front end applies
+#: another. There is now a single source of truth, in this order:
+#:
+#:   1. `data/voice/frontend-profile.json`, if the user has calibrated (`voice_edge.calibrate`);
+#:   2. otherwise `derive_frontend_params` on the measured/declared noise floor;
+#:   3. and `DEFAULT_HIGHPASS_HZ` is only the value used when the noise floor is unknown.
+DEFAULT_HIGHPASS_HZ = 120.0
+
+#: Schema version of the calibration profile file (AGENTS.md 铁律 10: persisted records carry
+#: a schema version; new fields are additive).
+PROFILE_SCHEMA_VERSION = 1
+
+#: The profile the calibrate CLI writes by default, relative to the repository root.
+DEFAULT_PROFILE_PATH = "data/voice/frontend-profile.json"
 
 #: Frames shorter than this are not a meaningful RMS.
 MIN_FRAME_SAMPLES = 32
@@ -705,4 +727,182 @@ def derive_frontend_params(
         sample_rate=sample_rate,
         rationale=tuple(rationale),
     )
+
+
+# --------------------------------------------------------------------------------------
+# 5. Calibration profile: the one place the recommended values and the applied values meet
+# --------------------------------------------------------------------------------------
+
+
+def frontend_defaults() -> dict:
+    """The **complete** parameter set the front end applies when no calibration profile exists.
+
+    Built by the same derivation the profile path uses (`derive_frontend_params` on the
+    quantisation floor, then `DEFAULT_HIGHPASS_HZ`), and returned in the same camelCase shape as
+    `apply_calibration`, so `calibration_consistency` can compare the two field by field instead
+    of comparing apples to a subset. Kept in one function so the calibrate report, the profile
+    file and this module cannot drift apart — `tests/unit/voice/frontend.test.ts` asserts that
+    `defaults.highpassHz === DEFAULT_HIGHPASS_HZ` and that the calibrate CLI's
+    `consistency.defaults` equals this object.
+    """
+    seed = derive_frontend_params(QUANTISATION_FLOOR_DBFS)
+    applied = apply_calibration("(no profile)", seed)
+    applied["highpassHz"] = DEFAULT_HIGHPASS_HZ
+    applied["profilePath"] = None
+    applied["profileSchemaVersion"] = PROFILE_SCHEMA_VERSION
+    applied["source"] = "code-default"
+    applied["note"] = (
+        "无校准产物时前端使用的默认值；DEFAULT_HIGHPASS_HZ 等于本机实测噪声下 "
+        "derive_frontend_params 给出的截止频率（<100 Hz 占 62% → 120 Hz）"
+    )
+    return applied
+
+
+def apply_calibration(profile_path: str | Path, params: FrontendParams) -> dict:
+    """The parameter set the front end *actually applies* after calibration.
+
+    This is the function that closes F8: the calibrate CLI writes the object returned here into
+    the profile, so the recommended value and the applied value are literally the same object
+    rather than two independently hard-coded numbers. Every field is echoed in the same
+    camelCase spelling the console reads (`highpassHz`, `gateThresholdDbfs`, ...) so a caller
+    cannot accidentally read a snake_case key that does not exist.
+    """
+    return {
+        "profileSchemaVersion": PROFILE_SCHEMA_VERSION,
+        "profilePath": str(profile_path).replace("\\", "/"),
+        "highpassHz": params.highpass_hz,
+        "gateThresholdDbfs": params.gate_threshold_dbfs,
+        "gateMarginDb": params.gate_margin_db,
+        "gateReleaseDb": params.gate_release_db,
+        "suggestedCaptureGainDb": params.suggested_capture_gain_db,
+        "confidence": params.confidence,
+        "stopSecs": params.stop_secs,
+        "minVolume": params.min_volume,
+        "noiseReduction": params.noise_reduction,
+        "oversubtraction": params.oversubtraction,
+        "gainFloor": params.gain_floor,
+        "sampleRate": params.sample_rate,
+    }
+
+
+def calibration_consistency(applied: dict, defaults: dict) -> dict:
+    """Compare the applied calibration with the code defaults, field by field.
+
+    Reported by the calibrate CLI so a reader can see whether calibrating actually changes
+    anything, instead of assuming it does. `profileOverridesDefault` lists the fields where the
+    calibration differs from the built-in default — on this machine that is only the gate
+    threshold (the cutoff already equals the measured default).
+    """
+    ignored = {"source", "note", "profileSchemaVersion", "profilePath"}
+    compared = {key: value for key, value in applied.items() if key not in ignored}
+    overrides = [
+        {"field": key, "default": defaults.get(key), "applied": value}
+        for key, value in compared.items()
+        if key in defaults and defaults[key] != value
+    ]
+    return {
+        "profileApplied": True,
+        "defaults": defaults,
+        "applied": compared,
+        "profileOverridesDefault": overrides,
+        "identicalToDefaults": len(overrides) == 0,
+        "why": (
+            "校准产物存在时，前端按 applied 里的值运行；这里逐字段与代码默认对比，"
+            "列表为空即「校准没有改变任何参数」（本机只可能在高通截止上出现差异）"
+        ),
+    }
+
+
+def load_calibrated_params(
+    profile_path: str | Path = DEFAULT_PROFILE_PATH,
+    *,
+    root: str | Path | None = None,
+    sample_rate: int = 16_000,
+    noise_floor_dbfs_value: float | None = None,
+    stop_secs: float = 0.6,
+) -> tuple[FrontendParams, dict]:
+    """Parameters to actually use, preferring a calibration profile when one exists.
+
+    Returns `(params, origin)` where `origin` is machine-readable evidence of *which* source
+    won, so callers (and tests) can assert the behaviour instead of trusting a comment:
+
+    * `{"source": "profile", "path": ...}` — a readable profile was found and its
+      `applied` block was adopted. This is the path that makes the calibrate recommendation
+      effective.
+    * `{"source": "derived", ...}` — no profile (or an unreadable/older one): the parameters are
+      derived from `noise_floor_dbfs_value` when given, otherwise `DEFAULT_HIGHPASS_HZ` plus the
+      quantisation-clamped gate.
+
+    A corrupt profile must never take the voice path down, so a parse error is reported in
+    `origin["warning"]` and the derived path is used.
+    """
+    path = Path(profile_path)
+    if root is not None and not path.is_absolute():
+        path = Path(root) / path
+    origin: dict = {"source": "derived", "path": str(path).replace("\\", "/"), "warning": None}
+
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            applied = payload.get("applied") if isinstance(payload, dict) else None
+            if isinstance(applied, dict) and "highpassHz" in applied:
+                # `applied` is authoritative: adopt it verbatim instead of re-deriving, so the
+                # profile cannot be "reinterpreted" into something else on load.
+                seed = derive_frontend_params(
+                    float(applied.get("gateThresholdDbfs", QUANTISATION_FLOOR_DBFS + 9.0))
+                    - float(applied.get("gateMarginDb", 9.0)),
+                    sample_rate=sample_rate,
+                    stop_secs=stop_secs,
+                )
+                params = FrontendParams(
+                    highpass_hz=float(applied["highpassHz"]),
+                    gate_threshold_dbfs=float(applied.get("gateThresholdDbfs", seed.gate_threshold_dbfs)),
+                    gate_margin_db=float(applied.get("gateMarginDb", seed.gate_margin_db)),
+                    gate_release_db=float(applied.get("gateReleaseDb", seed.gate_release_db)),
+                    suggested_capture_gain_db=float(
+                        applied.get("suggestedCaptureGainDb", seed.suggested_capture_gain_db)
+                    ),
+                    confidence=float(applied.get("confidence", seed.confidence)),
+                    stop_secs=float(applied.get("stopSecs", stop_secs)),
+                    min_volume=float(applied.get("minVolume", 0.0)),
+                    noise_reduction=bool(applied.get("noiseReduction", False)),
+                    oversubtraction=float(applied.get("oversubtraction", 2.0)),
+                    gain_floor=float(applied.get("gainFloor", 0.06)),
+                    sample_rate=int(applied.get("sampleRate", sample_rate)),
+                    rationale=(
+                        f"校准产物生效：{path.name}（capturedAt={payload.get('capturedAt')}）",
+                        f"高通 {applied['highpassHz']} Hz、门限 {applied.get('gateThresholdDbfs')} dBFS 来自实测校准",
+                    ),
+                )
+                origin.update({"source": "profile", "capturedAt": payload.get("capturedAt")})
+                return params, origin
+            origin["warning"] = "profile exists but has no usable `applied` block (older schema?)"
+        except Exception as error:  # noqa: BLE001 - a bad profile must not break the voice path
+            origin["warning"] = f"profile unreadable ({type(error).__name__}: {error})"
+
+    if noise_floor_dbfs_value is not None:
+        derived = derive_frontend_params(noise_floor_dbfs_value, sample_rate=sample_rate, stop_secs=stop_secs)
+        origin["derivedFrom"] = "measured-noise-floor"
+        return derived, origin
+    derived = derive_frontend_params(QUANTISATION_FLOOR_DBFS, sample_rate=sample_rate, stop_secs=stop_secs)
+    derived = FrontendParams(
+        highpass_hz=DEFAULT_HIGHPASS_HZ,
+        gate_threshold_dbfs=derived.gate_threshold_dbfs,
+        gate_margin_db=derived.gate_margin_db,
+        gate_release_db=derived.gate_release_db,
+        suggested_capture_gain_db=derived.suggested_capture_gain_db,
+        confidence=derived.confidence,
+        stop_secs=derived.stop_secs,
+        min_volume=derived.min_volume,
+        noise_reduction=derived.noise_reduction,
+        oversubtraction=derived.oversubtraction,
+        gain_floor=derived.gain_floor,
+        sample_rate=sample_rate,
+        rationale=(
+            f"无校准产物 → 使用代码默认高通 {DEFAULT_HIGHPASS_HZ} Hz（等于本机实测噪声下的推荐值）",
+            f"门限 {derived.gate_threshold_dbfs} dBFS 由量化底推导（噪声底未知）",
+        ),
+    )
+    origin["derivedFrom"] = "code-default"
+    return derived, origin
 

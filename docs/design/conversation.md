@@ -23,12 +23,40 @@ ACTIVE/LINGERING --suspend()--> SUSPENDED --到期(tick) 或 resume()--> IDLE
 
 - 状态只有五个：`IDLE | ENGAGING | ACTIVE | LINGERING | SUSPENDED`。
 - 所有决策都基于**注入的毫秒时间戳**（构造函数收 `at`，`tick(at)` 显式推进），因此可在测试与
-  §22.3 的回放里逐字复现。
+  §22.3 的回放里逐字复现。**注意 `tick` 不是调用方的义务**：`ConversationEngine` 的状态读取会自己按
+  注入时钟推进，见本节末「状态读取即推进」。
 - 默认配置 `DEFAULT_FSM_CONFIG`：`lingerMs = 30_000`、`engageTimeoutMs = 15_000`。
   **`silenceTolerance` 没有默认值**（见下）：它只能来自人格。
 - `SUSPENDED` 的到期时间可以是 `null`（「今天想安静点」到显式 `resume()` 为止）。
 - `snapshot()` 返回 `{state, since, lastTurnAt, suspendedUntil, turnCount}`——`turnCount` 是**本进程内**的计数，
   与持久化的 `conversation_sessions.turn_count`（跨进程累积）不是同一个东西。
+
+### 状态读取即推进（`engine.state` / `snapshot()`）
+
+FSM 只在有人调用 `tick` 时才让 `LINGERING` / `ENGAGING` / 过期的 `SUSPENDED` 落到 `IDLE`。
+「有人调用」不能是调用方的义务：生产入口只用 `engine.state` 判断该不该把这句话当成叫醒，
+没有一处调用 `engine.tick()`（t6 F1 实测），于是超时后的状态永远是**过期缓存**。
+
+因此 `ConversationEngine` 的状态读取是侧效应的读取：
+
+```text
+engine.state     → #advance(clock())   → 同步人格窗口 → fsm.tick(now) → 返回 fsm.state
+engine.snapshot()→ #advance(clock())   → 同上，再返回快照（与 state 同一时刻，不会互相矛盾）
+engine.respond() → #advance(at)        → 用**本轮自己的时间戳**推进，回放因此可复现
+engine.buildPrompt() → #advance(at)    → prompt 里的会话状态同样是「现在」
+```
+
+取舍（有意选择，不只是实现细节）：
+
+- **getter 带副作用**：读状态会推进注入的时间。这是这个值的本性——「现在是什么状态」随时间变化，
+  而把推进责任交给每个调用方正是失败的方案（t19）。
+- **读取顺带重读人格窗口**：过期时刻由窗口长度决定，所以人格被 `overrideSelfProfile` 改动后，
+  读取也必须用新窗口，否则会出现「窗口变长但会话已经按旧窗口过期」的另一种过期。代价是一次小 SELECT；
+  试用页的 `/api/state` 本来就要读 `selfProfile()`。**推论：store 关闭后不要再读 `engine.state`。**
+- **`respond()` 不用墙钟**：它按 `at`（调用方给的或注入的时钟）推进，`at` 决定这次决策的时间基准；
+  用墙钟会让 §22.3 的回放依赖真实时间。
+- **`tick()` 保留**：它是显式推进的接口（循环、回放与测试仍可用），但**生产路径已不依赖它**。
+- 事件 `timestamp` 与决策时间仍分开：读取推进不写任何事件，只有真正的拒绝/接受才写 `conversation.decision`。
 
 ### §13 的 POC 判定规则（`shouldAcceptTurn`）
 
@@ -45,16 +73,41 @@ ACTIVE/LINGERING --suspend()--> SUSPENDED --到期(tick) 或 resume()--> IDLE
 |---|---|
 | 试用页 `scripts/serve-chat.ts` | `addressed: engine.state === 'IDLE'`（`handleTurn` 与 `/api/voice` 都是这一句） |
 | 终端 `scripts/chat.ts` | 同上：`engine.state === 'IDLE'`，即「IDLE 时这句话就是叫醒，会话开着就是继续」 |
+| 现场测试 `scripts/field-test.ts` | 同上：`engine.state === 'IDLE'`（两处入口都这样传） |
 | 评测器 `scripts/eval-conversation.ts` | 由语料逐轮声明（`tests/scenarios/corpus.ts` 的 `addressed?`） |
 
-因此在这两个真实入口上，「`IDLE` 且未直呼」这条拒绝分支**不可达**（它们都按状态传对），
-唯一会被拒的情况是 `SUSPENDED`（点过「今天安静点」/ 输入过 `/quiet` 之后）。
+**这条规则只有在 `engine.state` 是「现在」的状态时才成立**——见下面这段，它是本轮修掉的第二个缺陷：
 
-> 已修（本轮）：`scripts/chat.ts` 曾经用局部变量 `first`，**只在第一句**传 `addressed: true`。
-> 跟进窗口超时回到 `IDLE` 之后，后面每一句都会被判成 `REJECTED_NOT_ADDRESSED`——
-> 复现与前后对比见 [`progress.md`](../progress.md) §0 的本轮段落与
+> 已修（t19 / t6 F1）：`engine.state` 曾经返回 **FSM 最后一次跃迁时记下的状态**。
+> 时间只由 `tick()` 或 `respond()` 内部推进，而**生产代码从来没有调用过 `engine.tick()`**
+> （`scripts/chat.ts`、`scripts/serve-chat.ts`、`scripts/field-test.ts` 都只读 `engine.state`）。
+> 于是长停顿（超过跟进窗口）之后：`engine.state` 仍然报 `LINGERING` → 调用方算出 `addressed = false`
+> → 但 `shouldAcceptTurn` 在决策时会按真实时间 `tick` 到 `IDLE` → **用户的下一句话被判成
+> `REJECTED_NOT_ADDRESSED`，再下一句才被接受**。
+>
+> 根治办法（已实现）：**读取即推进**。`engine.state` 与 `snapshot()` 现在先按注入的时钟 `tick`
+> 再返回（`packages/conversation/src/engine.ts` 的 `#advance()`），所以调用方读到的一定是「现在」。
+> 取舍见 §1「状态读取即推进」。
+
+因此在这两个真实入口上，「`IDLE` 且未直呼」这条拒绝分支**仍然不可达，但现在的理由不同了**——
+不是「它们按状态传对了」，而是「读到的状态和决策用的状态出自同一时刻」：
+
+- 修复前：调用方读到过期的 `LINGERING`，转发 `addressed: false`，而决策时 FSM 已经是 `IDLE`
+  → 分支真的被走到了（这就是 F1 的现象）。
+- 修复后：读与决策之间只隔一次函数调用（同一个 `at`），要走到这个分支需要会话**恰好在这两步之间过期**
+  （例如 ASR/TTS 往返期间窗口关闭），属于窄竞态而不是常态。
+- 真实入口上唯一稳定的拒绝是 `SUSPENDED`（点过「今天安静点」/ 输入过 `/quiet` 之后），
+  语义上「叫醒」也无法解除它，见 §5 的真实样本复现步骤。
+- 语料评测器仍会显式传 `addressed: false`（例如电视声），那时若会话正好是 `IDLE`，这个分支就会被走到，
+  这也是保留它的原因。
+
+> 已修（t5）：`scripts/chat.ts` 曾经用局部变量 `first`，**只在第一句**传 `addressed: true`。
+> 跟进窗口超时回到 `IDLE` 之后，后面每一句都会被判成 `REJECTED_NOT_ADDRESSED`。
+> t5 把它改成「按状态传」（与试用页一致），但当时没发现状态本身是过期的——两处缺陷叠加才表现为
+> 「长停顿后第一句被拒」。回归测试：
 > `tests/integration/conversation-engine.test.ts` 的
-> `a long pause closes the session, and the next addressed line is accepted again`。
+> `a long pause is noticed without calling tick(): the first line after it is a wake-up, not a rejection`（t19 新增，
+> 修复前该用例失败于 `the state a caller reads must describe now, not the last transition`）。
 
 ### 静默容忍度如何缩放跟进窗口
 
@@ -199,7 +252,7 @@ HARD_POLICY（不可变硬策略，常量）
 ## 5. 一轮的完整时序（`ConversationEngine.respond`）
 
 ```text
-⓪  syncSilenceTolerance()                                    读 selfProfile → fsm.setSilenceTolerance
+⓪  before = advance(at)                                      同步人格窗口 → fsm.tick(at) → 得到「现在」的状态
 ①  acceptance = fsm.shouldAcceptTurn({addressed, at})
        未接受 → appendEvent(conversation.decision, accepted=false) 后立即返回（不写轮次、不调模型）
 ②  fsm.onUserTurn(at)                                        ACTIVE
@@ -214,6 +267,31 @@ HARD_POLICY（不可变硬策略，常量）
 ⑪  finally: appendEvent(conversation.decision, accepted=true, action, fsm_state)
 ⑫  返回 {accepted, reason, state, action, text, provider, model, latencyMs, firstTokenMs, prompt}
 ```
+
+第 ⓪ 步的 `before` 同时是「决策前的状态」，因此 `conversation.decision.fsm_state_before` 记录的是
+**决策那一刻**的真实状态（长停顿后应为 `IDLE`），而不是上一次跃迁留下的状态。
+
+### 真实拒绝样本（怎么复现）
+
+`conversation.decision` 的 `accepted=false` 分支在真实事件日志里可以这样留下一条
+（2026-09-30 在本机实测，样本为 `data/chat/xixi.sqlite` 的 sequence 45）:
+
+```powershell
+"/quiet`n西西，你在吗？`n/exit" | npm run chat -- --fake
+# 输出：已进入安静模式（/resume 恢复）。 / 未接受（REJECTED_SUSPENDED）：西西正处在安静模式，用 /resume 恢复。
+```
+
+落库样本（只存 `reason_code` 与分值，无用户原话、无模型推理）：
+
+```json
+{"accepted":false,"reason":"REJECTED_SUSPENDED","action":"SILENCE","fsm_state":"SUSPENDED",
+ "fsm_state_before":"SUSPENDED","addressed":false,"acceptance_score":0,
+ "linger_ms":36000,"silence_tolerance":0.7}
+```
+
+这是真实入口上**唯一稳定可复现**的拒绝：长停顿之后的 `REJECTED_NOT_ADDRESSED` 已被 t19 修掉
+（调用方读到的状态不再过期），而电视声那种「未直呼」要由调用方显式传 `addressed: false` 才会走到，
+属于语料评测器的用法（`tests/scenarios/corpus.ts`）。
 
 细节与陷阱：
 
@@ -279,7 +357,7 @@ decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值�
 |---|---|
 | `packages/conversation/src/fsm.ts`（状态、`DEFAULT_FSM_CONFIG`、判定或 `lingerMs` 算法） | §1（并同步 `tests/unit/conversation-fsm.test.ts`） |
 | `packages/conversation/src/prompt.ts`（§26 顺序、`HARD_POLICY`、阈值或指令文案、`sections`） | §2、§3、§4（并同步 `tests/unit/prompt.test.ts`） |
-| `packages/conversation/src/engine.ts`（编排步骤、沉默兜底、落库时机、时钟用法、decision 事件） | §4、§5 |
+| `packages/conversation/src/engine.ts`（编排步骤、沉默兜底、落库时机、时钟用法、`#advance` 读取即推进、decision 事件） | §1（状态读取即推进）、§4、§5 |
 | `packages/conversation/src/personality.ts`（`DEFAULT_SILENCE_TOLERANCE` 与取值优先级） | §1 |
 | `packages/brain-adapter/src/mimo.ts` 的 `SILENCE_TOKEN` / `isSilenceReply` / 工具循环 | §4、§6（两处 token 必须保持一致） |
 | `packages/domain/src/store.ts` 的 `recordTurn` / `recentTurns` 语义 | §5（并同步 [`domain-model.md`](domain-model.md) §5） |

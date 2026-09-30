@@ -271,13 +271,13 @@ export class ConversationEngine {
 
   async respond(input: RespondInput, hooks: RespondHooks = {}): Promise<ConversationTurn> {
     const at = input.at ?? this.#clock();
-    // Personality first: the follow-up window is part of "how tolerant is she
-    // with silence", so the value that scales it must be current when the
-    // acceptance decision is made (an override may have landed since last turn).
-    this.#syncSilenceTolerance();
+    // `#advance(at)` re-reads the personality (which scales the follow-up window)
+    // and expires timed states at the turn's own timestamp, so both the decision
+    // below and the audited `before` describe this instant. Ordering matters: the
+    // window must be current before it is used to decide anything.
+    const before = this.#advance(at);
     const session = this.#store.getSession(input.sessionId);
     const addressed = input.addressed ?? true;
-    const before = this.#fsm.state;
     const acceptance = this.#fsm.shouldAcceptTurn({ addressed, at: at.getTime() });
     if (!acceptance.accept) {
       this.#recordDecision({

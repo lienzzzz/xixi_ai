@@ -78,7 +78,12 @@ const dryRun = args.includes('--dry-run') || process.env.XIXI_FAKE_ASR === '1';
  */
 const useNoiseReduction = args.includes('--nr');
 const skipNoiseReduction = !useNoiseReduction;
-const minSimilarity = Number(argValue('--min-similarity', '0.6'));
+/**
+ * Similarity **threshold** — a pass/fail bar, not a statistic. F3: this used to be named
+ * `minSimilarity` while the per-tier `minSimilarity` report field actually held a *mean*,
+ * so two different ideas shared one name. Threshold and statistics are named apart now.
+ */
+const similarityThreshold = Number(argValue('--min-similarity', '0.6'));
 const maxEndpointDelayMs = Number(argValue('--max-endpoint-delay', '1500'));
 const tierFilter = argValue('--tiers');
 const outPath = argValue('--out', join(OUT_DIR, fake || dryRun ? 'verify-voice-noise-offline.json' : 'verify-voice-noise.json'));
@@ -257,7 +262,7 @@ async function measure(args: {
     transcript = asr.text;
     asrMs = asr.asrMs;
     similarity = characterSimilarity(asr.text, args.text);
-    if (similarity < minSimilarity) failures.push(`SIMILARITY<${minSimilarity}(${similarity})`);
+    if (similarity < similarityThreshold) failures.push(`SIMILARITY<${similarityThreshold}(${similarity})`);
   }
   const endpointDelayMs = speech === null || detectedEnd === null || args.cleanEndMs === null
     ? null
@@ -360,11 +365,17 @@ interface TierSummary {
   clips: number;
   detected: number;
   detectionRate: number;
-  meanSimilarity: number | null;
-  minSimilarity: number | null;
+  /**
+   * F3: per-tier similarity statistics. These used to be named `meanSimilarity` /
+   * `minSimilarity` while *both* held the mean, so a reader could not see how close the
+   * worst clip came to the threshold. Three separate, correctly-computed numbers now.
+   */
+  similarityMean: number | null;
+  similarityMin: number | null;
+  similarityMax: number | null;
   meanEndPointDelayMs: number | null;
   meanVadStartLatencyMs: number | null;
-  meanSimilarityNoNr: number | null;
+  similarityMeanNoNr: number | null;
   failures: number;
   verdict: 'PASS' | 'FAIL';
 }
@@ -375,25 +386,42 @@ const mean = (values: (number | null)[]): number | null => {
   if (usable.length === 0) return null;
   return Number((usable.reduce((sum, value) => sum + value, 0) / usable.length).toFixed(3));
 };
+const minimum = (values: (number | null)[]): number | null => {
+  const usable = values.filter((value): value is number => value !== null);
+  if (usable.length === 0) return null;
+  return Number(Math.min(...usable).toFixed(3));
+};
+const maximum = (values: (number | null)[]): number | null => {
+  const usable = values.filter((value): value is number => value !== null);
+  if (usable.length === 0) return null;
+  return Number(Math.max(...usable).toFixed(3));
+};
 
 const summaries: TierSummary[] = tierNames.map((tier) => {
   const rows = results.filter((row) => row.tier === tier);
   const detected = rows.filter((row) => row.detected).length;
   const failures = rows.filter((row) => row.failures.length > 0).length;
-  const meanSimilarity = mean(rows.map((row) => row.similarity));
-  return {
+  const similarities = rows.map((row) => row.similarity);
+  const summary: TierSummary = {
     tier,
     clips: rows.length,
     detected,
     detectionRate: rows.length === 0 ? 0 : Number((detected / rows.length).toFixed(3)),
-    meanSimilarity,
-    minSimilarity: mean(rows.map((row) => row.similarity)),
+    similarityMean: mean(similarities),
+    similarityMin: minimum(similarities),
+    similarityMax: maximum(similarities),
     meanEndPointDelayMs: mean(rows.map((row) => row.endpointDelayMs)),
     meanVadStartLatencyMs: mean(rows.map((row) => row.vadStartLatencyVsCleanMs)),
-    meanSimilarityNoNr: mean(rows.map((row) => row.similarityNoNr)),
+    similarityMeanNoNr: mean(rows.map((row) => row.similarityNoNr)),
     failures,
     verdict: failures === 0 ? 'PASS' : 'FAIL',
   };
+  // A silent regression back to "min == mean" is exactly the F3 defect, so it fails here
+  // instead of quietly reappearing in a report.
+  if (summary.similarityMin !== null && summary.similarityMax !== null && summary.similarityMean !== null && summary.similarityMin !== summary.similarityMax && summary.similarityMin >= summary.similarityMean) {
+    throw new Error(`tier ${tier}: similarityMin (${summary.similarityMin}) must be below similarityMean (${summary.similarityMean}) when the clips differ`);
+  }
+  return summary;
 });
 
 const failing = results.filter((row) => row.failures.length > 0);
@@ -421,7 +449,8 @@ const report = {
     fakeAsr: fake,
     dryRun,
     noiseReduction: !skipNoiseReduction,
-    minSimilarity,
+    /** F3: this is the *threshold* (`--min-similarity`), not a per-tier statistic. */
+    similarityThreshold,
     maxEndpointDelayMs,
     tiers: tiers ?? 'all',
     fixtures: measured,
@@ -447,7 +476,7 @@ const report = {
     applies: !offline,
     failingClips: failing.length,
     measuredClips: results.length,
-    threshold: minSimilarity,
+    threshold: similarityThreshold,
     why: offline
       ? '相似度判据在离线模式下不适用：ASR 是确定性桩，转写文本与期望文本必然不同，所以这里不会是 PASS，但它不代表功能坏了'
       : '真实 MiMo ASR 的转写与夹具原文做字符级相似度比较（≥ 阈值即通过）',
@@ -456,10 +485,10 @@ const report = {
     transcriptSimilarity: offline
       ? {
           applies: false,
-          threshold: minSimilarity,
+          threshold: similarityThreshold,
           why: '相似度判据在离线模式下不适用：ASR 被替换为确定性桩，转写文本与期望文本必然不同，所以 SIMILARITY / NO_SPEECH_DETECTED 只作为观察记录，不代表功能坏了',
         }
-      : { applies: true, threshold: minSimilarity, why: '真实 MiMo ASR 的转写与夹具原文做字符级相似度比较' },
+      : { applies: true, threshold: similarityThreshold, why: '真实 MiMo ASR 的转写与夹具原文做字符级相似度比较' },
     speechDetection: offline
       ? { applies: false, why: '离线模式只记录检出/未检出，不据此判定；真实检出率请跑真实 ASR 模式' }
       : { applies: true, why: '真实 ASR 模式下列 1（没有语音段）算失败' },
@@ -488,8 +517,10 @@ const report = {
     claim: `${offline ? '（离线模式：以下边界只用桩 ASR 计算，不代表真实噪声鲁棒性）' : ''}${
       boundary === null
         ? 'no SNR tier passed with the current thresholds; see failures'
-        : `SNR_inband ≥ ${boundary} dB 时，干净/噪声夹具的平均字符相似度 ≥ ${minSimilarity}，且没有片段漏检或超长端点`
+        : `SNR_inband ≥ ${boundary} dB 时，干净/噪声夹具的平均字符相似度 ≥ ${similarityThreshold}，且没有片段漏检或超长端点`
     }`,
+    /** F3: `tiers[].similarityMin` is the true minimum per tier, not a copy of the mean. */
+    tierNote: 'tiers[] 里每档同时给出 similarityMean / similarityMin / similarityMax 三个真实统计量（旧版的 minSimilarity 字段其实等于均值）',
     lowestPassingTierDb: boundary,
     passingTiers: passingTiers.map((summary) => summary.tier),
     failingTiers: summaries.filter((summary) => summary.tier !== 'clean' && summary.verdict === 'FAIL').map((summary) => summary.tier),

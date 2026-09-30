@@ -111,7 +111,14 @@ def record(seconds: float, device: int | None, sample_rate: int, channels: int =
 
 
 def analyze(samples: np.ndarray, sample_rate: int) -> dict:
-    """The published report: measurement + parameters + the measured effect of the parameters."""
+    """The published report: measurement + parameters + the measured effect of the parameters.
+
+    Since F8 (2026-09-30) the report also states, in `consistency`, whether the recommended
+    parameters differ from the front end's built-in defaults and which profile file they are
+    written to. That is the whole point of the fix: the recommendation and the applied value are
+    produced by the same derivation, so a user who follows the calibration gets exactly what the
+    tool promised.
+    """
     report = fe.calibrate_from_samples(samples, sample_rate, stop_secs=BASELINE.stop_secs)
     params = report["parameters"]
     report["params"] = params.to_dict()
@@ -123,6 +130,9 @@ def analyze(samples: np.ndarray, sample_rate: int) -> dict:
     report["params"]["suggestedCaptureGainDb"] = params.suggested_capture_gain_db
     report["measuredEffect"]["highpassOnRumbleDb"] = report["measuredEffect"]["highpassWidebandRmsReductionDb"]
     report["measuredEffect"]["noiseReductionOnFloorDb"] = report["measuredEffect"]["noiseReductionFloorReductionDb"]
+    applied = fe.apply_calibration(fe.DEFAULT_PROFILE_PATH, params)
+    report["applied"] = applied
+    report["consistency"] = fe.calibration_consistency(applied, fe.frontend_defaults())
     return report
 
 
@@ -152,13 +162,25 @@ def calibrate(
 
 
 def profile(params: dict, calibration: dict) -> dict:
-    """The compact object the Node side can read without parsing the whole report."""
+    """The compact file the front end reads (the "applied" contract, F8).
+
+    `applied` is the authoritative block: `frontend.load_calibrated_params` adopts it verbatim,
+    so what the tool recommends here is what the front end runs with — no second hard-coded
+    default to drift away from. `params` stays for readers that expect the raw snake_case
+    derivation, and `consistency` records how `applied` compares with the code defaults.
+    """
+    applied = calibration.get("applied")
+    if applied is None:  # callers that built a report without analyze() (older call sites)
+        applied = fe.apply_calibration(fe.DEFAULT_PROFILE_PATH, fe.derive_frontend_params(-70.0))
     return {
         "generatedFrom": "voice_edge.calibrate",
+        "profileSchemaVersion": fe.PROFILE_SCHEMA_VERSION,
         "capturedAt": calibration.get("capturedAt"),
         "source": calibration.get("source"),
         "noiseFloorDbfs": calibration["noiseFloorDbfs"],
         "lowFrequencyShare": calibration["lowFrequencyShare"],
+        "applied": applied,
+        "consistency": calibration.get("consistency"),
         "params": params,
     }
 

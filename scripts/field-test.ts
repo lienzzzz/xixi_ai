@@ -993,15 +993,20 @@ def mode_endpoints():
 
     def dump(device, label):
         volume = interface(device)
+        level_db = round(float(volume.GetMasterVolumeLevel()), 2)
         return {
             "label": label,
             "name": friendly(device),
             "muted": bool(volume.GetMute()),
             "volumeScalar": round(float(volume.GetMasterVolumeLevelScalar()), 4),
-            "volumeDb": round(float(volume.GetMasterVolumeLevel()), 2),
+            "volumeDb": level_db,
+            # On a Windows *capture* endpoint the endpoint volume **is** the microphone
+            # gain (t6 measured +0.23 dB). Exposed under an explicit name so the console
+            # can show it; nothing in this repo writes it (pycaw is used read-only here).
+            "gainDb": level_db if label == "capture" else None,
         }
 
-    emit({"ok": True, "render": dump(AudioUtilities.GetSpeakers(), "render"), "capture": dump(AudioUtilities.GetMicrophone(), "capture")})
+    emit({"ok": True, "readOnly": True, "render": dump(AudioUtilities.GetSpeakers(), "render"), "capture": dump(AudioUtilities.GetMicrophone(), "capture")})
 
 
 def mode_mic(root, seconds):
@@ -1041,8 +1046,11 @@ def mode_speaker(root, fixture, gain):
     if source_rate != rate:
         mono = soxr.resample(mono, source_rate, rate)
     played = np.clip(mono * gain, -1.0, 1.0).astype(np.float64)
-    preroll = np.zeros(int(0.6 * rate), dtype=np.float64)
-    tail = np.zeros(int(0.4 * rate), dtype=np.float64)
+    # 1.0 s of silence on both sides of the playback: the noise reference is the
+    # average in-band power of every silence frame (pre *and* post), so a single
+    # unlucky burst in a 0.6 s pre-roll cannot flatter or spoil the comparison.
+    preroll = np.zeros(int(1.0 * rate), dtype=np.float64)
+    tail = np.zeros(int(1.0 * rate), dtype=np.float64)
     padded = np.concatenate([preroll, played, tail])
 
     loop = {}
@@ -1066,11 +1074,36 @@ def mode_speaker(root, fixture, gain):
 
     pre = captured[: len(preroll)]
     play = captured[len(preroll) : len(preroll) + len(played)]
+    post = captured[len(preroll) + len(played) : len(preroll) + len(played) + len(tail)]
     pre_levels = band_frame_db(pre, rate, fe)
     play_levels = band_frame_db(play, rate, fe)
-    noise_ref = float(np.mean(pre_levels)) if pre_levels.size else float("nan")
-    heard_mean = float(np.mean(play_levels)) if play_levels.size else float("nan")
-    heard_peak = float(np.percentile(play_levels, 95)) if play_levels.size else float("nan")
+    post_levels = band_frame_db(post, rate, fe)
+
+    def mean_power_db(*level_sets):
+        """Mean in-band power of several equal-length-frame sets, as dBFS.
+
+        Every frame is 50 ms and every level is that frame's in-band level, so the
+        mean of 10**(L/10) is the window's mean in-band power. Two windows of
+        different length are therefore still comparable, which is what makes the
+        *energy ratio* below meaningful.
+        """
+        values = [float(level) for levels in level_sets for level in np.asarray(levels).reshape(-1)]
+        if not values:
+            return float("nan")
+        return 10.0 * math.log10(max(float(np.mean([10.0 ** (level / 10.0) for level in values])), 1e-24))
+
+    silence_power_db = mean_power_db(pre_levels, post_levels)
+    play_power_db = mean_power_db(play_levels)
+
+    def diff(value):
+        if math.isnan(value) or math.isnan(silence_power_db):
+            return None
+        return round(value - silence_power_db, 2)
+
+    # Frame-level percentile: the loudest frames of the playback against the average
+    # silence level. Reported as an *upper bound* only — it is the number that made a
+    # marginal microphone look comfortable (recon: energy ratio 0.8-2.6 dB vs p95 ~12 dB).
+    play_p95_db = float(np.percentile(play_levels, 95)) if play_levels.size else float("nan")
 
     looped = loop.get("data")
     loop_mono = None
@@ -1085,16 +1118,29 @@ def mode_speaker(root, fixture, gain):
         "unit": "dBFS",
         "playbackPeakDbfs": round(to_db(float(np.max(np.abs(played)))), 2),
         "playbackClipSamples": int(np.count_nonzero(np.abs(played) >= 0.999)),
-        "prerollMs": 600,
+        "prerollMs": 1000,
+        "tailMs": 1000,
         "playedMs": round(len(played) / rate * 1000.0, 1),
-        "preRollSpeechBandDbfs": None if math.isnan(noise_ref) else round(noise_ref, 2),
-        "playWindowMeanSpeechBandDbfs": None if math.isnan(heard_mean) else round(heard_mean, 2),
-        "playWindowP95SpeechBandDbfs": None if math.isnan(heard_peak) else round(heard_peak, 2),
-        "differentialMeanDb": None if math.isnan(heard_mean - noise_ref) else round(heard_mean - noise_ref, 2),
-        "differentialP95Db": None if math.isnan(heard_peak - noise_ref) else round(heard_peak - noise_ref, 2),
-        "micRmsDbfs": round(to_db(np.sqrt(np.mean(captured ** 2))), 2),
         "bandEstimator": "voice_edge.frontend" if fe is not None else "inline-fallback",
         "frontendError": fe_error,
+        # --- F2: the two criteria, both reported, neither hidden ---------------------
+        # Primary (conservative, integration): average in-band power during playback
+        # divided by average in-band power during silence. Same order of magnitude as
+        # the recon's 0.8-2.6 dB.
+        "energyRatioDb": None if math.isnan(play_power_db) or math.isnan(silence_power_db) else round(play_power_db - silence_power_db, 2),
+        "playWindowBandPowerDbfs": None if math.isnan(play_power_db) else round(play_power_db, 2),
+        "silenceWindowBandPowerDbfs": None if math.isnan(silence_power_db) else round(silence_power_db, 2),
+        "preRollBandPowerDbfs": None if not pre_levels.size else round(mean_power_db(pre_levels), 2),
+        "postRollBandPowerDbfs": None if not post_levels.size else round(mean_power_db(post_levels), 2),
+        # Secondary (optimistic upper bound, frame percentile): loudest frames vs the
+        # average silence level. Never the sole basis for a PASS any more.
+        "differentialP95Db": diff(play_p95_db),
+        "differentialMeanDb": diff(float(np.mean(play_levels)) if play_levels.size else float("nan")),
+        "playWindowP95SpeechBandDbfs": None if math.isnan(play_p95_db) else round(play_p95_db, 2),
+        "playWindowMeanSpeechBandDbfs": None if not play_levels.size else round(float(np.mean(play_levels)), 2),
+        "preRollSpeechBandDbfs": None if not pre_levels.size else round(float(np.mean(pre_levels)), 2),
+        "bandFrames": {"pre": int(pre_levels.size), "play": int(play_levels.size), "post": int(post_levels.size)},
+        "micRmsDbfs": round(to_db(np.sqrt(np.mean(captured ** 2))), 2),
         "loopbackCorrelation": None if loop_corr is None else round(loop_corr, 4),
         "loopbackBestLagMs": loop_lag_ms,
         "loopbackFrames": None if looped is None else int(np.asarray(looped).shape[0]),
@@ -1302,13 +1348,24 @@ export async function runDeviceAcceptance(options: AcceptanceOptions = {}): Prom
   }
   const render = (endpoints?.render ?? null) as Record<string, unknown> | null;
   const capture = (endpoints?.capture ?? null) as Record<string, unknown> | null;
+  /**
+   * F7: the capture endpoint's "volume" on Windows *is* the microphone gain. It is read
+   * (pycaw, read-only) and printed, never written — the console only ever suggests
+   * setting it to 0 dB when the noise floor is high, because raising/lowering it is a
+   * machine setting the user owns (t6 measured +0.23 dB and found no code that sets it).
+   */
+  const captureGainDb = capture === null ? null : numberField(capture, 'gainDb') ?? numberField(capture, 'volumeDb');
+  const gainHint = (floor: number | null): string =>
+    floor !== null && floor > -40
+      ? `采集增益当前 ${captureGainDb ?? '?'} dB（Windows 输入端点读数，仓库里没有任何代码修改它）：噪声底 ${floor} dBFS 偏高，可考虑在「声音设置 → 输入」里把该麦克风的增益设为 0 dB（实测 1:1 换回约 5.5 dB 噪声余量）；控制台只提示，不会自动改系统设置`
+      : `采集增益当前 ${captureGainDb ?? '?'} dB（Windows 输入端点读数，仓库里没有任何代码修改它）：噪声底不高，保持现状即可`;
   if (endpoints !== null) {
-    log(`[acceptance] 默认输出「${String(render?.name ?? '?')}」muted=${String(render?.muted)} 音量=${String(render?.volumeScalar)}｜默认输入「${String(capture?.name ?? '?')}」muted=${String(capture?.muted)}`);
+    log(`[acceptance] 默认输出「${String(render?.name ?? '?')}」muted=${String(render?.muted)} 音量=${String(render?.volumeScalar)}｜默认输入「${String(capture?.name ?? '?')}」muted=${String(capture?.muted)} 采集增益=${String(captureGainDb)} dB`);
   }
 
   // ---- 1. microphone ------------------------------------------------------------
   const micChecks: AcceptanceCheck[] = [];
-  let micEvidence: Record<string, unknown> = { endpoints: { render, capture } };
+  let micEvidence: Record<string, unknown> = { endpoints: { render, capture }, captureGainDb, readOnly: true };
   let micVerdict: AcceptanceItem['verdict'] = 'skipped';
   let micSummary = '未测到：麦克风探测没有跑起来';
   let micNext = '确认 .venvs/field-probe 里有 numpy + sounddevice，然后重跑这一项';
@@ -1316,7 +1373,7 @@ export async function runDeviceAcceptance(options: AcceptanceOptions = {}): Prom
     micChecks.push({
       name: 'Windows 采集端点（默认麦克风）',
       verdict: capture.muted === true ? 'fail' : 'pass',
-      detail: `设备「${String(capture.name ?? '?')}」：静音=${String(capture.muted)}，音量=${Math.round(Number(capture.volumeScalar ?? 0) * 100)}%`,
+      detail: `设备「${String(capture.name ?? '?')}」：静音=${String(capture.muted)}，音量=${Math.round(Number(capture.volumeScalar ?? 0) * 100)}%，采集增益=${captureGainDb ?? '?'} dB（= Windows 输入端点音量；pycaw 只读读数，仓库里没有任何代码设置它）`,
     });
   } else {
     micChecks.push({ name: 'Windows 采集端点（默认麦克风）', verdict: 'info', detail: '读不到端点状态（pycaw 不可用），只按录音判断' });
@@ -1339,6 +1396,11 @@ export async function runDeviceAcceptance(options: AcceptanceOptions = {}): Prom
       verdict: floor === null ? 'info' : floor > -40 ? 'info' : 'pass',
       detail: floor === null ? '算不出来（录音太短）' : `噪声底 ${floor} dBFS（50ms 帧 RMS 的 p10）。高于 −40 dBFS 说明这台机器的底噪偏大（勘测实测 −30.86 dBFS），这是当前最大风险`,
     });
+    micChecks.push({
+      name: '输入采集增益（系统设置，仅提示）',
+      verdict: 'info',
+      detail: gainHint(floor),
+    });
     const muted = capture?.muted === true;
     if (muted) {
       micVerdict = 'fail';
@@ -1351,10 +1413,10 @@ export async function runDeviceAcceptance(options: AcceptanceOptions = {}): Prom
     } else {
       micVerdict = 'pass';
       micSummary = floor !== null && floor > -40
-        ? `通过（有风险）：麦克风能录到声音，但噪声底 ${floor} dBFS 偏高，说话声只比它高几 dB 时识别会不稳`
-        : `通过：麦克风能录到声音（RMS ${rms} dBFS，噪声底 ${floor ?? '?'} dBFS）`;
+        ? `通过（有风险）：麦克风能录到声音，但噪声底 ${floor} dBFS 偏高（采集增益 ${captureGainDb ?? '?'} dB），说话声只比它高几 dB 时识别会不稳`
+        : `通过：麦克风能录到声音（RMS ${rms} dBFS，噪声底 ${floor ?? '?'} dBFS，采集增益 ${captureGainDb ?? '?'} dB）`;
       micNext = floor !== null && floor > -40
-        ? '下一步：扬声器自检；另外建议把麦克风采集增益从 +5.5 dB 降到 0 dB（实测 1:1 换回约 5.5 dB 噪声余量），或让麦克风离人近一点'
+        ? `下一步：扬声器自检；另外可考虑把输入采集增益从 ${captureGainDb ?? '?'} dB 设为 0 dB（实测 1:1 换回约 5.5 dB 噪声余量，控制台只提示、不改系统设置），或让麦克风离人近一点`
         : '下一步：扬声器自检（不需要你说话，程序会自己放一段音频）';
     }
   } catch (error) {
@@ -1378,52 +1440,70 @@ export async function runDeviceAcceptance(options: AcceptanceOptions = {}): Prom
     });
   }
   const speakerTrials: Record<string, unknown>[] = [];
-  // Playback gain 1.0, not 0.6: the fixture sits at −24.6 dBFS (recon §2.6), so
-  // even unity gain leaves ~24 dB of headroom (no clipping) and matches what a
-  // real TTS reply at the system volume actually sounds like. At 0.6 the measured
-  // play-vs-noise difference hovered at 9–13 dB, i.e. right on the 10 dB gate —
-  // a quieter-than-reality test signal, not a broken speaker.
+  // Playback gain 1.0: the fixture's speech-band level is −24.6 dBFS, so unity gain
+  // still leaves several dB of headroom (no clipping, checked below) and matches what
+  // a real TTS reply at the system volume sounds like.
   const SPEAKER_GAIN = '1.0';
+  /** Gate for BOTH speaker criteria. The same 10 dB the recon asked for, now applied to the conservative estimator. */
+  const SPEAKER_GATE_DB = 10;
+  /** Trials are always 3: the gate uses their mean, so an unlucky or lucky single run cannot decide the verdict. */
+  const SPEAKER_TRIALS = 3;
+  const stats = (values: readonly (number | null)[]): { count: number; best: number; worst: number; mean: number } | null => {
+    const usable = values.filter((value): value is number => value !== null);
+    if (usable.length === 0) return null;
+    return {
+      count: usable.length,
+      best: Number(Math.max(...usable).toFixed(2)),
+      worst: Number(Math.min(...usable).toFixed(2)),
+      mean: Number((usable.reduce((sum, value) => sum + value, 0) / usable.length).toFixed(2)),
+    };
+  };
   try {
-    let probe = await runner('speaker', [fixture, SPEAKER_GAIN], audioPython);
-    const trials: Record<string, unknown>[] = [probe];
-    speakerTrials.push(probe);
-    // The play-vs-silence difference is a noisy measurement (room noise, playback
-    // gain, microphone position) and on this machine it lands at 9–13 dB across
-    // runs — right on the 10 dB gate. A single trial just below the gate would flip
-    // the verdict for no real reason, so a sub-threshold result is re-measured
-    // (up to 3 trials) and the best trial wins — every trial is in the report.
-    for (let attempt = 1; attempt < 3; attempt += 1) {
-      const best = Math.max(...trials.map((item) => numberField(item, 'differentialP95Db') ?? -Infinity));
-      if (best >= 10) break;
-      log(`[acceptance] 扬声器相对差 ${best.toFixed(2)} dB < 10 dB，第 ${attempt + 1} 次复测…`);
-      try {
-        const retry = await runner('speaker', [fixture, SPEAKER_GAIN], audioPython);
-        trials.push(retry);
-        speakerTrials.push(retry);
-        const retryDiff = numberField(retry, 'differentialP95Db');
-        const probeDiff = numberField(probe, 'differentialP95Db');
-        if (retryDiff !== null && (probeDiff === null || retryDiff > probeDiff)) probe = retry;
-      } catch (error) {
-        notes.push(`扬声器复测失败（按已有结果判定）：${probeError(error)}`);
-        break;
-      }
+    for (let attempt = 0; attempt < SPEAKER_TRIALS; attempt += 1) {
+      if (attempt > 0) log(`[acceptance] 扬声器第 ${attempt + 1}/${SPEAKER_TRIALS} 次测量…`);
+      const trial = await runner('speaker', [fixture, SPEAKER_GAIN], audioPython);
+      speakerTrials.push(trial);
+      if (trial.ok === false) break;
     }
-    speakerEvidence = { ...speakerEvidence, loopback: probe, loopbackTrials: trials.map((item) => ({ differentialP95Db: item.differentialP95Db, differentialMeanDb: item.differentialMeanDb, loopbackCorrelation: item.loopbackCorrelation })) };
+    const probe = speakerTrials[0] as Record<string, unknown>;
+    const energyStats = stats(speakerTrials.map((item) => numberField(item, 'energyRatioDb')));
+    const p95Stats = stats(speakerTrials.map((item) => numberField(item, 'differentialP95Db')));
+    speakerEvidence = {
+      ...speakerEvidence,
+      loopback: probe,
+      loopbackTrials: speakerTrials.map((item) => ({
+        energyRatioDb: item.energyRatioDb,
+        differentialP95Db: item.differentialP95Db,
+        differentialMeanDb: item.differentialMeanDb,
+        silenceWindowBandPowerDbfs: item.silenceWindowBandPowerDbfs,
+        playWindowBandPowerDbfs: item.playWindowBandPowerDbfs,
+        loopbackCorrelation: item.loopbackCorrelation,
+      })),
+      trialStats: { energyRatioDb: energyStats, differentialP95Db: p95Stats, trials: speakerTrials.length },
+    };
     if (probe.ok === false) throw new Error(String(probe.error ?? '未知原因'));
     const correlation = numberField(probe, 'loopbackCorrelation');
     const correlationLag = numberField(probe, 'loopbackBestLagMs');
-    const diffMean = numberField(probe, 'differentialMeanDb');
-    const diffP95 = numberField(probe, 'differentialP95Db');
+    const energyRatio = energyStats?.mean ?? null;
+    const energyBest = energyStats?.best ?? null;
+    const energyWorst = energyStats?.worst ?? null;
+    const diffP95 = p95Stats?.mean ?? null;
+    const p95Best = p95Stats?.best ?? null;
+    const p95Worst = p95Stats?.worst ?? null;
     const estimator = String(probe.bandEstimator ?? '?');
     const playbackPeak = numberField(probe, 'playbackPeakDbfs');
+    const silencePower = numberField(probe, 'silenceWindowBandPowerDbfs');
+    const playPower = numberField(probe, 'playWindowBandPowerDbfs');
+    const trialText = energyStats === null || energyStats.count === 1
+      ? '单次测量'
+      : `${energyStats.count} 次测量的均值（最差 ${energyWorst} / 均值 ${energyRatio} / 最好 ${energyBest} dB）`;
     speakerChecks.push({
       name: '① 程序真的把音频送到了输出流（WASAPI loopback）',
       // Evidence, not a gate: this measurement is 0.9996 on a clean single-stream
       // capture (recon §2.5) but lands lower when the endpoint applies audio
       // enhancements/resampling, and it stays high when the *hardware* is muted —
       // so it can never be the thing that fails a speaker. The endpoint mute state
-      // and ② below are the gates.
+      // and the energy-ratio criterion below are the gates.
       verdict: correlation === null ? 'info' : correlation >= 0.9 ? 'pass' : 'info',
       detail: correlation === null
         ? `未能独立测量：${String(probe.loopbackError ?? 'soundcard 回采不可用')}。只有端点状态可作参考`
@@ -1437,28 +1517,35 @@ export async function runDeviceAcceptance(options: AcceptanceOptions = {}): Prom
         : `播放信号峰值 ${playbackPeak} dBFS（距数字满量程 ${(0 - playbackPeak).toFixed(1)} dB 余量，无削顶采样；夹具语音带电平 −24.6 dBFS，增益 1.0 比 0.6 更接近真实 TTS 播放电平）`,
     });
     speakerChecks.push({
-      name: '② 麦克风真的听到了（播放窗 − 前置静音窗，语音带 300–3400 Hz）',
-      verdict: diffP95 === null ? 'fail' : diffP95 >= 10 ? 'pass' : 'fail',
+      name: `② 麦克风真的听到了（主判据：能量比 ≥${SPEAKER_GATE_DB} dB，语音带 300–3400 Hz）`,
+      verdict: energyRatio === null ? 'fail' : energyRatio >= SPEAKER_GATE_DB ? 'pass' : 'fail',
+      detail: energyRatio === null
+        ? '算不出能量比（没录到有效数据）'
+        : `能量比 ${energyRatio} dB = 播放窗平均带内功率（${playPower ?? '?'} dBFS）− 静音窗平均带内功率（${silencePower ?? '?'} dBFS，前置 1.0s + 尾部 1.0s 的所有 50ms 帧）；${trialText}。`
+          + `口径说明：能量比是**相对**口径里最保守的那个（平均功率之比，与勘测实测的 0.8–2.6 dB 同一量级，也与 ASR 实际可用性最相关）；绝对 RMS 不能用——勘测实测扬声器静音时绝对 RMS 反而更高（0.0505 vs 0.0486）`,
+    });
+    speakerChecks.push({
+      name: '③ 参考口径：帧级 dB 分位（乐观上界，不作为判据）',
+      verdict: 'info',
       detail: diffP95 === null
-        ? '算不出相对差（没录到有效数据）'
-        : `相对差 ${diffP95} dB（均值 ${diffMean ?? '?'} dB，估计器 ${estimator}；判据 ≥10 dB）。这是**相对**判据：勘测实测扬声器静音时绝对 RMS 反而更高（0.0505 vs 0.0486），绝对判据会假 PASS` + (speakerTrials.length > 1 ? `｜本轮复测 ${speakerTrials.length} 次（各次 ${speakerTrials.map((item) => numberField(item as Record<string, unknown>, 'differentialP95Db') ?? '?').join(' / ')} dB），取较好的一次` : ''),
+        ? '算不出分位差（没录到有效数据）'
+        : `分位差（最响 50ms 帧 − 静音窗平均）${diffP95} dB（最差 ${p95Worst} / 均值 ${diffP95} / 最好 ${p95Best} dB，估计器 ${estimator}）。`
+          + (energyRatio === null ? '' : `本次它比能量比高 ${Number((diffP95 - energyRatio).toFixed(2))} dB。`)
+          + `口径说明：分位只看最响的瞬间，这个差值是定义差异而非额外余量——T6 在 0.6s 单窗参考下实测 11.83 vs 2.69 dB（差约 9 dB），本报告改了参考窗定义，差值与数值都会随噪声条件变化，**不能**用来判断平均声学余量`,
     });
     if (render?.muted === true) {
       speakerVerdict = 'fail';
       speakerSummary = '失败：默认输出设备是静音状态，程序再努力也放不出声';
       speakerNext = '打开「声音设置 → 输出」，选中默认设备并解除静音、音量调到 50% 以上，然后重跑扬声器一项（勘测已把本机音量设为 66%）';
-    } else if (diffP95 !== null && diffP95 >= 12) {
+    } else if (energyRatio !== null && energyRatio >= SPEAKER_GATE_DB) {
       speakerVerdict = 'pass';
-      speakerSummary = `通过：麦克风听到的播放声比噪声底高 ${diffP95} dB（相对判据 ≥10 dB）`;
+      speakerSummary = `通过：能量比 ${energyRatio} dB ≥ ${SPEAKER_GATE_DB} dB（分位口径 ${diffP95 ?? '?'} dB 只是上界）`;
       speakerNext = '下一步：摄像头自检';
-    } else if (diffP95 !== null && diffP95 >= 10) {
-      speakerVerdict = 'pass';
-      speakerSummary = `通过（临界）：麦克风听到的播放声只比噪声底高 ${diffP95} dB（阈值 10 dB）`;
-      speakerNext = '下一步：摄像头自检；另外把音量调大一点或让麦克风离扬声器近一些（0.3–1 m），可以把这个余量做厚';
     } else {
       speakerVerdict = 'fail';
-      speakerSummary = `失败：麦克风没有明显听到播放声（相对差 ${diffP95 ?? '?'} dB < 10 dB），但程序确实渲染了音频（相关 ${correlation ?? '未测'}）`;
-      speakerNext = '两种失败要分开看：①「渲染失败」看相关性，②「听不到」看音量/距离。请先确认音量 ≥50%，扬声器没有被物理静音，麦克风离扬声器 0.3–1 m，然后重跑';
+      speakerSummary = `失败（口径修正后）：程序确实渲染了音频（相关 ${correlation ?? '未测'}），但按**能量比**口径麦克风只比噪声底高 ${energyRatio ?? '?'} dB（< ${SPEAKER_GATE_DB} dB）；`
+        + `分位口径 ${diffP95 ?? '?'} dB 是乐观上界，不代表平均声学余量。这与勘测实测的 0.8–2.6 dB 一致：瓶颈是本机麦克风自噪，不是扬声器`;
+      speakerNext = '先确认：音量 ≥50%、扬声器未被物理静音、麦克风离扬声器 0.3–1 m，然后重跑。若能量比仍 <10 dB，说明本机麦克风自噪过高——按控制台/报告里的「Windows 采集增益」读数把它设为 0 dB（控制台只提示，不改系统设置），或换外接麦克风';
     }
   } catch (error) {
     speakerVerdict = 'fail';
@@ -1541,6 +1628,10 @@ export async function runDeviceAcceptance(options: AcceptanceOptions = {}): Prom
   const overall: AcceptanceReport['overall'] = items.every((item) => item.verdict === 'pass') ? 'pass' : 'fail';
   if (items.some((item) => item.verdict === 'skipped')) notes.push('有项目被跳过（依赖的 venv 或设备不可用），报告里逐项写了原因与下一步');
   notes.push('判据说明：「程序渲染了音频」与「麦克风真的听到了」是两件事，分别测量、分别显示（勘测 §2.5 的假 PASS 教训）');
+  notes.push('扬声器「麦克风真的听到了」有**两个口径**，报告里两个都给出：② **能量比**（主判据：播放窗平均带内功率 − 静音窗平均带内功率，保守、与 ASR 可用性最相关，勘测实测 0.8–2.6 dB）与 ③ **帧级 dB 分位**（乐观上界：最响的 50 ms 帧 − 静音窗平均；T6 实测 11.83 vs 2.69 dB，差约 9 dB，本报告的参考窗定义不同故差值不同）。单一分位数字会让读者高估声学余量，所以它不再作为判据');
+  notes.push('扬声器复测：固定测 3 次，判据取 3 次的**均值**，同时给出最差/最好（每次的原始数字都在证据里）。不取「最好的一次」，避免把偶然的噪声低谷当成余量');
+  notes.push('静音参考窗的定义：前置 1.0 s + 尾部 1.0 s 的所有 50 ms 帧的**平均带内功率**（两个窗都列在证据里）。取两段而不是只看前置，是为了不让采集刚启动时的爬升段把噪声底压低而虚增余量；尾部若混入播放混响，只会让判据更保守');
+  notes.push('输入采集增益（Windows 采集端点音量，pycaw 只读读数）会显示在麦克风一项与报告里；噪声底偏高时只提示「可考虑设为 0 dB」，控制台不会修改任何系统设置');
   notes.push('「程序渲染了音频」（WASAPI 回采相关性）是证据不是门禁：本机带音频增强/重采样时实测会低于勘测单流采集的 0.9996，所以它不单独判失败；判失败的是「端点被静音」与「麦克风没听到（相对差 <10 dB）」');
   notes.push('扬声器相对差是噪声测量：本机多次运行实测 9.1–14.7 dB（单次结果会压在 10 dB 阈值上）；因此用更好的播放电平（增益 1.0，无削顶）+ 最多 3 次复测取较好值，每一次的原始数字都写进证据——真坏了的话三次都不会过');
   notes.push('同时有别的程序（浏览器标签、会议软件，或另一个正在跑的检测脚本）占用摄像头时，DSHOW 一定打不开——这是占用而不是设备故障，关掉占用方后重跑本项即可');
@@ -1642,7 +1733,8 @@ export function renderAcceptanceReport(report: AcceptanceReport, extra: { readon
   for (const note of report.notes) lines.push(`- ${note}`);
   lines.push('- 本机实测噪声底 −30.86 dBFS、环境 RMS −27.25 dBFS（勘测 §1.2），麦克风噪声是当前最大风险；麦克风一项的「通过」不等于「识别一定准」。');
   lines.push('- 噪声底每次重新实测，不沿用旧数字：本轮与勘测的差异来自采集音量/设备状态（Windows 采集端点音量、麦克风位置），所以报告里的数字以本文件为准，勘测数字只作对照。');
-  lines.push('- 绝对 RMS 不能当扬声器判据：勘测实测扬声器静音时 RMS 反而更高（0.0505 vs 0.0486），因此本报告用「播放窗 − 前置静音窗」的相对判据（≥10 dB）。');
+  lines.push('- 绝对 RMS 不能当扬声器判据：勘测实测扬声器静音时 RMS 反而更高（0.0505 vs 0.0486），因此本报告用「播放窗 − 静音窗」的**相对**判据；其中主判据是**能量比**（保守、≥10 dB），帧级 dB 分位只作乐观上界参考。');
+  lines.push('- 扬声器判据的门限（10 dB）没有因为口径变化而改变，但换到能量比口径后本机读数会明显更低——这正是勘测 0.8–2.6 dB 与旧报告「11 dB 通过」之间矛盾的解释。');
   lines.push('');
   lines.push('## 复现方式');
   lines.push('');
@@ -1773,6 +1865,59 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   let acceptanceRunning = false;
   const calibration = readCalibration();
 
+  /**
+   * F7: the Windows input/output endpoint readings the console shows (mute, volume, and
+   * for the input endpoint the *capture gain*, which is the same number Windows calls the
+   * endpoint volume). pycaw is used read-only here: nothing in this repo writes these
+   * settings, the console only *suggests* 0 dB when the measured noise floor is high.
+   */
+  const probePath = join(REPO_ROOT, 'data', 'field-test', 'device-probe.py');
+  mkdirSync(dirname(probePath), { recursive: true });
+  if (!existsSync(probePath)) writeFileSync(probePath, DEVICE_PROBE_PY, 'utf8');
+  const endpointsRunner = options.probeRunner ?? defaultProbeRunner(probePath, REPO_ROOT);
+  let endpointsCache: { at: number; payload: Record<string, unknown> } | null = null;
+
+  async function readEndpoints(force = false): Promise<Record<string, unknown>> {
+    const now = Date.now();
+    if (!force && endpointsCache !== null && now - endpointsCache.at < 15_000) return endpointsCache.payload;
+    let payload: Record<string, unknown>;
+    try {
+      const probe = await endpointsRunner('endpoints', [], PROBE_PYTHON);
+      if (probe.ok === false) throw new ConsoleError('ENDPOINT_READ_FAILED', `读不到 Windows 端点状态：${String(probe.error ?? '未知原因')}`, '确认 .venvs/field-probe 里有 pycaw + comtypes；没有它也能跑麦克风/扬声器自检，只是看不到系统读数');
+      const render = (probe.render ?? {}) as Record<string, unknown>;
+      const capture = (probe.capture ?? {}) as Record<string, unknown>;
+      const gain = numberField(capture, 'gainDb') ?? numberField(capture, 'volumeDb');
+      const noiseFloor = calibration.noiseFloorDbfs;
+      const noiseFloorHigh = noiseFloor !== null && noiseFloor > -40;
+      payload = {
+        ok: true,
+        checkedAt: new Date().toISOString(),
+        readOnly: true,
+        render,
+        capture,
+        captureGainDb: gain,
+        noiseFloorDbfs: noiseFloor,
+        noiseFloorHigh,
+        hint: noiseFloorHigh
+          ? `当前输入采集增益 ${gain ?? '?'} dB；实测噪声底 ${noiseFloor ?? '?'} dBFS 偏高，可考虑在「声音设置 → 输入」里把它设为 0 dB（实测 1:1 换回约 5.5 dB 噪声余量）。控制台只提示，不会修改任何系统设置`
+          : `当前输入采集增益 ${gain ?? '?'} dB；实测噪声底 ${noiseFloor ?? '?'} dBFS 不算高，保持现状即可`,
+        readOnlyNote: '这组读数由 pycaw 只读取得；本仓库代码不会修改系统音频设置（t6 核实：采集增益为系统值，没有任何代码设置它）',
+      };
+    } catch (error) {
+      payload = {
+        ok: false,
+        checkedAt: new Date().toISOString(),
+        error: {
+          message: error instanceof ConsoleError ? error.message : `读不到 Windows 端点状态：${probeError(error)}`,
+          hint: error instanceof ConsoleError ? error.hint : '确认 .venvs/field-probe 里有 pycaw + comtypes',
+        },
+      };
+      log(`[endpoints] ${String((payload.error as Record<string, unknown>).message)}`);
+    }
+    endpointsCache = { at: now, payload };
+    return payload;
+  }
+
   function pushTurn(turn: ConsoleTurn): void {
     turns.unshift(turn);
     if (turns.length > 20) turns.pop();
@@ -1824,6 +1969,10 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
         }
         if (request.method === 'GET' && url.pathname === '/api/field/presence') {
           json(response, 200, await readPresence({ store: getPresenceStore() }));
+          return;
+        }
+        if (request.method === 'GET' && url.pathname === '/api/field/endpoints') {
+          json(response, 200, await readEndpoints(url.searchParams.get('force') === '1'));
           return;
         }
         if (request.method === 'POST' && url.pathname === '/api/field/acceptance') {
@@ -2139,8 +2288,21 @@ export function buildFieldPage(boot: FieldBootstrap): string {
   </section>
 
   <section class="card">
+    <h2>Windows 设备读数（系统设置，只读）</h2>
+    <table>
+      <tr><th style="width:44%">读数</th><th>含义</th></tr>
+      <tr><td>默认输入「<b id="ep-capture-name">—</b>」</td><td>静音 <b id="ep-capture-muted">—</b>，音量 <b id="ep-capture-volume">—</b>%，<b>采集增益 <span id="ep-capture-gain">—</span> dB</b>（Windows 把输入端点音量就叫增益；噪声底偏高时这条最关键）</td></tr>
+      <tr><td>默认输出「<b id="ep-render-name">—</b>」</td><td>静音 <b id="ep-render-muted">—</b>，音量 <b id="ep-render-volume">—</b>%（出厂静音过一次，这是上一轮验收失败的根因）</td></tr>
+    </table>
+    <div class="muted" id="ep-hint">加载中…</div>
+    <div class="muted" id="ep-readonly">这组读数由 pycaw 只读取得；本仓库代码不会修改系统音频设置。</div>
+    <div style="margin-top:8px"><button id="ep-refresh">刷新设备读数</button> <span class="muted" id="ep-error"></span></div>
+  </section>
+
+  <section class="card">
     <h2>设备验收引导（麦克风 → 扬声器 → 摄像头）</h2>
-    <div class="muted">点一次「开始设备自检」：程序会自己录 3 秒环境声、放一段音频并用麦克风回采、再打开摄像头取 15 帧。全程约 10–20 秒，不需要你说话。结果与「下一步动作」会写进 <code>docs/recon/field-test-report-&lt;日期&gt;.md</code>。</div>
+    <div class="muted">点一次「开始设备自检」：程序会自己录 3 秒环境声、放 3 遍音频并用麦克风回采、再打开摄像头取 15 帧。全程约 20–35 秒，不需要你说话。结果与「下一步动作」会写进 <code>docs/recon/field-test-report-&lt;日期&gt;.md</code>。</div>
+    <div class="muted">扬声器一项会给两个口径的数字：<b>能量比</b>（主判据，保守，≥10 dB）与<b>帧级分位</b>（乐观上界，仅参考）。只看分位会高估声学余量。</div>
     <div style="margin:10px 0"><button id="accept" class="primary">开始设备自检</button> <span class="muted" id="accept-status"></span></div>
     <div id="accept-items"></div>
     <div id="accept-error"></div>
@@ -2288,6 +2450,36 @@ function renderPresence(presence) {
   el('presence-confidence').textContent = fmt(presence.confidence, 2);
   el('presence-updated').textContent = presence.updatedAt === null ? '—' : presence.updatedAt + (presence.stale ? '（已过期）' : '');
   el('presence-note').textContent = presence.note;
+}
+
+function renderEndpoints(payload) {
+  el('ep-error').textContent = '';
+  if (payload.ok === false) {
+    el('ep-capture-name').textContent = '读取失败';
+    el('ep-render-name').textContent = '读取失败';
+    el('ep-hint').textContent = payload.error ? payload.error.message + '（下一步：' + payload.error.hint + '）' : '读不到端点读数';
+    return;
+  }
+  var capture = payload.capture || {};
+  var render = payload.render || {};
+  el('ep-capture-name').textContent = capture.name || '(未命名)';
+  el('ep-capture-muted').textContent = capture.muted ? '是（麦克风被静音！）' : '否';
+  el('ep-capture-volume').textContent = Math.round(Number(capture.volumeScalar || 0) * 100);
+  el('ep-capture-gain').textContent = payload.captureGainDb === null || payload.captureGainDb === undefined ? '—' : Number(payload.captureGainDb).toFixed(2);
+  el('ep-render-name').textContent = render.name || '(未命名)';
+  el('ep-render-muted').textContent = render.muted ? '是（扬声器放不出声）' : '否';
+  el('ep-render-volume').textContent = Math.round(Number(render.volumeScalar || 0) * 100);
+  el('ep-hint').textContent = payload.hint || '';
+  el('ep-readonly').textContent = (payload.readOnlyNote || '这组读数由 pycaw 只读取得。') + '（读数时间 ' + new Date(payload.checkedAt).toLocaleTimeString() + '）';
+}
+
+async function refreshEndpoints(force) {
+  try {
+    var response = await fetch('/api/field/endpoints' + (force ? '?force=1' : ''));
+    renderEndpoints(await response.json());
+  } catch (error) {
+    el('ep-hint').textContent = '读不到 Windows 设备读数：' + error.message + '（下一步：确认启动现场测试的终端还在运行）';
+  }
 }
 
 function pctFromDbfs(dbfs) {
@@ -2527,7 +2719,10 @@ el('form').addEventListener('submit', async function (event) {
 });
 
 refreshState();
+refreshEndpoints(false);
+el('ep-refresh').addEventListener('click', function () { refreshEndpoints(true); });
 setInterval(function () { refreshState(); }, 5000);
+setInterval(function () { refreshEndpoints(false); }, 30000);
 </script>
 </body></html>`;
 }
@@ -2545,14 +2740,25 @@ setInterval(function () { refreshState(); }, 5000);
  * calls it FAIL and points at the mute. That makes the fix a regression test
  * rather than a claim.
  */
-export function createFakeProbeRunner(): ProbeRunner {
+export interface FakeProbeOptions {
+  /** Whether the *render* endpoint is muted (the false-PASS case keeps it muted by default). */
+  readonly renderMuted?: boolean;
+  /** Primary speaker criterion (dB). */
+  readonly energyRatioDb?: number;
+  /** Optimistic frame-percentile criterion (dB) — reported, never the gate. */
+  readonly differentialP95Db?: number;
+  readonly differentialMeanDb?: number;
+}
+
+export function createFakeProbeRunner(options: FakeProbeOptions = {}): ProbeRunner {
   return async (mode) => {
     switch (mode) {
       case 'endpoints':
         return {
           ok: true,
-          render: { label: 'render', name: 'FAKE 扬声器', muted: true, volumeScalar: 0.661, volumeDb: -6.19 },
-          capture: { label: 'capture', name: 'FAKE 麦克风', muted: false, volumeScalar: 0.66, volumeDb: -6.0 },
+          readOnly: true,
+          render: { label: 'render', name: 'FAKE 扬声器', muted: options.renderMuted ?? true, volumeScalar: 0.661, volumeDb: -6.19, gainDb: null },
+          capture: { label: 'capture', name: 'FAKE 麦克风', muted: false, volumeScalar: 0.66, volumeDb: 0.23, gainDb: 0.23 },
         };
       case 'mic':
         return { ok: true, device: 'FAKE 麦克风', rate: 48000, seconds: 3, unit: 'dBFS', rmsDbfs: -27.25, noiseFloorDbfs: -30.86, p90FrameDbfs: -26.4, peakDbfs: -12.1, frames: 59 };
@@ -2560,18 +2766,26 @@ export function createFakeProbeRunner(): ProbeRunner {
         return {
           ok: true,
           fixture: 'fake.wav',
-          gain: 0.6,
+          gain: 1.0,
           rate: 48000,
           unit: 'dBFS',
-          prerollMs: 600,
+          prerollMs: 1000,
+          tailMs: 1000,
           playedMs: 2520,
+          // F2: the two criteria disagree by design in this double — the energy ratio is
+          // the conservative one, the frame percentile is ~9 dB higher.
+          energyRatioDb: options.energyRatioDb ?? -2.6,
+          playWindowBandPowerDbfs: -38.6,
+          silenceWindowBandPowerDbfs: -36.0,
           preRollSpeechBandDbfs: -41.2,
           playWindowMeanSpeechBandDbfs: -38.6,
           playWindowP95SpeechBandDbfs: -38.6,
-          differentialMeanDb: -2.6,
-          differentialP95Db: -2.6,
+          differentialMeanDb: options.differentialMeanDb ?? -2.6,
+          differentialP95Db: options.differentialP95Db ?? -2.6,
           micRmsDbfs: -30.1,
           bandEstimator: 'fake',
+          playbackPeakDbfs: -5.49,
+          playbackClipSamples: 0,
           loopbackCorrelation: 0.9996,
           loopbackError: null,
         };
@@ -2668,7 +2882,7 @@ export async function runSelfTest(options: { log?: (line: string) => void } = {}
 
     // ---- page -----------------------------------------------------------------
     const page = await (await fetch(`${base}/`)).text();
-    const pageMarkers = ['麦克风实时电平与噪声底', '摄像头在场状态', '设备验收引导', '最近几轮', 'VAD', 'ASR', '首字', '总时长', '沉默', '下一步动作', 'dBFS', '127.0.0.1'];
+    const pageMarkers = ['麦克风实时电平与噪声底', '摄像头在场状态', '设备验收引导', '最近几轮', 'VAD', 'ASR', '首字', '总时长', '沉默', '下一步动作', 'dBFS', '127.0.0.1', '采集增益', '能量比', '分位', '只读'];
     const missing = pageMarkers.filter((marker) => !page.includes(marker));
     check('页面包含全部中文说明与数字含义', missing.length === 0, missing.length === 0 ? `${pageMarkers.length} 个标记全部存在` : `缺少：${missing.join('、')}`);
 
@@ -2729,9 +2943,43 @@ export async function runSelfTest(options: { log?: (line: string) => void } = {}
     const speaker = report.items.find((item: { id: string }) => item.id === 'speaker') as Record<string, any>;
     check('扬声器静音 + 播放窗无差异 → 判 FAIL（修掉假 PASS）', speaker.verdict === 'fail' && speaker.nextAction.includes('静音'), speaker.summary);
     check('扬声器判据是相对的，不是绝对 RMS', speaker.checks.some((item: { detail: string }) => item.detail.includes('相对')), speaker.checks.map((item: { name: string }) => item.name).join(' / '));
+    check('F2：报告同时给出能量比（主判据）与分位（上界）两个口径', speaker.checks.some((item: { name: string }) => item.name.includes('能量比')) && speaker.checks.some((item: { name: string }) => item.name.includes('分位') && item.name.includes('不作为判据')), speaker.checks.map((item: { name: string }) => item.name).join(' / '));
+    check('F6：复测同时报最差/均值/最好', speaker.checks.some((item: { detail: string }) => item.detail.includes('最差') && item.detail.includes('均值') && item.detail.includes('最好')) && (speaker.evidence.trialStats as { trials: number }).trials === 3, JSON.stringify((speaker.evidence.trialStats as { energyRatioDb: unknown }).energyRatioDb));
     check('总体结论与报告落盘', report.overall === 'fail' && typeof report.reportPath === 'string' && existsSync(report.reportPath), String(report.reportPath));
     const reportText = typeof report.reportPath === 'string' && existsSync(report.reportPath) ? readFileSync(report.reportPath, 'utf8') : '';
     check('报告文件含逐项结论、证据与复现方式', reportText.includes('现场测试报告') && reportText.includes('下一步动作') && reportText.includes('复现方式') && reportText.includes('假 PASS'), `报告 ${reportText.split('\n').length} 行`);
+
+    // ---- F7: endpoint readings (capture gain) visible --------------------------
+    const endpoints = (await (await fetch(`${base}/api/field/endpoints`)).json()) as Record<string, any>;
+    check('F7：控制台能给出输入采集增益（pycaw 只读读数）', endpoints.ok === true && endpoints.captureGainDb === 0.23 && endpoints.readOnly === true, `captureGainDb=${String(endpoints.captureGainDb)} | readOnly=${String(endpoints.readOnly)}`);
+    check('F7：噪声底偏高时提示「可考虑设为 0 dB」，并声明不改系统设置', String(endpoints.hint).includes('0 dB') && String(endpoints.hint).includes('只提示') && String(endpoints.readOnlyNote).includes('不会修改'), String(endpoints.hint).slice(0, 90));
+
+    // ---- F2 regression: energy ratio below the gate while the percentile is above it
+    // This is the exact case the independent verification flagged: a non-muted render,
+    // energy ratio 2.69 dB, frame percentile 11.83 dB. The item MUST fail, and both
+    // numbers MUST be in the report.
+    const f2Handle = await createFieldServer({
+      port: 0,
+      offline: true,
+      ttsEnabled: false,
+      voiceDir: join(root, 'voice-f2'),
+      dataDir: join(root, 'data-f2'),
+      presenceDataDir: join(root, 'presence-f2'),
+      reportDir: join(root, 'recon-f2'),
+      autoPrune: false,
+      probeRunner: createFakeProbeRunner({ renderMuted: false, energyRatioDb: 2.69, differentialP95Db: 11.83, differentialMeanDb: 6.47 }),
+      log: () => {},
+    });
+    try {
+      const f2Response = (await (await fetch(`${f2Handle.url}/api/field/acceptance`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).json()) as Record<string, any>;
+      const f2Speaker = (f2Response.report.items as Record<string, any>[]).find((item) => item.id === 'speaker');
+      check('F2 回归：能量比 2.69 dB（<10）但分位 11.83 dB（>10）→ 必须判 FAIL', f2Speaker.verdict === 'fail', f2Speaker.summary);
+      check('F2 回归：FAIL 的说明里点名能量比与「乐观上界」', String(f2Speaker.summary).includes('能量比') && String(f2Speaker.summary).includes('上界'), String(f2Speaker.summary).slice(0, 120));
+      const f2Text = readFileSync(f2Response.report.reportPath as string, 'utf8');
+      check('F2 回归：报告里两个口径都出现（2.69 与 11.83）', f2Text.includes('2.69') && f2Text.includes('11.83'), `报告 ${f2Text.split('\n').length} 行`);
+    } finally {
+      await f2Handle.close();
+    }
   } catch (error) {
     check('自检过程未抛异常', false, error instanceof Error ? (error.stack ?? error.message) : String(error));
   } finally {

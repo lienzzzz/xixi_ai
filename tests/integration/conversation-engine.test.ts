@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 import { FakeBrainAdapter, type ScriptedOutcome, type UserTurnInput } from '@xixi/brain-adapter';
 import { ConversationEngine } from '@xixi/conversation';
-import { fixedClock, openXixiStore, type XixiConfig, type XixiStore } from '@xixi/domain';
+import { fixedClock, openXixiStore, type Clock, type XixiConfig, type XixiStore } from '@xixi/domain';
 
 const T0 = new Date('2026-09-29T20:00:00+08:00');
 
@@ -231,6 +231,49 @@ test('quiet mode stops accepting turns and can be lifted', async () => {
   }
 });
 
+test('a long pause is noticed without calling tick(): the first line after it is a wake-up, not a rejection', async () => {
+  const store = freshStore();
+  try {
+    // A clock this test owns: `now` moves only when the test moves it. Nothing
+    // below calls `engine.tick()` — that is the production path (t19 / t6 F1):
+    // `scripts/chat.ts`, `scripts/serve-chat.ts` and `scripts/field-test.ts` read
+    // `engine.state` to decide whether the next utterance is a wake-up, and none
+    // of them ever ticked, so the getter used to answer with the last transition.
+    let now = new Date(T0);
+    const clock: Clock = () => new Date(now);
+    const engine = new ConversationEngine({
+      adapter: new FakeBrainAdapter({ reply: (input) => ({ action: 'SPEAK', text: `收到：${input.text}` }) }),
+      store,
+      config: CONFIG,
+      clock,
+      offsetMinutes: 480,
+      fsm: { lingerMs: 30_000 },
+    });
+    const session = store.createSession();
+
+    await engine.respond({ sessionId: session.sessionId, text: '第一句', addressed: engine.state === 'IDLE' });
+    assert.equal(engine.state, 'LINGERING');
+    assert.equal(engine.lingerMs, 36_000, '0.7 → 30s × 1.2');
+
+    // Ten minutes of silence, far past the 36 s follow-up window.
+    now = new Date(now.getTime() + 10 * 60_000);
+
+    assert.equal(engine.state, 'IDLE', 'the state a caller reads must describe now, not the last transition');
+    assert.equal(engine.snapshot().state, 'IDLE', 'snapshot() must agree with state about the same instant');
+
+    // Exactly what the CLIs do: IDLE means this line is the wake-up.
+    const firstLineAfterThePause = await engine.respond({
+      sessionId: session.sessionId,
+      text: '长停顿之后的第一句',
+      addressed: engine.state === 'IDLE',
+    });
+    assert.equal(firstLineAfterThePause.accepted, true, 'the FIRST line after the pause must be accepted');
+    assert.equal(firstLineAfterThePause.reason, 'ACCEPTED_WAKE_OR_DIRECT');
+  } finally {
+    store.close();
+  }
+});
+
 test('a long pause closes the session, and the next addressed line is accepted again', async () => {
   const store = freshStore();
   try {
@@ -240,17 +283,24 @@ test('a long pause closes the session, and the next addressed line is accepted a
     assert.equal(engine.state, 'LINGERING');
     // 0.7 → window = 30s × 1.2 = 36s
     assert.equal(engine.lingerMs, 36_000);
+    // `tick()` stays available as an explicit seam (the loop and replay use it);
+    // reads no longer depend on it, see the test above.
     engine.tick(new Date(Date.now() + 10 * 60 * 1000));
     assert.equal(engine.state, 'IDLE');
 
-    // In IDLE an unaddressed line is still refused…
+    // In IDLE an unaddressed line is still refused — the §13 rule the TV-audio
+    // case depends on, and the only way to reach this branch from a caller that
+    // does not compute `addressed` from the state.
     const ignored = await engine.respond({ sessionId: session.sessionId, text: '还在吗', addressed: false });
     assert.equal(ignored.accepted, false);
     assert.equal(ignored.reason, 'REJECTED_NOT_ADDRESSED');
 
-    // …and this is exactly the fix for `scripts/chat.ts`: the callers rule is
-    // "IDLE means the click/line is a wake-up", so the next line is accepted
-    // instead of being rejected forever after the first follow-up timeout.
+    // …and the rejection is auditable, unlike before t5.
+    const rejected = store.readEvents({ type: 'conversation.decision' }).at(-1);
+    assert.equal((rejected?.payload as { accepted: boolean }).accepted, false);
+    assert.equal((rejected?.payload as { reason: string }).reason, 'REJECTED_NOT_ADDRESSED');
+
+    // A caller that computes `addressed` from the state (the CLIs' rule) accepts it.
     const resumed = await engine.respond({ sessionId: session.sessionId, text: '还在吗', addressed: true });
     assert.equal(resumed.accepted, true);
     assert.equal(resumed.reason, 'ACCEPTED_WAKE_OR_DIRECT');
