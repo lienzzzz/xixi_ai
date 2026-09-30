@@ -10,8 +10,6 @@
  * 用法：node scripts/serve-chat.ts [--port 8791] [--no-tts]
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { DshBrainAdapter, MimoBrainAdapter, defaultTools, type BrainAdapter } from '@xixi/brain-adapter';
@@ -21,7 +19,14 @@ import { MimoClient } from '@xixi/model-adapters';
 import { openXixiStore } from '@xixi/domain';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
-import { readWav, sliceWav } from './lib/wav.ts';
+import {
+  ConsoleError,
+  handleVoiceTurn,
+  pruneVoiceDir,
+  retentionPolicy,
+  type VoiceDeps,
+  type VoiceTurnBody,
+} from './field-test.ts';
 import { toOffsetIso } from '@xixi/contracts';
 
 for (const [key, value] of Object.entries(readDotEnv())) {
@@ -41,6 +46,13 @@ const config = loadConfig();
 const client = new MimoClient();
 const store = openXixiStore({ dataDir: join(REPO_ROOT, 'data', 'web-chat') });
 store.seedSelfProfile(config.personality.base);
+const policy = retentionPolicy(config);
+// Same privacy fix as the field-test console: apply the retention policy to any
+// whole-recording files older versions left behind (audit finding, §20.1).
+const pruned = pruneVoiceDir(VOICE_DIR, policy);
+if (pruned.removed.length > 0) {
+  console.log(`[privacy] 按保留策略清理 ${pruned.removed.length} 个音频文件（${Math.round(pruned.bytesFreed / 1024)} KB）：${pruned.removed.map((item) => item.name).join('、')}`);
+}
 
 function buildAdapter(): BrainAdapter {
   if (!USE_DSH) {
@@ -76,103 +88,27 @@ interface TurnBody {
   readonly audioBase64?: string;
 }
 
-/** Run the VAD segmenter over a WAV and return its JSON result. */
-function runVad(wavPath: string): Promise<{ segments: { startMs: number; endMs: number }[]; bargeInDecisionMs: number | null; timings?: { processMs: number } }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(PYTHON, ['-m', 'voice_edge.segment', wavPath], {
-      cwd: join(REPO_ROOT, 'services', 'voice-edge'),
-      windowsHide: true,
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (data: string) => {
-      stdout += data;
-    });
-    child.stderr.on('data', (data: string) => {
-      stderr += data;
-    });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      // Exit 2 means "no speech found", which is a result rather than a failure.
-      if (code === 0 || code === 2) {
-        try {
-          resolve(JSON.parse(stdout));
-        } catch (cause) {
-          reject(new Error(`VAD 输出无法解析：${cause instanceof Error ? cause.message : String(cause)}`));
-        }
-      } else {
-        reject(new Error(`VAD 失败（exit ${code}）：${stderr.slice(-300)}`));
-      }
-    });
-  });
-}
+const voiceDeps: VoiceDeps = {
+  python: PYTHON,
+  voiceDir: VOICE_DIR,
+  client,
+  engine,
+  currentSessionId: () => session.sessionId,
+  ttsEnabled: TTS_ENABLED,
+  policy,
+  log: (line) => console.log(line),
+};
 
 /**
- * Voice turn: browser capture → VAD (only the speech span) → ASR → conversation → TTS.
+ * Voice turn, delegated to the shared core in `scripts/field-test.ts`.
  *
- * The browser captures because the Python `sounddevice` path on this machine
- * delivered no speech-band signal (docs/recon/device-acceptance-2026-09-30.md);
- * the browser brings its own device selection, echo cancellation and noise
- * suppression, which is a genuinely different audio front end.
+ * Why not inline any more: this handler used to write the whole recording to
+ * `data/voice-web/capture-*.wav` *before* the VAD (even when there was no speech,
+ * and with no cleanup), and it silently kept only `segments[0]`. Both are fixed in
+ * one place now, so this page and the field-test console cannot drift apart.
  */
 async function handleVoice(body: TurnBody, response: ServerResponse): Promise<void> {
-  if (typeof body.audioBase64 !== 'string' || body.audioBase64.length === 0) throw new Error('没有收到音频');
-  mkdirSync(VOICE_DIR, { recursive: true });
-  const stamp = Date.now();
-  const rawPath = join(VOICE_DIR, `capture-${stamp}.wav`);
-  writeFileSync(rawPath, Buffer.from(body.audioBase64, 'base64'));
-
-  const vadStarted = Date.now();
-  const vad = await runVad(rawPath);
-  const vadMs = Date.now() - vadStarted;
-  const speech = vad.segments[0];
-  if (speech === undefined) {
-    json(response, 200, {
-      accepted: false,
-      reason: 'NO_SPEECH_DETECTED',
-      transcript: null,
-      reply: null,
-      action: 'SILENCE',
-      state: engine.state,
-      vadMs,
-      latencyMs: vadMs,
-      firstTokenMs: null,
-      audio: null,
-      note: '麦克风里没有检测到语音（音量过低、被静音，或设备选错）',
-    });
-    return;
-  }
-
-  // Only the speech span reaches the model (§20.1).
-  const speechPath = join(VOICE_DIR, `speech-${stamp}.wav`);
-  writeFileSync(speechPath, sliceWav(readWav(rawPath), speech.startMs, speech.endMs));
-
-  const asrStarted = Date.now();
-  const transcript = (await client.transcribe(readWav(speechPath))).text;
-  const asrMs = Date.now() - asrStarted;
-
-  const turn = await engine.respond({ sessionId: session.sessionId, text: transcript, addressed: engine.state === 'IDLE' });
-  let audio: string | null = null;
-  if (TTS_ENABLED && body.speak !== false && turn.action === 'SPEAK' && turn.text !== null) {
-    audio = (await client.synthesize(turn.text)).toString('base64');
-  }
-  json(response, 200, {
-    accepted: turn.accepted,
-    reason: turn.reason,
-    transcript,
-    reply: turn.text,
-    action: turn.action,
-    state: turn.state,
-    latencyMs: turn.latencyMs,
-    firstTokenMs: turn.firstTokenMs,
-    model: turn.model,
-    audio,
-    speech: { startMs: speech.startMs, endMs: speech.endMs },
-    vadMs,
-    asrMs,
-  });
+  json(response, 200, await handleVoiceTurn(voiceDeps, body as VoiceTurnBody));
 }
 
 function json(response: ServerResponse, status: number, payload: unknown): void {
@@ -194,7 +130,7 @@ async function readBody(request: IncomingMessage): Promise<TurnBody> {
 
 async function handleTurn(body: TurnBody, response: ServerResponse): Promise<void> {
   const text = (body.text ?? '').trim();
-  if (text.length === 0) throw new Error('空消息');
+  if (text.length === 0) throw new ConsoleError('EMPTY_MESSAGE', '没有输入文字', '在输入框里打一句话再按发送');
   // IDLE 时把这一次点击当作直呼（M2 之前用按钮代替唤醒词），会话开着就按继续处理。
   const addressed = engine.state === 'IDLE';
   const turn = await engine.respond({ sessionId: session.sessionId, text, addressed });
@@ -267,7 +203,21 @@ const server = createServer((request, response) => {
       }
       json(response, 404, { error: 'not found' });
     } catch (error) {
-      json(response, 500, { error: error instanceof Error ? error.message : String(error) });
+      // Readable Chinese errors, never a blank page or a raw stack (§20 audit item).
+      if (error instanceof ConsoleError) {
+        json(response, error.status, { ok: false, error: error.message, hint: error.hint, code: error.code });
+        return;
+      }
+      console.error(`[error] ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      const missingKey = /MISSING_KEY|api.?key is not set/i.test(message);
+      json(response, missingKey ? 503 : 500, {
+        ok: false,
+        error: missingKey ? '缺少 MIMO_API_KEY：模型调用用不了' : `服务端出错了：${message}`,
+        hint: missingKey
+          ? '把 .env.example 复制成 .env 并填入 MIMO_API_KEY，然后重启；没有密钥时可用 npm run chat -- --fake 或 npm run field-test -- --offline'
+          : '页面不会白屏；完整堆栈在这个终端里，请发给维护者。想用「一条命令」的现场测试控制台：npm run field-test',
+      });
     }
   })();
 });
@@ -313,7 +263,7 @@ const PAGE = `<!doctype html>
     <button class="primary" type="submit">发送</button>
     <button type="button" id="mic" title="按住说话，松开结束">🎤 按住说</button>
   </form>
-  <div class="hint" id="hint">打字或按麦克风说话（第一句视为叫醒西西）。语音只上传检测到的语音段；回复由浏览器播放。</div>
+  <div class="hint" id="hint">打字或按麦克风说话（第一句视为叫醒西西）。语音只把 VAD 检出的语音段送去识别，整段录音不落盘；回复由浏览器播放。</div>
 </footer>
 <script>
 const log = document.getElementById('log');
@@ -399,19 +349,29 @@ async function stopRecording() {
     });
     const data = await response.json();
     pending.parentElement.remove();
+    if (data.ok === false) {
+      add('xixi', '语音没成功：' + data.error, data.hint ?? '');
+      hint.textContent = '语音没成功：' + data.error + (data.hint ? '（' + data.hint + '）' : '');
+      return;
+    }
     if (data.reason === 'NO_SPEECH_DETECTED') {
-      add('xixi silent', '（没有听清：麦克风里没检测到语音）', data.note ?? '');
+      add('xixi silent', '（没有听清：麦克风里没检测到语音）', data.notes ? data.notes[data.notes.length - 1] : '');
     } else {
       if (data.transcript) add('user', data.transcript);
-      const meta = (data.accepted ? data.action : '未接受(' + data.reason + ')')
-        + ' · 录音 ' + (data.vadMs + data.asrMs) + 'ms 处理' + ' · ' + data.latencyMs + 'ms'
-        + (data.firstTokenMs == null ? '' : ' · 首字' + data.firstTokenMs + 'ms') + ' · ' + data.state;
-      if (data.action === 'SILENCE' || !data.accepted) add('xixi silent', '（西西选择沉默）', meta);
+      const stages = data.stages ?? {};
+      const meta = (data.actionText ?? data.action) + ' · ' + (data.reasonText ?? data.reason)
+        + ' · VAD ' + Math.round(stages.vadMs ?? 0) + 'ms · ASR ' + Math.round(stages.asrMs ?? 0) + 'ms'
+        + ' · 首字 ' + (stages.llmFirstChunkMs == null ? '—' : Math.round(stages.llmFirstChunkMs) + 'ms')
+        + ' · 总 ' + Math.round(stages.totalMs ?? data.totalMs ?? 0) + 'ms'
+        + ' · 语音段 ' + data.segmentsUsed + '/' + data.segmentsTotal + (data.droppedSegments && data.droppedSegments.length ? '（丢弃' + data.droppedSegments.length + '段）' : '')
+        + ' · ' + data.state;
+      if (data.action === 'SILENCE' || data.accepted === false) add('xixi silent', data.accepted === false ? '（这句不是对西西说的）' : '（西西选择沉默）', meta);
       else add('xixi', data.reply ?? '', meta);
       if (data.audio) new Audio('data:audio/wav;base64,' + data.audio).play().catch(() => {});
+      if (data.privacy) hint.textContent = data.privacy.note;
     }
     setBanner(await (await fetch('/api/state')).json());
-    hint.textContent = '说完松开即发送。回复可朗读（右上角开关）。';
+    hint.textContent = '说完松开即发送。回复可朗读（右上角开关）。整段录音不落盘。';
   } catch (error) {
     pending.parentElement.remove();
     add('xixi', '语音出错：' + error.message);
@@ -467,10 +427,11 @@ form.addEventListener('submit', async (event) => {
       body: JSON.stringify({ text, speak: speakBox.checked }),
     });
     const data = await response.json();
-    const meta = (data.accepted ? data.action : '未接受(' + data.reason + ')')
+    const meta = (data.actionText ?? (data.accepted ? data.action : '未接受(' + data.reason + ')'))
       + ' · ' + data.latencyMs + 'ms' + (data.firstTokenMs == null ? '' : ' · 首字' + data.firstTokenMs + 'ms')
       + ' · ' + data.state;
     pending.parentElement.remove();
+    if (data.ok === false) { add('xixi', '出错了：' + data.error, data.hint ?? ''); return; }
     if (data.action === 'SILENCE' || !data.accepted) add('xixi silent', data.accepted ? '（西西选择沉默）' : '（这句不是对西西说的）', meta);
     else add('xixi', data.reply ?? '', meta);
     if (data.audio) { const audio = new Audio('data:audio/wav;base64,' + data.audio); audio.play().catch(() => {}); }
@@ -499,6 +460,17 @@ input.focus();
 </script>
 </body></html>`;
 
+server.on('error', (error: NodeJS.ErrnoException) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`端口 ${PORT} 已被占用（可能已经开着一个 npm run web 或现场测试控制台）。`);
+    console.error(`换一个端口：npm run web -- --port ${PORT + 1}；或先关掉占用该端口的程序。`);
+    console.error('想用「一条命令」的现场测试控制台（含设备验收）：npm run field-test');
+  } else {
+    console.error(`无法在本机监听 ${PORT}：${error.message}`);
+  }
+  process.exit(1);
+});
+
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`西西试用页面： http://127.0.0.1:${PORT}`);
   console.log(
@@ -506,5 +478,6 @@ server.listen(PORT, '127.0.0.1', () => {
       `｜身份 ${config.identity.name}｜地点 ${config.identity.place ?? '未设置'}｜朗读回复 ${TTS_ENABLED ? '开' : '关'}`,
   );
   console.log(`会话 ${session.sessionId}`);
-  console.log('语音输入：页面按住🎤说话（浏览器采集，只上传检测到的语音段）。按 Ctrl+C 结束。');
+  console.log('语音输入：页面按住🎤说话（浏览器采集，只把 VAD 检出的语音段送去识别，整段录音不落盘）。按 Ctrl+C 结束。');
+  console.log('现场测试（一条命令、含设备验收与实时状态页）：npm run field-test');
 });

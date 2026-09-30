@@ -6,8 +6,13 @@
  * repeatable, and its per-stage timings come straight from 《方案》§46.4
  * (`vad`, `asr`, `llm_ttft`, `tts_first_chunk`, `e2e`).
  *
- * Privacy (§20.1): only the VAD-detected speech span is uploaded, never the whole
+ * Privacy (§20.1): only the VAD-detected speech spans are uploaded, never the whole
  * recording, and raw audio is never stored beyond the explicit output files.
+ *
+ * Multi-segment: a recording that contains more than one speech segment (a pause
+ * in the middle of a test sentence is the normal case) now feeds *all* of them to
+ * ASR, stitched in order with a short gap. Anything left out by the per-call caps
+ * is reported in `droppedSegments` with a reason — never dropped silently.
  *
  * Usage:
  *   node scripts/voice-turn.ts --wav tests/audio-fixtures/direct-question.wav
@@ -24,7 +29,10 @@ import { MimoClient } from '@xixi/model-adapters';
 import { openXixiStore } from '@xixi/domain';
 
 import { REPO_ROOT, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
-import { concatWav, readWavInfo, sliceWav, readWav } from './lib/wav.ts';
+import { concatWav, readWavInfo, readWav } from './lib/wav.ts';
+// Shared with the field-test console: the multi-segment planner and the
+// speech-only slicer, so "use every segment" lives in exactly one place.
+import { buildSpeechAudio, planSpeechSegments, type DroppedSegment } from './field-test.ts';
 
 for (const [key, value] of Object.entries(readDotEnv())) {
   if (process.env[key] === undefined) process.env[key] = value;
@@ -36,6 +44,12 @@ const OUT_DIR = join(REPO_ROOT, 'data', 'voice');
 interface VoiceTurnResult {
   readonly wav: string;
   readonly speech: { startMs: number; endMs: number; endpointDelayMs: number | null } | null;
+  /** Every VAD segment of this file, in order (not just the first one). */
+  readonly segments: readonly { startMs: number; endMs: number; durationMs: number }[];
+  readonly segmentsTotal: number;
+  readonly segmentsUsed: number;
+  /** Anything left out, with the reason — never a silent drop. */
+  readonly droppedSegments: readonly DroppedSegment[];
   readonly transcript: string | null;
   readonly reply: string | null;
   readonly action: string;
@@ -109,12 +123,20 @@ for (const wavPath of wavs) {
   const vadStart = Date.now();
   const segmentation = await segment(absolute);
   const vadMs = Date.now() - vadStart;
-  const speech = segmentation.segments[0] ?? null;
+  const rawWav = readWav(absolute);
+  // Use every detected segment (§20.1: only speech is uploaded; and a second
+  // sentence in the same recording must not be dropped silently).
+  const plan = planSpeechSegments(segmentation.segments);
+  const speech = plan.used[0] ?? null;
 
   if (speech === null) {
     results.push({
       wav: wavPath,
       speech: null,
+      segments: [],
+      segmentsTotal: 0,
+      segmentsUsed: 0,
+      droppedSegments: [],
       transcript: null,
       reply: null,
       action: 'SILENCE',
@@ -126,8 +148,10 @@ for (const wavPath of wavs) {
     continue;
   }
 
-  // Only the speech span is uploaded (§20.1).
-  const speechBuffer = sliceWav(readWav(absolute), speech.startMs, speech.endMs);
+  // Only the speech spans are uploaded (§20.1); several segments are stitched
+  // with a short silence so ASR does not fuse the words across the gap.
+  const speechBuffer = buildSpeechAudio(rawWav, plan);
+  const lastUsed = plan.used[plan.used.length - 1] as (typeof plan.used)[number];
 
   const asrStart = Date.now();
   const transcript = client === null ? `（离线模拟）${wavPath}` : (await client.transcribe(speechBuffer)).text;
@@ -161,7 +185,15 @@ for (const wavPath of wavs) {
 
   results.push({
     wav: wavPath,
-    speech: { startMs: speech.startMs, endMs: speech.endMs, endpointDelayMs: speech.endpointDelayMs },
+    speech: { startMs: speech.startMs, endMs: speech.endMs, endpointDelayMs: speech.endpointDelayMs ?? null },
+    segments: plan.used.map((item) => ({
+      startMs: item.startMs,
+      endMs: item.endMs,
+      durationMs: item.durationMs ?? Math.round(item.endMs - item.startMs),
+    })),
+    segmentsTotal: segmentation.segments.length,
+    segmentsUsed: plan.used.length,
+    droppedSegments: plan.dropped,
     transcript,
     reply: turn.text,
     action: turn.action,
@@ -182,11 +214,11 @@ for (const wavPath of wavs) {
       e2eSpeechEndToFirstChunkMs:
         firstChunkAt === null
           ? null
-          : Math.round((speech.endpointDelayMs ?? 0) + asrMs + (firstChunkAt - llmStart)),
+          : Math.round((lastUsed.endpointDelayMs ?? 0) + asrMs + (firstChunkAt - llmStart)),
       e2eToFirstReplyAudioMs:
         ttsMs === null || firstChunkAt === null
           ? null
-          : Math.round((speech.endpointDelayMs ?? 0) + asrMs + (firstChunkAt - llmStart) + ttsMs),
+          : Math.round((lastUsed.endpointDelayMs ?? 0) + asrMs + (firstChunkAt - llmStart) + ttsMs),
     },
   });
 }
@@ -202,7 +234,7 @@ printEvidence('语音闭环（夹具音频 → VAD → ASR → 对话 → TTS）
   sessionId: session.sessionId,
   turns: results,
   stitchedReplyWav: conversationWav,
-  note: 'e2e 估算含 VAD 端点延迟；真实麦克风与扬声器仍未验收（§33 的 P50 < 500ms 打断目标不在本次证据内）',
+  note: 'e2e 估算含 VAD 端点延迟；每段文件的 segmentsTotal/segmentsUsed/droppedSegments 说明是否丢弃了语音段（不再静默丢弃）；真实麦克风与扬声器验收见 docs/recon/field-test-report-<日期>.md（§33 的 P50 < 500ms 打断目标不在本次证据内）',
 });
 store.recordHealth('voice-edge', 'ok', `voice turn batch of ${wavs.length}`);
 store.close();

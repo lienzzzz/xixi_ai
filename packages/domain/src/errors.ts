@@ -7,6 +7,7 @@ export type DomainErrorCode =
   | 'MIGRATION_FAILED'
   | 'UNKNOWN_PERSONALITY_PROPERTY'
   | 'PROPERTY_OUT_OF_RANGE'
+  | 'INVALID_WORLD_STATE'
   | 'INVALID_CONFIG';
 
 export class DomainError extends Error {

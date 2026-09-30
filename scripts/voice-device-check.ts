@@ -20,6 +20,7 @@ import { MimoClient } from '@xixi/model-adapters';
 import { openXixiStore } from '@xixi/domain';
 
 import { REPO_ROOT, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
+import { characterSimilarity } from './lib/similarity.ts';
 import { readWav, sliceWav } from './lib/wav.ts';
 
 for (const [key, value] of Object.entries(readDotEnv())) {
@@ -64,32 +65,9 @@ function runPython(pythonArgs: string[]): Promise<string> {
   });
 }
 
-/** Character-level similarity after removing punctuation and spaces. */
+/** Character-level similarity after removing punctuation and spaces (shared with verify-voice-noise). */
 function similarity(a: string, b: string): number {
-  const clean = (text: string): string => text.replace(/[\s，。！？、,.!?：:"'`]/g, '');
-  const left = clean(a);
-  const right = clean(b);
-  if (left.length === 0 && right.length === 0) return 1;
-  const distance = levenshtein(left, right);
-  return Number((1 - distance / Math.max(left.length, right.length, 1)).toFixed(3));
-}
-
-function levenshtein(a: string, b: string): number {
-  const rows = Array.from({ length: a.length + 1 }, (_, index) => index);
-  for (let j = 1; j <= b.length; j += 1) {
-    let diagonal = rows[0] as number;
-    rows[0] = j;
-    for (let i = 1; i <= a.length; i += 1) {
-      const previous = rows[i] as number;
-      rows[i] = Math.min(
-        (rows[i] as number) + 1,
-        (rows[i - 1] as number) + 1,
-        diagonal + (a[i - 1] === b[j - 1] ? 0 : 1),
-      );
-      diagonal = previous;
-    }
-  }
-  return rows[a.length] as number;
+  return characterSimilarity(a, b);
 }
 
 const segmentation = JSON.parse(await runPython(['-m', 'voice_edge.segment', wavPath])) as Segmentation;

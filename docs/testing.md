@@ -2,7 +2,8 @@
 
 > 最后更新：2026-09-30
 > 权威来源：`tests/**`、`scripts/**`、`package.json` 的脚本；与代码不一致时以代码为准并立即修正本文
-> 当前状态：`npm test` → **63 项全绿**，耗时 <1s，**不发起任何网络请求**。
+> 当前状态：`npm test` → **全绿**（2026-09-30 实测 **95 项**：unit 77 + integration 18；`tests/scenarios/` 是语料模块、`tests/replay/` 仍为空，都不产生用例），耗时约 3s，**不发起任何网络请求**。
+> 项数会随开发变化——以 `npm test` 的实际输出为准，本文里的数字都标了实测日期。
 > 实测结论集中在 [`progress.md` §0](progress.md)：对话质量、语音闭环、打断与结构化输出都有单独脚本与证据。
 > 上游依据：《方案》§51（CI / Regression）、§52（Model Contract Testing）、§22.3（Event Replay）、§33（PoC 指标）。
 > 相关：[`architecture.md`](architecture.md)、[`event-contracts.md`](event-contracts.md)、[`ADR-0006`](adr/0006-runtime-and-dependency-choices.md)、[`ADR-0008`](adr/0008-realtime-path-direct-mimo.md)。
@@ -11,11 +12,13 @@
 
 | 层 | 目录 | 跑什么 | 是否联网 | 现在有什么 |
 |---|---|---|---|---|
-| 单元 | `tests/unit/` | 契约校验、领域持久化、transport 解析、会话 FSM、Prompt 组装、工具 | 否 | 6 个文件、42 项 |
-| 集成 | `tests/integration/` | BrainAdapter ↔ transport ↔ store、会话引擎、离线重启恢复 | 否 | 3 个文件、21 项 |
-| 场景 | `tests/scenarios/` | 对话语料（8 场景，数据驱动），由 `scripts/eval-conversation.ts` 执行 | 执行时联网 | `corpus.ts`（不再是空目录） |
+| 单元 | `tests/unit/` | 契约校验、领域持久化、transport 解析、会话 FSM、Prompt 组装、工具、语音前端 | 否 | 12 个测试文件、77 项（2026-09-30 实测） |
+| 集成 | `tests/integration/` | BrainAdapter ↔ transport ↔ store、会话引擎、离线重启恢复 | 否 | 18 项（2026-09-30 实测） |
+| 场景 | `tests/scenarios/` | 对话语料（8 场景，数据驱动），由 `scripts/eval-conversation.ts` 执行 | 执行时联网 | `corpus.ts`（**不是**空目录，也不产生 `npm test` 用例：它是数据模块） |
 | 回放 | `tests/replay/` | 导出事件区间 → 重放 → 复现决策（§22.3） | 否 | **空**（属 M5） |
+| 控制台 | `tests/console/` | 现场测试控制台的隐私保留策略、多段语音规划、在场回退、报告与错误文案（15 项） | 否 | `field-test-console.test.ts`；**不在 `npm test` 的 glob 里**，用 `node --test "tests/console/**/*.test.ts"` 跑 |
 | 真实 API 验收 | `scripts/verify-*.ts`、`eval-conversation.ts`、`voice-*.ts` | 真实 MiMo 调用、语音闭环、打断 | **是** | 见下方「新增验证脚本」，**都不在 `npm test` 里** |
+| 真机设备验收 | `scripts/field-test.ts --acceptance` | 麦克风/扬声器/摄像头自检（pycaw + WASAPI 回环 + DSHOW） | 否 | 需要真机；结果写 `docs/recon/field-test-report-<日期>.md` |
 
 全部测试用 Node 内置 `node:test` + `node:assert/strict`，直接执行 `.ts`（无构建步骤，[ADR-0006](adr/0006-runtime-and-dependency-choices.md)）。
 模型相关测试遵守 §51：验证**结构与行为**（`action` 取值、`toolName` 是否被调用、字段是否落在范围内），
@@ -92,23 +95,56 @@ harness 映射仍在，并把持久化的 harness 会话原样交给 transport�
 
 真正的跨进程版本是 `demo:m0:restart`（离线）与 `verify:m0`（真实模型），见 §5。
 
+### `tests/console/field-test-console.test.ts`（15 项）
+
+现场测试控制台里「不需要硬件就应该正确」的部分，全部纯离线：
+
+| 用例 | 断言的核心行为 |
+|---|---|
+| 出厂配置 = 不留原始录音（§20.1） | `privacy.store_raw_audio: false` + `memory.raw_audio_retention_days: 0` → 整段录音与语音段都不落盘，`reason` 里说明理由 |
+| 显式开启时的保留期 | `store_raw_audio: true` + 7 天 → 只保留语音段、保留 7 天 |
+| 清理逻辑 | 只删本脚本自己的 `capture-*.wav`/`speech-*.wav`；保留期内的文件不删；`ambient-5s.wav`/`notes.txt` 不碰 |
+| 多段语音规划 | 10 段 → 用 8 段、**逐条报告**丢弃的 2 段与原因；超时长上限同理；`used + dropped == total` |
+| 三段音频拼接 | 单段 = 纯切片；多段 = 全部语音段按顺序拼接（段间 300ms），格式不变，被丢弃的段**不在**音频里 |
+| 校准产物读取 | 文件缺失 → `available: false` + 「简易 RMS，未校准」；Python 的 snake_case 字段（`gate_threshold_dbfs`）也能解析 |
+| 在场状态回退 | 投影 / 事件日志 / 未接入 / 读取失败四种状态都返回视图**从不抛异常**；`stale` 会说明过期 |
+| 动作与原因中文 | `SILENCE` → 「沉默」，`REJECTED_SUSPENDED` → 「今天安静点」等 |
+| 报告自足 | 含逐项结论、证据 JSON、下一步动作（不重复前缀）、假 PASS 判据说明、校准与隐私段、复现命令 |
+| 页面自足 | 中文标记齐全（电平/噪声底/在场/验收引导/延迟分段）、含启动状态、没有未替换的模板占位符 |
+| 可读错误 | 没有音频 / 太短 / 不是 WAV / 缺 Python / 缺探测二进制 → `ConsoleError` 带中文 `hint`，不是堆栈 |
+| 假 PASS 回归 | 离线替身返回「扬声器静音 + 相对差 2.6 dB + 绝对 RMS −30 dB」→ 判据必须是相对的那一条 |
+| 只监听本机 | 端口 0 绑定后 `server.address().address === '127.0.0.1'`，`/api/field/state` 回报 `127.0.0.1:<真实端口>` |
+
+需要真机的部分（麦克风电平、扬声器回环、摄像头取帧）由 `node scripts/field-test.ts --acceptance` 覆盖，
+离线自检 `node scripts/field-test.ts --self-test` 则真的起 HTTP 服务并跑 VAD，验证「无语音不留盘」「多段语音全部送识别」等承诺。
+
 ## 3. 怎么跑
 
 ```powershell
-npm test                 # 全部离线测试（unit + integration + scenarios + replay），当前 36 项
+npm test                 # 全部离线测试（unit + integration），2026-09-30 实测 95 项全绿
 npm run test:unit        # 只跑 tests/unit/**
 npm run test:integration # 只跑 tests/integration/**
-npm run test:scenarios   # tests/scenarios/**（当前为空）
-npm run test:replay      # tests/replay/**（当前为空）
+npm run test:scenarios   # tests/scenarios/**（语料模块，当前没有 *.test.ts，输出 0 项）
+npm run test:replay      # tests/replay/**（目录仍为空）
+
+node --test "tests/console/**/*.test.ts"   # 现场测试控制台的 15 项（不在 npm test 的 glob 里）
 
 node --test tests/unit/contracts.test.ts   # 单文件
 
 npm run demo:m0:text     # 离线单轮演示（FakeBrainAdapter，无需密钥）
 npm run demo:m0:restart  # 离线两进程重启演示
+
+# 现场测试（一条命令启动控制台；页面里点「开始设备自检」）
+npm run field-test                          # http://127.0.0.1:8792，只监听本机
+npm run field-test -- --offline             # 没有密钥也能跑通 UI（ASR/模型用替身）
+node scripts/field-test.ts --self-test      # 离线自检：隐私/多段语音/页面/报告（不碰硬件）
+node scripts/field-test.ts --acceptance     # 只跑一次真机设备验收，重写 docs/recon/field-test-report-<日期>.md
 ```
 
-`npm test` 的 glob 已包含 `tests/scenarios/**` 与 `tests/replay/**`——目录当前为空，
-所以现在多加一个用例就会自动被纳入全量测试，不需要改脚本。
+`npm test` 的 glob 包含 `tests/scenarios/**` 与 `tests/replay/**`——这两个目录目前都不产生用例
+（前者是数据模块 `corpus.ts`，后者为空），所以以后往这两个目录加 `*.test.ts` 会被自动纳入全量测试，不需要改脚本。
+`tests/console/**` **不在** glob 里：现场测试控制台的测试要起 HTTP 服务与 Python VAD，故意与「秒级、无网络、无子进程」的
+`npm test` 分开跑（见 §1 表格最后两行）。
 
 ## 4. 会花真实 API 调用的检查（刻意排除在 `npm test` 之外）
 
@@ -183,6 +219,16 @@ manual audio hardware tests 三档；`AGENTS.md` 第 2 节也要求「联网验�
 | `tests/unit/prompt.test.ts` | 5 | 硬策略在场、人格→具体指令、同一人格前缀逐字节稳定、情境含时段/星期、sections 可寻址 |
 | `tests/unit/tools.test.ts` | 7 | 天气码中文、默认地点与显式地点、未知地点是类型化拒绝、预报缓存、参数封闭、只读约束 |
 | `tests/integration/conversation-engine.test.ts` | 8 | 未直呼不写入日志、多轮连续性与工作记忆、跨分片的 `[静默]` 兜底、安静模式、长停顿后需重新直呼 |
+| `tests/unit/voice/frontend.test.ts` | 7 | 抗噪前端：转发 `services/voice-edge/tests/test_frontend.py` 的 39 项 DSP 单测（去直流/高通/噪声底/谱减法/参数推导/夹具生成），再断言噪声夹具与 manifest 自洽、困难档不被删除、相似度评分定义、verify 脚本的失败规则 |
+| `services/voice-edge/tests/test_frontend.py` | 39 | 纯函数离线单测（由上面那条转发执行，不单独出现在 `npm test` 的 glob 里） |
+
+### 测量方法上的坑（踩过，写下来）
+
+- **能量阈值不是人工标注**：起点/端点用帧能量估计，误差约一帧（32ms），是测量里最弱的一环。
+  2026-09-30 之后这个阈值不再写死 −40 dBFS，而是由噪声底推导（`max(噪声底,−70) + 余量`，见 [design/voice.md](design/voice.md) §1.1（3））；
+  旧值仍以 `rawEnergyStartMs`/`rawEnergyEndMs` 输出，方便与历史数字对比。
+- **同一段代码的两种「降噪」结论必须分开写**：高通把宽带噪声降 5.3 dB，但 VAD 判定几乎不变；
+  谱减法噪声带只降 0.5–2 dB 且在 3 dB SNR 上让 ASR 变差（默认关闭）。把「电平下降」当成「识别变好」是错的。
 
 ### 新增验证脚本（都会花钱或有副作用，不进 `npm test`）
 
@@ -197,7 +243,10 @@ manual audio hardware tests 三档；`AGENTS.md` 第 2 节也要求「联网验�
 | `npm run web` / `npm run web -- --dsh` | 每次一轮 | 浏览器试用页（http://127.0.0.1:8791）；`--dsh` 切到 Harness 路径 |
 | `POST /api/voice`（试用页的🎤） | ASR + 一轮 | 浏览器采集 → VAD 只取语音段 → ASR → 对话 → TTS；无语音时返回 `NO_SPEECH_DETECTED` 而不是假装听懂 |
 | `scripts/voice-device-check.ts` | ASR + 一轮 | 设备验收：对回环录音跑全链路并与原文比对字符级相似度（≥0.5 判 PASS） |
-| `python -m voice_edge.loopback` | 0 | 扬声器播放 + 麦克风录回；`verdict` 为 `silent-capture` 即麦克风没有信号 |
+| `node scripts/verify-voice-noise.ts` | 4 条干净 + 20 条噪声夹具 × 1 次 ASR（默认 5 档） | **噪声鲁棒性回归**：干净与噪声夹具分别跑前端→VAD→ASR，输出转写、字符级相似度、端点延迟、失败清单与成功边界；`--nr` 切去噪做 A/B，`--fake`/`--dry-run` 完全离线 |
+| `python -m voice_edge.calibrate --seconds 5` | 0（只碰麦克风） | 噪声底校准：输出分带能量、噪声底与建议参数 JSON；`--list-devices` 列设备（WASAPI 优先） |
+| `python -m voice_edge.make_noise_fixtures --force` | 0 | 用实测环境噪声重建 `tests/audio-fixtures/noisy/` 与 `manifest.json`（5 夹具 × 6 档 SNR） |
+| `python -m voice_edge.loopback <wav> <out.wav>` | 0 | 扬声器播放 + 麦克风录回；相对判据（语音带抬升 ≥10 dB 或相关 ≥0.3）+ Core Audio 静音状态；`verdict` 不是 `ok` 时说明是「静音端点」「音量不足」还是「没渲染」 |
 | `npm run turns -- data/chat/xixi.sqlite 6` | 0 | 直接查事件日志里的最近轮次（含 `tool_name` 审计） |
 | `node scripts/probe-tools.ts` | 2 次 | 诊断「模型有没有请求工具、适配器有没有真的执行」 |
 
@@ -205,6 +254,8 @@ manual audio hardware tests 三档；`AGENTS.md` 第 2 节也要求「联网验�
 
 - **能量阈值不是人工标注**：起点/端点用 −40 dBFS 帧能量估计，误差约一帧（32ms），是测量里最弱的一环。
 - **VAD 冷启动与流式成本必须分开**：`segment.py` 输出 `loadMs`（模型加载）与 `processMs`（逐帧），只有后者算实时延迟；否则会把一次性的 Python 启动算进 SLA。
+### 测量方法上的坑（踩过，写下来）
+
 - **MiMo 会「一句话 + 工具调用」同时返回**，所以「有文本」不等于「已回答」——这曾导致工具永远不执行（`probe-tools.ts` 就是为了复现它）。
 - **MiMo 结构化输出会间歇性补白截断**（`json_schema`，`strict` 与否都出现过）：所有结构化结果必须本地校验，`chatJson` 负责回退，评审失败按「未测量」计并限制在 1 次以内。
 - **语料不能假设时钟**：早期场景名写「疲惫的晚上」，实际评测在早上跑，模型正确地指出真实时间，评审却判为矛盾——语料只固定行为期望，不固定世界状态。

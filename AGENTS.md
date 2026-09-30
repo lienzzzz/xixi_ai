@@ -79,7 +79,7 @@ $env:NODE_USE_ENV_PROXY = '1'   # Node 需要显式开启才读环境变量代�
 ## 7. 常用命令
 
 ```powershell
-npm test                 # 全部离线测试（单元/集成），不花 API 费用；当前 63 项
+npm test                 # 全部离线测试（单元/集成），不花 API 费用；当前 95 项
 npm run install:profile  # 幂等：把仓库内的西西 DSH profile 装进 .dsh/
 npm run chat             # 交互式对话（直连 MiMo，实时路径）
 npm run chat -- --fake   # 完全离线的对话演示
@@ -96,6 +96,10 @@ node scripts/make-audio-fixtures.ts   # 用 MiMo TTS 生成中文音频夹具（
 npm run voice:turn -- --wav tests/audio-fixtures/direct-question.wav
 npm run voice:turn -- --wav tests/audio-fixtures/direct-question.wav --wav tests/audio-fixtures/followup-turn.wav
 npm run voice:bargein          # §14.2 打断的离线测量（纯本地，不花 API 费用）
+npm run voice:noise            # 噪声鲁棒性回归：干净+噪声夹具 → 前端 → VAD → 真实 ASR（会花钱；--fake 离线）
+# 前端与校准（在 services/voice-edge 目录下跑，用 voice-pipecat venv）
+#   python -m voice_edge.calibrate --seconds 5      # 噪声底校准（需要带 sounddevice 的 venv，如 .venvs/field-probe）
+#   python -m voice_edge.make_noise_fixtures --force # 重建 tests/audio-fixtures/noisy/
 
 # 调试与文档
 npm run turns -- data/chat/xixi.sqlite 6   # 看事件日志里的最近轮次（含 tool_name）

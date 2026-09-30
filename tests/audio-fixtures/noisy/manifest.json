@@ -1,0 +1,668 @@
+{
+  "generator": "services/voice-edge/voice_edge/make_noise_fixtures.py",
+  "regenerate": "E:\\worker2\\.venvs\\voice-pipecat\\Scripts\\python.exe -m voice_edge.make_noise_fixtures --force",
+  "snrDefinition": "SNR_inband = 10*log10(P_speech(300-3400 Hz) / P_noise(300-3400 Hz)), measured after front-end conditioning (DC removal + high-pass), speech and noise measured as separate segments",
+  "noiseSource": {
+    "path": "data/recon/ambient-5s.wav",
+    "what": "5 s real ambient recording on this machine (t1 recon §1.2)",
+    "rmsDbfs": -27.18,
+    "noiseFloorDbfs": -29.84,
+    "bandPowerShare": {
+      "under100": 0.6201,
+      "100-300": 0.1537,
+      "300-3400": 0.2116,
+      "3400-8000": 0.0146,
+      "above8000": 0.0
+    }
+  },
+  "frontendHighpassHzForDefinitions": 120.0,
+  "leadPadMs": 150.0,
+  "tailPadMs": 500.0,
+  "trimThresholdDbfs": -60.0,
+  "snrStepsDb": [
+    18.0,
+    9.0,
+    6.0,
+    3.0,
+    0.0,
+    -6.0
+  ],
+  "measuredByDefault": [
+    "direct-question",
+    "followup-turn",
+    "longer-turn",
+    "tv-dialogue"
+  ],
+  "clips": [
+    {
+      "id": "direct-question-snr18db",
+      "fixture": "direct-question",
+      "text": "西西，明天天气怎么样？",
+      "speaker": "father, direct address",
+      "path": "tests/audio-fixtures/noisy/direct-question-snr18db.wav",
+      "bytes": 162604,
+      "durationMs": 5080.0,
+      "sourceDurationMs": 2520.0,
+      "targetSnrDb": 18.0,
+      "measuredSnrDb": 18.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -22.97,
+      "noiseScale": 0.46581,
+      "noiseReferenceSamples": 40640,
+      "noiseReferenceMs": 2540.0,
+      "conditionedNoiseFloorDbfs": -39.75
+    },
+    {
+      "id": "direct-question-snr9db",
+      "fixture": "direct-question",
+      "text": "西西，明天天气怎么样？",
+      "speaker": "father, direct address",
+      "path": "tests/audio-fixtures/noisy/direct-question-snr9db.wav",
+      "bytes": 162604,
+      "durationMs": 5080.0,
+      "sourceDurationMs": 2520.0,
+      "targetSnrDb": 9.0,
+      "measuredSnrDb": 9.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -22.97,
+      "noiseScale": 1.31283,
+      "noiseReferenceSamples": 40640,
+      "noiseReferenceMs": 2540.0,
+      "conditionedNoiseFloorDbfs": -30.75
+    },
+    {
+      "id": "direct-question-snr6db",
+      "fixture": "direct-question",
+      "text": "西西，明天天气怎么样？",
+      "speaker": "father, direct address",
+      "path": "tests/audio-fixtures/noisy/direct-question-snr6db.wav",
+      "bytes": 162604,
+      "durationMs": 5080.0,
+      "sourceDurationMs": 2520.0,
+      "targetSnrDb": 6.0,
+      "measuredSnrDb": 6.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -22.97,
+      "noiseScale": 1.85442,
+      "noiseReferenceSamples": 40640,
+      "noiseReferenceMs": 2540.0,
+      "conditionedNoiseFloorDbfs": -27.75
+    },
+    {
+      "id": "direct-question-snr3db",
+      "fixture": "direct-question",
+      "text": "西西，明天天气怎么样？",
+      "speaker": "father, direct address",
+      "path": "tests/audio-fixtures/noisy/direct-question-snr3db.wav",
+      "bytes": 162604,
+      "durationMs": 5080.0,
+      "sourceDurationMs": 2520.0,
+      "targetSnrDb": 3.0,
+      "measuredSnrDb": 3.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -22.97,
+      "noiseScale": 2.61943,
+      "noiseReferenceSamples": 40640,
+      "noiseReferenceMs": 2540.0,
+      "conditionedNoiseFloorDbfs": -24.75
+    },
+    {
+      "id": "direct-question-snr0db",
+      "fixture": "direct-question",
+      "text": "西西，明天天气怎么样？",
+      "speaker": "father, direct address",
+      "path": "tests/audio-fixtures/noisy/direct-question-snr0db.wav",
+      "bytes": 162604,
+      "durationMs": 5080.0,
+      "sourceDurationMs": 2520.0,
+      "targetSnrDb": 0.0,
+      "measuredSnrDb": 0.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -22.97,
+      "noiseScale": 3.70005,
+      "noiseReferenceSamples": 40640,
+      "noiseReferenceMs": 2540.0,
+      "conditionedNoiseFloorDbfs": -21.75
+    },
+    {
+      "id": "direct-question-snr-6db",
+      "fixture": "direct-question",
+      "text": "西西，明天天气怎么样？",
+      "speaker": "father, direct address",
+      "path": "tests/audio-fixtures/noisy/direct-question-snr-6db.wav",
+      "bytes": 162604,
+      "durationMs": 5080.0,
+      "sourceDurationMs": 2520.0,
+      "targetSnrDb": -6.0,
+      "measuredSnrDb": -6.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -22.97,
+      "noiseScale": 7.38257,
+      "noiseReferenceSamples": 40640,
+      "noiseReferenceMs": 2540.0,
+      "conditionedNoiseFloorDbfs": -15.75
+    },
+    {
+      "id": "followup-turn-snr18db",
+      "fixture": "followup-turn",
+      "text": "对了，还有个事想问你。",
+      "speaker": "father, continuation",
+      "path": "tests/audio-fixtures/noisy/followup-turn-snr18db.wav",
+      "bytes": 153644,
+      "durationMs": 4800.0,
+      "sourceDurationMs": 2360.0,
+      "targetSnrDb": 18.0,
+      "measuredSnrDb": 18.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -19.9,
+      "noiseScale": 0.66421,
+      "noiseReferenceSamples": 38400,
+      "noiseReferenceMs": 2400.0,
+      "conditionedNoiseFloorDbfs": -36.7
+    },
+    {
+      "id": "followup-turn-snr9db",
+      "fixture": "followup-turn",
+      "text": "对了，还有个事想问你。",
+      "speaker": "father, continuation",
+      "path": "tests/audio-fixtures/noisy/followup-turn-snr9db.wav",
+      "bytes": 153644,
+      "durationMs": 4800.0,
+      "sourceDurationMs": 2360.0,
+      "targetSnrDb": 9.0,
+      "measuredSnrDb": 9.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -19.9,
+      "noiseScale": 1.87199,
+      "noiseReferenceSamples": 38400,
+      "noiseReferenceMs": 2400.0,
+      "conditionedNoiseFloorDbfs": -27.7
+    },
+    {
+      "id": "followup-turn-snr6db",
+      "fixture": "followup-turn",
+      "text": "对了，还有个事想问你。",
+      "speaker": "father, continuation",
+      "path": "tests/audio-fixtures/noisy/followup-turn-snr6db.wav",
+      "bytes": 153644,
+      "durationMs": 4800.0,
+      "sourceDurationMs": 2360.0,
+      "targetSnrDb": 6.0,
+      "measuredSnrDb": 6.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -19.9,
+      "noiseScale": 2.64426,
+      "noiseReferenceSamples": 38400,
+      "noiseReferenceMs": 2400.0,
+      "conditionedNoiseFloorDbfs": -24.7
+    },
+    {
+      "id": "followup-turn-snr3db",
+      "fixture": "followup-turn",
+      "text": "对了，还有个事想问你。",
+      "speaker": "father, continuation",
+      "path": "tests/audio-fixtures/noisy/followup-turn-snr3db.wav",
+      "bytes": 153644,
+      "durationMs": 4800.0,
+      "sourceDurationMs": 2360.0,
+      "targetSnrDb": 3.0,
+      "measuredSnrDb": 3.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -19.9,
+      "noiseScale": 3.73512,
+      "noiseReferenceSamples": 38400,
+      "noiseReferenceMs": 2400.0,
+      "conditionedNoiseFloorDbfs": -21.7
+    },
+    {
+      "id": "followup-turn-snr0db",
+      "fixture": "followup-turn",
+      "text": "对了，还有个事想问你。",
+      "speaker": "father, continuation",
+      "path": "tests/audio-fixtures/noisy/followup-turn-snr0db.wav",
+      "bytes": 153644,
+      "durationMs": 4800.0,
+      "sourceDurationMs": 2360.0,
+      "targetSnrDb": 0.0,
+      "measuredSnrDb": 0.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -19.9,
+      "noiseScale": 5.276,
+      "noiseReferenceSamples": 38400,
+      "noiseReferenceMs": 2400.0,
+      "conditionedNoiseFloorDbfs": -18.7
+    },
+    {
+      "id": "followup-turn-snr-6db",
+      "fixture": "followup-turn",
+      "text": "对了，还有个事想问你。",
+      "speaker": "father, continuation",
+      "path": "tests/audio-fixtures/noisy/followup-turn-snr-6db.wav",
+      "bytes": 153644,
+      "durationMs": 4800.0,
+      "sourceDurationMs": 2360.0,
+      "targetSnrDb": -6.0,
+      "measuredSnrDb": -6.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -19.9,
+      "noiseScale": 10.527,
+      "noiseReferenceSamples": 38400,
+      "noiseReferenceMs": 2400.0,
+      "conditionedNoiseFloorDbfs": -12.7
+    },
+    {
+      "id": "backchannel-snr18db",
+      "fixture": "backchannel",
+      "text": "嗯。",
+      "speaker": "father, backchannel",
+      "path": "tests/audio-fixtures/noisy/backchannel-snr18db.wav",
+      "bytes": 110764,
+      "durationMs": 3460.0,
+      "sourceDurationMs": 1720.0,
+      "targetSnrDb": 18.0,
+      "measuredSnrDb": 18.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -29.25,
+      "noiseScale": 0.22488,
+      "noiseReferenceSamples": 27680,
+      "noiseReferenceMs": 1730.0,
+      "conditionedNoiseFloorDbfs": -45.99
+    },
+    {
+      "id": "backchannel-snr9db",
+      "fixture": "backchannel",
+      "text": "嗯。",
+      "speaker": "father, backchannel",
+      "path": "tests/audio-fixtures/noisy/backchannel-snr9db.wav",
+      "bytes": 110764,
+      "durationMs": 3460.0,
+      "sourceDurationMs": 1720.0,
+      "targetSnrDb": 9.0,
+      "measuredSnrDb": 9.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -29.25,
+      "noiseScale": 0.63378,
+      "noiseReferenceSamples": 27680,
+      "noiseReferenceMs": 1730.0,
+      "conditionedNoiseFloorDbfs": -36.99
+    },
+    {
+      "id": "backchannel-snr6db",
+      "fixture": "backchannel",
+      "text": "嗯。",
+      "speaker": "father, backchannel",
+      "path": "tests/audio-fixtures/noisy/backchannel-snr6db.wav",
+      "bytes": 110764,
+      "durationMs": 3460.0,
+      "sourceDurationMs": 1720.0,
+      "targetSnrDb": 6.0,
+      "measuredSnrDb": 6.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -29.25,
+      "noiseScale": 0.89524,
+      "noiseReferenceSamples": 27680,
+      "noiseReferenceMs": 1730.0,
+      "conditionedNoiseFloorDbfs": -33.99
+    },
+    {
+      "id": "backchannel-snr3db",
+      "fixture": "backchannel",
+      "text": "嗯。",
+      "speaker": "father, backchannel",
+      "path": "tests/audio-fixtures/noisy/backchannel-snr3db.wav",
+      "bytes": 110764,
+      "durationMs": 3460.0,
+      "sourceDurationMs": 1720.0,
+      "targetSnrDb": 3.0,
+      "measuredSnrDb": 3.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -29.25,
+      "noiseScale": 1.26457,
+      "noiseReferenceSamples": 27680,
+      "noiseReferenceMs": 1730.0,
+      "conditionedNoiseFloorDbfs": -30.99
+    },
+    {
+      "id": "backchannel-snr0db",
+      "fixture": "backchannel",
+      "text": "嗯。",
+      "speaker": "father, backchannel",
+      "path": "tests/audio-fixtures/noisy/backchannel-snr0db.wav",
+      "bytes": 110764,
+      "durationMs": 3460.0,
+      "sourceDurationMs": 1720.0,
+      "targetSnrDb": 0.0,
+      "measuredSnrDb": 0.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -29.25,
+      "noiseScale": 1.78625,
+      "noiseReferenceSamples": 27680,
+      "noiseReferenceMs": 1730.0,
+      "conditionedNoiseFloorDbfs": -27.99
+    },
+    {
+      "id": "backchannel-snr-6db",
+      "fixture": "backchannel",
+      "text": "嗯。",
+      "speaker": "father, backchannel",
+      "path": "tests/audio-fixtures/noisy/backchannel-snr-6db.wav",
+      "bytes": 110764,
+      "durationMs": 3460.0,
+      "sourceDurationMs": 1720.0,
+      "targetSnrDb": -6.0,
+      "measuredSnrDb": -6.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -29.25,
+      "noiseScale": 3.56403,
+      "noiseReferenceSamples": 27680,
+      "noiseReferenceMs": 1730.0,
+      "conditionedNoiseFloorDbfs": -21.99
+    },
+    {
+      "id": "longer-turn-snr18db",
+      "fixture": "longer-turn",
+      "text": "我明天下午去镇上办点事，可能要到晚上才回来。",
+      "speaker": "father, long utterance",
+      "path": "tests/audio-fixtures/noisy/longer-turn-snr18db.wav",
+      "bytes": 261804,
+      "durationMs": 8180.0,
+      "sourceDurationMs": 4120.0,
+      "targetSnrDb": 18.0,
+      "measuredSnrDb": 18.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -23.39,
+      "noiseScale": 0.4446,
+      "noiseReferenceSamples": 65440,
+      "noiseReferenceMs": 4090.0,
+      "conditionedNoiseFloorDbfs": -40.11
+    },
+    {
+      "id": "longer-turn-snr9db",
+      "fixture": "longer-turn",
+      "text": "我明天下午去镇上办点事，可能要到晚上才回来。",
+      "speaker": "father, long utterance",
+      "path": "tests/audio-fixtures/noisy/longer-turn-snr9db.wav",
+      "bytes": 261804,
+      "durationMs": 8180.0,
+      "sourceDurationMs": 4120.0,
+      "targetSnrDb": 9.0,
+      "measuredSnrDb": 9.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -23.39,
+      "noiseScale": 1.25304,
+      "noiseReferenceSamples": 65440,
+      "noiseReferenceMs": 4090.0,
+      "conditionedNoiseFloorDbfs": -31.11
+    },
+    {
+      "id": "longer-turn-snr6db",
+      "fixture": "longer-turn",
+      "text": "我明天下午去镇上办点事，可能要到晚上才回来。",
+      "speaker": "father, long utterance",
+      "path": "tests/audio-fixtures/noisy/longer-turn-snr6db.wav",
+      "bytes": 261804,
+      "durationMs": 8180.0,
+      "sourceDurationMs": 4120.0,
+      "targetSnrDb": 6.0,
+      "measuredSnrDb": 6.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -23.39,
+      "noiseScale": 1.76997,
+      "noiseReferenceSamples": 65440,
+      "noiseReferenceMs": 4090.0,
+      "conditionedNoiseFloorDbfs": -28.11
+    },
+    {
+      "id": "longer-turn-snr3db",
+      "fixture": "longer-turn",
+      "text": "我明天下午去镇上办点事，可能要到晚上才回来。",
+      "speaker": "father, long utterance",
+      "path": "tests/audio-fixtures/noisy/longer-turn-snr3db.wav",
+      "bytes": 261804,
+      "durationMs": 8180.0,
+      "sourceDurationMs": 4120.0,
+      "targetSnrDb": 3.0,
+      "measuredSnrDb": 3.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -23.39,
+      "noiseScale": 2.50015,
+      "noiseReferenceSamples": 65440,
+      "noiseReferenceMs": 4090.0,
+      "conditionedNoiseFloorDbfs": -25.11
+    },
+    {
+      "id": "longer-turn-snr0db",
+      "fixture": "longer-turn",
+      "text": "我明天下午去镇上办点事，可能要到晚上才回来。",
+      "speaker": "father, long utterance",
+      "path": "tests/audio-fixtures/noisy/longer-turn-snr0db.wav",
+      "bytes": 261804,
+      "durationMs": 8180.0,
+      "sourceDurationMs": 4120.0,
+      "targetSnrDb": 0.0,
+      "measuredSnrDb": 0.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -23.39,
+      "noiseScale": 3.53156,
+      "noiseReferenceSamples": 65440,
+      "noiseReferenceMs": 4090.0,
+      "conditionedNoiseFloorDbfs": -22.11
+    },
+    {
+      "id": "longer-turn-snr-6db",
+      "fixture": "longer-turn",
+      "text": "我明天下午去镇上办点事，可能要到晚上才回来。",
+      "speaker": "father, long utterance",
+      "path": "tests/audio-fixtures/noisy/longer-turn-snr-6db.wav",
+      "bytes": 261804,
+      "durationMs": 8180.0,
+      "sourceDurationMs": 4120.0,
+      "targetSnrDb": -6.0,
+      "measuredSnrDb": -6.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -23.39,
+      "noiseScale": 7.04639,
+      "noiseReferenceSamples": 65440,
+      "noiseReferenceMs": 4090.0,
+      "conditionedNoiseFloorDbfs": -16.11
+    },
+    {
+      "id": "tv-dialogue-snr18db",
+      "fixture": "tv-dialogue",
+      "text": "明天天气怎么样？",
+      "speaker": "television audio",
+      "path": "tests/audio-fixtures/noisy/tv-dialogue-snr18db.wav",
+      "bytes": 121644,
+      "durationMs": 3800.0,
+      "sourceDurationMs": 1880.0,
+      "targetSnrDb": 18.0,
+      "measuredSnrDb": 18.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -23.29,
+      "noiseScale": 0.44891,
+      "noiseReferenceSamples": 30400,
+      "noiseReferenceMs": 1900.0,
+      "conditionedNoiseFloorDbfs": -40.07
+    },
+    {
+      "id": "tv-dialogue-snr9db",
+      "fixture": "tv-dialogue",
+      "text": "明天天气怎么样？",
+      "speaker": "television audio",
+      "path": "tests/audio-fixtures/noisy/tv-dialogue-snr9db.wav",
+      "bytes": 121644,
+      "durationMs": 3800.0,
+      "sourceDurationMs": 1880.0,
+      "targetSnrDb": 9.0,
+      "measuredSnrDb": 9.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -23.29,
+      "noiseScale": 1.26519,
+      "noiseReferenceSamples": 30400,
+      "noiseReferenceMs": 1900.0,
+      "conditionedNoiseFloorDbfs": -31.07
+    },
+    {
+      "id": "tv-dialogue-snr6db",
+      "fixture": "tv-dialogue",
+      "text": "明天天气怎么样？",
+      "speaker": "television audio",
+      "path": "tests/audio-fixtures/noisy/tv-dialogue-snr6db.wav",
+      "bytes": 121644,
+      "durationMs": 3800.0,
+      "sourceDurationMs": 1880.0,
+      "targetSnrDb": 6.0,
+      "measuredSnrDb": 6.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -23.29,
+      "noiseScale": 1.78713,
+      "noiseReferenceSamples": 30400,
+      "noiseReferenceMs": 1900.0,
+      "conditionedNoiseFloorDbfs": -28.07
+    },
+    {
+      "id": "tv-dialogue-snr3db",
+      "fixture": "tv-dialogue",
+      "text": "明天天气怎么样？",
+      "speaker": "television audio",
+      "path": "tests/audio-fixtures/noisy/tv-dialogue-snr3db.wav",
+      "bytes": 121644,
+      "durationMs": 3800.0,
+      "sourceDurationMs": 1880.0,
+      "targetSnrDb": 3.0,
+      "measuredSnrDb": 3.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -23.29,
+      "noiseScale": 2.52439,
+      "noiseReferenceSamples": 30400,
+      "noiseReferenceMs": 1900.0,
+      "conditionedNoiseFloorDbfs": -25.07
+    },
+    {
+      "id": "tv-dialogue-snr0db",
+      "fixture": "tv-dialogue",
+      "text": "明天天气怎么样？",
+      "speaker": "television audio",
+      "path": "tests/audio-fixtures/noisy/tv-dialogue-snr0db.wav",
+      "bytes": 121644,
+      "durationMs": 3800.0,
+      "sourceDurationMs": 1880.0,
+      "targetSnrDb": 0.0,
+      "measuredSnrDb": 0.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -23.29,
+      "noiseScale": 3.56579,
+      "noiseReferenceSamples": 30400,
+      "noiseReferenceMs": 1900.0,
+      "conditionedNoiseFloorDbfs": -22.07
+    },
+    {
+      "id": "tv-dialogue-snr-6db",
+      "fixture": "tv-dialogue",
+      "text": "明天天气怎么样？",
+      "speaker": "television audio",
+      "path": "tests/audio-fixtures/noisy/tv-dialogue-snr-6db.wav",
+      "bytes": 121644,
+      "durationMs": 3800.0,
+      "sourceDurationMs": 1880.0,
+      "targetSnrDb": -6.0,
+      "measuredSnrDb": -6.0,
+      "snrBandHz": [
+        300.0,
+        3400.0
+      ],
+      "cleanSpeechBandDbfs": -23.29,
+      "noiseScale": 7.11469,
+      "noiseReferenceSamples": 30400,
+      "noiseReferenceMs": 1900.0,
+      "conditionedNoiseFloorDbfs": -16.07
+    }
+  ]
+}

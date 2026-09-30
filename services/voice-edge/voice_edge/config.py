@@ -17,6 +17,7 @@ Note what this baseline does **not** buy us: "嗯。" is invisible to Silero VAD
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 
 
@@ -59,4 +60,19 @@ def quiet_logging() -> None:
 
         logger.remove()
     except Exception:  # pragma: no cover - loguru always ships with pipecat
+        pass
+
+
+def utf8_stdout() -> None:
+    """Force UTF-8 on stdout.
+
+    The JSON these CLIs print contains Chinese rationales and U+2212 minus signs; a
+    Windows console defaults stdout to GBK, and `json.dump` then dies with
+    `UnicodeEncodeError: 'gbk' codec can't encode character '\\u2212'` *after* the VAD has
+    already run. The consumer (`scripts/voice-turn.ts`, `scripts/verify-voice-noise.ts`)
+    reads UTF-8, so the fix belongs here rather than in every caller's environment.
+    """
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    except Exception:  # pragma: no cover - already UTF-8 or a non-reconfigurable stream
         pass

@@ -21,6 +21,23 @@ import { clampPersonality, personalityProperty } from './personality.ts';
 export const DEFAULT_DATA_DIR = 'data';
 export const DEFAULT_DB_FILE = 'xixi.sqlite';
 
+/**
+ * WorldState key for "is somebody at home". One key for M6; the table is not specialised
+ * for it, so `living_room` / `quiet_hours` style keys can join later without a migration.
+ */
+export const PRESENCE_KEY = 'presence.home';
+
+/**
+ * How long a presence reading counts as "now" before it must be treated as unknown (§5.3).
+ *
+ * 60 s is chosen against the producer: `services/perception-edge` writes a row on every
+ * transition and the verify script keeps refreshing while it runs, so a healthy, running
+ * loop always produces a value well inside this window. If the loop died, 60 s later the
+ * reading is `stale` and consumers must say "unknown" rather than reuse an old "someone is
+ * here" — the failure mode §5.3 exists to prevent.
+ */
+export const DEFAULT_PRESENCE_TTL_SECONDS = 60;
+
 export interface StoreOptions {
   /** Directory holding the SQLite database. Created when missing. */
   readonly dataDir?: string;
@@ -28,6 +45,54 @@ export interface StoreOptions {
   readonly dbPath?: string;
   readonly clock?: Clock;
 }
+
+/** One row of the `world_state` projection, as stored. */
+export interface WorldStateEntry {
+  readonly key: string;
+  readonly value: string | null;
+  readonly source: string;
+  readonly updatedAt: string;
+  readonly confidence: number;
+  readonly ttlSeconds: number;
+}
+
+export interface WorldStateQuery {
+  /** Override "now" (tests, replays). Defaults to the store clock. */
+  readonly now?: string;
+}
+
+/** A projection row plus the derived staleness verdict and the presence shortcut. */
+export interface WorldState extends WorldStateEntry {
+  readonly stale: boolean;
+  /** `updatedAt + ttlSeconds`, pre-computed so callers do not redo the arithmetic. */
+  readonly staleAfter: string;
+  /** Present only for `presence.home`; `null` for other keys. */
+  readonly present: boolean | null;
+  /** What the same key said before this write (only set by `recordPresenceChanged`). */
+  readonly previousState?: string | null;
+}
+
+export interface SetWorldStateInput {
+  readonly key: string;
+  readonly value: string | null;
+  readonly source: string;
+  readonly confidence: number;
+  readonly ttlSeconds?: number;
+  readonly timestamp?: string;
+}
+
+export interface RecordPresenceInput {
+  readonly present: boolean;
+  readonly source?: string;
+  readonly confidence?: number;
+  /** Envelope `source_detail`; the detector puts its evidence summary here (≤200 chars). */
+  readonly sourceDetail?: string | null;
+  readonly room?: string | null;
+  readonly actor?: Actor;
+  readonly timestamp?: string;
+  readonly ttlSeconds?: number;
+}
+
 
 export interface SessionRecord {
   readonly sessionId: string;
@@ -125,6 +190,15 @@ interface ProfileRow {
   value: number;
   source: string;
   updated_at: string;
+}
+
+interface WorldStateRow {
+  key: string;
+  value: string | null;
+  source: string;
+  updated_at: string;
+  confidence: number;
+  ttl_seconds: number;
 }
 
 /**
@@ -564,8 +638,7 @@ export class XixiStore {
     }));
   }
 
-  selfProfileHistory(property?: string): SelfProfileChange[] {
-    this.#assertOpen();
+  selfProfileHistory(property?: string): SelfProfileChange[] {    this.#assertOpen();
     const rows = (
       property === undefined
         ? this.#db.prepare('SELECT * FROM self_profile_history ORDER BY created_at ASC, rowid ASC').all()
@@ -593,10 +666,196 @@ export class XixiStore {
       createdAt: row.created_at,
     }));
   }
+
+  // ------------------------------------------------------------ world state (§5.3)
+
+  /**
+   * Write one row of the current-state projection.
+   *
+   * This table answers "what is true now"; it is not a history. Callers that have a durable
+   * fact (a sensor transition, a decision) must append an event too — see
+   * `recordPresenceChanged`, which does both in one transaction.
+   */
+  setWorldState(input: SetWorldStateInput): WorldStateEntry {
+    this.#assertOpen();
+    if (input.key.trim().length === 0) {
+      throw new DomainError('INVALID_WORLD_STATE', 'world state key must not be empty');
+    }
+    if (!Number.isFinite(input.confidence) || input.confidence < 0 || input.confidence > 1) {
+      throw new DomainError('INVALID_WORLD_STATE', `confidence ${input.confidence} is outside [0,1]`, input.key);
+    }
+    const ttl = input.ttlSeconds ?? DEFAULT_PRESENCE_TTL_SECONDS;
+    if (!Number.isFinite(ttl) || ttl <= 0) {
+      throw new DomainError('INVALID_WORLD_STATE', `ttlSeconds ${ttl} must be > 0`, input.key);
+    }
+    const at = input.timestamp ?? this.#now();
+    this.#db
+      .prepare(
+        `INSERT INTO world_state (key, schema_version, value, source, updated_at, confidence, ttl_seconds)
+         VALUES (?, 1, ?, ?, ?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET
+           value = excluded.value,
+           source = excluded.source,
+           updated_at = excluded.updated_at,
+           confidence = excluded.confidence,
+           ttl_seconds = excluded.ttl_seconds`,
+      )
+      .run(input.key, input.value, input.source, at, input.confidence, ttl);
+    return {
+      key: input.key,
+      value: input.value,
+      source: input.source,
+      updatedAt: at,
+      confidence: input.confidence,
+      ttlSeconds: ttl,
+    };
+  }
+
+  /** Read the projection; `stale` is computed against the store clock unless overridden. */
+  worldState(key: string, query: WorldStateQuery = {}): WorldState | null {
+    this.#assertOpen();
+    const row = this.#db.prepare('SELECT * FROM world_state WHERE key = ?').get(key) as unknown;
+    if (row === undefined) return null;
+    const stored = toWorldStateEntry(row as WorldStateRow);
+    const now = query.now ?? this.#now();
+    const staleAfter = addSecondsToIso(stored.updatedAt, stored.ttlSeconds);
+    return {
+      ...stored,
+      stale: Date.parse(now) >= Date.parse(staleAfter),
+      staleAfter,
+      present: key === PRESENCE_KEY ? stored.value === 'present' : null,
+    };
+  }
+
+  /** Every projection row, ordered by key (WorldState-lite is one row today, not forever). */
+  worldStateEntries(query: WorldStateQuery = {}): WorldState[] {
+    this.#assertOpen();
+    const rows = this.#db.prepare('SELECT * FROM world_state ORDER BY key').all() as unknown as WorldStateRow[];
+    return rows.map((row) => {
+      const entry = toWorldStateEntry(row);
+      const now = query.now ?? this.#now();
+      const staleAfter = addSecondsToIso(entry.updatedAt, entry.ttlSeconds);
+      return {
+        ...entry,
+        stale: Date.parse(now) >= Date.parse(staleAfter),
+        staleAfter,
+        present: entry.key === PRESENCE_KEY ? entry.value === 'present' : null,
+      };
+    });
+  }
+
+  /**
+   * Record a presence transition: **one transaction**, event log + projection.
+   *
+   * The log is the source of truth and the projection is rebuildable, so they must not be
+   * allowed to disagree — which is why this is a single method rather than two calls the
+   * caller has to remember to pair up (same reasoning as `recordTurn`).
+   */
+  recordPresenceChanged(input: RecordPresenceInput): { event: StoredEvent; state: WorldState } {
+    this.#assertOpen();
+    const at = input.timestamp ?? this.#now();
+    const previous = this.worldState(PRESENCE_KEY, { now: at });
+    const previousState = previous === null ? null : previous.present ? 'present' : 'absent';
+    const nextState = input.present ? 'present' : 'absent';
+    const source = input.source ?? 'perception';
+    const confidence = input.confidence ?? 1;
+    const ttlSeconds = input.ttlSeconds ?? DEFAULT_PRESENCE_TTL_SECONDS;
+
+    const event = buildEvent({
+      event_type: 'presence.changed',
+      source,
+      actor: input.actor ?? 'father',
+      room: input.room ?? null,
+      confidence,
+      timestamp: at,
+      payload: {
+        present: input.present,
+        source_detail: input.sourceDetail ?? null,
+      },
+    });
+
+    const stored = this.#transaction(() => {
+      const appended = this.appendEvent(event);
+      this.setWorldState({
+        key: PRESENCE_KEY,
+        value: nextState,
+        source,
+        confidence,
+        ttlSeconds,
+        timestamp: at,
+      });
+      return appended;
+    });
+
+    const state = this.worldState(PRESENCE_KEY, { now: at });
+    if (state === null) {
+      throw new DomainError('INVALID_WORLD_STATE', 'presence projection vanished right after being written');
+    }
+    return { event: stored, state: { ...state, previousState } };
+  }
+
+  /**
+   * Rebuild the projection from the event log.
+   *
+   * Not called anywhere at startup: rebuilding is how the projection is *proved* to be
+   * derived data (a test can rebuild and compare), and it is the recovery path if the
+   * table is ever lost. History is never in question — `events` holds every transition.
+   */
+  rebuildWorldStateFromEvents(key: string = PRESENCE_KEY): { scanned: number; entry: WorldStateEntry | null } {
+    this.#assertOpen();
+    const events = this.readEvents({ type: 'presence.changed', limit: Number.MAX_SAFE_INTEGER });
+    let latest: StoredEvent | null = null;
+    for (const event of events) latest = event;
+    if (latest === null) return { scanned: 0, entry: null };
+    const payload = latest.payload as { present?: unknown; source_detail?: unknown };
+    const entry = this.setWorldState({
+      key,
+      value: payload.present === true ? 'present' : 'absent',
+      source: latest.source,
+      confidence: latest.confidence,
+      ttlSeconds: DEFAULT_PRESENCE_TTL_SECONDS,
+      timestamp: latest.timestamp,
+    });
+    return { scanned: events.length, entry };
+  }
+
+  /** Close the loop: the projection carries a version like every other durable record. */
+  worldStateSchemaVersion(): number {
+    this.#assertOpen();
+    const row = this.#db.prepare('SELECT MAX(schema_version) AS version FROM world_state').get() as unknown as
+      | { version: number | null }
+      | undefined;
+    return row?.version ?? 1;
+  }
 }
 
-function sessionIdOf(event: EventEnvelope): string | null {
-  const payload = event.payload as JsonValue;
+/**
+ * `updated_at + ttl` in the same local-offset form the store writes.
+ *
+ * Deliberately built on `Date.parse` + `toOffsetIso` rather than a duration library: the
+ * timestamp format is fixed by the event contract (docs/design/domain-model.md §2) and the
+ * offset must survive the arithmetic, or `stale` would be wrong by the timezone offset.
+ */
+function addSecondsToIso(timestamp: string, seconds: number): string {
+  const base = Date.parse(timestamp);
+  if (Number.isNaN(base)) {
+    throw new DomainError('INVALID_WORLD_STATE', `cannot parse timestamp "${timestamp}"`);
+  }
+  return toOffsetIso(new Date(base + seconds * 1000));
+}
+
+function toWorldStateEntry(row: WorldStateRow): WorldStateEntry {
+  return {
+    key: row.key,
+    value: row.value,
+    source: row.source,
+    updatedAt: row.updated_at,
+    confidence: row.confidence,
+    ttlSeconds: row.ttl_seconds,
+  };
+}
+
+function sessionIdOf(event: EventEnvelope): string | null {  const payload = event.payload as JsonValue;
   if (typeof payload === 'object' && payload !== null && !Array.isArray(payload)) {
     const candidate = (payload as Record<string, JsonValue>).session_id;
     if (typeof candidate === 'string') return candidate;

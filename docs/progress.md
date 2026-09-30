@@ -192,7 +192,7 @@ compat: { thinkingFormat: deepseek, requiresReasoningContentOnAssistantMessages:
 - 对话语料：`tests/scenarios/corpus.ts`（8 个场景：连续对话、疲惫晚上、跨轮话题、电视未直呼、安静模式、低/高话多对比、连续应和），
   每条都是**可证伪的行为断言**，不是字符串比对。
 - 评测器：`scripts/eval-conversation.ts`（结构检查 + 可选评审模型 `--judge`），报告写入 `docs/recon/conversation-eval-<date>.md`。
-- 现有测试：`npm test` **63 项全绿**（离线，不花钱）。
+- 现有测试：`npm test` **95 项全绿**（离线，不花钱；其中 7 项属语音前端，见 §2.13）。
 
 ## 3. 关键决策
 

@@ -25,8 +25,9 @@
 ```powershell
 cd E:\worker2
 npm install                    # workspace 链接 + js-yaml + dsh-tools（失败可挂代理 127.0.0.1:7890）
-npm test                       # 期望：63 项通过，<1s，不联网
-npm run web                    # 打开 http://127.0.0.1:8791，打字或按住🎤说话
+npm test                       # 期望：全绿，约 3s，不联网（2026-09-30 实测 95 项）
+npm run field-test             # 👉 现场测试控制台 http://127.0.0.1:8792：麦克风电平/噪声底 + 摄像头在场 + 每轮延迟与动作 + 设备自检
+npm run web                    # 试用对话页 http://127.0.0.1:8791，打字或按住🎤说话
 ```
 
 需要真实调用（花钱、看外部系统是否健康）时：
@@ -48,14 +49,15 @@ npm run voice:bargein                # 0 次调用：打断判定延迟（纯本
 | 事件契约（`xixi.event.v1`，3 类事件） | ✅ 完成 | `npm test`（contracts 用例含 fail-closed 与漂移检查） |
 | 领域持久化（事件日志/会话/人格基线/迁移） | ✅ 完成 | `npm test`（迁移幂等、篡改检测、人格只补缺） |
 | 对话层（FSM §12/§13 + Prompt §26 + 沉默 §55） | ✅ 完成 | `npm test` + `npm run chat` |
-| 人格可调并体现在行为 | ✅ 完成 | `eval:conversation:judge`（低/高话多组长度差 2.4×） |
+| 人格可调并体现在行为 | ✅ 完成 | `eval:conversation:judge`（低/高话多组长度差 **2.57×**：22.3 字 vs 57.3 字，见 `docs/progress.md` §0） |
 | 只读工具（时间/天气） | ✅ 完成 | `node scripts/probe-tools.ts` |
 | 直连 MiMo 实时路径（流式 + 工具循环） | ✅ 完成 | `npm run chat` |
 | DSH Harness 路径（含 profile 与工具插件） | ✅ 完成（M0 验收） | `npm run verify:m0` / `npm run verify:provider` |
-| 语音输入（浏览器采集 → VAD → ASR → 对话 → TTS） | ✅ 完成 | 页面按住🎤；或 POST `/api/voice` |
-| 语音闭环（文件驱动） | ✅ 完成 | `npm run voice:turn -- --wav tests/audio-fixtures/direct-question.wav` |
+| 语音输入（浏览器采集 → VAD → ASR → 对话 → TTS） | ✅ 完成 | 页面按住🎤；或 POST `/api/voice`。**多段语音全部使用**（不再只取第一段），整段录音不落盘（`docs/field-test-report` 见下） |
+| 现场测试控制台（一条命令 + 设备验收引导） | ✅ 完成 | `npm run field-test` → http://127.0.0.1:8792；离线自检 `node scripts/field-test.ts --self-test`（24 项） |
+| 语音闭环（文件驱动） | ✅ 完成 | `npm run voice:turn -- --wav tests/audio-fixtures/direct-question.wav`（输出里含 `segmentsUsed/droppedSegments`） |
 | 打断判定（离线） | ✅ 完成（判定层面） | `npm run voice:bargein`（192ms） |
-| 真实麦克风/扬声器验收 | ⛔ 阻塞 | 录音 99.5% 能量 <100Hz，见 [`recon/device-acceptance-2026-09-30.md`](recon/device-acceptance-2026-09-30.md)；需用户开麦/开音量 |
+| 真实麦克风/扬声器/摄像头验收 | ✅ 通过（2026-09-30） | `node scripts/field-test.ts --acceptance`：麦/扬/摄三项全通过，报告 [`recon/field-test-report-2026-09-30.md`](recon/field-test-report-2026-09-30.md)；出厂静音已解除，扬声器判据改为相对差（≥10 dB） |
 | 扬声器真正静音的延迟（§33 P50<500ms） | ⛔ 未验收 | 需要设备 |
 | 唤醒词 / 搭话判定（§13 完整版） | ⛔ 未实现（M2） | — |
 | 长期记忆 / 纠正（§10） | ⛔ 未实现（M4） | — |
@@ -93,6 +95,8 @@ npm run voice:bargein                # 0 次调用：打断判定延迟（纯本
 | Pipecat venv | `E:\worker2\.venvs\voice-pipecat`（pipecat-ai 1.12.0） |
 | LiveKit venv | `E:\worker2\.venvs\voice-livekit`（livekit-agents 1.8.3 + sounddevice/soundfile） |
 | 试用页 | `npm run web` → http://127.0.0.1:8791（`--dsh` 可切到 Harness 路径） |
+| 现场测试控制台 | `npm run field-test` → http://127.0.0.1:8792（设备验收报告：`docs/recon/field-test-report-<日期>.md`） |
+| 端点在不在静音 | `node scripts/field-test.ts --acceptance` 会打印默认输出/输入设备的 muted 与音量（出厂静音是上一轮验收失败的根因） |
 
 ## 6. 下一件事（如果只做一件事）
 
@@ -110,7 +114,7 @@ Pipecat 与 LiveKit 的 VAD/EOU 都无法区分电视与真人（电视 p=0.91~0
 ## 7. 动代码前的检查清单
 
 - [ ] 读过 `AGENTS.md` 的铁律（尤其：模型不能改规则/权限、主动行为必须过硬门禁、事件是唯一事实来源）
-- [ ] `npm test` 是绿的（63 项），知道哪些用例覆盖你要改的地方
+- [ ] `npm test` 是绿的（2026-09-30 实测 95 项），知道哪些用例覆盖你要改的地方
 - [ ] 新行为**先写测试**（离线可跑），真实 API 验证放 `scripts/verify-*` / `eval-*`，不进 `npm test`
 - [ ] 不新增依赖，或新增时写清新 ADR 与理由
 - [ ] 改完按 [`README.md` §3 更新触发条件](README.md) 同步文档

@@ -1,0 +1,338 @@
+"""The perception loop: capture → detect → debounce → emit. One process, no service, no cloud.
+
+Run it against the real camera:
+
+    python -m perception_edge.run --seconds 20
+
+or offline, with scripted synthetic scenes (used by the regression tests):
+
+    python -m perception_edge.run --source synthetic --scenario person-arrives-moves-leaves
+
+The loop prints one JSON object per line: `frame` records (evidence, for measurement),
+`event` records (the `presence.changed` events, contract-validated) and one final
+`summary`. Nothing is uploaded and no image is written: frame data dies with the process.
+
+Privacy note, stated once and enforced by construction: this module has no HTTP client, no
+socket, and no upload path. `semantic_hook` is the *only* place where a future "send one
+screenshot to a multimodal model on demand" path could live, and it is deliberately
+unimplemented — see `semantic.py`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from dataclasses import dataclass
+from typing import Sequence
+
+import cv2
+import numpy as np
+
+from .camera import CameraConfig, CameraUnavailable, FrameGrabber, SyntheticFrameSource
+from .debounce import ABSENT, PRESENT, DebounceConfig, PresenceDebouncer
+from .detector import DetectionConfig, PresenceDetector, create_face_detector
+from .emitter import EventEmitter, frame_record
+from .contracts import local_timestamp
+from .scenes import empty_static, face_track, person_track, speckle_frame, still_track
+from .semantic import SemanticAnalysisHook, describe_privacy_boundary
+
+
+@dataclass
+class RunConfig:
+    seconds: float = 20.0
+    max_frames: int | None = None
+    source: str = "camera"
+    scenario: str | None = None
+    detector: str = "auto"
+    model: str | None = None
+    width: int = 640
+    height: int = 480
+    camera_index: int = 0
+    process_width: int = 320
+    motion_pixel_threshold: int = 6
+    motion_min_ratio: float = 0.005
+    face_every_n_frames: int = 10
+    present_confirm_frames: int = 15
+    absent_confirm_frames: int = 45
+    release_grace_ms: float = 3000.0
+    initial_state: str = ABSENT
+    db: str | None = None
+    append: bool = False
+    quiet_frames: bool = False
+    ttl_seconds: float = 60.0
+
+
+def _face_detector(cfg: RunConfig, size: tuple[int, int]):
+    if cfg.detector == "none":
+        from .detector import NullFaceDetector
+
+        return NullFaceDetector()
+    if cfg.detector == "haar":
+        from .detector import HaarFaceDetector
+
+        return HaarFaceDetector()
+    if cfg.detector == "yunet":
+        from .detector import YuNetFaceDetector, load_yunet_model_path
+
+        return YuNetFaceDetector(load_yunet_model_path(cfg.model), size, 0.6)
+    return create_face_detector(size, model_path=cfg.model)
+
+
+# ----------------------------------------------------------------- synthetic scenes
+#
+# The scenes themselves live in `scenes.py` (drawn by code — no external assets, no licence
+# questions). This mapping only decides *which* scene each named scenario plays, and every
+# scenario exists to pin down one debounce requirement in tests/perception/.
+
+
+def synthetic_scenario(name: str, shape=(480, 640), fps: float = 30.0) -> list[tuple[np.ndarray, float]]:
+    """Named scenes, each one a documented debounce requirement."""
+    if name == "empty-still":
+        # A room with nothing happening: must never claim presence.
+        return still_track(90, shape=shape)
+
+    if name == "person-arrives-moves-leaves":
+        # A person stands and moves: detected only after `present_confirm_frames`
+        # consistent frames, and left only after the absence window plus the release grace.
+        return person_track(120, start_x=40, step=14, shape=shape) + still_track(120, shape=shape)
+
+    if name == "face-arrives":
+        # The face path: confirmation must come from the face detector, not only motion.
+        return face_track(60, shape=shape) + still_track(120, fill=70, shape=shape)
+
+    if name == "brief-occlusion":
+        # Person moves, the lens is covered for a moment (0.5 s), the person moves again.
+        # Must produce at most one extra pair of events, never a stutter.
+        return (
+            person_track(90, start_x=40, step=14, shape=shape)
+            + still_track(15, shape=shape)
+            + person_track(90, start_x=40, step=14, shape=shape)
+            + still_track(120, shape=shape)
+        )
+
+    if name == "long-occlusion":
+        # A real occlusion (5 s of nothing) must report the absence exactly once: the
+        # event means "nobody is visible", and it must not repeat while it stays true.
+        return (
+            person_track(90, start_x=40, step=14, shape=shape)
+            + still_track(150, shape=shape)
+            + person_track(90, start_x=40, step=14, shape=shape)
+        )
+
+    if name == "single-frame-glitch":
+        # One corrupted frame in an empty room: the classic false positive, must be ignored.
+        frames = still_track(60, shape=shape)
+        frames[20] = (speckle_frame(shape=shape), frames[20][1])
+        return frames
+
+    if name == "glitch-burst":
+        # A short burst that appears and vanishes inside the glitch window: ignored.
+        return (
+            still_track(20, shape=shape)
+            + person_track(4, start_x=60, step=20, shape=shape)
+            + still_track(60, shape=shape)
+        )
+
+    raise SystemExit(
+        f"未知的合成场景 '{name}'；可用：empty-still, person-arrives-moves-leaves, face-arrives, "
+        "brief-occlusion, long-occlusion, single-frame-glitch, glitch-burst"
+    )
+
+
+def run(
+    cfg: RunConfig,
+    emitter: EventEmitter,
+    semantic: SemanticAnalysisHook | None = None,
+    frames: Sequence[tuple[np.ndarray, float]] | None = None,
+) -> dict:
+    """Run the loop once. Returns the summary dict (also printed as a `summary` record).
+
+    `frames` lets a caller (a test, a replay tool) inject its own frame script instead of
+    using the camera or one of the named synthetic scenarios.
+    """
+    detection = DetectionConfig(
+        motion_pixel_threshold=cfg.motion_pixel_threshold,
+        motion_min_ratio=cfg.motion_min_ratio,
+        process_width=cfg.process_width,
+        face_every_n_frames=cfg.face_every_n_frames,
+        use_face_detector=cfg.detector != "none",
+    )
+    debounce = DebounceConfig(
+        present_confirm_frames=cfg.present_confirm_frames,
+        absent_confirm_frames=cfg.absent_confirm_frames,
+        release_grace_ms=cfg.release_grace_ms,
+        initial_state=cfg.initial_state,
+    )
+    detector = PresenceDetector(detection, _face_detector(cfg, (cfg.width, cfg.height)))
+    debouncer = PresenceDebouncer(debounce)
+    semantic = semantic or SemanticAnalysisHook()
+
+    # Announce the starting state once, so the WorldState projection exists from the first
+    # second instead of being absent (a reader then always sees a value + updated_at + TTL).
+    emitter.emit_presence(
+        present=debouncer.state == PRESENT,
+        confidence=0.85,
+        source_detail=(
+            f"state={debouncer.state} startup frames=0 motion_ratio=0.0000 faces=0 "
+            f"gate=motion+face reason=camera_started"
+        ),
+        timestamp=local_timestamp(),
+    )
+    events = 1
+
+    frames_seen = 0
+    started = time.perf_counter()
+    loop_ms: list[float] = []
+    detect_ms: list[float] = []
+    grabber = None
+    source = None
+
+    if frames is not None:
+        source = SyntheticFrameSource(frames).frames()
+    elif cfg.source != "synthetic":
+        grabber = FrameGrabber(
+            CameraConfig(index=cfg.camera_index, width=cfg.width, height=cfg.height, warmup_frames=1)
+        )
+        grabber.open()
+        source = grabber.frames()
+    else:
+        scenario = cfg.scenario or "person-arrives-moves-leaves"
+        source = SyntheticFrameSource(synthetic_scenario(scenario)).frames()
+
+    try:
+        for frame, timestamp_ms in source:
+            frame_started = time.perf_counter()
+            signals = detector.detect(frame, timestamp_ms)
+            decision = debouncer.update(
+                signal=signals.signal,
+                motion_ratio=signals.motion_ratio,
+                faces=signals.faces,
+                timestamp_ms=timestamp_ms,
+                frame_index=signals.frame_index,
+            )
+            detect_ms.append(signals.detect_ms)
+            frames_seen += 1
+            if not cfg.quiet_frames:
+                emitter.frame(frame_record(signals, decision))
+            if decision.changed:
+                # Only the transition is persisted; the frames behind it are not.
+                emitter.emit_presence(
+                    present=decision.state == PRESENT,
+                    confidence=decision.confidence,
+                    source_detail=decision.source_detail,
+                )
+                events += 1
+                # Semantic analysis stays a stub: it must never be called automatically.
+                semantic.on_presence_changed(decision.state == PRESENT, frame)
+            loop_ms.append((time.perf_counter() - frame_started) * 1000.0)
+
+            if cfg.max_frames is not None and frames_seen >= cfg.max_frames:
+                break
+            if time.perf_counter() - started >= cfg.seconds:
+                break
+    finally:
+        if grabber is not None:
+            grabber.close()
+
+    elapsed = time.perf_counter() - started
+    summary = {
+        "source": cfg.source,
+        "scenario": cfg.scenario,
+        "face_backend": detector.face_backend,
+        "process_width": cfg.process_width,
+        "face_every_n_frames": cfg.face_every_n_frames,
+        "present_confirm_frames": cfg.present_confirm_frames,
+        "absent_confirm_frames": cfg.absent_confirm_frames,
+        "release_grace_ms": cfg.release_grace_ms,
+        "ttl_seconds": cfg.ttl_seconds,
+        "frames": frames_seen,
+        "elapsed_s": round(elapsed, 2),
+        "fps_processed": round(frames_seen / elapsed, 1) if elapsed > 0 else 0.0,
+        "detect_ms_mean": round(sum(detect_ms) / len(detect_ms), 2) if detect_ms else 0.0,
+        "detect_ms_p95": round(sorted(detect_ms)[min(len(detect_ms) - 1, int(0.95 * (len(detect_ms) - 1)))], 2)
+        if detect_ms
+        else 0.0,
+        "loop_ms_mean": round(sum(loop_ms) / len(loop_ms), 2) if loop_ms else 0.0,
+        "events": events,
+        "final_state": debouncer.state,
+        "counters": debouncer.counters.to_dict(),
+        "camera": grabber.stats.summary() if grabber is not None else None,
+        "privacy": describe_privacy_boundary(),
+        "semantic_analysis": semantic.status(),
+    }
+    emitter.summary(summary)
+    return summary
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="perception_edge.run",
+        description="本地摄像头在场检测（连续视频不出本机；只产出 presence.changed 事件）",
+    )
+    parser.add_argument("--seconds", type=float, default=20.0, help="最多抓多少秒（默认 20）")
+    parser.add_argument("--frames", type=int, default=None, help="最多处理多少帧（优先于 --seconds）")
+    parser.add_argument("--source", choices=["camera", "synthetic"], default="camera")
+    parser.add_argument("--scenario", default=None, help="--source synthetic 时的场景名")
+    parser.add_argument("--detector", choices=["auto", "yunet", "haar", "none"], default="auto")
+    parser.add_argument("--model", default=None, help="YuNet onnx 路径（默认 data/models/ 下那份）")
+    parser.add_argument("--camera-index", type=int, default=0)
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=480)
+    parser.add_argument("--process-width", type=int, default=320, help="帧差动的处理宽度（默认 320）")
+    parser.add_argument("--motion-pixel-threshold", type=int, default=6)
+    parser.add_argument("--motion-min-ratio", type=float, default=0.005)
+    parser.add_argument("--face-every-n-frames", type=int, default=10)
+    parser.add_argument("--present-confirm-frames", type=int, default=15)
+    parser.add_argument("--absent-confirm-frames", type=int, default=45)
+    parser.add_argument("--release-grace-ms", type=float, default=3000.0)
+    parser.add_argument("--initial-state", choices=[PRESENT, ABSENT], default=ABSENT)
+    parser.add_argument("--db", default=None, help="已初始化的西西 SQLite 库（配合 --append）")
+    parser.add_argument("--append", action="store_true", help="把事件追加进 --db（不建表、不迁移）")
+    parser.add_argument(
+        "--ttl-seconds",
+        type=float,
+        default=60.0,
+        help="world_state 投影的 TTL（默认 60 s；必须与 packages/domain 的 DEFAULT_PRESENCE_TTL_SECONDS 一致）",
+    )
+    parser.add_argument("--quiet-frames", action="store_true", help="不打印逐帧记录，只打印事件与汇总")
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="限制 OpenCV 线程数（默认交给 OpenCV；实时对话链路上建议 1-2，给音频留余量）",
+    )
+    return parser
+
+
+def _apply_thread_limit(threads: int | None) -> None:
+    if threads is None:
+        return
+    setup = getattr(cv2, "setNumThreads", None)
+    if callable(setup):
+        setup(max(1, int(threads)))
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parsed = vars(build_parser().parse_args(argv))
+    parsed["max_frames"] = parsed.pop("frames")
+    threads = parsed.pop("threads")
+    _apply_thread_limit(threads)
+    cfg = RunConfig(**parsed)
+    emitter = EventEmitter(db_path=cfg.db, append=cfg.append, ttl_seconds=cfg.ttl_seconds)
+    try:
+        run(cfg, emitter)
+    except CameraUnavailable as cause:
+        print(f"摄像头不可用：{cause}", file=sys.stderr)
+        print("提示：先关掉占用摄像头的程序（相机 App / 会议软件 / 其它预览窗口），或换 --camera-index。", file=sys.stderr)
+        return 2
+    except FileNotFoundError as cause:
+        print(f"缺少模型文件：{cause}", file=sys.stderr)
+        return 3
+    finally:
+        emitter.close()
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
