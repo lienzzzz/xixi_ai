@@ -1,7 +1,7 @@
 # 安全与隐私：§19 权限身份、§20 数据、§53 不可信内容、§41.7 审计
 
 > 最后更新：2026-09-30
-> 权威来源：`packages/contracts/src/envelope.ts` + `schemas/events/conversation.turn.v1.json`、`packages/domain/src/{store,migrations/001_initial.sql,config}.ts`、`packages/brain-adapter/src/{tools,mimo}.ts`、`packages/model-adapters/src/{mimo,weather}.ts`、`apps/brain-dsh/profile/cordis.patch.yml`、`plugins/xixi-tools/index.js`、`scripts/lib/harness.ts`、`scripts/serve-chat.ts`、`.gitignore`、`AGENTS.md` §1/§5、[progress.md](../progress.md) §2.2/§2.6/§2.10、方案 §19/§20/§41.7/§53
+> 权威来源：`packages/contracts/src/envelope.ts` + `schemas/events/{conversation.turn,conversation.decision,presence.changed}.v1.json`、`packages/domain/src/{store,migrations/001_initial.sql,config}.ts`、`packages/brain-adapter/src/{tools,mimo,dsh,errors}.ts`、`packages/model-adapters/src/{mimo,weather,errors}.ts`、`packages/conversation/src/engine.ts`、`apps/brain-dsh/profile/cordis.patch.yml`、`plugins/xixi-tools/index.js`、`services/perception-edge/**`、`scripts/verify-camera-presence.ts`、`scripts/lib/harness.ts`、`scripts/serve-chat.ts`、`tests/unit/core/brain-error-classification.test.ts`、`.gitignore`、`AGENTS.md` §1/§5、[progress.md](../progress.md) §2.2/§2.6/§2.10、[perception.md](perception.md)、方案 §19/§20/§41.7/§53
 > 若与代码不一致，以代码为准，并请立即修正本文件
 
 本文是「方案条款 → 代码位置 → 已实现 / 仅设计」的逐条映射。**没有实现的安全项在 §5 集中列出**，不要把它们当已完成。
@@ -14,7 +14,11 @@
 - **没有任何认证或来源判别代码**：`packages/domain/src/store.ts` 的 `recordTurn` 把 actor **硬编码**为
   `input.role === 'user' ? 'father' : 'xixi'`。也就是说，无论是谁说话（父亲、家人、电视、陌生人），
   写进事件日志的 actor **永远是 `father`** —— `unknown_person` / `tv_media` / `family_member` / `admin`
-  这些枚举值在运行时代码里**从未被写入过**。
+  这些枚举值在运行时代码里**从未被写入过**（核对方式：在 `packages/**/src`、`services/`、`scripts/` 里搜这几个字面量，
+  只有 `packages/contracts/src/envelope.ts` 的枚举定义命中）。
+- **M6 的在场检测同样不判断「是谁」**：`store.recordPresenceChanged` 的 actor 默认也是 `'father'`（允许调用方覆盖），
+  感知边的 `contracts.py` 默认值同样是 `"father"`；它只回答「有没有人」（`presence.changed`），
+  不做人脸识别/身份判定——所以身份分级依然只是数据契约上的枚举，不是运行时能力。
 - 声纹 / 说话人验证：代码里不存在（全仓库 grep 无实现），`config/xixi.example.yaml` 里 `features.speaker_verification: false`。
 - 结论：**身份分级只是数据契约上的枚举，不是运行时能力**。真正的身份判定属 M2（见 [voice.md](voice.md) §2）。
 
@@ -22,7 +26,7 @@
 
 | 等级 | 方案举例 | 当前实现 |
 |---|---|---|
-| L0 内部只读 | 当前时间、WorldState、Memory search | 只有 `xixi_get_current_time`（`packages/brain-adapter/src/tools.ts` 注释标 L0；参数 `properties:{}` + `additionalProperties:false`）。WorldState / Memory search 未实现 |
+| L0 内部只读 | 当前时间、WorldState、Memory search | 只有 `xixi_get_current_time`（`packages/brain-adapter/src/tools.ts` 注释标 L0；参数 `properties:{}` + `additionalProperties:false`）。**WorldState 投影已存在**（`world_state` 表，`002_world_state.sql`；由 `recordPresenceChanged` 与感知边维护）**但没有给模型读它的工具**；Memory search 未实现 |
 | L1 普通外部只读 | 天气、新闻、日历读取 | 只有 `xixi_get_weather`（注释标 L1）。新闻不可用（该密钥 `webSearchEnabled is false`，recon §3），日历未实现 |
 | L2 低风险可逆 | 提醒、播放音乐、开灯 | 未实现 |
 | L3 外部通信 / 隐私 | 发消息、上传图片、改日历 | 未实现 |
@@ -41,7 +45,10 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
 显式 `disabled: true` 关掉 `tool-bash`、`tool-pwsh`、`tool-fs`、`tool-fs-search`、各种 sandbox、`skill*`、`subagent*`、
 `tool-workflow`、`plan-mode`、`goal*`、`tool-todo`、`web`、`web-search-deepseek`、`web-fetch-http`、`tool-web`、`mcp-resources`、`user-questions`、`commands`、`tool-jobs`；
 同时 `includeHarnessIdentity: false` 并写入西西的 `personaPrefix`/`personaSuffix`。
-它只注册一个只读工具：`plugins/xixi-tools/index.js` 的 `xixi_get_current_time`（`parameters: {}`）。
+它只注册**两个**只读工具：`plugins/xixi-tools/index.js` 的 `xixi_get_current_time`（`parameters: {}`）与
+`xixi_get_weather`（`place` + `day`，`additionalProperties: false`；天气工具由 t5 补齐，此前 `--dsh` 路径问天气只能编造或回避）。
+注意 DSH 的 `defineTool` 隐式参数根**不带** `additionalProperties: false`（实测 `@deepseek-ai/dsh-tools` 0.1.7-rc.2），
+所以天气工具的封闭性由工具体内的参数校验兜底，而不是靠注册表。
 
 ## 3. §20 数据与隐私 → 逐条映射
 
@@ -49,19 +56,30 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
 
 | 方案要求 | 现状 |
 |---|---|
-| 内存 ring buffer | **未实现**：没有常驻音频缓冲；浏览器「按住🎤」一次采集一段，Python 侧 `segment.py` 整文件读入 |
-| 非触发片段不落盘 | **部分实现但反着来**：`/api/voice` **先把整段录音写盘**（`data/voice-web/capture-<ts>.wav`）再做 VAD；无语音时这段录音**已经落盘**了 |
-| 被识别为对话的短音频可暂存用于 ASR | ✅ 实现：`sliceWav` 切出语音段写 `speech-<ts>.wav` 并送去 ASR |
-| 调试模式可配置保留 N 天 | **未实现**：`config/xixi.example.yaml` 里有 `memory.raw_audio_retention_days: 0`，但 `config.ts` 把 `proactive`/`memory`/`privacy`/`features` 四段都只解析成 `Record<string, unknown>`，全仓库**没有任何读取/清理代码** |
-| 正式运行不长期保存原始环境音 | **未实现**：没有保留期、没有删除接口 |
+| 内存 ring buffer | **未实现**：没有常驻音频缓冲（`services/voice-edge` 里没有环形缓冲/常开采集代码；浏览器「按住🎤」一次采集一段，`segment.py` 按文件读入） |
+| 非触发片段不落盘 | ✅ **已实现**（默认策略下连整段录音都不落 `data/`）：VAD 是独立 Python 进程、需要文件输入，所以整段录音只写进**系统临时目录**（`scripts/field-test.ts:673` 的 `mkdtempSync(tmpdir()/xixi-vad-)`）供读一次，**不进 `data/`**；现场测试控制台自测里有一条断言「隐私策略：整段录音不落盘」（`field-test.ts:2892`）。**历史**：这条以前是反着的（旧 `/api/voice` 先把整段写进 `data/voice-web/capture-*.wav` 再做 VAD，无语音时也已经落盘），两个入口改用共享核心后修掉（见 `scripts/serve-chat.ts:102-109` 的说明） |
+| 被识别为对话的短音频可暂存用于 ASR | ✅ 但**默认不保留**：`keepSpeechSegments = privacy.store_raw_audio && memory.raw_audio_retention_days > 0`——默认（`store_raw_audio: false`、保留 0 天）语音段也不写盘，ASR 直接用内存里的音频 |
+| 调试模式可配置保留 N 天 | ✅ **已实现**（不再是「配置项无人读取」）：`scripts/field-test.ts` 的 `retentionPolicy(config)` 读 `privacy.store_raw_audio` + `memory.raw_audio_retention_days`，`pruneVoiceDir()` 在**启动时清理过期文件**；两个入口都在用（`scripts/serve-chat.ts:49/52` 清理并打印 `[privacy] 按保留策略清理 …`；现场测试控制台在启动与每轮前清理，`field-test.ts:775/1805`）。开启后只写 VAD 检出的语音段到 `data/voice-web/`，保留 N 天 |
+| 正式运行不长期保存原始环境音 | ✅ **默认成立**（不落盘、不保留）；开启保留时是**按天数粗粒度**清理 + 手工删目录，**没有针对单条记录的删除接口**（细粒度删除仍属 M4 的记忆管理） |
 
 **唯一硬约束是「不进版本库」**：`data/` 与 `.env` 都在 `.gitignore`（`.gitignore` 含 `data/`、`.dsh/`、`.venvs/`、`.env`、`.env.local`）。
 上传侧的最小化是真的（只有 VAD 语音段进 ASR，`scripts/voice-turn.ts` 与 `scripts/serve-chat.ts` 都有注释与实现），
-**本地落盘侧的保留策略还没有**。
+落盘侧现在也有默认「什么都不留」的策略；**剩下的缺口是细粒度删除与保留期的可视化**。
 
 ### 20.2 原始视频
 
-**完全未实现**：仓库里没有摄像头代码，`config` 里 `features.camera_presence: false`。方案 §20.2 的「本地检测、只留事件截图、不上云」属 M6。
+**M6 已落地本地在场检测**（`services/perception-edge/`，一次性进程：capture → detect → debounce → emit）：
+
+| 方案要求 | 现状 |
+|---|---|
+| 本地检测、只留事件 | ✅ **帧差动 + 人脸确认**（320×240 灰度帧差动作廉价门，每 10 帧一次 YuNet 人脸确认；Haar 为显式降级后端），产出 `presence.changed` 事件与 `world_state.presence` 投影 |
+| 连续视频不上云 | ✅ **由构造保证**：感知边没有任何网络客户端（`run.py` 注释写明 `One process, no service, no cloud`），并有测试断言；本机实测也未出网 |
+| 不上传截图 / 按需语义分析 | **刻意未实现**：只留接口 `SemanticAnalysisHook`，`capture_snapshot()` 调用即抛 `SemanticAnalysisNotImplemented`——所以**没有任何代码路径能上传图像** |
+| 画面不入仓库 | ✅ 帧只在内存里活过一次 `detect()` 调用（不落盘、不写图片/视频），仓库不跟踪画面；YuNet 模型文件在 `data/models/`（`data/` 已 gitignore，模型不入库） |
+
+必须写清的边界（不得夸大）：**真人站在镜头前的检出自测尚未完成**（摄像头朝天，需要人参与），M6 目前是场景夹具 +
+本机自测的验证强度（细节与数字见 [perception.md](perception.md) §3/§8）。另外 `config/xixi.example.yaml` 的
+`features.camera_presence: false` 仍是**未被任何代码读取的声明**（与 §3 里 memory/privacy 各段的处境相同）。
 
 ### 20.3 Transcript
 
@@ -110,15 +128,28 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
 6. **独立日志 redact 层**：未实现（靠不打印）。
 7. **§53 的显式不可信内容标签**：未实现。
 8. **出网白名单**：未实现。
+9. **按需语义分析（截图交多模态模型）**：**刻意未实现**——只留 `SemanticAnalysisHook` 接口，
+   `capture_snapshot()` 调用即抛 `SemanticAnalysisNotImplemented`。M6 的「图像不出设备」边界正是靠这个「不实现」保证的，
+   接它之前必须先补 §53 的标签与出网约束。
+10. **真人站在镜头前的在场检出自测**：**未完成**（摄像头朝天，需要人参与）。M6 目前的证据是场景夹具与本机自测，
+    不要把「有人/无人判定已实现」读成「已在真人条件下验收」（数字与复现见 [perception.md](perception.md) §3/§8）。
 
 ## 6. §41.7 / §55 审计：`reason_code` 与分数
 
-- **事件是唯一事实来源**（ADR-0003）。`packages/domain/src/store.ts` 只提供两个 `appendEvent` 调用点——
-  `recordTurn`（`conversation.turn`）与 `recordHealth`（`system.health`）；
-  第三个事件类型 `conversation.decision` 由**引擎**调用 `store.appendEvent` 直接追加
-  （`packages/conversation/src/engine.ts` 的 `#recordDecision`）。
+- **事件是唯一事实来源**（ADR-0003）。`appendEvent` 的调用点一共 **4 处**（2026-09-30 用 `grep -n "appendEvent("` 核对；`store.ts:267` 是定义行，不算调用点）：
+
+  | 位置 | 函数 | 事件 |
+  |---|---|---|
+  | `packages/domain/src/store.ts:333` | `recordHealth` | `system.health` |
+  | `packages/domain/src/store.ts:443` | `recordTurn` | `conversation.turn` |
+  | `packages/domain/src/store.ts:778` | `recordPresenceChanged` | `presence.changed`（**与 `world_state` 投影同一事务**，M6 感知边） |
+  | `packages/conversation/src/engine.ts:206` | `#recordDecision` | `conversation.decision`（t5 新增） |
+
+  还有一条**不经过 `appendEvent`** 的写入路径：感知边进程用 Python 直接 SQL 写同一个库
+  （`services/perception-edge/perception_edge/emitter.py`，`INSERT INTO events` 与 `world_state` 同一事务；
+  `scripts/verify-camera-presence.ts` 会把这些事件再用 `buildEvent()` 重建校验）。
   **`createSession` 不写事件；`seedSelfProfile` / `overrideSelfProfile` 只写 `self_profile` 与 `self_profile_history`，同样不写事件。**
-  所以「每条状态变更都进事件表」目前只对**对话轮次、接受判定与健康状态**成立。
+  所以「每条状态变更都进事件表」目前对**对话轮次、接受判定、健康状态与在场状态**成立。
 - **被拒绝的轮次有记录**：`ConversationEngine.respond` 在 `accepted === false` 时**不**调用 `recordTurn`
   （所以它不会变成对话历史，也不会进入工作记忆），但会先追加一条 `conversation.decision`，
   因此在事件日志里可以查到「这句话为什么没被接受」。
@@ -145,17 +176,47 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
 - 工具调用审计：`ToolCallRecord`（`{name,args,ok,result,error}`）通过 `onToolCall` 回调给调用方，
   落库的是事件 payload 里的 `tool_name`（只留第一个工具名，不留参数）。
 
+## 7. 失败分类口径（`BrainError`）：诊断不要看错层
+
+现场测试时最先撞到的安全/配置问题就是「没配密钥」，而它的**分类**决定用户被告知什么，因此这里写死口径。
+
+- **两层错误对象**：`ModelError`（`packages/model-adapters/src/errors.ts`，provider 侧）与
+  `BrainError`（`packages/brain-adapter/src/errors.ts`，适配器接缝，见《方案》§25）。上层只 `switch (BrainError.code)`。
+- **原始 provider 码不丢**：`BrainError` 带 `originalCode` 字段（并同时留在 `detail` 文本里），
+  所以「哪一类失败」不会因为映射而消失。
+- **两条路径共用同一张映射表** `brainErrorCodeFor()`（`packages/brain-adapter/src/errors.ts`），避免直连与 DSH 对同一个码有两种理解：
+  - **直连（`MimoBrainAdapter`）**：`ModelError.code` 直接决定 `BrainError.code`，并记进 `originalCode`。
+    口径示例（缺密钥）：`MIMO_API_KEY` 未设置 → `MimoClient` 在**任何请求发出之前**抛
+    `ModelError('MISSING_KEY')` → 适配器报 `BrainError.code = TRANSPORT_FAILED`、
+    `originalCode = MISSING_KEY`、`detail` 含 `MISSING_KEY:`，**fetch 一次都没被调用**。
+    HTTP 状态映射：401/403 → `AUTH`、402 → `QUOTA`、429 → `RATE_LIMIT`、400/404/422 → `BAD_REQUEST`、
+    ≥500 → `PROVIDER_FAILED`、连不上 → `TRANSPORT_FAILED`（`originalCode = NETWORK`）。
+  - **DSH（`DshBrainAdapter`）**：harness 报 `ok:false` 时 `BrainError.code` **保持 `PROVIDER_FAILED`**
+    （既有契约，`tests/integration/brain-adapter.test.ts` 断言的就是这一条），但 harness 自己的码
+    （`AUTH`/`RATE_LIMIT`/`QUOTA`/`BAD_REQUEST`/`MISSING_CREDENTIAL` 等）会进 `originalCode`
+    （不在闭集里的码则留在 `detail`）。
+- **为什么重要**：`curl` 不通与「忘配 `.env`」在过去都显示成网络类失败，会把人引向错误的排查方向；
+  分类保真后这几类是分开的，§21.1 的降级也才有依据去区分「换密钥 / 退避重试 / 供应商故障」。
+- **离线覆盖**（无需新增测试，口径已被钉住）：`tests/unit/core/brain-error-classification.test.ts`——
+  第 78 行那条断言「缺密钥 → `ModelError('MISSING_KEY')`，且经适配器后 `code = TRANSPORT_FAILED`、
+  `originalCode = MISSING_KEY`、`detail` 含 `MISSING_KEY`、fetch 未被调用」，第 38 行按 HTTP 状态逐类断言
+  `code` + `originalCode`，第 110 行断言 DSH 侧原始码进 `originalCode`；
+  `tests/integration/brain-adapter.test.ts` 第 20 行在集成层复核同一件事（含 `attempted === 0`）。
+
 ## 维护规则
 
 | 改了哪个源文件 | 必须同步更新本文件的小节 |
 |---|---|
 | `packages/contracts/src/envelope.ts`（ACTORS） | §1 |
-| `packages/domain/src/store.ts`（`recordTurn` 的 actor、`appendEvent` 调用点、`overrideSelfProfile`） | §1、§6（`appendEvent` 的调用点清单） |
+| `packages/domain/src/store.ts`（`recordTurn` 的 actor、`appendEvent` 调用点、`recordPresenceChanged`、`overrideSelfProfile`） | §1、§6（`appendEvent` 的调用点清单） |
 | `packages/contracts/schemas/events/conversation.turn.v1.json` 或 `conversation.decision.v1.json`（新增字段 / 新事件类型） | §6（`reason_code` 与分值是否落库、是否只存 code 与分数） |
 | `packages/conversation/src/engine.ts` 的 `#recordDecision`（decision 事件字段） | §6（拒绝轮次的记录方式与字段清单） |
 | `packages/brain-adapter/src/tools.ts` 或新增任何工具 | §2（等级表、参数封闭、未知工具处理） |
 | `apps/brain-dsh/profile/cordis.patch.yml`、`plugins/xixi-tools/index.js` | §2（Harness 侧最小权限面） |
-| `packages/model-adapters/src/mimo.ts`（错误构造、密钥读取） | §3.20.4（密钥纪律、是否有回显路径） |
+| `packages/model-adapters/src/mimo.ts`（错误构造、密钥读取） | §3.20.4（密钥纪律、是否有回显路径）、§7（失败分类口径） |
+| `packages/brain-adapter/src/errors.ts`（码表、`brainErrorCodeFor`、`originalCode`） | §7 |
+| `services/perception-edge/**`（感知边；`emitter.py` 直接 SQL 写 `events` + `world_state`） | §3.20.2（原始视频：本地检测、不上云、画面不落盘）、§6（事件写入方） |
+| `scripts/verify-camera-presence.ts`（在场验收脚本） | §3.20.2 |
 | `packages/model-adapters/src/weather.ts` 或新增外部数据源 | §4（外部主机清单、不可信内容分层） |
 | `scripts/lib/harness.ts`（`readDotEnv`/`harnessEnv`） | §3.20.4 |
 | `scripts/serve-chat.ts`（语音落盘与上传范围） | §3.20.1 |
