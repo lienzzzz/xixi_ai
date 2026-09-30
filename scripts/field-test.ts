@@ -1842,6 +1842,8 @@ export interface FieldServerOptions {
   readonly probeRunner?: ProbeRunner;
   /** Test seam for the live camera loop (t78): the real one spawns the perception edge. */
   readonly liveRunner?: LiveCameraRunner;
+  /** Test seam for the brain (t88): lets a test drive 「看一眼」 without a key or a network. */
+  readonly adapterOverride?: BrainAdapter;
   readonly log?: (line: string) => void;
 }
 
@@ -1873,6 +1875,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   store.recordHealth('field-test', 'ok', `console started (offline=${offline})`);
 
   function buildAdapter(): BrainAdapter {
+    if (options.adapterOverride !== undefined) return options.adapterOverride;
     if (offline) return new FakeBrainAdapter();
     if (!options.useDsh) {
       return new MimoBrainAdapter({
@@ -1955,6 +1958,17 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       sessionId: () => session.sessionId,
       available: !offline && client.hasKey,
       recentLines: () => proactiveLoop.spokenLines(),
+      // t88: 自主看 is opt-in. With the switch off this returns null and the call is text-only.
+      vision: () => {
+        if (!vision.autoLook) return null;
+        const image = liveSensors.imageInput(lookMaxWidth);
+        if ('refused' in image) return null;
+        return { images: [{ mediaType: image.mediaType, base64: image.base64 }], info: { width: image.width, height: image.height, bytes: image.bytes }, note: '主动开口时附带了 1 张静帧' };
+      },
+      onUpload: (info) => {
+        const record = recordLookOnce(store, { ...info, question: null, outcome: 'auto-look' });
+        log(`[vision] 自主看上传一张静帧（${info.width}x${info.height}，${Math.round(info.bytes / 1024)}KB，审计 #${record.sequence}）`);
+      },
       log,
     }),
     log,
@@ -1979,6 +1993,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       status: liveSensors.status(),
       frame: liveSensors.frame(),
       loop: proactiveLoop.status(),
+      vision: visionPayload(),
       ttsEnabled: ttsOn,
       ttsAvailable: ttsOn && client.hasKey,
       cameraIndex: liveCameraIndex,
@@ -2119,16 +2134,189 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       ttsAvailable: ttsOn && client.hasKey,
       live: liveSensors.status(),
       liveLoop: proactiveLoop.status(),
+      vision: visionPayload(),
       reportDir,
     };
+  }
+
+  // -------------------------------------------------- 「看一眼」: the manual still-frame path (t88)
+  const visionConfig = ((config as unknown as Record<string, unknown>)['vision'] ?? {}) as Record<string, unknown>;
+  /** The size cap comes from `config/xixi.example.yaml` (`vision.max_width_px`), default 480. */
+  const lookMaxWidth = typeof visionConfig['max_width_px'] === 'number' ? visionConfig['max_width_px'] : LOOK_ONCE_MAX_WIDTH;
+  const configuredAutoLook = typeof visionConfig['auto_look'] === 'boolean' ? visionConfig['auto_look'] : VISION_AUTO_LOOK_DEFAULT;
+  let vision = restoreVisionSettings(store, configuredAutoLook);
+  if (vision.source === 'console') log(`[vision] 从审计记录恢复「允许西西自己看」=${vision.autoLook}（${vision.updatedAt ?? '?'}）`);
+
+  function visionPayload(): Record<string, unknown> {
+    const history = lookOnceHistory(store, 10);
+    return {
+      autoLookEnabled: vision.autoLook,
+      autoLookSource: vision.source,
+      maxWidthPx: lookMaxWidth,
+      uploads: history.length,
+      lastUpload: history[0] ?? null,
+      history,
+      historyNote: '每条只记时间/大小/触发源/结果，没有图像，也没有落盘。',
+      privacyNote: VISION_NOTICE,
+      canLook: !offline && !options.useDsh && client.hasKey,
+      blockers: [
+        ...(offline ? ['--offline：替身不看图（它会忽略图片），所以这里不会真的「看见」'] : []),
+        ...(options.useDsh ? ['--dsh：DSH 路径一轮压成一个 task 字符串，发不了图（会被明确拒绝）'] : []),
+        ...(!client.hasKey ? ['没有 MIMO_API_KEY：无法真的调用模型看图'] : []),
+      ],
+      frame: liveSensors.frame() === null ? null : { width: liveSensors.frame()?.width ?? 0, height: liveSensors.frame()?.height ?? 0, bytes: liveSensors.frame()?.jpegBytes ?? 0 },
+    };
+  }
+
+  /**
+   * One look: attach the newest frame to *one* model call and turn the answer into a normal turn.
+   *
+   * It goes through the same pieces a typed turn uses — the engine's prompt assembler (identity,
+   * hard policy, personality, world state, recent history) and the same adapter (tools included) —
+   * but with `images` on the adapter call, because the conversation engine's `respond` has no image
+   * seam yet (packages/ is out of scope for this task). The two turns are written to the log, so the
+   * right column and the next user turn both see them; the audit row never contains the picture.
+   */
+  async function lookOnce(trigger: LookOnceTrigger, questionInput?: string): Promise<Record<string, unknown>> {
+    const question = questionInput === undefined || questionInput.trim().length === 0 ? LOOK_ONCE_DEFAULT_QUESTION : questionInput.trim();
+    const image = liveSensors.imageInput(lookMaxWidth);
+    if ('refused' in image) {
+      return { ok: false, error: { code: 'NO_FRAME', message: image.refused, hint: '先点左栏的「启用」，等画面出现后再按「看一眼」。' } };
+    }
+    // An injected adapter (tests) is a deliberate choice, so it skips the "can this brain really
+    // look" checks — but the *real* paths keep them, because a look that cannot look must say so.
+    const injected = options.adapterOverride !== undefined;
+    if (!injected && offline) {
+      return {
+        ok: false,
+        error: {
+          code: 'OFFLINE',
+          message: '当前是 --offline：替身适配器不看图（它会忽略图片），所以「看一眼」不会真的看到东西。',
+          hint: '去掉 --offline（需要有 MIMO_API_KEY）再试，这样画面才会真的发给模型。',
+        },
+      };
+    }
+    if (!injected && options.useDsh) {
+      return {
+        ok: false,
+        error: {
+          code: 'DSH_NO_IMAGES',
+          message: '--dsh 路径发不了图：DSH 适配器会明确拒绝带图的请求（宁可拒绝，也不假装看见了）。',
+          hint: '用直连 MiMo 的控制台（不要 --dsh）按「看一眼」；查资料/工具调用仍可用 --dsh。',
+        },
+      };
+    }
+    if (!injected && !client.hasKey) {
+      return { ok: false, error: { code: 'NO_KEY', message: '没有 MIMO_API_KEY：无法把画面发给模型。', hint: '配置 .env.local 里的 MIMO_API_KEY 后重启控制台。' } };
+    }
+    const at = new Date();
+    const startedAt = Date.now();
+    let reply: string | null = null;
+    let action = 'SILENCE';
+    let provider = engine.adapter.provider;
+    let model = engine.adapter.describe().model;
+    let segments: readonly string[] = [];
+    let gapMs = 0;
+    let audio: (string | null)[] | null = null;
+    let audioNote: string | null = null;
+    try {
+      // The whole turn goes through the engine (t88, per t91's review): the frame travels
+      // console → `engine.respond({images})` → adapter seam, so the FSM, the decision record, the
+      // two `conversation.turn` rows and the segment plan are all exactly the normal turn's.
+      const turn = await engine.respond(
+        { sessionId: session.sessionId, text: question, addressed: true, at, images: [{ mediaType: image.mediaType, base64: image.base64 }] },
+        {
+          // Per-segment TTS, the same seam the typed/voice turns use.
+          onSegment: async (segment) => {
+            const synthesize = loopSynthesizeProvider();
+            if (synthesize === undefined) {
+              audioNote = '只显示文字：朗读关闭（--no-tts）或没有可用密钥，所以这次没有合成语音。';
+              return;
+            }
+            audio = audio ?? [];
+            try {
+              (audio as (string | null)[]).push((await synthesize(segment.text)).toString('base64'));
+            } catch (error) {
+              (audio as (string | null)[]).push(null);
+              audioNote = `第 ${segment.index + 1} 段合成失败：${error instanceof Error ? error.message : String(error)}`;
+            }
+          },
+        },
+      );
+      action = turn.action;
+      reply = turn.text === null || turn.text.trim().length === 0 ? null : turn.text.trim();
+      provider = turn.provider;
+      model = turn.model;
+      segments = turn.segments;
+      gapMs = turn.segmentGapMs;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      recordLookOnce(store, { ...image, trigger, question, outcome: `failed:${message.slice(0, 60)}` });
+      return { ok: false, error: { code: 'LOOK_FAILED', message: `这一次调用失败了：${message}`, hint: '画面没有重试、也没有落盘；可以直接再按一次。' } };
+    }
+    const latencyMs = Date.now() - startedAt;
+    // The two turns are already in the log — `engine.respond` writes them (that is why this path
+    // has no `recordTurn` of its own; adding one would double every look in the right column).
+    const record = recordLookOnce(store, { ...image, trigger, question, outcome: reply === null ? `no-text:${action}` : action });
+    if (reply !== null && segments.length === 0) {
+      const split = splitReplyIntoSegments(reply, resolveReplyLimits(config.reply));
+      segments = split.segments;
+      gapMs = split.gapMs;
+    }
+    pushTurn({
+      kind: 'text',
+      at: at.toISOString(),
+      action,
+      actionText: action === 'SPEAK' ? '说话' : action,
+      reason: 'VISION_LOOK_ONCE',
+      reasonText: `手动看一眼（${trigger}）`,
+      transcript: question,
+      reply,
+      state: engine.state,
+      stages: { vad: null, asr: null, firstToken: null, total: latencyMs },
+      segmentsTotal: segments.length,
+      segmentsUsed: segments.length,
+      droppedSegments: [],
+      privacyNote: '这一张静帧只发送了一次（' + `${image.width}x${image.height}，${Math.round(image.bytes / 1024)}KB` + '）；没有落盘、没有连续上传，记录里也没有图像。',
+      replySegments: segments,
+      replyGapMs: gapMs,
+      source: `看一眼（${trigger}）`,
+    });
+    log(`[vision] 看一眼（${trigger}）：${image.width}x${image.height} ${Math.round(image.bytes / 1024)}KB → ${action}${reply === null ? '' : `「${reply.slice(0, 40)}」`}（${latencyMs}ms，审计 #${record.sequence}）`);
+    return {
+      ok: true,
+      action,
+      reply,
+      noAnswer: reply === null,
+      // A manual look that the model answers with silence is not an error — it did look — but the
+      // page must not say "看过了" and leave the user guessing why nothing came back.
+      noAnswerNote:
+        reply === null
+          ? `模型这次没说话（action=${action}）：它已经看过这一帧（记录 #${record.sequence}），但没有给出内容。可以换个问法再按一次，或直接问「画面里有什么？」。`
+          : null,
+      segments,
+      gapMs,
+      audio,
+      audioNote,
+      provider,
+      model,
+      latencyMs,
+      upload: record,
+      vision: visionPayload(),
+      state: statePayloadSync(),
+    };
+  }
+
+  /** The state the page needs right after a look (sync part; `statePayload` is async). */
+  function statePayloadSync(): Record<string, unknown> {
+    return { sessionId: session.sessionId, state: engine.state, recent: turns, vision: visionPayload() };
   }
 
   const server = createServer((request, response) => {
     void (async () => {
       try {
         const url = new URL(request.url ?? '/', 'http://127.0.0.1');
-        if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
-          const address = server.address();
+        if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {          const address = server.address();
           const port = typeof address === 'object' && address !== null ? address.port : options.port;
           const boot = { listen: `127.0.0.1:${port}`, offline, ttsEnabled, modelConfigured: client.hasKey, calibration, policy, databasePath: dataDir };
           // Build first, write second: if the page builder throws, the catch below can still
@@ -2166,6 +2354,26 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
         }
         if (request.method === 'GET' && url.pathname === '/api/field/live') {
           json(response, 200, { ok: true, ...livePayload() });
+          return;
+        }
+        if (request.method === 'POST' && url.pathname === '/api/field/look') {
+          // Manual only: the endpoint ignores any `trigger` the page might send that is not
+          // 'manual' — autonomy has exactly one switch (the vision settings endpoint below).
+          const body = (await readBody(request)) as Record<string, unknown>;
+          const question = typeof body['question'] === 'string' ? body['question'] : undefined;
+          const payload = await lookOnce('manual', question);
+          json(response, payload['ok'] === true ? 200 : 200, payload);
+          return;
+        }
+        if (request.method === 'POST' && url.pathname === '/api/field/vision') {
+          const body = (await readBody(request)) as Record<string, unknown>;
+          if (typeof body['autoLook'] !== 'boolean') {
+            throw new ConsoleError('VISION_SWITCH_INVALID', '「允许西西自己看」需要一个布尔值', '页面上的复选框会传 true / false');
+          }
+          vision = { autoLook: body['autoLook'], source: 'console', updatedAt: new Date().toISOString() };
+          persistVisionSettings(store, vision.autoLook);
+          log(`[vision] 「允许西西自己看」已${vision.autoLook ? '打开' : '关闭'}（默认是关的；打开后仍要过全部主动开口硬门禁）`);
+          json(response, 200, { ok: true, vision: visionPayload(), state: statePayloadSync() });
           return;
         }
         if (request.method === 'POST' && url.pathname === '/api/field/live') {
@@ -3552,11 +3760,165 @@ export class LiveSensors {
   frame(): LiveFrameView | null {
     return this.#lastFrame;
   }
+
+  /**
+   * The latest frame as something the brain seam accepts (t88, 「看一眼」).
+   *
+   * Two guarantees live here rather than in the caller: the picture is **only** ever the newest
+   * one (no backlog to send), and it must already be within the size cap — the perception child
+   * encodes at `--frame-max-width` (480 px by default), and a wider frame is refused instead of
+   * being sent big "because we could not scale it" (there is no image library in this project).
+   */
+  imageInput(maxWidthPx: number): { readonly mediaType: 'image/jpeg'; readonly base64: string; readonly width: number; readonly height: number; readonly bytes: number } | {
+    readonly refused: string;
+  } {
+    const frame = this.#lastFrame;
+    if (frame === null || frame.dataUrl.length === 0) return { refused: '现在还没有画面：先点「启用」，等到出现第一帧再按「看一眼」。' };
+    if (frame.width > maxWidthPx) {
+      return { refused: `这一帧宽 ${frame.width}px，超过上限 ${maxWidthPx}px：把「启用」的 --frame-max-width 调小后重试（本仓库没有图像库，不会偷偷放大/缩小再发）。` };
+    }
+    const prefix = 'data:image/jpeg;base64,';
+    if (!frame.dataUrl.startsWith(prefix)) return { refused: '这一帧不是 JPEG，不能作为图片输入。' };
+    return {
+      mediaType: 'image/jpeg',
+      base64: frame.dataUrl.slice(prefix.length),
+      width: frame.width,
+      height: frame.height,
+      bytes: frame.jpegBytes,
+    };
+  }
 }
 
-/** The perception edge lives here (`-m perception_edge.run` is run with this as cwd). */
-export const PERCEPTION_SERVICE_DIR = join(REPO_ROOT, 'services', 'perception-edge');
-/** Enough OpenCV + numpy to run the detector: `verify-camera-presence.ts` probes the same way. */
+// ---------------------------------------------------- 「看一眼」 (t88)
+//
+// The manual still-frame path: the user presses a button, the *current* frame goes to the model
+// once, and the reply is spoken and logged like any other turn. Three guarantees are structural:
+//
+//   1. **It is manual by default.** Nothing here is called by the consideration loop unless the
+//      「允许西西自己看」 switch (default off) is on — autonomous looking is a separate decision.
+//   2. **Every upload leaves a record** (time, size, trigger, question) with **no image bytes**,
+//      written as a `system.health` row like the proactive settings audit.
+//   3. **Nothing is persisted and nothing is continuous**: the picture is the newest frame the
+//      console already holds in memory, it is sent once per press, and it is never written to disk.
+
+/** Audit rows for still-frame uploads (`system.health`, `service = vision-look-once`). */
+export const LOOK_ONCE_SERVICE = 'vision-look-once';
+/** Setting rows for the vision switches (`system.health`, `service = vision-settings`). */
+export const VISION_SETTINGS_SERVICE = 'vision-settings';
+/** The picture sent to the model must be at most this wide (the child encodes at this width too). */
+export const LOOK_ONCE_MAX_WIDTH = 480;
+/** The question attached to a manual look when the user does not type one. */
+export const LOOK_ONCE_DEFAULT_QUESTION = '看一眼：画面里有什么？用一句话说重点。';
+/** Who asked for this upload — the two values the audit record can carry. */
+export type LookOnceTrigger = 'manual' | 'auto';
+/** Default of the 「允许西西自己看」 switch: off, so nothing looks without being asked. */
+export const VISION_AUTO_LOOK_DEFAULT = false;
+
+export interface LookOnceUploadInfo {
+  readonly width: number;
+  readonly height: number;
+  readonly bytes: number;
+}
+
+/** One auditable upload. Deliberately has no image field. */
+export interface LookOnceRecord {
+  readonly at: string;
+  readonly trigger: LookOnceTrigger;
+  readonly width: number;
+  readonly height: number;
+  readonly bytes: number;
+  readonly question: string | null;
+  readonly outcome: string;
+  readonly sequence: number | null;
+}
+
+export interface LookOnceSettings {
+  readonly autoLook: boolean;
+  /** `console` = restored from the audit record; `default` = the shipped default (off). */
+  readonly source: 'console' | 'default';
+  readonly updatedAt: string | null;
+}
+
+/** Write one upload record — time, size, trigger, question; **never** the picture. */
+export function recordLookOnce(
+  store: XixiStore,
+  info: LookOnceUploadInfo & { readonly trigger: LookOnceTrigger; readonly question: string | null; readonly outcome: string },
+): LookOnceRecord {
+  const at = new Date().toISOString();
+  const detail = JSON.stringify({
+    v: 1,
+    at,
+    trigger: info.trigger,
+    width: info.width,
+    height: info.height,
+    bytes: info.bytes,
+    question: info.question === null ? null : info.question.slice(0, 120),
+    outcome: info.outcome,
+    note: '只记录这一次上传的时间/大小/触发源/结果；图像本身没有写进任何记录，也没有落盘。',
+  });
+  const event = store.recordHealth(LOOK_ONCE_SERVICE, 'ok', detail.slice(0, 480));
+  return { at, trigger: info.trigger, width: info.width, height: info.height, bytes: info.bytes, question: info.question, outcome: info.outcome, sequence: event.sequence };
+}
+
+/** Every upload recorded in this store, newest first (what the page lists). */
+export function lookOnceHistory(store: XixiStore, limit = 20): LookOnceRecord[] {
+  const rows: LookOnceRecord[] = [];
+  for (const event of store.readEvents({ type: 'system.health', limit: Number.MAX_SAFE_INTEGER })) {
+    const payload = event.payload as Record<string, unknown>;
+    if (payload['service'] !== LOOK_ONCE_SERVICE) continue;
+    const detail = payload['detail'];
+    if (typeof detail !== 'string') continue;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(detail) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (parsed['v'] !== 1) continue;
+    rows.push({
+      at: typeof parsed['at'] === 'string' ? parsed['at'] : event.timestamp,
+      trigger: parsed['trigger'] === 'auto' ? 'auto' : 'manual',
+      width: Number(parsed['width'] ?? 0),
+      height: Number(parsed['height'] ?? 0),
+      bytes: Number(parsed['bytes'] ?? 0),
+      question: typeof parsed['question'] === 'string' ? parsed['question'] : null,
+      outcome: typeof parsed['outcome'] === 'string' ? parsed['outcome'] : '?',
+      sequence: event.sequence,
+    });
+  }
+  return rows.sort((left, right) => (right.sequence ?? 0) - (left.sequence ?? 0)).slice(0, limit);
+}
+
+/** Persist the vision switch (default off) so a restart keeps the user's choice. */
+export function persistVisionSettings(store: XixiStore, autoLook: boolean): StoredEvent {
+  return store.recordHealth(VISION_SETTINGS_SERVICE, 'ok', JSON.stringify({ v: 1, autoLook, at: new Date().toISOString() }));
+}
+
+/** Read the vision switch back; anything unreadable falls back to the configured default (off). */
+export function restoreVisionSettings(store: XixiStore, fallback: boolean = VISION_AUTO_LOOK_DEFAULT): LookOnceSettings {
+  let latest: LookOnceSettings | null = null;
+  for (const event of store.readEvents({ type: 'system.health', limit: Number.MAX_SAFE_INTEGER })) {
+    const payload = event.payload as Record<string, unknown>;
+    if (payload['service'] !== VISION_SETTINGS_SERVICE) continue;
+    const detail = payload['detail'];
+    if (typeof detail !== 'string') continue;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(detail) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (parsed['v'] !== 1) continue;
+    latest = { autoLook: parsed['autoLook'] === true, source: 'console', updatedAt: event.timestamp };
+  }
+  return latest ?? { autoLook: fallback, source: 'default', updatedAt: null };
+}
+
+/** The permission sentence: what leaving this switch off means, in one line. */
+export const VISION_NOTICE =
+  '默认只有你按「看一眼」时才会把一张画面发给小米服务器；下面这个开关打开后西西才可能自己看（默认关）。每次上传都会留一条记录（时间/大小/触发源），记录里没有图像。';
+
+export const PERCEPTION_SERVICE_DIR = join(REPO_ROOT, 'services', 'perception-edge');/** Enough OpenCV + numpy to run the detector: `verify-camera-presence.ts` probes the same way. */
 const PERCEPTION_PROBE = 'import cv2, numpy';
 let perceptionPython: string | null = null;
 
@@ -4014,8 +4376,7 @@ function planFor(
   };
 }
 
-export interface ProactiveLoopEntry {
-  readonly at: string;
+export interface ProactiveLoopEntry {  readonly at: string;
   readonly candidateId: string;
   readonly trigger: string;
   readonly triggerLabel: string;
@@ -4036,6 +4397,8 @@ export interface ProactiveLoopEntry {
   readonly fact: string;
   /** Where the *content* came from: the model (key present) or the fixed fallback line (t74). */
   readonly contentSource: ProactiveContentSource;
+  /** `true` when this message carried a still frame (t88: only with 「允许西西自己看」 on). */
+  readonly imageUsed: boolean;
   /** Anything the reader should know about the content (fallback reason, model error, …). */
   readonly contentNote: string | null;
   /** Sequence of the assistant `conversation.turn` written for this message, when one was. */
@@ -4049,6 +4412,8 @@ export interface ProactiveComposedContent {
   readonly text: string;
   readonly source: ProactiveContentSource;
   readonly note: string | null;
+  /** `true` when a still frame was attached to this call (t88: only with the switch on). */
+  readonly imageUsed?: boolean;
 }
 
 export interface ProactiveComposeInput {
@@ -4209,6 +4574,7 @@ export class ProactiveLoop {
     const settings = this.#options.readSettings();
     let delivered: string | null = null;
     let contentSource: ProactiveContentSource = 'fixed';
+    let imageUsed = false;
     let contentNote: string | null = this.#options.compose === undefined ? '离线/无密钥：用固定短句兜底（内容不经过模型）。' : null;
     const engine = new ProactiveEngine({ store: this.#options.store, settings, clock: () => now });
     const outcome = await engine.consider({
@@ -4259,6 +4625,7 @@ export class ProactiveLoop {
         delivered = composed.text;
         contentSource = composed.source;
         contentNote = composed.note;
+        imageUsed = composed.imageUsed === true;
       },
     });
     const split = delivered === null ? null : splitReplyIntoSegments(delivered, resolveReplyLimits(this.#options.replyLimits));
@@ -4325,6 +4692,7 @@ export class ProactiveLoop {
       audioNote,
       fact: plan.fact,
       contentSource,
+      imageUsed,
       contentNote,
       turnEventSequence,
     };
@@ -4375,6 +4743,13 @@ export function createModelComposer(options: {
   readonly sessionId: () => string | null;
   readonly available: boolean;
   readonly recentLines?: (() => readonly string[]) | undefined;
+  /**
+   * t88: the *only* way a proactive line can carry a picture. It returns `null` unless the user
+   * switched 「允许西西自己看」 on, so the default path sends text only. Whatever it returns is
+   * audited through `onUpload` — the composer never uploads silently.
+   */
+  readonly vision?: (() => { readonly images: readonly BrainImageInput[]; readonly info: LookOnceUploadInfo; readonly note: string } | null) | undefined;
+  readonly onUpload?: ((info: LookOnceUploadInfo & { readonly trigger: LookOnceTrigger }) => void) | undefined;
   readonly timeoutMs?: number;
   readonly log?: ((line: string) => void) | undefined;
 }): (input: ProactiveComposeInput) => Promise<ProactiveComposedContent> {
@@ -4386,19 +4761,29 @@ export function createModelComposer(options: {
     if (sessionId === null) {
       return { text: input.plan.line, source: 'fixed', note: '没有会话可以承载主动消息：用固定短句兜底。' };
     }
+    const vision = options.vision?.() ?? null;
     const directive = proactiveComposeDirective(input.plan, options.recentLines?.() ?? []);
     const at = new Date();
     const prompt = options.engine.buildPrompt({ sessionId, text: directive, addressed: true, at });
-    const stream = await options.engine.adapter.handleUserTurn({ sessionId, text: directive, prompt, timeoutMs: options.timeoutMs ?? 60_000 });
+    const stream = await options.engine.adapter.handleUserTurn({
+      sessionId,
+      text: directive,
+      prompt,
+      timeoutMs: options.timeoutMs ?? 60_000,
+      ...(vision === null ? {} : { images: vision.images }),
+    });
     for await (const chunk of stream) void chunk; // the text is only needed at the end
     const result = await stream.result;
+    if (vision !== null) {
+      options.onUpload?.({ ...vision.info, trigger: 'auto' });
+    }
     const text = typeof result.text === 'string' ? result.text.trim() : '';
     if (result.action !== 'SPEAK' || text.length === 0 || text.includes(SILENCE_TOKEN)) {
       options.log?.(`[proactive] 模型这次没给出可用内容（action=${result.action}）：用固定短句兜底`);
       return { text: input.plan.line, source: 'fixed', note: `模型返回 action=${result.action}（或沉默标记）：用固定短句兜底。` };
     }
-    options.log?.(`[proactive] 内容由模型生成（${result.provider}/${result.model}，${text.length} 字）`);
-    return { text, source: 'model', note: null };
+    options.log?.(`[proactive] 内容由模型生成（${result.provider}/${result.model}，${text.length} 字${vision === null ? '' : `，附 1 张静帧 ${vision.info.width}x${vision.info.height}`}）`);
+    return { text, source: 'model', note: vision === null ? null : `${vision.note}（已记入上传记录；开关打开时才可能附帧）`, imageUsed: vision !== null };
   };
 }
 
@@ -4658,6 +5043,15 @@ async function pxLoad() {
   try { pxRender(await (await fetch(PX.base + '/proactive')).json()); }
   catch (error) { pxStatus('读取主动性设置失败：' + error.message); }
 }
+/** 看一眼 的开关与上传记录（t88）: refreshed with the live payload, so the panel always matches. */
+async function pxLoadVision() {
+  try {
+    var payload = await (await fetch(PX.base + '/live')).json();
+    if (payload.ok !== false && payload.vision) pxRenderVision(payload.vision);
+  } catch (error) {
+    /* the live endpoint is refreshed every second anyway */
+  }
+}
 async function pxSave(patch, note) {
   var result = await pxPost('/proactive/settings', patch || pxPatch());
   if (result.ok === false) { pxStatus('保存失败：' + result.error); return; }
@@ -4784,6 +5178,7 @@ function pxLoopEntry(entry) {
     + ' · ' + entry.triggerLabel + ' <span class="muted">(' + entry.trigger + ')</span>'
     + ' · 分数 ' + entry.score + '/' + entry.threshold
     + ' · ' + entry.reasonCode + '（' + entry.reasonLabel + '）'
+    + (entry.imageUsed ? ' · 附了 1 张静帧' : '')
     + ' · ' + new Date(entry.at).toLocaleTimeString();
   row.appendChild(head);
   var fact = document.createElement('div');
@@ -4927,6 +5322,7 @@ async function pxLiveRefresh() {
   if (payload.ok === false) return;
   pxLiveState(payload);
   pxLiveSensors(payload);
+  if (payload.vision) pxRenderVision(payload.vision);
   return payload;
 }
 
@@ -4958,6 +5354,64 @@ async function pxTtsToggle(on) {
   void pxLiveRefresh();
 }
 
+/* ---------------------------------------------------------------- 「看一眼」（t88） */
+
+function pxRenderVision(vision) {
+  var box = document.getElementById('px-vision-auto');
+  if (box) box.checked = vision.autoLookEnabled === true;
+  var histNote = document.getElementById('px-look-history-note');
+  if (histNote) {
+    histNote.textContent = '上传记录（只有时间/大小/触发源，没有图像）：共 ' + vision.uploads + ' 次' + (vision.historyNote ? '｜' + vision.historyNote : '');
+  }
+  var hist = document.getElementById('px-look-history');
+  if (hist) {
+    if (!vision.history || vision.history.length === 0) { hist.textContent = ''; return; }
+    hist.innerHTML = vision.history.map(function (row) {
+      var when = new Date(row.at).toLocaleTimeString();
+      var size = Math.round((row.bytes || 0) / 1024) + 'KB';
+      return '<div>· ' + when + '｜' + (row.trigger === 'auto' ? '自己看' : '手动') + '｜' + row.width + 'x' + row.height + '｜' + size + '｜' + row.outcome + '</div>';
+    }).join('');
+  }
+  var privacy = document.getElementById('px-look-privacy');
+  if (privacy && vision.privacyNote) privacy.textContent = vision.privacyNote;
+}
+
+async function pxLook() {
+  var question = pxVal('lookQuestion');
+  pxStatus('正在把这一帧发给模型…');
+  var payload = await pxPost('/look', { question: question === undefined ? '' : String(question) });
+  if (payload.vision) pxRenderVision(payload.vision);
+  if (payload.ok === false) {
+    pxStatus('这次没看成：' + payload.error.message);
+    showError('px-look-status', '', '');
+    var status = document.getElementById('px-look-status');
+    if (status) status.textContent = '失败：' + payload.error.message;
+    return;
+  }
+  var status = document.getElementById('px-look-status');
+  if (status) {
+    status.textContent = payload.noAnswer
+      ? '看过了，但模型没给内容'
+      : '看过了（' + payload.latencyMs + 'ms，' + payload.provider + '/' + payload.model + '）';
+  }
+  if (payload.noAnswer) {
+    pxAppendConversation('xixi', payload.noAnswerNote, [], 0, '看一眼（没给内容）');
+    pxStatus(payload.noAnswerNote);
+    return;
+  }
+  pxAppendConversation('xixi', payload.reply, payload.segments, payload.gapMs, '看一眼');
+  if (payload.audio) pxPlayClips(payload.audio, payload.gapMs);
+  if (payload.audioNote) pxStatus(payload.audioNote);
+  else pxStatus('看一眼完成：回复在右栏「对话记录」里（也朗读出来了）');
+}
+
+async function pxVisionToggle(on) {
+  var payload = await pxPost('/vision', { autoLook: on });
+  if (payload.ok === false) { pxStatus('开关失败：' + payload.error.message); return; }
+  pxRenderVision(payload.vision);
+  pxStatus(on ? '已允许西西自己看（默认关，打开后仍要过全部硬门禁）' : '已恢复为「只有你按看一眼才传画面」');
+}
+
 (function pxWire() {
   var save = document.getElementById(PX.ids.save); if (save) save.addEventListener('click', function () { void pxSave(); });
   var off = document.getElementById(PX.ids.off); if (off) off.addEventListener('click', function () { void pxSave({ enabled: false }, '已一键关闭主动开口'); });
@@ -4973,7 +5427,11 @@ async function pxTtsToggle(on) {
   var disable = document.getElementById('px-disable'); if (disable) disable.addEventListener('click', function () { void pxEnable(false); });
   var tts = document.getElementById('px-tts-switch'); if (tts) tts.addEventListener('change', function () { void pxTtsToggle(tts.checked); });
   var camSwitch = document.getElementById('px-camera-switch'); if (camSwitch) camSwitch.addEventListener('change', function () { pxStatus(camSwitch.checked ? '摄像头在场检测已打开（下次启用生效）' : '摄像头在场检测已关闭（只跑主动循环）'); });
+  // t88: the manual 「看一眼」 button and the default-off autonomy switch.
+  var look = document.getElementById('px-look'); if (look) look.addEventListener('click', function () { void pxLook(); });
+  var visionAuto = document.getElementById('px-vision-auto'); if (visionAuto) visionAuto.addEventListener('change', function () { void pxVisionToggle(visionAuto.checked); });
   void pxLoad();
+  void pxLoadVision();
   void pxLoopPoll();
   void pxLiveRefresh();
   PX.loopPoller = setInterval(function () { void pxLoopPoll(); }, 2000);
@@ -5081,6 +5539,14 @@ ${PROACTIVE_PANEL_CSS}
       <img id="px-cam" alt="摄像头实时画面" style="width:100%; max-width:480px; border-radius:10px; background:#0b0d11; border:1px solid #262a33; display:block" />
       <div class="muted" id="px-cam-note">未启用：点上面的「启用」开始——摄像头实时画面只在内存里显示，不写任何文件。</div>
       <div class="big" id="presence-text" style="margin-top:8px">—</div>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0">
+        <button id="px-look" class="primary">看一眼（把这一帧发给小米服务器）</button>
+        <input type="text" id="px-look-question" placeholder="想问什么？（可留空）" style="flex:1; min-width:180px" />
+        <span class="muted" id="px-look-status">还没看过</span>
+      </div>
+      <div class="muted" id="px-look-privacy">${VISION_NOTICE}</div>
+      <div class="muted" id="px-look-history-note">上传记录（只有时间/大小/触发源，没有图像）：还没有记录。</div>
+      <div id="px-look-history" class="muted"></div>
       <table>
         <tr><th style="width:44%">字段</th><th>含义</th></tr>
         <tr><td>来源 <b id="presence-mode">—</b></td><td id="presence-mode-help">在场状态从哪里来</td></tr>
@@ -5144,6 +5610,7 @@ ${PROACTIVE_PANEL_CSS}
         <tr><td><label><input type="checkbox" id="px-camera-switch" checked /> 摄像头在场检测</label></td><td>关掉就只跑主动循环（没有现场画面，也没有「有人到家」这个事实来源）。</td></tr>
         <tr><td><label><input type="checkbox" id="px-tts-switch" /> 朗读（TTS）</label></td><td>回复与主动开口是否合成语音；关掉就只有文字。改完立刻生效，不用重启。</td></tr>
         <tr><td>循环间隔 <input type="number" id="px-enable-interval" min="5" max="3600" step="5" value="30" style="width:88px" /> 秒</td><td>主动循环多久考虑一次（下限 5 秒）；点「启用」会立刻先考虑一次，之后按这个间隔继续。</td></tr>
+        <tr><td><label><input type="checkbox" id="px-vision-auto" /> 允许西西自己看（默认关）</label></td><td>打开后，主动开口时可能附带一张当前画面（仍要过全部硬门禁；每次上传都留记录）。默认关 = 只有你按「看一眼」才会传画面。</td></tr>
       </table>
       <div class="muted">这三个开关和下面的「主动性」是同一套设置：都在中栏，改完立刻生效、留审计。</div>
     </section>

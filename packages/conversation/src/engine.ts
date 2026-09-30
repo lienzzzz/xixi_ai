@@ -1,5 +1,5 @@
 import { buildEvent, toOffsetIso } from '@xixi/contracts';
-import { isSilenceReply, type BrainAdapter } from '@xixi/brain-adapter';
+import { isSilenceReply, type BrainAdapter, type BrainImageInput } from '@xixi/brain-adapter';
 import type { Clock, TurnAction, XixiConfig, XixiStore } from '@xixi/domain';
 import { systemClock } from '@xixi/domain';
 
@@ -50,6 +50,15 @@ export interface RespondInput {
    */
   readonly addressed?: boolean;
   readonly at?: Date;
+  /**
+   * Optional still image(s) for **this** turn (t88: the console's 「看一眼」 button).
+   *
+   * The *caller* decides what, when and whether to attach — the engine never picks a picture
+   * itself, and iron rule 6 still holds: no continuous video, one explicitly chosen frame per
+   * call. It goes straight to the adapter's own `images` seam (t87); an adapter that cannot send
+   * pictures (DSH) refuses such a turn instead of silently dropping the image.
+   */
+  readonly images?: readonly BrainImageInput[];
 }
 
 /** One segment as it is handed to the playback seam (ADR-0010). */
@@ -379,6 +388,9 @@ export class ConversationEngine {
         text: input.text,
         prompt,
         timeoutMs: this.#turnTimeoutMs,
+        // t88: the caller's still frame(s) for this turn, passed straight through. Absent for every
+        // ordinary turn, so the text path is byte-for-byte what it was (t87 pins that in tests).
+        ...(input.images === undefined ? {} : { images: input.images }),
       });
 
       // The silence token can arrive split across deltas ("[" + "静默" + "]"), so a

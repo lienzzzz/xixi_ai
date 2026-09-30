@@ -86,3 +86,15 @@ xixi:
     camera_presence: false  # M6
     home_assistant: false
     frigate: false
+
+  # 「看一眼」（t88）：按需把**一张缩略静帧**发给模型，让西西能说出画面里的内容。
+  # 本段已被代码读取：现场测试控制台读 max_width_px（尺寸上限）与 auto_look（自主看的出厂默认值）；
+  # 页面上的开关一旦动过，就以库里的选择为准（system.health / service=vision-settings）。
+  vision:
+    look_once: true          # 手动按钮「看一眼」：按下才发，默认只允许这种触发
+    auto_look: false         # 自主看：默认关。打开后主动开口才可能附一张帧（仍要过全部硬门禁）
+    max_width_px: 480        # 超过这个宽度的帧会被拒绝，而不是放大/缩小再发（仓库里没有图像库）
+    jpeg_quality: 60         # 由感知边编码（perception_edge.run --jpeg-quality，默认 60）
+    # 铁律 6：连续音视频不上云。只有这里允许的、被程序显式选中的单帧才会发给模型；
+    # 每次上传都写一条 system.health（service=vision-look-once）记录：时间/大小/触发源/结果，
+    # **记录里没有图像**，图像也不落盘（帧只在内存与 localhost 之间）。

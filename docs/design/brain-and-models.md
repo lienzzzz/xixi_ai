@@ -221,6 +221,7 @@ FatherModel/RelationshipModel/FutureHooks 恢复（这些领域对象尚不存�
 ## 8. 未实现清单（与本文相关）
 
 - `BACKCHANNEL` / `WAIT` 两种 action **没有任何生产者**（事实由 `tests/unit/core/dead-code-truthfulness.test.ts` 固化，见 §2）。
+  t88 的「看一眼」也**不制造**这两个值：它把这一次当作普通一轮交给 `ConversationEngine.respond`，助手那一轮记的是模型真实的 action（直连路径只有 SPEAK / SILENCE / TOOL）。
 - 四个 meta-agent 能力（§2 表）。
 - DSH 路径的提示词拼装是 `composeTask` 占位（§26 的正式拼装由 `packages/conversation` 的 `PromptAssembler` 负责，直连路径已用上）。
   （**DSH 路径的天气工具已在本轮补齐**，见 §5。）
@@ -228,11 +229,27 @@ FatherModel/RelationshipModel/FutureHooks 恢复（这些领域对象尚不存�
 - `MimoClient.#post` 会把「缺密钥」误标成 `NETWORK`（§7 的 KNOWN GAP）。
 - `brain-adapter` 无 type check（无 `tsc --noEmit`），类型错误只在运行时暴露（progress §6）。
 
+### 8.1 单帧图像（t88「看一眼」）：接缝已通到引擎
+
+`images` 是一条完整的通路，而不是只有适配器认识它：
+
+```
+控制台「看一眼」按钮 → POST /api/field/look → ConversationEngine.respond({ …, images })
+   → BrainAdapter.handleUserTurn({ …, images }) → MimoBrainAdapter 挂到最后一个 user 消息
+   → model-adapters/mimo 转成 OpenAI 风格 content:[…, {type:'image_url',…}]
+```
+
+- **谁决定发图**：调用方（控制台），每次显式一次；引擎自己不看、不选、不缓存任何画面。
+- **接缝的诚实性**：发不了图的适配器（DSH）在调用传输层之前就 `BrainError('BAD_REQUEST')`，这个错误会**传回调用方**（`respond` 不吞），所以控制台能说清「这次没看成」而不是假装看见；没有 `images` 的一轮不会多出 `images` 键（`tests/unit/core/engine-image-passthrough.test.ts` 固化这三点）。
+- **控制台侧的三条保障**（`scripts/field-test.ts`）：按钮文案写明「会把一张画面发给小米服务器」；默认只允许手动触发（自主看是另一个**默认关**的开关 `vision.auto_look`）；每次上传写一条 `system.health`（`service=vision-look-once`）记录——时间/大小/触发源/结果，**记录里没有图像**。
+- **不落盘、不连续**：帧来自控制台内存里最新的那一帧（感知边以 `--frame-max-width` 480px 编码），超过上限会被拒绝而不是缩放后发送；一次点击就是一次上传，没有队列、没有重试。
+
 ## 维护规则
 
 | 改了哪个源文件 | 必须同步更新本文件的小节 |
 |---|---|
 | `packages/brain-adapter/src/types.ts` | §1、§2（方法清单与状态）、§3（对比表的结构字段） |
+| `packages/conversation/src/engine.ts`（`RespondInput.images` 等一轮输入） | §8.1，并同步 `tests/unit/core/engine-image-passthrough.test.ts` |
 | `packages/brain-adapter/src/mimo.ts` | §3、§4（流式/工具循环/action 语义）、§7 |
 | `packages/brain-adapter/src/dsh.ts`、`apps/brain-dsh/src/transport.ts` | §2、§3、§7（`TRANSPORT_FAILED`/`TIMEOUT`/`INVALID_RESPONSE` 触发点） |
 | `packages/brain-adapter/src/tools.ts` 或新增工具 | §5（工具表、参数封闭、注册表） |
