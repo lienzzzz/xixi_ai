@@ -116,10 +116,10 @@ test('the config defaults match ADR-0009 §5 exactly', () => {
   const parsed = parseProactiveSettings(undefined);
   assert.deepEqual(parsed, DEFAULT_PROACTIVE_SETTINGS);
   assert.equal(parsed.enabled, true);
-  assert.equal(parsed.baseCooldownMinutes, 25);
-  assert.equal(parsed.maxPer6h, 4);
-  assert.equal(parsed.maxPerDay, 8);
-  assert.equal(parsed.topicRepeatWindowHours, 12);
+  assert.equal(parsed.baseCooldownMinutes, 12);
+  assert.equal(parsed.maxPer6h, 8);
+  assert.equal(parsed.maxPerDay, 20);
+  assert.equal(parsed.topicRepeatWindowHours, 6);
   assert.equal(parsed.negativeFeedbackCooldownMultiplier, 2.0);
   assert.equal(parsed.quietHours.startMinutes, 22 * 60 + 30);
   assert.equal(parsed.quietHours.endMinutes, 7 * 60);
@@ -134,13 +134,15 @@ test('the config defaults match ADR-0009 §5 exactly', () => {
   assert.equal(PROACTIVE_TRIGGERS.length, 6, '§16 lists six trigger sources');
 });
 
-test('parseProactiveSettings reads the example config and tolerates unusable values', () => {
+test('parseProactiveSettings parses a shipped-style config and tolerates unusable values', () => {
+  // Hand-written copy of the shipped example values (config/xixi.example.yaml), not a file read:
+  // it exists to show the parsed shape equals DEFAULT_PROACTIVE_SETTINGS.
   const fromExample = parseProactiveSettings({
     enabled: true,
-    base_cooldown_min: 25,
-    max_per_6h: 4,
-    max_per_day: 8,
-    topic_repeat_window_h: 12,
+    base_cooldown_min: 12,
+    max_per_6h: 8,
+    max_per_day: 20,
+    topic_repeat_window_h: 6,
     negative_feedback_cooldown_multiplier: 2.0,
     quiet_hours: { start: '22:30', end: '07:00' },
     triggers: {
@@ -167,8 +169,8 @@ test('parseProactiveSettings reads the example config and tolerates unusable val
   assert.equal(hostile.enabled, true, 'a non-boolean keeps the default');
   assert.equal(hostile.baseCooldownMinutes, 0, 'clamped to the allowed range');
   assert.equal(hostile.maxPer6h, 100);
-  assert.equal(hostile.maxPerDay, 8, 'a string falls back');
-  assert.equal(hostile.topicRepeatWindowHours, 12);
+  assert.equal(hostile.maxPerDay, 20, 'a string falls back');
+  assert.equal(hostile.topicRepeatWindowHours, 6);
   assert.equal(hostile.negativeFeedbackCooldownMultiplier, 1, 'the multiplier cannot go below 1');
   assert.equal(hostile.quietHours.startMinutes, 22 * 60 + 30, 'an impossible time falls back, it does not fail');
   assert.equal(hostile.quietHours.endMinutes, 7 * 60);
@@ -266,29 +268,31 @@ test('DND_ACTIVE beats QUIET_HOURS, and both use the local clock', () => {
   );
 });
 
-test('COOLDOWN_ACTIVE: 25 minutes by default, exactly', () => {
-  const history = [delivered('older', minutesBefore(AFTERNOON, 25))];
-  assert.equal(evaluateProactiveGates(candidate(), context({ history })).reasonCode, 'PASSED', 'exactly 25 min is allowed');
-  const justInside = [delivered('older', minutesBefore(AFTERNOON, 24))];
+test('COOLDOWN_ACTIVE: 12 minutes by default, exactly', () => {
+  const history = [delivered('older', minutesBefore(AFTERNOON, 12))];
+  assert.equal(evaluateProactiveGates(candidate(), context({ history })).reasonCode, 'PASSED', 'exactly 12 min is allowed');
+  const justInside = [delivered('older', minutesBefore(AFTERNOON, 11))];
   assert.equal(evaluateProactiveGates(candidate(), context({ history: justInside })).reasonCode, 'COOLDOWN_ACTIVE');
   // A record from yesterday cannot block today, but a fresh one always does.
   const yesterday = [delivered('older', minutesBefore(AFTERNOON, 24 * 60))];
   assert.equal(evaluateProactiveGates(candidate(), context({ history: yesterday })).reasonCode, 'PASSED');
 });
 
-test('QUOTA_6H_EXCEEDED: four in six hours by default', () => {
-  const four = [30, 50, 70, 90].map((minutes) => delivered(`old_${minutes}`, minutesBefore(AFTERNOON, minutes)));
-  assert.equal(evaluateProactiveGates(candidate(), context({ history: four })).reasonCode, 'QUOTA_6H_EXCEEDED');
-  const three = four.slice(0, 3);
-  assert.equal(evaluateProactiveGates(candidate(), context({ history: three })).reasonCode, 'PASSED');
+test('QUOTA_6H_EXCEEDED: eight in six hours by default', () => {
+  const eight = [20, 35, 50, 65, 80, 95, 110, 125].map((minutes) =>
+    delivered(`old_${minutes}`, minutesBefore(AFTERNOON, minutes)),
+  );
+  assert.equal(evaluateProactiveGates(candidate(), context({ history: eight })).reasonCode, 'QUOTA_6H_EXCEEDED');
+  const seven = eight.slice(0, 7);
+  assert.equal(evaluateProactiveGates(candidate(), context({ history: seven })).reasonCode, 'PASSED');
   // A record older than the window does not count.
   const old = [delivered('old_1', minutesBefore(AFTERNOON, 7 * 60))];
   assert.equal(evaluateProactiveGates(candidate(), context({ history: old })).reasonCode, 'PASSED');
-  const fourWithAnOldOne = [...four.slice(0, 3), delivered('old_2', minutesBefore(AFTERNOON, 6 * 60 + 1))];
-  assert.equal(evaluateProactiveGates(candidate(), context({ history: fourWithAnOldOne })).reasonCode, 'PASSED');
+  const sevenWithAnOldOne = [...seven, delivered('old_2', minutesBefore(AFTERNOON, 6 * 60 + 1))];
+  assert.equal(evaluateProactiveGates(candidate(), context({ history: sevenWithAnOldOne })).reasonCode, 'PASSED');
 });
 
-test('QUOTA_DAY_EXCEEDED: eight in the local natural day by default', () => {
+test('QUOTA_DAY_EXCEEDED: the local natural day, with a 2-per-day cap', () => {
   // The 6-hour budget would fire first, so this gate is tested with it raised —
   // which is also the documented evaluation order.
   const dayScoped = settings({ maxPer6h: 100, maxPerDay: 2 });
@@ -301,7 +305,7 @@ test('QUOTA_DAY_EXCEEDED: eight in the local natural day by default', () => {
   assert.equal(evaluateProactiveGates(candidate(), context({ settings: dayScoped, history: yesterday })).reasonCode, 'PASSED');
 });
 
-test('TOPIC_REPEATED: 12 hours by default, only for a topic that has been used', () => {
+test('TOPIC_REPEATED: 6 hours by default, only for a topic that has been used', () => {
   const history = [delivered('older', minutesBefore(AFTERNOON, 60), 'hook_weather')];
   assert.equal(
     evaluateProactiveGates(candidate({ topicRef: 'hook_weather' }), context({ history })).reasonCode,
@@ -310,10 +314,10 @@ test('TOPIC_REPEATED: 12 hours by default, only for a topic that has been used',
   assert.equal(evaluateProactiveGates(candidate({ topicRef: 'hook_other' }), context({ history })).reasonCode, 'PASSED');
   assert.equal(evaluateProactiveGates(candidate({ topicRef: null }), context({ history })).reasonCode, 'PASSED');
   assert.equal(evaluateProactiveGates(candidate(), context({ history })).reasonCode, 'PASSED', 'no topicRef at all is never repeated');
-  // Window boundary: strictly inside 12 hours counts, exactly 12 hours does not.
-  const old = [delivered('older', new Date(AFTERNOON.getTime() - 12 * 60 * 60_000), 'hook_weather')];
+  // Window boundary: strictly inside 6 hours counts, exactly 6 hours does not.
+  const old = [delivered('older', new Date(AFTERNOON.getTime() - 6 * 60 * 60_000), 'hook_weather')];
   assert.equal(evaluateProactiveGates(candidate({ topicRef: 'hook_weather' }), context({ history: old })).reasonCode, 'PASSED');
-  const justInside = [delivered('older', new Date(AFTERNOON.getTime() - 12 * 60 * 60_000 + 1), 'hook_weather')];
+  const justInside = [delivered('older', new Date(AFTERNOON.getTime() - 6 * 60 * 60_000 + 1), 'hook_weather')];
   assert.equal(
     evaluateProactiveGates(candidate({ topicRef: 'hook_weather' }), context({ history: justInside })).reasonCode,
     'TOPIC_REPEATED',
@@ -365,19 +369,19 @@ test('SCENE_UNAVAILABLE and SPEECH_UNAVAILABLE', () => {
 });
 
 test('negative feedback tightens the cooldown and the budget', () => {
-  // Cooldown: 25 min normally, 50 min after negative feedback.
-  const thirtyMinutesAgo = [delivered('older', minutesBefore(AFTERNOON, 30))];
-  assert.equal(evaluateProactiveGates(candidate(), context({ history: thirtyMinutesAgo })).reasonCode, 'PASSED');
+  // Cooldown: 12 min normally, 24 min after negative feedback.
+  const fifteenMinutesAgo = [delivered('older', minutesBefore(AFTERNOON, 15))];
+  assert.equal(evaluateProactiveGates(candidate(), context({ history: fifteenMinutesAgo })).reasonCode, 'PASSED');
   assert.equal(
-    evaluateProactiveGates(candidate(), context({ history: thirtyMinutesAgo, negativeFeedback: true })).reasonCode,
+    evaluateProactiveGates(candidate(), context({ history: fifteenMinutesAgo, negativeFeedback: true })).reasonCode,
     'COOLDOWN_ACTIVE',
   );
 
-  // Budget: floor(4 / 2) = 2 in the 6-hour window.
-  const twoOldOnes = [delivered('a', minutesBefore(AFTERNOON, 55)), delivered('b', minutesBefore(AFTERNOON, 65))];
-  assert.equal(evaluateProactiveGates(candidate(), context({ history: twoOldOnes })).reasonCode, 'PASSED');
+  // Budget: floor(8 / 2) = 4 in the 6-hour window (all of them older than the tightened 24-min cooldown).
+  const fourOldOnes = [25, 35, 45, 55].map((minutes) => delivered(`old_${minutes}`, minutesBefore(AFTERNOON, minutes)));
+  assert.equal(evaluateProactiveGates(candidate(), context({ history: fourOldOnes })).reasonCode, 'PASSED');
   assert.equal(
-    evaluateProactiveGates(candidate(), context({ history: twoOldOnes, negativeFeedback: true })).reasonCode,
+    evaluateProactiveGates(candidate(), context({ history: fourOldOnes, negativeFeedback: true })).reasonCode,
     'QUOTA_6H_EXCEEDED',
   );
 
@@ -396,7 +400,7 @@ test('the reason-code list names every outcome the gates can return', () => {
     context({ conversationState: 'SUSPENDED' }),
     context({ now: at('2026-09-30T23:00:00+08:00') }),
     context({ history: [delivered('older', minutesBefore(AFTERNOON, 1))] }),
-    context({ history: [1, 2, 3, 4].map((n) => delivered(`old_${n}`, minutesBefore(AFTERNOON, 30 * n))) }),
+    context({ history: [1, 2, 3, 4, 5, 6, 7, 8].map((n) => delivered(`old_${n}`, minutesBefore(AFTERNOON, 30 * n))) }),
     context({ settings: settings({ maxPer6h: 100, maxPerDay: 1 }), history: [delivered('old', minutesBefore(AFTERNOON, 30))] }),
     context({ history: [delivered('old', minutesBefore(AFTERNOON, 30), 'hook_weather')] }),
     context({ conversationState: 'LINGERING' }),

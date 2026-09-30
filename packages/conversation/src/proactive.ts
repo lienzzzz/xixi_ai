@@ -151,13 +151,18 @@ export interface ProactiveSettings {
   readonly triggers: Readonly<Record<ProactiveTrigger, boolean>>;
 }
 
-/** Exactly the defaults declared in `config/xixi.example.yaml` and ADR-0009 §5. */
+/**
+ * Exactly the factory defaults declared in `config/xixi.example.yaml` and ADR-0009 §5:
+ * 12 min cooldown / 8 per 6 h / 20 per day / 6 h topic window. It is only the fallback for a
+ * config that has no `proactive` section at all, so it must stay numerically identical to the
+ * shipped config — a test compares both against the same hand-written example object.
+ */
 export const DEFAULT_PROACTIVE_SETTINGS: ProactiveSettings = Object.freeze({
   enabled: true,
-  baseCooldownMinutes: 25,
-  maxPer6h: 4,
-  maxPerDay: 8,
-  topicRepeatWindowHours: 12,
+  baseCooldownMinutes: 12,
+  maxPer6h: 8,
+  maxPerDay: 20,
+  topicRepeatWindowHours: 6,
   negativeFeedbackCooldownMultiplier: 2.0,
   quietHours: Object.freeze({ startMinutes: 22 * 60 + 30, endMinutes: 7 * 60 }),
   triggers: Object.freeze({

@@ -237,7 +237,9 @@ test('quotas are recomputed from the log, so a restart cannot reset the daily bu
   try {
     const engine = engineFor(store);
     const spy = deliveries();
-    const times = [4, 3, 2, 1].map((hours) => new Date(T0.getTime() - hours * 60 * 60_000));
+    // Eight deliveries inside the 6-hour window, each ~30 min apart so none is
+    // inside the 12-minute cooldown.
+    const times = [4, 3.5, 3, 2.5, 2, 1.5, 1, 0.5].map((hours) => new Date(T0.getTime() - hours * 60 * 60_000));
     for (const [index, at] of times.entries()) {
       const outcome = await engine.consider({
         candidate: candidate(`cand_${index}`),
@@ -247,22 +249,22 @@ test('quotas are recomputed from the log, so a restart cannot reset the daily bu
       });
       assert.equal(outcome.speak, true, `delivery ${index + 1} should pass`);
     }
-    assert.equal(spy.log.length, 4);
+    assert.equal(spy.log.length, 8);
 
-    // The 6-hour budget is now spent: 4 deliveries inside the window, all older
+    // The 6-hour budget is now spent: 8 deliveries inside the window, all older
     // than the cooldown, so the quota is the first gate that can fire.
-    const fifth = await engine.consider({ candidate: candidate('cand_5'), at: T0, conversationState: 'IDLE', deliver: spy.deliver });
-    assert.equal(fifth.reasonCode, 'QUOTA_6H_EXCEEDED');
-    assert.equal(readProactiveHistory(store).length, 4);
+    const ninth = await engine.consider({ candidate: candidate('cand_9'), at: T0, conversationState: 'IDLE', deliver: spy.deliver });
+    assert.equal(ninth.reasonCode, 'QUOTA_6H_EXCEEDED');
+    assert.equal(readProactiveHistory(store).length, 8);
 
-    // Three hours later the oldest two have left the window (6h exactly does not
+    // Three hours later the three oldest have left the window (6h exactly does not
     // count), so delivery is possible again — and today's budget still remembers
-    // all four.
+    // all eight.
     const later = new Date(T0.getTime() + 3 * 60 * 60_000);
-    const sixth = await engine.consider({ candidate: candidate('cand_6'), at: later, conversationState: 'IDLE', deliver: spy.deliver });
-    assert.equal(sixth.reasonCode, 'PASSED', 'the rolling window must forget what left it');
-    assert.equal(readProactiveHistory(store).length, 5);
-    assert.equal(decisions(store).length, 6, 'every consideration is auditable, delivered or not');
+    const tenth = await engine.consider({ candidate: candidate('cand_10'), at: later, conversationState: 'IDLE', deliver: spy.deliver });
+    assert.equal(tenth.reasonCode, 'PASSED', 'the rolling window must forget what left it');
+    assert.equal(readProactiveHistory(store).length, 9);
+    assert.equal(decisions(store).length, 10, 'every consideration is auditable, delivered or not');
   } finally {
     store.close();
   }
@@ -275,10 +277,10 @@ test('the engine reads config.proactive instead of inventing its own defaults', 
     // The example config, verbatim (config/xixi.example.yaml).
     const fromExample = engineFor(store, {
       enabled: true,
-      base_cooldown_min: 25,
-      max_per_6h: 4,
-      max_per_day: 8,
-      topic_repeat_window_h: 12,
+      base_cooldown_min: 12,
+      max_per_6h: 8,
+      max_per_day: 20,
+      topic_repeat_window_h: 6,
       negative_feedback_cooldown_multiplier: 2.0,
       quiet_hours: { start: '22:30', end: '07:00' },
       triggers: { random_smalltalk: false },
@@ -286,7 +288,7 @@ test('the engine reads config.proactive instead of inventing its own defaults', 
     assert.deepEqual(fromExample.settings, DEFAULT_PROACTIVE_SETTINGS);
 
     // A tighter budget is honoured: the first delivery happens, the second is
-    // refused by the 6-hour quota — with the default cap of 4 it would pass.
+    // refused by the 6-hour quota — with the default cap of 8 it would pass.
     const engine = engineFor(store, { max_per_6h: 1 });
     const spy = deliveries();
     const first = await engine.consider({ candidate: candidate('cand_1'), at: minutesBefore(T0, 60), conversationState: 'IDLE', deliver: spy.deliver });
@@ -297,7 +299,7 @@ test('the engine reads config.proactive instead of inventing its own defaults', 
 
     // Negative feedback tightens the cooldown by the configured multiplier.
     const feedback = engineFor(store, { negative_feedback_cooldown_multiplier: 3 });
-    const after = new Date(T0.getTime() + 40 * 60_000); // 40 min > 25, < 75
+    const after = new Date(T0.getTime() + 40 * 60_000); // well past the plain 12-min cooldown
     const relaxed = await feedback.consider({
       candidate: candidate('cand_3'),
       at: after,
