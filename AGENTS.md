@@ -50,7 +50,7 @@
 | 模型 | 小米 MiMo：`mimo-v2.6-flash` 已用真实密钥验证可用（`https://api.xiaomimimo.com/v1/chat/completions`，请求头 `api-key`，非 Bearer） |
 | 显卡 | GTX 1050 Ti 4GB + Intel HD 630 |
 | 外网 | 可能需要代理 `http://127.0.0.1:7890` |
-| 命令行工具 | **本机没有 `grep`、也没有 `rg`**（t48 实测确认）。搜代码用 `git grep -n "…" -- <路径>`（路径参数用实际路径，不要留占位符）或 PowerShell 的 `Select-String` |
+| 命令行工具 | PATH 上没有 `grep`/`rg`，但 **Git for Windows 自带的在 `D:\Git`**：`D:\Git\usr\bin\grep.exe`、`D:\Git\bin\bash.exe`（2026-09-30 实测可用）。PowerShell 里可直接 `& 'D:\Git\usr\bin\grep.exe' -n 模式 路径`，或用 `git grep`；把 `D:\Git\usr\bin` 加进 PATH 就与平常一致。**注意：曾误写成「本机没有 grep」——那只是 PATH 上没有。** |
 
 ### 代理
 
@@ -212,7 +212,7 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    t34 抓到的反例：文档钉了 15 处代码行号，**13 处已漂移**，多数指向错误的代码。
    **原则**：能推导的就别写死；能用一次运行输出的，就别复制到三处文档；
    **引用代码位置时用「函数名 + 一条可复现的 `git grep` 命令」，不要用行号**（行号随任何一次编辑失效；
-   本机没有 `grep`，见 §4）。
+   本机 `grep` 在 PATH 上没有但 Git 自带了，见 §4）。
    **结论的第一引用必须是「能重跑的命令」，不是「某次运行的产物文件」**：产物若落在 gitignored 的 `data/` 下，
    换机器即失、别人无法核对（t39 的 O1）。正确写法是「一条命令 + 预期输出」，产物只能作附件。
 19. **`acceptance` 数组最多 3 条、每条一句话（硬约束）**：本轮 **t31 与 t38 两次**被成员报告「收到的派单把
