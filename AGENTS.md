@@ -120,3 +120,20 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
 - 不适合委派：需要全局架构判断的改动、铁律相关决策。
 - 委派时必须给出：目标、可验证的交付形式、允许改动的路径、禁止事项（尤其是密钥）。
 - 子代理的结论要落到 `docs/progress.md` 或 ADR，否则等于没做。
+
+## 9. AgentTeams 派单纪律（2026-09-30 本轮血的教训）
+
+本轮有**三次任务失败**（t12 / t2 / t4），原因全部是**派单方 inScope 声明与验收条款不对齐**，而不是成员越权：
+
+1. **inScope 必须穷举「验收条款要求产出的每一个文件」**。写条款时先反推路径：条款说「改 X 的行为」，X 就必须在 inScope 里。
+   反例：t12 的条款要求改写一条测试，但那条测试在 `tests/unit/core/`，未列入 → 契约拒绝，任务判 failed。
+   反例：t2 的条款要求「复用共享评分定义 / 登记新入口」，对应 `scripts/lib/similarity.ts`、`docs/testing.md` 未列入 → 判 failed。
+2. **契约校验只核对成员「声明」的 changedPaths**：未声明的越界编辑**不会**被自动拦截（t4 的 `package.json`、`scripts/voice-turn.ts` 就是这样绕过的）。
+   因此唯一防线是：成员**如实披露** inScope 外的改动 + 评审**逐条复核**这些披露。
+3. **多任务不要声明同一路径**：并发写同一文件会互相覆盖（`docs/progress.md`、`tests/`、`package.json` 都踩过）。
+   约定：进度文档由集成任务**单写**，其他成员把可直接粘贴的段落写进**完成回报**；测试按子目录分（`tests/unit/voice/`、`tests/unit/core/`、`tests/perception/`、`tests/console/`）。
+4. **队长所有的文件成员不得直接改**：`AGENTS.md`、`xixi_ai_companion_project_plan.md`、`.agent-teams/`（后者已 gitignore）。成员提出建议，由 captain 落笔。
+5. **任务 failed 后契约是终态、不可 amend**：正确做法是**另开收尾任务**并把下游依赖改接到它（本轮 `t12 → t14`、`t2 → t17`），
+   而不是让成员回滚质量或绕过门禁。收尾任务的回报必须写明「原任务失败的归因」与「本次只做补正/核实」。
+6. **验收命令必须是改完之后真实存在的命令**；需要新脚本时，把它写进 deliverables，否则 `verify` 无法执行。
+7. **每次提交前先跑 `npm test` 与 `npm run check:docs`，并把实测结果写进提交信息**——本轮出现过提交信息声称「全绿」而实际 1 项失败的情况（因为把成员在途的半成品一起提交了）。
