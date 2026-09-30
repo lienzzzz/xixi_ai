@@ -249,7 +249,9 @@ HARD_POLICY（不可变硬策略，常量）
 引擎不等整句，而是边收边判——把 chunk 累积进 `held`，只要 `SILENCE_TOKEN.startsWith(held.trim())`
 就**继续压住不发**；一旦内容偏离这个前缀，立刻把 `held` 交给 `onTextChunk` 并清空
 （因此普通回复仍然是逐块流式，不被拖慢）；如果恰好凑齐 `[静默]`，就置 `suppressed = true`，
-后续 chunk 全部丢弃。`tests/integration/conversation-engine.test.ts` 里有一个手写的分片适配器
+后续 chunk 全部丢弃。**这段判定与是否分段无关**：调用方给了 `onSegment` 时照样压住、照样识别
+`[静默]`（`suppressed` 与 `silent` 都成立），只是不再把普通内容交给 `onTextChunk`——它改由
+第 ⑨′ 步按段播放（见 §5、§7）。`tests/integration/conversation-engine.test.ts` 里有一个手写的分片适配器
 （`['[', '静', '默', ']']`）专门断言这一条，并断言 `onTextChunk` 一次都没被调过。
 
 落库效果：`action: 'SILENCE'`、`text: null`，即「西西选择不说话」是**一等事实**，
@@ -266,12 +268,17 @@ HARD_POLICY（不可变硬策略，常量）
 ④  store.recordTurn(user, SPEAK, text)                       事务：事件 + turn_count 投影
 ⑤  adapter.handleUserTurn({sessionId, text, prompt, timeoutMs})
 ⑥  逐 chunk：压住可能的 [静默] 前缀，其余交给 hooks.onTextChunk（TTS 可提前开始）
+       给了 hooks.onSegment 时不再发 onTextChunk（两个音频出口互斥，§4）
 ⑦  result = await stream.result                             适配器抛错 → finally 里先落 decision，再上抛
 ⑧  沉默兜底：isSilenceReply → action=SILENCE / text=null
 ⑨  store.recordTurn(assistant, action, text, toolName)       事务：事件 + 投影
-⑩  fsm.onReplyCompleted()                                    LINGERING
+⑨′ replySplit = splitReplyIntoSegments(text, limits)         纯函数切分（只对 SPEAK，§7）
+       for 每段: await hooks.onSegment({index,text,total,gapMsAfter})
+       期间状态保持 ACTIVE（M8）；某段抛错 → 停后续段、结束本轮、错误仍上抛（M9）
+⑩  fsm.onReplyCompleted()                                    LINGERING（起点=最后一段播完时的时钟读数，M7）
 ⑪  finally: appendEvent(conversation.decision, accepted=true, action, fsm_state)
-⑫  返回 {accepted, reason, state, action, text, provider, model, latencyMs, firstTokenMs, prompt}
+⑫  返回 {accepted, reason, state, action, text, segments, segmentGapMs,
+        provider, model, latencyMs, firstTokenMs, prompt}
 ```
 
 第 ⓪ 步的 `before` 同时是「决策前的状态」，因此 `conversation.decision.fsm_state_before` 记录的是
@@ -344,22 +351,28 @@ decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值�
 `tests/integration/conversation-engine.test.ts` 断言这条 payload 里**不含本轮文本**，
 也没有任何 `reasoning` 类字段。事件因此可以在不扩大隐私暴露面的前提下支撑 §22.2 的调试视图。
 
-## 6. 未实现（对话层相关）
+## 6. 尚未落地的部分（对话层相关）
+
+本表是**缺口清单**：某一行已有代码时，写清楚**哪一半落地了、缺的在哪一半**（t41 之后「主动开口」与
+「多段回复」都不再是「无代码」，但也都还不能在真机上直接看到效果）。
 
 | 能力 | 现状 |
 |---|---|
-| 唤醒词与搭话判定（§13 完整版） | 无代码；`addressed` 由 UI 按钮/语料给出（M2） |
-| 主动开口（§15） | 无代码；`evaluateProactiveCandidate` 抛 `NOT_IMPLEMENTED(M5)`。**契约已定**：触发源与九个硬门禁见 [ADR-0009](../adr/0009-proactive-triggers-and-hard-gates.md)（门禁由程序判定、模型不可绕过；`config` 的 `proactive` 默认值已按该 ADR 改成更激进的一档，但 `quiet_hours` 底线不动） |
-| 多段回复（一轮说 1~3 段） | **无代码**：`respond()` 目前把整段回复一次性交给 `onTextChunk`，语音侧按单段合成。契约与可测条款见 §7 与 [ADR-0010](../adr/0010-multi-segment-replies.md) |
+| 唤醒词与搭话判定（§13 完整版） | §13 的 **POC 判定规则已实现**（`shouldAcceptTurn`，见 §1）；**唤醒词检测本身无代码**——`addressed` 由 UI 按钮/语料给出（M2） |
+| 主动开口（§15） | **程序侧已落地（t41），内容侧还没有**：`packages/conversation/src/proactive.ts` 的 `ProactiveEngine` 逐条过硬门禁（[ADR-0009](../adr/0009-proactive-triggers-and-hard-gates.md) 的九条）、每次判定落一条 `proactive.decision` 审计、投递「先记后播」（重启不重发同一条），`config` 的 `proactive` 段也已被读取。**缺口**：没有候选生成器、没有常驻的考虑循环调用方（`ProactiveEngine` 目前只有测试在调用），模型侧 `evaluateProactiveCandidate` 仍抛 `NOT_IMPLEMENTED(M5)`——即「该不该说」已由程序判定，「说什么」尚未接线 |
+| 多段回复（一轮说 1~3 段） | **引擎侧已落地（t41）**：`packages/conversation/src/segments.ts` 的确定性分段器 + `RespondHooks.onSegment` 逐段播放 + §5 的 ⑨′ 步，`config` 的 `reply` 段已被读取；契约与可测条款见 §7 与 [ADR-0010](../adr/0010-multi-segment-replies.md)。**缺口**：语音侧尚未接线——`scripts/` 的入口仍只传 `onTextChunk`（核对：`git grep -n "onSegment" -- scripts`），所以真机上目前仍是单段合成 |
 | 长期记忆与关系（§10/§18） | 工作记忆只有 `recentTurns(limit 8)`；长期记忆属 M4 |
 | 回溯打断时的语义截断 | 只有 VAD 判定层面的离线测量（`scripts/voice-bargein.ts`） |
 | 提示词与延迟进事件日志 | 刻意不存（铁律 5 的方向：只存事实与 `reason_code`）；接受判定已按同一原则落 `conversation.decision` |
 | 多轮工具调用与强制工具 | `tool_choice` 只能 `auto`，模型可拒绝调用；适配器上限 2 轮 |
 
-## 7. 多段回复：语义与上限（契约，M5 实现）
+## 7. 多段回复：语义与上限（契约与实现）
 
-**本节是契约，不是现状**：当前实现是单段（一轮回复一次性交给 TTS）。落地时按
-[ADR-0010](../adr/0010-multi-segment-replies.md) 实现，并逐条加断言。
+**引擎侧已实现（t41）**：`packages/conversation/src/segments.ts` 的确定性分段器、`RespondHooks.onSegment`
+逐段播放、§5 的 ⑨′ 步与 M1–M9 的断言（`tests/unit/core/reply-segments.test.ts`、
+`tests/integration/conversation-engine.test.ts`）。**语音侧还没接线**——`scripts/` 的入口仍把整段交给
+`onTextChunk` 一次合成，所以真机上的「分段说话」要等语音侧改用 `onSegment` 才会出现（见 §6）。
+下表同时是契约与现状判据，按 [ADR-0010](../adr/0010-multi-segment-replies.md) 实现。
 
 语义：一次用户轮次最多 **3 段**依次说出（段间留自然停顿），但**仍然只是「一轮」**——
 `conversation.turn` 只写一条 assistant 记录（`action: SPEAK`，`text` 为完整文本）、
@@ -378,8 +391,14 @@ decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值�
 | M9 | 部分失败 | 某段 TTS 失败 → 停止后续段、结束该轮；事件日志仍只有一条 assistant 记录；实际播了几段属运行期信息，**不进事件** |
 
 硬上限不可突破（人格与模型都不能越过）：段数 ≤ 3、单段 ≤ 60 汉字、间隔 ≤ 1200ms；
-`config/xixi.example.yaml` 的 `reply` 段只能在上限内收紧（默认 `max_segments: 3` / `segment_max_chars: 60` / `gap_ms: 450`，
-该段目前**无人读取**）。切分由**程序**做（确定性纯函数），模型只负责内容。
+`config/xixi.example.yaml` 的 `reply` 段只能在上限内收紧（默认 `max_segments: 3` / `segment_max_chars: 60` / `gap_ms: 450`；
+该段由 `resolveReplyLimits()` 读取并夹紧，核对：`git grep -n "resolveReplyLimits(" -- packages`）。切分由**程序**做
+（确定性纯函数），模型只负责内容。
+
+**两个上限在「回复超过 3 × 60 = 180 字」时数学上不可兼得**，此时实现取「不丢字」（M4 优先）：
+把尾部合并进第 3 段、允许该段超长，并把 `SegmentedReply.mergedOverflow` 置为 `true` 让调用方看得见
+（`packages/conversation/src/segments.ts` 的文件头有同一句说明；两组边界断言分别是
+`[40,40,120]` 的尾部合并与 130 字无标点句子的硬切）。能装进 180 字的回复，每一段都在 60 字以内。
 
 ## 维护规则
 
@@ -389,7 +408,9 @@ decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值�
 |---|---|
 | `packages/conversation/src/fsm.ts`（状态、`DEFAULT_FSM_CONFIG`、判定或 `lingerMs` 算法） | §1（并同步 `tests/unit/conversation-fsm.test.ts`） |
 | `packages/conversation/src/prompt.ts`（§26 顺序、`HARD_POLICY`、阈值或指令文案、`sections`） | §2、§3、§4（并同步 `tests/unit/prompt.test.ts`） |
-| `packages/conversation/src/engine.ts`（编排步骤、沉默兜底、落库时机、时钟用法、`#advance` 读取即推进、decision 事件） | §1（状态读取即推进）、§4、§5 |
+| `packages/conversation/src/engine.ts`（编排步骤、沉默兜底、分段播放 `onSegment`、落库时机、时钟用法、`#advance` 读取即推进、decision 事件） | §1（状态读取即推进）、§4、§5、§7 |
+| `packages/conversation/src/segments.ts`（分段算法、`REPLY_LIMITS` 硬上限、`resolveReplyLimits` 的夹紧、`mergedOverflow`） | §7（并同步 `tests/unit/core/reply-segments.test.ts`） |
+| `packages/conversation/src/proactive.ts`（九个门禁、分数与阈值、`proactive.decision` 审计、投递顺序） | §6（并同步 [ADR-0009](../adr/0009-proactive-triggers-and-hard-gates.md) 与 [`security-and-privacy.md`](security-and-privacy.md) §6 的写入方清单） |
 | `packages/conversation/src/personality.ts`（`DEFAULT_SILENCE_TOLERANCE` 与取值优先级） | §1 |
 | `packages/brain-adapter/src/mimo.ts` 的 `SILENCE_TOKEN` / `isSilenceReply` / 工具循环 | §4、§6（两处 token 必须保持一致） |
 | `packages/domain/src/store.ts` 的 `recordTurn` / `recentTurns` 语义 | §5（并同步 [`domain-model.md`](domain-model.md) §5） |

@@ -52,9 +52,23 @@ import { fileURLToPath } from 'node:url';
 
 import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, defaultTools, type BrainAdapter } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
-import { ConversationEngine } from '@xixi/conversation';
+import {
+  ConversationEngine,
+  DEFAULT_PROACTIVITY,
+  PROACTIVE_REASON_CODES,
+  PROACTIVE_TRIGGERS,
+  ProactiveEngine,
+  parseProactiveSettings,
+  readProactiveHistory,
+  resolveReplyLimits,
+  splitReplyIntoSegments,
+  type ProactiveReasonCode,
+  type ProactiveSettings,
+  type ProactiveTrigger,
+  type ConversationState,
+} from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
-import { openXixiStore, type XixiConfig } from '@xixi/domain';
+import { openXixiStore, type XixiConfig, type StoredEvent, type XixiStore } from '@xixi/domain';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
 import { concatWav, readWav, readWavInfo, sliceWav } from './lib/wav.ts';
