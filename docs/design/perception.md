@@ -260,12 +260,19 @@ node scripts/verify-camera-presence.ts --help
 - `--require-transition`：整个运行期没有**真实状态转换**（只有启动记录）就判失败——
   这是「人真的站在镜头前」那一步用的。
 
-**台账现状（实测，可复核）**：`data/perception/field-test.sqlite` 里现在只有 **5 条
-`reason=camera_started`** 记录，全部来自真实摄像头的空场景运行，**没有任何合成事件**。
-历史上曾有 4 条合成事件（早期版本 `--self-test` 还写同一个库：2 条
-`reason=present_confirmed`（`motion_ratio=0.148` / `0.0318`，无人脸证据）+ 1 条
-`reason=absent_confirmed`，时间戳 `2026-09-30T12:04:1x`），它们已在本次补正中**逐条删除**，
-并按「最后一条事件 → 投影」重建了 `world_state`，日志与投影重新一致。
+**台账现状（写这一段时的测量，会随时间变化——以复核命令的输出为准）**：
+`data/perception/field-test.sqlite` 是一本**本机台账**（`data/` 在 `.gitignore` 里），每次真机运行
+都会往里追加，所以这里只能记「写这一句时看到的数」，不能当成长期事实。当时（t100 复核）实查
+`presence.changed` 共 **9 条 = 6 条 `reason=camera_started` + 3 条 `reason=present_confirmed`**：
+6 条启动记录来自真实摄像头的空场景运行，3 条 `present_confirmed` 是**合成场景**（`--self-test`）
+在驱动还交得出画面的那段时间留下的（`motion_ratio` 0.043 / 0.047 / 0.126，`faces=0`）——
+它们**不是**关于房间的证据。判读这本台账时请按 `source_detail` 里的 `reason` 分类，不要按条数下结论。
+
+更早的补正（t92）曾把 4 条**合成事件**（早期版本 `--self-test` 还写这个库：2 条
+`reason=present_confirmed` 的 `motion_ratio=0.148` / `0.0318`（无人脸证据）+ 1 条
+`reason=absent_confirmed`，时间戳 `2026-09-30T12:04:1x`）**逐条删除**，并按「最后一条事件 → 投影」
+重建了 `world_state`，让日志与投影重新一致。那次清理是对的，但它只清到「当时的最后一条」——
+之后的新运行照样会写进来，所以现在又有了 3 条合成记录。要一条干净台账就照下面做。
 
 复核命令（不需要 Python 之外的依赖）：
 
@@ -278,6 +285,12 @@ E:\worker2\.venvs\cv4\Scripts\python.exe -c "import sqlite3,json;c=sqlite3.conne
 合成帧以后一律进 `data/perception/self-test.sqlite`，不会再混进这个库。
 
 ### 8.4 打不开摄像头时：数秒内退出 + 一句中文原因（t89 实测）
+
+> **为什么 8.4 排在 8.3 前面（不要「理顺」这个编号）**：`docs/handoff.md` 有两处把
+> 「真人站在镜头前未实测」指向本文件的 **§8.3**（§8.3 就是那一节）。本节的编号当初被定成 8.4
+> 并放在 8.3 之前，正是为了让那两处引用继续指对地方。如果要按主题排序把它改成 8.3
+> （8.3=失败路径、8.4=真人），**必须同时**交给一个能改 `docs/handoff.md` 的任务把那两处
+> `§8.3` 改成 `§8.4`，否则 handoff 会指向错误的节。
 
 **复现命令（唯一可靠的那条）**：
 
@@ -315,8 +328,11 @@ node scripts/verify-camera-presence.ts --camera-index -1 --seconds 3
 先关掉占用摄像头的程序，或换 --camera-index（环境变量 XIXI_PERCEPTION_PYTHON 可指定解释器）。
 ```
 
-第二行里的秒数是**子进程自己的等待预算**（实测：2.5 s 预算打印「已等待 2.5 秒」、3.0 s 预算打印
-「已等待 3.1 秒」），不是手写的固定值。
+第二行里的秒数是**子进程实际等待的耗时**（`run.py` 打印的是 `elapsed = time.perf_counter() - started_at`
+的实测值，保留一位小数）。它**通常约等于当时的预算、但会浮动**：同一个 2.5 秒预算实测出现过
+**2.5 / 2.6 / 2.5 秒**，3.0 秒预算实测出现过 **3.0–3.1 秒**。**预算是另外两个东西**：
+`--camera-open-timeout` 与 `run.py` 的 `CAMERA_OPEN_TIMEOUT_SECONDS`（见上面的三层预算表）——
+不要把这个秒数当成「预算被写死了」，也不要把它当成「每次都会是这个数」。
 
 **为什么只看到中文**：OpenCV 打不开时会先往 stderr 打印一行英文
 （`[ WARN:0@0.121] global cap.cpp:477 cv::VideoCapture::open VIDEOIO(DSHOW): …`）。现在有两层处理：
