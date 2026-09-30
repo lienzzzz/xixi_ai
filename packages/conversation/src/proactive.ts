@@ -101,8 +101,14 @@ export const PROACTIVE_SCORE_WEIGHTS: Readonly<Record<string, number>> = Object.
   uncertainty_penalty: -0.1,
 });
 
-/** The baseline from `config/xixi.example.yaml`; used when nothing is persisted. */
-export const DEFAULT_PROACTIVITY = 0.55;
+/**
+ * The baseline from `config/xixi.example.yaml`; used when nothing is persisted.
+ *
+ * 0.70 (not the older 0.55): the household chose a more willing default in ADR-0009,
+ * which moves the threshold from 0.585 down to `0.45 + 0.30 × (1 − 0.70) = 0.54`.
+ * It only moves the bar — every hard gate still applies（铁律 3）。
+ */
+export const DEFAULT_PROACTIVITY = 0.7;
 
 /**
  * Score a candidate from its §15.4 components.

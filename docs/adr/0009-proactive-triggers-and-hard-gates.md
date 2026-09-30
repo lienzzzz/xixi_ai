@@ -41,11 +41,14 @@
    阈值：
 
    ```text
-   threshold = 0.45 + 0.30 × (1 - proactivity)      // proactivity=0.55（默认基线）→ 0.585
+   threshold = 0.45 + 0.30 × (1 - proactivity)      // proactivity=0.70（默认基线）→ 0.54
    ```
 
    即 `proactivity` 越高阈值越低（更愿意开口），但**永远不可能低于 0.45**——分数与阈值都夹在 `[0,1]` 内，
    「更激进」只体现在门禁参数（第 5 条），不体现在「跳过门禁」。
+   默认基线取 **0.70**（订正 2026-09-30：先前写 0.55 → 阈值 0.585），对应阈值
+   `0.45 + 0.30 × (1 − 0.70) = 0.45 + 0.30 × 0.30 = 0.54`；`config/xixi.example.yaml` 与
+   `packages/conversation/src/proactive.ts` 的 `DEFAULT_PROACTIVITY` 必须与这个数一致（`0.7` 与 `0.70` 是同一个值）。
 5. **默认强度：更激进，但底线不动**（与 `config/xixi.example.yaml` 逐项一致）：
 
    | 配置项 | 旧默认 | 新默认 | 说明 |

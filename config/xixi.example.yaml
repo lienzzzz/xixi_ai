@@ -22,7 +22,7 @@ xixi:
 
   personality:
     base:
-      proactivity: 0.55
+      proactivity: 0.70
       talkativeness: 0.45
       verbosity: 0.40
       curiosity: 0.40

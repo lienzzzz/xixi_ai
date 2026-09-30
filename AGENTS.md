@@ -135,6 +135,11 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
 1. **inScope 必须穷举「验收条款要求产出的每一个文件」**。写条款时先反推路径：条款说「改 X 的行为」，X 就必须在 inScope 里。
    反例：t12 的条款要求改写一条测试，但那条测试在 `tests/unit/core/`，未列入 → 契约拒绝，任务判 failed。
    反例：t2 的条款要求「复用共享评分定义 / 登记新入口」，对应 `scripts/lib/similarity.ts`、`docs/testing.md` 未列入 → 判 failed。
+   **子规则（本轮第 4 次同类失败 t58 换来）**：**验收里含「npm test 全绿」时，inScope 必须包含所有把被改动的值
+   钉死的测试文件。** t58 把默认 `proactivity` 从 0.55 改到 0.70，三处改动都完成且读取路径实测生效，
+   但三条断言旧值的测试不在 inScope（`tests/unit/domain.test.ts`、`tests/unit/core/proactive-gates.test.ts`、
+   `tests/console/proactive-console.test.ts`），于是**任务必然 failed**。
+   **派单前先 `git grep` 那个值**，把命中的测试文件一并列入 inScope。
 2. **契约校验只核对成员「声明」的 changedPaths**：未声明的越界编辑**不会**被自动拦截（t4 的 `package.json`、`scripts/voice-turn.ts` 就是这样绕过的）。
    因此唯一防线是：成员**如实披露** inScope 外的改动 + 评审**逐条复核**这些披露。
    **披露的固定格式（t45 的写法已被验证有效，请照抄）**：① 改了哪个文件（完整路径）；
