@@ -42,8 +42,11 @@
 
 即「输入文字 → DSH → MiMo → structured tool → answer；restart → session recover」成立，且不是同进程内的假恢复。
 另有 `npm run verify:provider`（一次真实调用）单独证明路由 + 工具调用可用。
-离线测试 `npm test`：**209 项全部通过**（2026-09-30 集成收口实测，exit 0，19.1s；**项数以实跑末行为准**——
-本轮先后出现过 36 / 63 / 87 / 95 / 120 / 137 / 180 / 189 / 192 / 201 / 206 / 209，那些都是**当时快照**）。
+离线测试 `npm test`：**以末行为准**（最近一次实测点：2026-09-30、**223 项**、exit 0；更早的集成收口实测点是 209 项 / 19.1s）。
+**项数与文件数都不要抄**：本轮先后出现过 36 / 63 / 87 / 95 / 120 / 137 / 139 / 180 / 189 / 192 / 201 / 206 / 209 / 213 / 223，
+那些全是**当时快照**，留着只为了证明「这个数一直在动」——要现状就跑 `npm test` 看末行。
+**给后人的提醒：改这份文档时不要再写死测试总数或文件数**，只写「以 `npm test` 末行为准」加一个带日期的实测点
+（与 [`testing.md`](testing.md) 头部同一口径；依据见 [`AGENTS.md` §9.18](../AGENTS.md)）。
 
 ## 1. 里程碑状态
 
@@ -297,18 +300,20 @@ compat: { thinkingFormat: deepseek, requiresReasoningContentOnAssistantMessages:
 | **t9** `console-implementation-review` | t4 现场测试控制台 | needs_revision | F1 low（自检项数已漂移） | **t29** | **t30** needs_revision（F1 medium + F2–F5 low）→ t45 → round-3 仍 needs_revision → 后续 t53/t59/t64 逐处订正 | ⚠️ 文档数字链仍在收尾（每次复审都能抓到新的漂移） |
 | **t10** `core-wiring-review` | t5 核心接线 | needs_revision | F1 low / F2 low / F3 low | **t31** | **t32** `core-wiring-repair-review` **pass** | ✅ |
 
-**t10 评审 F3 的教训（必须记住）**：任务回报里的测试计数是**当时快照**——t5 报「87/87」，而本文件此刻实测是 209 项。
-引用任何他人回报里的数字时**必须注明时点**，不要当作现状；本文件里的计数一律以实跑末行为准。
+**t10 评审 F3 的教训（必须记住）**：任务回报里的测试计数是**当时快照**——t5 报「87/87」，而写这一段时的实测是 209 项
+（2026-09-30 的最近实测点已到 223 项，见 §0b）。引用任何他人回报里的数字时**必须注明时点**，不要当作现状；
+本文件里的计数一律写成「以实跑末行为准 + 带日期的实测点」，不写当前值。
 
 **独立验证（不是实现者自述）**：`docs/verification/` 下 2 份——多段回复与主动性门禁（t43：27/27 门禁用例、
 投递恰好 1 次、崩溃后绝不重发、6h 额度实测 4 = 配置上限）、现场测试控制台（t4 的独立验证）。
 **评审报告**共 20+ 份在 `docs/review/`（含 6 份复审），verdict 分布与观测都留在各自文件里。
 
 **t29 负责的三份文件（`docs/testing.md` / `README.md` / `docs/handoff.md`）**：本轮只做**最终一致性核对**，
-未重复修改（遵守派单约束）。**核对结论：仍有漂移，需另派单订正**——
+未重复修改（遵守派单约束）。**核对结论（当时）：仍有漂移，需另派单订正**——（现已在 t90/t94 收尾，见下）
 `docs/testing.md:5` 写「实测 **180 项**：unit 124 + integration 30 + perception 11 + console 15」，
 同文件 `:132` 又写「实测 **139 项**全绿」（同一份文件两个数），`docs/handoff.md` 两处写「实测 139 项」
-（还带「空载约 27–30s」的耗时旧结论）。**此刻实测是 `npm test` 209 项、`--self-test` 31 项**（本文件 §0b），
+（还带「空载约 27–30s」的耗时旧结论）。**核对当时**实测是 `npm test` 209 项、`--self-test` 31 项（本文件 §0b；
+这两个数今天也已过期——t90/t94 已把三份文档改成「以末行为准 + 带日期实测点」）。
 三处数字都应按「以实跑末行为准」改写（`docs/design/README.md` §3 规则 13 与 `AGENTS.md` §9.18 都是同一原则）。
 
 ## 3. 关键决策
@@ -340,14 +345,14 @@ compat: { thinkingFormat: deepseek, requiresReasoningContentOnAssistantMessages:
 3. **真实麦克风的人耳确认**：回采余量 FAIL（2.41 dB）已解释（§2.14），但「用户对麦克风说话能否被听到」
    仍需真人跑 `node scripts/voice-device-check.ts --wav <录音> --expect "<原文>"`；噪声下的真实对话响应也会变慢（§2.13 第三条）。
 4. **生产入口的常驻语音服务**：runner 已有常驻 Python worker，生产入口（`serve-chat.ts` / `voice-turn.ts`）仍是每次一进程。
-5. **三条文档-实现一致性待办（都不在本任务 inScope，需另派单）**：
-   - `docs/testing.md`（`:5` 写 180 项、`:132` 写 139 项）与 `docs/handoff.md`（两处写 139 项 + 「空载约 27–30s」）
-     的测试计数与耗时都已过期（**此刻实测 209 项 / self-test 31 项**）——按「以实跑末行为准」改写。
-   - `docs/adr/0010-multi-segment-replies.md` 有三处「**没有任何生产入口传 `onSegment`**」，而
-     `scripts/chat.ts` **已经传了**（核对：`git grep -n "onSegment" -- scripts`）——那三处现在已经是假话；
-     准确的现状是「chat CLI 已接分段播放，试用页与 `voice-turn.ts` 仍整段合成」。
-   - `docs/design/conversation.md` §6 的「播放侧尚未接线」同样过期（同上核对命令）。
-   （这就是 t54 的前瞻观测：接线落地的那一刻，这几处就变成假话。）
+5. **三条文档-实现一致性待办：都已收尾（留档，别再当待办）**：
+   - 计数类：`docs/testing.md`、`docs/handoff.md`、`README.md` 与本文件里写死的测试项数（曾出现 180 / 139 / 209 三个数并存）
+     已由 **t90 / t94** 全部改成「以 `npm test` 末行为准 + 带日期的实测点」。
+   - `docs/adr/0010-multi-segment-replies.md` 三处「**没有任何生产入口传 `onSegment`**」已由 **t82** 订正：
+     `scripts/chat.ts` **已经传了**（核对：`git grep -n "onSegment" -- scripts`），现状是「chat CLI 已接分段播放，试用页与 `voice-turn.ts` 仍整段合成」。
+   - `docs/design/conversation.md` §6/§7 的「播放侧尚未接线」已由 **t82** 改写；同表「主动开口」行的「没有候选生成器 / 没有常驻循环」已由 **t84** 改写。
+   **仍然有效的规则**：改文档时不要写死测试总数、文件数或耗时——只写「以实跑末行为准」加一个带日期的实测点。
+   （t54 的前瞻观测成真：接线落地的那一刻，那几处就变成了假话。）
 6. **已知小项（下次动那两处时顺手改）**：`conversation.md` 里 `confidence` 字段的括号说明容易被读成「也是 1/0」
    （实际是 1 或 0.5）；`packages/domain/src/store.ts` 的 `toStoredEvent` 不回填 `sessionId`（低危：列已写入、按 sessionId 过滤仍正常）。
 7. **M3 人格反馈**：「你话太多了」→ Feedback Interpreter（结构化输出 + 受控增量 + history + 回滚），
