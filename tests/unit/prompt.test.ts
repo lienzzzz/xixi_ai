@@ -29,6 +29,26 @@ test('the system prompt carries the immutable policy and never the mutable numbe
   assert.ok(prompt.system.includes('verbosity=0.4'));
 });
 
+test('the hard policy keeps exactly 7 numbered rules, and clause 7 is the no-fabrication rule (t119)', () => {
+  // Why this lives here (review t116 §3/O1): the only other way to check the count was a
+  // `git grep -c -E "^[0-9]+\. "` over the whole file, which counts *any* numbered list anywhere
+  // in prompt.ts (an example list added elsewhere would report 9) and reports 0 if the rules are
+  // ever rewritten as bullets. Counting inside the constant is the real question, and putting it
+  // in `npm test` means "deleted a rule" / "renumbered" / "moved clause 7" cannot ship silently.
+  const rules = HARD_POLICY.match(/^\d+\. /gm) ?? [];
+  assert.equal(rules.length, 7, `HARD_POLICY must hold exactly 7 numbered rules, found ${rules.length}`);
+  assert.deepEqual(rules, ['1. ', '2. ', '3. ', '4. ', '5. ', '6. ', '7. '], 'the numbering must stay 1..7, in order');
+
+  // Clause 7 (t111): checkable facts only from a tool result, and it applies to 主动开口 too.
+  assert.match(HARD_POLICY, /^7\. 可核查的具体事实/m);
+  assert.match(HARD_POLICY, /先调用工具去查/);
+  assert.match(HARD_POLICY, /这一条对主动开口同样有效/);
+
+  // Clause 5 is the first of the three silence defences (§4) — it must keep naming the token.
+  assert.match(HARD_POLICY, /^5\. /m);
+  assert.ok(HARD_POLICY.includes(SILENCE_TOKEN), 'clause 5 must name the silence token');
+});
+
 test('personality changes the directives, which is what makes feedback verifiable in behaviour', () => {
   const terse = personalityDirectives({ verbosity: 0.1, curiosity: 0.1, silence_tolerance: 0.9 });
   const chatty = personalityDirectives({ verbosity: 0.95, curiosity: 0.9, silence_tolerance: 0.2 });
