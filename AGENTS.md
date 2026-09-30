@@ -146,3 +146,11 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    **不许靠删断言或把测试挪出默认门禁**来换速度——「测试写了就必须跑」是本项目已经踩过坑的原则。
 10. **全量测试结果要在成员在途编辑窗口之外判读**：本轮多次出现「红 1 项」实为他人半成品（失败用例名每次不同、stash 后仍失败即可判定）。
    声明「全绿」时必须带**修订号**与实测输出，否则视为未验证。
+11. **`deliverables` 必须与「本次真正会改动的文件」一致**（不只是 `inScope` 允许改的集合）。
+   反例：t26 为满足某条验收顺手改了 `docs/recon/camera-detector-choice-2026-09-30.md`，它写在 inScope 里但不在 deliverables，
+   于是**没有进 changedPaths**，只能靠成员主动披露 + 评审逐处核对才被发现。派单时请把「验收会碰到的文件」全部列进 deliverables。
+12. **`acceptanceResults` 必须与任务的 `acceptance` 数组逐项对应**（条目数与 criterion 文本都要对上），否则完成校验会整份拒绝。
+   反例：t26 按自己理解的 1/2/3/6 条提交，全被拒，而报错只说「requires passed acceptanceResults for every acceptance item」，不提示期望条数。
+   **因此 captain 派单时把验收清单编号写进任务 description**，成员按同一编号回报，不要靠猜或去读团队状态文件。
+13. **优先「核实后不认同」而不是盲从**：t23 面对评审「表头写反了」的判断，逐格复核后确认没反，于是不改数字、只把表头改成无歧义写法并附原始格值——
+   这比盲改更有价值。评审也会错，关键是**谁给出可核对的证据**。
