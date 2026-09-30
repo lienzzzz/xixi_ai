@@ -432,19 +432,30 @@ export class ConversationEngine {
       // segments are being played the state is still ACTIVE (M8), so the user can
       // cut in.
       replySplit = turnText === null ? null : splitReplyIntoSegments(turnText, this.#replyLimits);
+      let playbackError: unknown = null;
       if (replySplit !== null) {
         const lastIndex = replySplit.segments.length - 1;
-        for (const [index, segment] of replySplit.segments.entries()) {
-          await hooks.onSegment?.({
-            index,
-            text: segment,
-            total: replySplit.segments.length,
-            gapMsAfter: index === lastIndex ? null : replySplit.gapMs,
-          });
+        try {
+          for (const [index, segment] of replySplit.segments.entries()) {
+            await hooks.onSegment?.({
+              index,
+              text: segment,
+              total: replySplit.segments.length,
+              gapMsAfter: index === lastIndex ? null : replySplit.gapMs,
+            });
+          }
+        } catch (cause) {
+          // ADR-0010 M9: a failed segment stops the remaining ones and ends the
+          // turn — the follow-up window still opens, so one broken TTS call cannot
+          // leave the conversation stuck in ACTIVE. The failure is reported to the
+          // caller afterwards rather than swallowed, and the log keeps exactly one
+          // assistant record (the log is conversation-level, not audio-level).
+          playbackError = cause;
         }
       }
       const finishedAt = this.#clock();
       this.#fsm.onReplyCompleted(finishedAt.getTime());
+      if (playbackError !== null) throw playbackError;
     } finally {
       // Recorded even when the model throws: "the turn was accepted, then the
       // provider failed" is exactly the fact §21 降级 needs later.

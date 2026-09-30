@@ -32,9 +32,16 @@
  *   node scripts/verify-voice-noise.ts --tiers 18,6         # only those SNR tiers
  *   node scripts/verify-voice-noise.ts --nr                 # A/B: with the noise-reduction stage on
  *   node scripts/verify-voice-noise.ts --dry-run            # VAD + scoring plumbing, no API calls
+ *   node scripts/verify-voice-noise.ts --no-vad-worker      # one Python process *per clip* (debug)
+ *
+ * VAD cost: every clip is segmented by the real `voice_edge.segment` CLI, but since t47 all clips
+ * of a run share **one** persistent Python process (the worker below) instead of paying a fresh
+ * interpreter + pipecat/Silero start per clip (~2.5–3.4 s each). `--no-vad-worker` / `XIXI_VAD_ONESHOT=1`
+ * restores the old one-shot behaviour; the report records which path was used (`seed.vadProcess`).
  */
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { MimoClient } from '@xixi/model-adapters';
@@ -180,13 +187,254 @@ function runPython(pythonArgs: string[]): Promise<string> {
   });
 }
 
-async function segment(wavPath: string, options: { noiseReduction: boolean; calibratedFloorDbfs?: number }): Promise<Segmentation> {
-  const pythonArgs = ['-m', 'voice_edge.segment', wavPath, '--highpass-hz', '120'];
-  if (options.noiseReduction) pythonArgs.push('--nr');
-  if (options.calibratedFloorDbfs !== undefined) {
-    pythonArgs.push('--noise-floor-dbfs', String(options.calibratedFloorDbfs));
+/**
+ * Persistent VAD worker: **one** Python process for every clip of a run (t47).
+ *
+ * Why: a one-shot `python -m voice_edge.segment <clip>` costs ~2.5–3.4 s per clip, and almost
+ * all of it is interpreter + pipecat/Silero startup, not the analysis. A run touches 12 clips
+ * (4 clean + one noisy tier), so the old shape paid that startup 12 times — that single file
+ * was the default gate's critical path (~21 s solo).
+ *
+ * Fidelity: the worker calls the *real* CLI entry `voice_edge.segment.main(argv)` in-process
+ * with the exact same argv a subprocess would get, capturing its stdout. No parameter mapping
+ * is duplicated here, so a change in the segmenter's CLI cannot silently diverge from this
+ * path. Requests are answered one line of JSON at a time, keyed by id.
+ *
+ * Safety: if the worker cannot start (or dies), `runVad()` falls back to the one-shot
+ * subprocess for the remaining clips — slower, but never a new failure mode. `--no-vad-worker`
+ * (or `XIXI_VAD_ONESHOT=1`) forces the old path for debugging.
+ */
+const VAD_WORKER_PY = String.raw`
+"""Persistent VAD worker (written by scripts/verify-voice-noise.ts at runtime).
+
+Reads one JSON request per line on stdin: {"id": 1, "argv": ["clip.wav", "--highpass-hz", "120"]}
+Writes one JSON response per line on stdout: {"id": 1, "ok": true, "code": 0, "stdout": "<segmenter JSON>"}
+Uses the real CLI entry (voice_edge.segment.main) so the parameters are exactly the CLI's.
+"""
+import contextlib
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+
+from voice_edge.segment import main as segment_main  # noqa: E402
+
+
+class Capture:
+    """stdout/stderr stand-in: the segmenter reconfigures sys.stdout for UTF-8."""
+
+    def __init__(self):
+        self._parts = []
+
+    def write(self, text):
+        self._parts.append(text)
+        return len(text)
+
+    def flush(self):
+        pass
+
+    def reconfigure(self, **_kwargs):
+        pass
+
+    def isatty(self):
+        return False
+
+    def value(self):
+        return "".join(self._parts)
+
+
+def handle(request):
+    identifier = request.get("id")
+    argv = [str(item) for item in (request.get("argv") or [])]
+    out = Capture()
+    err = Capture()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = segment_main(argv)
+        return {"id": identifier, "ok": code in (0, 2), "code": code, "stdout": out.value(), "stderr": err.value()}
+    except SystemExit as exc:  # argparse exits on bad arguments
+        return {"id": identifier, "ok": False, "code": 1, "stdout": out.value(), "stderr": err.value(), "error": "SystemExit(%r)" % (exc.code,)}
+    except BaseException as exc:  # noqa: BLE001 - every failure is reported to the caller
+        return {"id": identifier, "ok": False, "code": 1, "stdout": out.value(), "stderr": err.value(), "error": "%s: %s" % (type(exc).__name__, exc)}
+
+
+for raw_line in sys.stdin:
+    raw_line = raw_line.strip()
+    if not raw_line:
+        continue
+    try:
+        request = json.loads(raw_line)
+    except Exception as exc:  # noqa: BLE001
+        response = {"id": None, "ok": False, "error": "bad request: %s" % exc}
+    else:
+        response = {"id": request.get("id"), "ok": True, "pong": True} if request.get("ping") else handle(request)
+    sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+`;
+
+interface VadWorkerResponse {
+  readonly id: number | null;
+  readonly ok: boolean;
+  readonly code?: number;
+  readonly stdout?: string;
+  readonly stderr?: string;
+  readonly error?: string;
+  readonly pong?: boolean;
+}
+
+/** One long-lived Python process; requests are pipelined by id. */
+class VadWorker {
+  readonly #child: ReturnType<typeof spawn>;
+  #buffer = '';
+  #nextId = 1;
+  #died: Error | null = null;
+  readonly #pending = new Map<number, { resolve: (response: VadWorkerResponse) => void; reject: (error: Error) => void }>();
+
+  private constructor(child: ReturnType<typeof spawn>) {
+    this.#child = child;
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    let stderr = '';
+    child.stderr?.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.stdout?.on('data', (chunk: string) => {
+      this.#buffer += chunk;
+      let index = this.#buffer.indexOf('\n');
+      while (index >= 0) {
+        const line = this.#buffer.slice(0, index).trim();
+        this.#buffer = this.#buffer.slice(index + 1);
+        if (line.length > 0) this.#deliver(line);
+        index = this.#buffer.indexOf('\n');
+      }
+    });
+    const die = (error: Error): void => {
+      this.#died = error;
+      for (const [, pending] of this.#pending) pending.reject(error);
+      this.#pending.clear();
+    };
+    child.on('error', (cause) => die(cause instanceof Error ? cause : new Error(String(cause))));
+    child.on('close', (code) => {
+      if (this.#pending.size > 0 || code !== 0) die(new Error(`VAD worker exited (code ${code}): ${stderr.slice(-300)}`));
+    });
   }
-  return JSON.parse(await runPython(pythonArgs)) as Segmentation;
+
+  static async start(): Promise<VadWorker> {
+    // The worker file lives in the OS temp dir: it is generated, not repository content.
+    const workerPath = join(tmpdir(), `xixi-vad-worker-${process.pid}.py`);
+    writeFileSync(workerPath, VAD_WORKER_PY, 'utf8');
+    const child = spawn(PYTHON, [workerPath, join(REPO_ROOT, 'services', 'voice-edge')], {
+      cwd: join(REPO_ROOT, 'services', 'voice-edge'),
+      windowsHide: true,
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const worker = new VadWorker(child);
+    // Handshake: importing pipecat/Silero happens here, so a broken venv fails fast and the
+    // caller can fall back instead of failing the first real clip.
+    const ping = await worker.request({ ping: true }, 60_000);
+    if (ping.pong !== true) throw new Error('VAD worker did not answer the handshake');
+    return worker;
+  }
+
+  #deliver(line: string): void {
+    let response: VadWorkerResponse;
+    try {
+      response = JSON.parse(line) as VadWorkerResponse;
+    } catch {
+      return; // a stray log line from the child; the protocol only reads JSON objects
+    }
+    const id = response.id;
+    if (id === null || id === undefined) return;
+    const pending = this.#pending.get(id);
+    if (pending === undefined) return;
+    this.#pending.delete(id);
+    pending.resolve(response);
+  }
+
+  request(payload: Record<string, unknown>, timeoutMs = 300_000): Promise<VadWorkerResponse> {
+    if (this.#died !== null) return Promise.reject(this.#died);
+    const id = this.#nextId;
+    this.#nextId += 1;
+    return new Promise<VadWorkerResponse>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        reject(new Error(`VAD worker timed out after ${timeoutMs} ms on request ${id}`));
+      }, timeoutMs);
+      this.#pending.set(id, {
+        resolve: (response) => {
+          clearTimeout(timer);
+          resolve(response);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      });
+      this.#child.stdin?.write(`${JSON.stringify({ id, ...payload })}\n`);
+    });
+  }
+
+  close(): void {
+    try {
+      this.#child.stdin?.end();
+      this.#child.kill();
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+let vadWorker: VadWorker | null = null;
+let vadWorkerFailed = false;
+let vadWorkerStarting: Promise<VadWorker> | null = null;
+
+function vadWorkerEnabled(): boolean {
+  return !vadWorkerFailed && process.env.XIXI_VAD_ONESHOT !== '1' && !args.includes('--no-vad-worker');
+}
+
+/** Run the segmenter CLI with `moduleArgs` (everything after `-m voice_edge.segment`). */
+async function runVad(moduleArgs: string[]): Promise<string> {
+  if (vadWorkerEnabled()) {
+    try {
+      if (vadWorker === null) {
+        vadWorkerStarting ??= VadWorker.start();
+        vadWorker = await vadWorkerStarting;
+      }
+      const response = await vadWorker.request({ argv: moduleArgs });
+      const stdout = response.stdout ?? '';
+      if (response.ok && (response.code === 0 || response.code === 2)) return stdout;
+      throw new Error(`VAD failed (exit ${response.code ?? '?'}): ${(response.error ?? response.stderr ?? '').slice(-400)}`);
+    } catch (error) {
+      // Only a *transport* problem falls back; a segmenter error (bad audio, no speech) is a
+      // real result and is re-thrown above. Distinguish by whether we had a live worker.
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith('VAD failed')) throw error;
+      vadWorkerFailed = true;
+      vadWorker?.close();
+      vadWorker = null;
+      vadWorkerStarting = null;
+      console.error(`[vad] 批量 worker 不可用（${message}），本轮回退到一次性子进程（结果不变，只是更慢）`);
+    }
+  }
+  return runPython(['-m', 'voice_edge.segment', ...moduleArgs]);
+}
+
+function closeVadWorker(): void {
+  vadWorker?.close();
+  vadWorker = null;
+  vadWorkerStarting = null;
+}
+
+
+async function segment(wavPath: string, options: { noiseReduction: boolean; calibratedFloorDbfs?: number }): Promise<Segmentation> {
+  // Everything after `-m voice_edge.segment`: the worker hands this to the same CLI entry.
+  const moduleArgs = [wavPath, '--highpass-hz', '120'];
+  if (options.noiseReduction) moduleArgs.push('--nr');
+  if (options.calibratedFloorDbfs !== undefined) {
+    moduleArgs.push('--noise-floor-dbfs', String(options.calibratedFloorDbfs));
+  }
+  return JSON.parse(await runVad(moduleArgs)) as Segmentation;
 }
 
 function requireManifest(): { clips: NoisyClip[]; noiseSource: unknown; snrDefinition: string; measuredByDefault: string[] } {
@@ -489,6 +737,8 @@ const report = {
     snrDefinition: manifest.snrDefinition,
     noiseSource: manifest.noiseSource,
     python: PYTHON,
+    /** t47: `persistent` = one Python process for every clip; `one-shot` = a process per clip. */
+    vadProcess: !vadWorkerFailed && vadWorker !== null ? 'persistent' : 'one-shot',
   },
   /** Which criteria a reader may apply to this run. Offline runs apply far fewer. */
   mode: offline ? 'offline-plumbing' : 'real-asr',
@@ -574,6 +824,7 @@ const report = {
 };
 
 writeFileSync(outPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+closeVadWorker(); // every clip has been segmented; release the Python process before printing
 printEvidence('噪声鲁棒性验证（干净 + 噪声夹具 → 前端 → VAD → ASR）', report);
 
 if (offline) {

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { FakeBrainAdapter, type ScriptedOutcome, type UserTurnInput } from '@xixi/brain-adapter';
-import { ConversationEngine } from '@xixi/conversation';
+import { ConversationEngine, type ReplySegmentPlayback } from '@xixi/conversation';
 import { fixedClock, openXixiStore, type Clock, type XixiConfig, type XixiStore } from '@xixi/domain';
 
 const T0 = new Date('2026-09-29T20:00:00+08:00');
@@ -330,6 +330,178 @@ test('every accepted turn leaves a decision event the log can explain', async ()
       decisions.map((event) => (event.payload as { action: string }).action),
       ['SPEAK', 'SPEAK'],
     );
+  } finally {
+    store.close();
+  }
+});
+
+
+// ------------------------------------------- ADR-0010 multi-segment replies
+
+/** A sentence of exactly 50 characters ending in a full stop. */
+function sentence50(filler: string): string {
+  return filler.repeat(49) + '。';
+}
+
+const THREE_SEGMENTS = sentence50('甲') + sentence50('乙') + sentence50('丙'); // 150 chars
+const TWO_SEGMENTS = sentence50('甲') + sentence50('乙'); // 80 chars
+
+test('ADR-0010: one turn is spoken as up to three segments and still advances the state machine once', async () => {
+  const store = freshStore();
+  try {
+    const chunks: string[] = [];
+    const engine = engineWith(() => ({ action: 'SPEAK', text: THREE_SEGMENTS }), store);
+    const session = store.createSession();
+    const turn = await engine.respond(
+      { sessionId: session.sessionId, text: '在吗', addressed: true },
+      { onTextChunk: (text) => void chunks.push(text) },
+    );
+
+    assert.equal(turn.segments.length, 3);
+    for (const segment of turn.segments) assert.ok(segment.length <= 60, 'every segment must be within the ceiling');
+    assert.equal(turn.segments.join(''), turn.text, 'M4: the segments are exactly the reply text');
+    assert.equal(turn.segmentGapMs, 450, 'M3: the default gap');
+    // The streaming seam is unchanged when no segment player is supplied.
+    assert.equal(chunks.join(''), THREE_SEGMENTS);
+
+    // M6: one user turn + one assistant record, and exactly one decision.
+    assert.equal(store.readEvents({ type: 'conversation.turn' }).length, 2);
+    assert.equal(store.recentTurns(session.sessionId).at(-1)?.text, THREE_SEGMENTS, 'the full text is recorded once');
+    assert.equal(store.readEvents({ type: 'conversation.decision' }).length, 1);
+    assert.equal(engine.state, 'LINGERING');
+  } finally {
+    store.close();
+  }
+});
+
+test('the reply limits come from config.reply, and only tightening is honoured', async () => {
+  const store = freshStore();
+  try {
+    const adapter = new FakeBrainAdapter({ reply: () => ({ action: 'SPEAK', text: THREE_SEGMENTS }) });
+    const build = (reply: Record<string, unknown>): ConversationEngine =>
+      new ConversationEngine({
+        adapter,
+        store,
+        config: { ...CONFIG, reply },
+        clock: fixedClock(new Date(T0), 1_000),
+        offsetMinutes: 480,
+      });
+
+    // Tightening: one segment holding the whole reply.
+    const single = await build({ max_segments: 1, segment_max_chars: 60, gap_ms: 450 }).respond({
+      sessionId: store.createSession().sessionId,
+      text: '在吗',
+      addressed: true,
+    });
+    assert.equal(single.segments.length, 1);
+    assert.equal(single.segments[0], THREE_SEGMENTS);
+
+    // Raising a ceiling is refused; the engine clamps instead of honouring it.
+    const clamped = await build({ max_segments: 9, segment_max_chars: 999, gap_ms: 60_000 }).respond({
+      sessionId: store.createSession().sessionId,
+      text: '在吗',
+      addressed: true,
+    });
+    assert.equal(clamped.segments.length, 3, 'the hard ceiling is 3 (ADR-0010 §3)');
+    assert.equal(clamped.segmentGapMs, 1_200, 'the hard ceiling for the gap is 1200 ms');
+    assert.equal(clamped.segments.join(''), THREE_SEGMENTS);
+  } finally {
+    store.close();
+  }
+});
+
+test('the segment player is awaited in order, sees ACTIVE, and the follow-up window starts after the last one', async () => {
+  const store = freshStore();
+  try {
+    let now = new Date(T0);
+    const engine = new ConversationEngine({
+      adapter: new FakeBrainAdapter({ reply: () => ({ action: 'SPEAK', text: TWO_SEGMENTS }) }),
+      store,
+      config: CONFIG,
+      clock: () => new Date(now),
+      offsetMinutes: 480,
+      fsm: { lingerMs: 30_000 },
+    });
+    const session = store.createSession();
+    const played: ReplySegmentPlayback[] = [];
+    const states: string[] = [];
+    const chunks: string[] = [];
+
+    const turn = await engine.respond(
+      { sessionId: session.sessionId, text: '在吗', addressed: true, at: new Date(T0) },
+      {
+        onSegment: (segment) => {
+          played.push(segment);
+          // M8: during playback the state is still ACTIVE, so the user can cut in.
+          states.push(engine.state);
+          now = new Date(now.getTime() + 1_000); // one second of playback per segment
+        },
+        // M6/M8 rely on the two seams being mutually exclusive.
+        onTextChunk: (text) => void chunks.push(text),
+      },
+    );
+
+    assert.deepEqual(played.map((segment) => segment.text), turn.segments);
+    assert.deepEqual(played.map((segment) => segment.index), [0, 1]);
+    assert.deepEqual(played.map((segment) => segment.total), [2, 2]);
+    assert.deepEqual(played.map((segment) => segment.gapMsAfter), [450, null]);
+    assert.deepEqual(states, ['ACTIVE', 'ACTIVE']);
+    assert.deepEqual(chunks, [], 'segmented playback must not also stream raw deltas');
+    // M7: the follow-up window starts when the last segment finished playing —
+    // two readbacks of a clock the test moved by one second per segment.
+    assert.equal(engine.snapshot().since, T0.getTime() + 2_000);
+    assert.equal(engine.state, 'LINGERING');
+  } finally {
+    store.close();
+  }
+});
+
+test('a SILENCE turn has no segments and never reaches the player', async () => {
+  const store = freshStore();
+  try {
+    const engine = engineWith(() => ({ action: 'SPEAK', text: '[静默]' }), store);
+    const session = store.createSession();
+    const played: ReplySegmentPlayback[] = [];
+    const turn = await engine.respond(
+      { sessionId: session.sessionId, text: '嗯。', addressed: true },
+      { onSegment: (segment) => void played.push(segment) },
+    );
+    assert.equal(turn.action, 'SILENCE');
+    assert.equal(turn.text, null);
+    assert.deepEqual(turn.segments, []);
+    assert.equal(turn.segmentGapMs, 450);
+    assert.deepEqual(played, [], 'the control token must never be played as a segment');
+  } finally {
+    store.close();
+  }
+});
+
+test('a failed segment ends the turn, keeps one log record, and does not hide the failure (M9)', async () => {
+  const store = freshStore();
+  try {
+    const engine = engineWith(() => ({ action: 'SPEAK', text: THREE_SEGMENTS }), store);
+    const session = store.createSession();
+    const played: number[] = [];
+    await assert.rejects(
+      engine.respond(
+        { sessionId: session.sessionId, text: '在吗', addressed: true },
+        {
+          onSegment: (segment) => {
+            played.push(segment.index);
+            if (segment.index === 1) throw new Error('tts down');
+          },
+        },
+      ),
+      /tts down/,
+      'the caller must learn that playback failed',
+    );
+
+    assert.deepEqual(played, [0, 1], 'the remaining segments are not played');
+    const turns = store.recentTurns(session.sessionId);
+    assert.equal(turns.filter((turn) => turn.role === 'assistant').length, 1, 'the log stays conversation-level');
+    assert.equal(turns.at(-1)?.text, THREE_SEGMENTS, 'the full text is what was recorded');
+    assert.equal(store.readEvents({ type: 'conversation.decision' }).length, 1);
+    assert.equal(engine.state, 'LINGERING', 'a broken TTS call must not leave the conversation stuck in ACTIVE');
   } finally {
     store.close();
   }
