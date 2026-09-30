@@ -4,6 +4,49 @@
 > 面向：接手本项目的编码 Agent / 维护者
 > 本文件告诉你「先读什么、什么最权威、改代码后必须更新哪些文档」。
 
+## 0. 现场测试前用户须知（先读这一节）
+
+**一条命令启动**：
+
+```powershell
+cd E:\worker2
+npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机）
+```
+
+**操作步骤**：① 页面打开后先看「传感器」栏的麦克风电平与噪声底；② 点「一键启用」开摄像头在场 + 自动考虑循环
+（会起一个 `perception_edge.run --live` 子进程，可在同一张卡上停用）；③ 在「对话」栏按住🎤或打字说话；
+④ 看「配置」栏调主动性 / 话痨 / 话长，以及冷却、额度、静默时段；⑤ 点「开始设备自检」跑麦克风 / 扬声器 / 摄像头自检。
+
+**怎么判读结果**：
+
+- **麦克风噪声与成功边界**：本机环境噪声底实测 −30 ~ −35 dBFS（低频为主）。抗噪前端（去直流 + 120 Hz 高通 +
+  噪声底自适应门限）之后，**`SNR_inband ≥ 3 dB` 时 4 条中文夹具全部检出、平均字符相似度 0.805**；
+  6 dB 档 0.841、18 dB 档 0.841、0 dB 档掉到 0.491（2 条 <0.6）、−6 dB 档 0/4 检出。**低于 3 dB 不要期待能用**。
+  细节与复现命令：`progress.md` §2.13、[`design/voice.md`](design/voice.md) §1.1。
+- **「扬声器验收 FAIL」的正确含义**：它测的是**回采余量**（笔记本扬声器 → 笔记本麦克风），
+  实测能量比 **2.41 dB < 10 dB** 所以判 FAIL——这**不代表「用户对麦克风说话能否被听到」**。
+  要检验「你说话西西听不听得见」，跑 `node scripts/voice-device-check.ts --wav <录音> --expect "<原文>"`（相似度 ≥ 0.5 判 PASS）；
+  口径变更说明见 [`testing.md`](testing.md) 与 [`recon/field-test-report-2026-09-30.md`](recon/field-test-report-2026-09-30.md)。
+- **输出端点可能被静音**：本机出厂时默认播放端点**就是静音的**（勘测实测），现场测试前先确认系统音量/静音；
+  控制台的「Windows 设备读数」卡片会显示默认输入/输出的静音与音量。
+- **输入采集增益可能被系统改动**：默认采集增益实测 +5.5 dB（出厂），噪声底几乎 1:1 跟着它走；
+  控制台会提示「可考虑设为 0 dB」——**它只提示，不会修改任何系统设置**（改动请自行在系统里做）。
+- **摄像头被占用**：本机只有 DSHOW 能开（MSMF 失败）；若别的程序占着摄像头，一键启用会起不来子进程，
+  页面的子进程状态会显示未运行，而不是假装在场。
+- **模型限流导致延迟波动**：LLM 首字实测 1.7–2.3 s、TTS 1.0–2.0 s，端到端首条回复音频 3.6–5.5 s；
+  供应商限流或 `: PROCESSING` 保活会让首字更慢（见 [`recon/mimo-api-probe-2026-09-29.md`](recon/mimo-api-probe-2026-09-29.md)）。
+- **四个入口各用不同数据库**：`chat` → `data/chat/`、试用页 → `data/web-chat/`、`voice-turn` → `data/voice/`、
+  现场测试控制台 → `data/field-test/`（chat 与试用页可用 `XIXI_CHAT_DATA_DIR` / `XIXI_WEB_DATA_DIR` 覆盖；
+  控制台用 `--data-dir` / `--presence-data-dir`）。**在 chat 里设的人格与历史不会带到控制台**——
+  别以为功能没生效，要在哪个入口用就在哪个入口再设一次（或改 `config/xixi.example.yaml` 的基线再 seed）。
+- **本轮新增的两项特性怎么用**：① **多段回复**（`config/xixi.example.yaml` 的 `reply`：`max_segments: 3`、
+  `segment_max_chars: 60`、`gap_ms: 450`；终端 `npm run chat` 已接逐段播放，试用页/语音脚本仍整段合成）；
+  ② **主动性**（人格 `proactivity` 默认 **0.85** → 阈值 `0.45 + 0.30 × (1 − proactivity)` = **0.495**；
+  控制台「配置」栏可调高/调低，**一键关闭**就是不开「自动考虑」开关或点停用；每次开口/被拦都落
+  `conversation.decision` 事件，可回答「为什么今天没说话」）。
+
+**还没验的部分**：M6 的**真人**在场自测尚未由人跑过（合成场景已测），命令见 `progress.md` 的「未完成项」。
+
 ## 1. 阅读顺序（第一次接手，约 40 分钟）
 
 | 顺序 | 文件 | 读它的目的 | 预计 |
@@ -14,18 +57,35 @@
 | 4 | [`architecture.md`](architecture.md) | 整体结构与数据流（两种大脑、语音链路、持久化） | 10 min |
 | 5 | 按需读 [`design/`](design/README.md) | 领域模型 / 对话层 / 大脑与模型 / 语音 / 安全隐私 | 按需 |
 | 6 | [`adr/`](adr/) | 为什么这样选（半年后不要推翻已验证的决策） | 按需 |
-| 7 | [`recon/`](recon/) | 外部依赖的**原始实测报告**（DSH、MiMo、Pipecat、LiveKit、设备） | 按需 |
-| 8 | [`../xixi_ai_companion_project_plan.md`](../xixi_ai_companion_project_plan.md) | 方案原文（57 节）。**注意：它是设计意图，不是现状** | 按需 |
+| 7 | [`recon/`](recon/) | 外部依赖的**原始实测报告**（DSH、MiMo、Pipecat、LiveKit、设备、现场环境、摄像头选型、现场测试报告） | 按需 |
+| 8 | [`verification/`](verification/) | **独立验证**报告（不是实现者自述）：三态判定（通过/失败/未测）、可重跑命令 | 按需 |
+| 9 | [`review/`](review/) | **评审**报告：verdict + findings（F 编号 / 严重度）+ 复审结论 | 按需 |
+| 10 | [`../xixi_ai_companion_project_plan.md`](../xixi_ai_companion_project_plan.md) | 方案原文（57 节）。**注意：它是设计意图，不是现状** | 按需 |
+
+本轮新增的报告（都已登记在上表目录里）：
+
+| 报告 | 内容 |
+|---|---|
+| [`design/perception.md`](design/perception.md) | 摄像头在场检测（M6）的设计：抓帧、检测器、投影、隐私边界 |
+| [`recon/field-test-environment-2026-09-30.md`](recon/field-test-environment-2026-09-30.md) | 本机现场环境勘测（噪声、增益、静音、延迟、摄像头） |
+| [`recon/camera-detector-choice-2026-09-30.md`](recon/camera-detector-choice-2026-09-30.md) | 摄像头检测器选型实测（帧差动 / YuNet / HOG） |
+| [`recon/field-test-report-2026-09-30.md`](recon/field-test-report-2026-09-30.md) | 现场测试报告（设备自检结论：麦克风/扬声器/摄像头，含口径说明） |
+| [`verification/proactive-and-segments-verification-2026-09-30.md`](verification/proactive-and-segments-verification-2026-09-30.md) | 多段回复与主动性硬门禁的独立验证（27/27 门禁用例、投递与复算） |
+| [`verification/field-test-verification-2026-09-30.md`](verification/field-test-verification-2026-09-30.md) | 现场测试控制台的独立验证 |
+| [`review/proactive-and-segments-review-2026-09-30.md`](review/proactive-and-segments-review-2026-09-30.md) | 主动引擎与多段回复的评审（铁律 3 / 费用 / 隐私） |
+| [`review/three-column-console-review-2026-09-30.md`](review/three-column-console-review-2026-09-30.md) | 三栏界面与一键启用的评审（子进程与隐私） |
 
 ## 2. 权威性排序（冲突时按这个判）
 
 ```text
 1. 代码与测试          ← 唯一事实来源
 2. docs/recon/*        ← 对外部系统（模型/框架/设备）的原始实测，带命令与数字
-3. docs/progress.md    ← 项目状态与结论，人写，可能与代码滞后
-4. docs/design/*       ← 设计说明，滞后风险更高
-5. docs/adr/*          ← 决策记录，除非决策被明确推翻，否则仍然有效
-6. xixi_ai_companion_project_plan.md  ← 方案意图，与现状不符的地方**以现状为准**
+3. docs/verification/* ← 独立验证（不是实现者自述）：三态判定 + 可重跑命令
+4. docs/review/*       ← 评审与复审：verdict + findings（F 编号/严重度）
+5. docs/progress.md    ← 项目状态与结论，人写，可能与代码滞后
+6. docs/design/*       ← 设计说明，滞后风险更高
+7. docs/adr/*          ← 决策记录，除非决策被明确推翻，否则仍然有效
+8. xixi_ai_companion_project_plan.md  ← 方案意图，与现状不符的地方**以现状为准**
 ```
 
 **发现文档与代码不一致时：以代码为准，并立即修正文档**（不要反过来改代码去迎合文档）。
@@ -46,8 +106,12 @@
 | `packages/model-adapters/src/mimo.ts`（含 `chatJson` 策略） | `design/brain-and-models.md`、`recon/mimo-api-probe-2026-09-29.md`（若发现新缺陷） |
 | `apps/brain-dsh/profile/cordis.patch.yml`（插件集/人格/system prompt） | `design/brain-and-models.md`、`architecture.md`、`design/security-and-privacy.md`（权限面） |
 | `services/voice-edge/**` 或 VAD 参数 | `design/voice.md`、`recon/pipecat-spike-2026-09-29.md`、`recon/device-acceptance-2026-09-30.md` |
+| `services/perception-edge/**` 或在场检测参数 | [`design/perception.md`](design/perception.md)、`recon/camera-detector-choice-2026-09-30.md` |
+| `scripts/field-test.ts`（现场测试控制台） | `design/perception.md`、`design/voice.md`、[`testing.md`](testing.md) 的脚本表、本文件 §0 的用户须知 |
+| `packages/conversation/src/proactive.ts` 或人格默认值 | `design/conversation.md`、[`adr/0009`](adr/0009-proactive-triggers-and-hard-gates.md)、本文件 §0（主动性怎么调/怎么关） |
 | 任何 `scripts/verify-*.ts` / `eval-*.ts` / `voice-*.ts` | [`testing.md`](testing.md) 的脚本表、`README.md` 的命令段、`AGENTS.md` §7 |
 | 里程碑推进（做完 M2/M3/…） | `progress.md` §0/§1、`architecture.md` 的「未实现」列表、相关 `design/*` |
+| 新增/更新 `docs/verification/**` 或 `docs/review/**` | 本文件 §1 的报告表、`progress.md` 的「评审与验证汇总」 |
 | 新增外部依赖 | 新 ADR + `AGENTS.md` 铁律 12 的引用 |
 | 修改方案里的既定原则 | **不要做**；如有异议写新 ADR 说明 |
 
@@ -60,12 +124,14 @@ cd E:\worker2
 npm test                                      # 测试数与 docs/testing.md、progress.md 是否一致
 npm run check:docs                            # 链接、文件引用、新鲜度标记是否仍然成立
 npm run install:profile                       # profile 自检（会打印 bundles 与校验结果）
+node scripts/field-test.ts --self-test        # 现场测试控制台离线自检（项数以末行为准）
 node scripts/show-turns.ts data/chat/xixi.sqlite 3   # 事件日志仍可读、字段仍在
 # 交叉检查：文档里提到的脚本是否真的存在
 foreach ($f in @('scripts/verify-m0.ts','scripts/verify-provider-route.ts','scripts/verify-structured-output.ts',
                  'scripts/eval-conversation.ts','scripts/voice-turn.ts','scripts/voice-bargein.ts',
                  'scripts/voice-device-check.ts','scripts/serve-chat.ts','scripts/chat.ts','scripts/show-turns.ts',
-                 'scripts/make-audio-fixtures.ts','scripts/check-docs.ts')) { if (Test-Path $f) { "OK  $f" } else { "缺失 $f" } }
+                 'scripts/make-audio-fixtures.ts','scripts/check-docs.ts','scripts/field-test.ts',
+                 'scripts/verify-camera-presence.ts','scripts/verify-voice-noise.ts')) { if (Test-Path $f) { "OK  $f" } else { "缺失 $f" } }
 ```
 
 `npm run check:docs` 会检查三件事，全部是「文档说了不存在的东西」这类错误：

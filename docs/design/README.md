@@ -14,7 +14,8 @@
 | [`domain-model.md`](domain-model.md) | 事件信封与三类事件、schema 版本策略、SQLite 表结构、迁移机制、人格属性集合 | 改契约、迁移、人格属性或会话映射之前 |
 | [`conversation.md`](conversation.md) | FSM 状态与判定、§26 提示词组装、人格→指令映射、§55 沉默、一轮时序 | 改对话层、提示词或沉默语义之前 |
 | [`brain-and-models.md`](brain-and-models.md) | `BrainAdapter` 全部方法的状态、两种实现的对比、流式与工具循环、`chatJson` 策略、错误码 | 改适配器、工具、模型调用或降级策略之前 |
-| [`voice.md`](voice.md) | VAD 基线、两条输入路径、打断与延迟实测 | 改语音链路或 VAD 参数之前 |
+| [`voice.md`](voice.md) | VAD 基线、抗噪前端与成功边界、两条输入路径、打断与延迟实测 | 改语音链路或 VAD 参数之前 |
+| [`perception.md`](perception.md) | 摄像头在场检测（M6）：抓帧、帧差动 + YuNet、`presence.changed`、WorldState 投影、隐私边界 | 改在场检测、摄像头或 WorldState 投影之前 |
 
 **尚不存在的设计文档**（`docs/README.md` §3 提到但仓库里没有）：`design/security-and-privacy.md`
 （`design/voice.md` 里有一处链到它，目前是断链）。工具权限、隐私分层、密钥纪律这些内容当前分散在
@@ -54,6 +55,11 @@
 10. **交叉链接用相对路径**：从 `docs/design/` 出发写 `../architecture.md`、`domain-model.md`。
 11. **密钥、令牌、个人数据永不写进文档**（`AGENTS.md` §5）。
 12. **改完代码先改文档，再写 `progress.md`**：文档的时效标记（`最后更新`）必须与本次改动同一天。
+13. **引用代码位置用「文件名 + 函数名/测试名 + 一条可复现的 `git grep`」，不要写行号**。
+    行号随任何一次编辑失效——t34 实测某文档钉了 15 处行号，**数小时内 13 处已漂移**，多数指向错误的代码。
+    正确写法例：`` `packages/conversation/src/proactive.ts` 的 `evaluateProactiveGates`（核对：`git grep -n "export function evaluateProactiveGates" -- packages`） ``。
+    **例外**：`docs/recon/**` 与 `docs/verification/**` 是**某一时点的快照式证据**，可以保留行号（它们记录的是「当时看到的那一行」），不受本条约束。
+    （本机 `grep` 不在 PATH 上，但 Git 自带：`git grep` 直接用；需要普通 grep 时用 `D:\Git\usr\bin\grep.exe`，见 `AGENTS.md` §4。）
 
 ## 维护规则
 

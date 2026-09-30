@@ -2,10 +2,10 @@
 
 > 更新规则：每完成一个可独立理解的步骤就立刻追加/更新本文，写清「做了什么、验证结果、下一步、已知问题」。
 > 这台机器偶发蓝屏，**本文是崩溃后恢复工作的唯一依据**。
-> 最后更新：2026-09-30 09:0x — **初步验证阶段达成：文本对话流畅 + 语音闭环 + 打断可测 + 浏览器可试用（含语音输入）**
+> 最后更新：2026-09-30（集成收口 t11）— **现场测试可用：一条命令起控制台 + 三栏界面 + 一键启用摄像头在场 + 主动开口（全部先过硬门禁）；噪声鲁棒前端给出可复现成功边界 SNR ≥ 3 dB**
 > 权威来源：本文件的数字来自当次命令输出；与代码冲突时以代码为准，并立即修正本文。
 
-## 0. 初步验证阶段结论（objective）
+## 0. 结论表（objective）
 
 | 能力 | 证据 | 状态 |
 |---|---|---|
@@ -14,17 +14,24 @@
 | 沉默是一等输出（§55） | 「嗯，知道了」→ 沉默；连续应和场景出现 SILENCE | ✅ |
 | 人格真的改变行为（§39.4） | 同题对比：低话多组平均 22.3 字 vs 高话多组 57.3 字（**2.57×**） | ✅ |
 | 真实能力而非空谈 | 天气工具（Open-Meteo，只读）被真实调用：回答用的是 19~25℃、降雨概率 8% 的真实预报 | ✅ |
-| 语音闭环 | 夹具音频 → VAD → ASR → 对话 → TTS，端到端 3.6~5.5s（含冷启动），ASR 中文转写正确 | ✅ |
-| 打断 | 离线模拟：判定延迟 **192ms**（§33 目标 <500ms），播放截断于 992ms，丢弃 4128ms 未播音频 | ✅（判定层面） |
+| 语音闭环（夹具） | 夹具 → 抗噪前端 → VAD → ASR → 对话 → TTS；端到端 3.6~5.5s（含冷启动） | ✅ |
+| **噪声鲁棒前端 + 成功边界** | `node scripts/verify-voice-noise.ts`（真实 ASR）：**SNR_inband ≥ 3 dB 时 4 条夹具全部检出、平均相似度 0.805**；详见 §2.13 | ✅ |
+| 打断（§14.2） | 离线模拟：判定延迟 **192ms**（§33 目标 <500ms），播放截断于 992ms，丢弃 4128ms 未播音频 | ✅（判定层面） |
 | 重启恢复 | 两个独立进程，第二个逐字复现第一个的回答（M0 验收，`npm run verify:m0`） | ✅ |
-| 主动问候 / 长期记忆 / 唤醒词 | 未实现（M2~M5），本轮刻意不做 | ⛔ |
-| 真实麦克风 / 扬声器 | **测了但链路无信号**：录音 99.5% 能量在 100Hz 以下，VAD 与 ASR 都取不到语音。原因定位到机器音频配置（音量/静音/设备），复现命令见 [device-acceptance 报告](recon/device-acceptance-2026-09-30.md) | ⛔ 待用户开麦 |
+| **摄像头在场检测（M6）** | 合成场景 + 真机子进程实测：帧差动 + YuNet → `presence.changed` → `world_state` 投影；一键启用/停用可复现 | ✅（**真人**在场自测未跑，见 §4） |
+| **主动开口（M5-lite）** | 常驻考虑循环 + 模型生成内容 + TTS 逐段发声；**全部先过确定性硬门禁**；5 次 tick 只放行 1 条 | ✅ |
+| **多段回复** | `reply.max_segments=3 / segment_max_chars=60 / gap_ms=450`；字符零丢失；状态机一轮只推进一次 | ✅（终端已接分段播放） |
+| **现场测试控制台（一条命令）** | `npm run field-test` → http://127.0.0.1:8792；三栏界面 + 一键启用 + 设备自检引导 | ✅ |
+| 真实麦克风 / 扬声器（人耳） | 回环「回采余量」实测能量比 **2.41 dB < 10 dB** → 判 FAIL；**这不代表用户对麦克风说话能否被听到**（见 §0 用户须知与 §2.14） | ⚠️ 需人耳确认 |
+| 唤醒词 / 长期记忆 / 模型侧主动候选 | 未实现（M2 / M4 / M5 的模型侧），本轮刻意不做 | ⛔ |
+| 主动问候的「真实用户价值」 | 主动开口已能发声，但**没有真人长期使用数据**；强度默认 0.85（阈值 0.495）只是当前取值 | ⚠️ 未验证 |
 
 综合延迟（干净环境）：对话总时长 P50 2.5s / P95 5.1s，首字 P50 1.2s / P95 2.9s；语音链路里 VAD 判定 ~192ms、ASR 0.34~0.73s、LLM 首字 1.7~2.3s、TTS 1.0~2.0s。
-**尚未验收**：扬声器真正静音的延迟、唤醒词、电视误触率；真实麦克风链路已测但无信号（见上表与设备验收报告）。
+**尚未验收**：扬声器真正静音的延迟、唤醒词、电视误触率、M6 的真人自测（命令见 §4）、噪声下的真实对话响应（端点延迟会从 600ms 涨到约 1500ms，见 §2.13）。
+**现场测试前请读** [`docs/README.md`](README.md) §0「现场测试前用户须知」（一条命令、怎么判读、设备前置条件、四个入口各用不同数据库）。
 
 
-## 0. M0 验收结论
+## 0b. M0 验收结论
 
 `node scripts/verify-m0.ts` 用**两个独立的操作系统进程**跑通（方案 §34 的 M0 验收）：
 
@@ -35,7 +42,8 @@
 
 即「输入文字 → DSH → MiMo → structured tool → answer；restart → session recover」成立，且不是同进程内的假恢复。
 另有 `npm run verify:provider`（一次真实调用）单独证明路由 + 工具调用可用。
-离线测试 `npm test`：**36 项全部通过**（contracts 12 / domain 9 / transport 5 / adapter 5 / restart 3 / smoke 1 + 其他）。
+离线测试 `npm test`：**209 项全部通过**（2026-09-30 集成收口实测，exit 0，19.1s；**项数以实跑末行为准**——
+本轮先后出现过 36 / 63 / 87 / 95 / 120 / 137 / 180 / 189 / 192 / 201 / 206 / 209，那些都是**当时快照**）。
 
 ## 1. 里程碑状态
 
@@ -43,9 +51,12 @@
 |---|---|
 | M0 DSH + MiMo 文本 Harness | **已完成（验收通过）** |
 | M1 前置 spike（Python + 语音框架选型） | **已完成**：ADR-0007 选 Pipecat，参数与结论均有实测支撑 |
-| M1 语音闭环（VAD→ASR→对话→TTS + 打断） | **基本可用**：离线夹具链路通过，判定延迟 192ms；真实麦克风/扬声器未验收 |
-| 对话层（会话 FSM + Prompt 组装 + 工具） | **已完成**：多轮连续性、沉默、人格可调、只读工具 |
-| M2 唤醒词 / M3 人格学习 / M4 记忆 / M5 主动 | 未开始 |
+| M1 语音闭环（前端→VAD→ASR→对话→TTS + 打断） | **可用**：夹具链路通过 + 抗噪前端与成功边界已实测（§2.13）；真实麦克风的人耳确认仍未做 |
+| 对话层（会话 FSM + Prompt 组装 + 工具 + 多段回复） | **已完成**：多轮连续性、沉默、人格可调、只读工具、多段回复（ADR-0010） |
+| **M5-lite 主动开口**（常驻考虑循环 + 硬门禁 + 真发声） | **已完成（部分）**：候选只来自事实、门禁原样生效、内容由模型生成；**模型侧候选生成、长期记忆、FutureHook 仍未做** |
+| **M6 摄像头在场检测** | **已完成（部分）**：帧差动 + YuNet → `presence.changed` → `world_state` 投影 + 一键启用；**真人自测未跑**（§4） |
+| M2 唤醒词 / M3 人格学习 / M4 记忆 | 未开始 |
+| 现场测试控制台（三栏 + 一键启用 + 设备自检） | **已完成**：`npm run field-test`（§2.15） |
 
 仓库：`E:\worker2`。独立项目，**不依赖** `E:\worker` 的「m」原型（其方向已偏离需求）。
 
@@ -55,7 +66,8 @@
 
 - DSH `@deepseek-ai/dsh` **0.1.7-rc.2**（Developer Preview / RC），项目内 DSH_HOME = `<repo>/.dsh`（已 gitignore）。
 - Node v24.21.0 原生运行 `.ts`（无需编译）；`node:sqlite`（SQLite 3.53.4，JSON1）可用 → M0 运行时只依赖 `js-yaml`。
-- 本机**没有 Docker / mosquitto / ffmpeg**；仅有 Python 3.14.7。
+- 本机**没有 Docker / mosquitto / ffmpeg**。系统 Python 是 **3.14.7**（不满足 Pipecat/LiveKit），
+  语音侧一律用隔离 venv 里的 **Python 3.12.10**（`.venvs/{voice-pipecat,voice-livekit,field-probe,cv4}`，见 §2.7 与 §2.7b）。
 - 显卡 GTX 1050 Ti 4GB + Intel HD 630；外网可能需要代理 `127.0.0.1:7890`。
 
 ### 2.2 DSH 集成配方（已落地，可复现）
@@ -192,7 +204,112 @@ compat: { thinkingFormat: deepseek, requiresReasoningContentOnAssistantMessages:
 - 对话语料：`tests/scenarios/corpus.ts`（8 个场景：连续对话、疲惫晚上、跨轮话题、电视未直呼、安静模式、低/高话多对比、连续应和），
   每条都是**可证伪的行为断言**，不是字符串比对。
 - 评测器：`scripts/eval-conversation.ts`（结构检查 + 可选评审模型 `--judge`），报告写入 `docs/recon/conversation-eval-<date>.md`。
-- 现有测试：`npm test` **63 项全绿**（离线，不花钱）。
+- 现有测试：`npm test` 实测数字见 §0b（**以实跑末行为准**；测试数会随断言增加而变化）。
+
+### 2.13 噪声鲁棒语音前端与成功边界（t2 实现 / t23 订正 / t7→t24→t38 评审链）
+
+用户明确说过「麦克风噪音很大」，而 ADR-0007 的基线只在干净合成夹具上验证过。本轮把它做成可测量的：
+
+- 实现：`services/voice-edge/voice_edge/frontend.py`（纯函数：去直流 + 零相位 120 Hz 双二阶高通 +
+  噪声底自适应门限；谱减法可选、**默认关**）、`voice_edge/calibrate.py`（噪声底校准入口）、
+  `voice_edge/make_noise_fixtures.py`（实测环境噪声 × 6 档 SNR = 30 个 WAV + `manifest.json`）、
+  `scripts/verify-voice-noise.ts`（干净 + 噪声夹具 → 前端 → VAD → **真实 MiMo ASR**）。
+
+**可复现成功边界（写死）**：`SNR_inband ≥ 3 dB` 时 4 条中文夹具**全部检出**、平均字符相似度 **0.805**。
+
+| SNR 档 | 检出 | 平均字符相似度 | 判定 |
+|---|---|---|---|
+| 18 dB | 4/4 | 0.841 | PASS |
+| 6 dB | 4/4 | 0.841 | PASS |
+| **3 dB** | **4/4** | **0.805** | **PASS（边界）** |
+| 0 dB | 4/4 | 0.491（2 条 <0.6） | FAIL |
+| −6 dB | 0/4 | —（全部漏检） | FAIL |
+
+**端点延迟必须按 t23 修正后的口径引用**（逐条值、最大值；**不要用均值，也不要用被截断的 `endpointDelayMs`**）：
+6 dB 档 **1056 / 1376 / 1472 / 1088（max 1472）**；干净档 728 / 704 / 864 / 704；3 dB 档 104 / 128 / −64 / 96（max 128）。
+复现（不花钱）：`node scripts/verify-voice-noise.ts --fake --tiers 6`；真实 ASR：`npm run voice:noise`。
+数字来源：`docs/design/voice.md` §1.1（6）。
+
+**三条负结论（不要美化）**：
+1. **高通把宽带噪声降了 5.33 dB，但对 Silero 的分段判定几乎没影响**（同一批夹具 A/B：段数/起点/端点不变，
+   个别 0–288 ms 的方向性改善）。别把「降噪 5.33 dB」读成「VAD 会变好 5.33 dB」。
+2. **谱减法默认关闭**：噪声带只降 0.47–1.91 dB，端到端相似度 6 dB 档无变化、**3 dB 档反而变差（0.622 vs 0.805）**，
+   还要每段多花 100–300 ms。开关保留（`segment --nr`），负结论留在代码与 `voice.md` §1.1（5）。
+3. **噪声下端点延迟显著变长**：干净 600 ms → 6 dB 档约 1056–1472 ms（≈1500 ms 量级），
+   真实对话的响应会明显拖慢；0 dB 档打断判定也不可靠。
+
+边界值的自动化与证据：`report.boundary.lowestPassingTierDb`（脚本自动算）、
+`docs/verification/*` 与 `docs/review/voice-*-review-*.md`；困难样本（0 / −6 dB 共 10 个 WAV）**全部保留**，
+有单测守住「最低 SNR 档必须仍在盘上」。
+
+### 2.14 摄像头在场检测（M6）与设备验收的正确解读
+
+- 实现：`services/perception-edge/perception_edge/{run,bench}.py`（DSHOW 抓帧 → 帧差动 1.17ms/对 → YuNet 人脸 38.3ms/帧）
+  → `presence.changed` 事件 → `world_state` 投影（`presence.home`，`002_world_state.sql`）；设计见 [`design/perception.md`](design/perception.md)。
+- 一键启用：控制台 `POST /api/field/live {action:'start'}` = 迁移在场库 → 起 `perception_edge.run --live` 子进程 → 循环先 tick 一次；
+  真机实测 `child.pid` 可见、5 秒后 frames 104、presence 事件 2 条、`present=true`、`confidence=0.75`，停用后子进程真退出。
+- 隐私：帧只在内存（子进程 `cv2.imencode` → stdout base64，控制台只留最新一帧），**不留图像**；
+  `--live` 仍会写 `data/perception/` 的事件库（「不留图像」≠「不写库」）。
+  可重跑核对：`node scripts/verify-camera-presence.ts --live --seconds 8`（磁盘图像文件 0 个）。
+- **设备验收的两条正确解读**（`docs/recon/field-test-report-2026-09-30.md`）：
+  1. **「扬声器 FAIL」测的是回采余量**（笔记本扬声器 → 笔记本麦克风），能量比 2.41 dB < 10 dB 所以 FAIL；
+     **不代表用户对麦克风说话能否被听到**——那要用 `node scripts/voice-device-check.ts --wav <录音> --expect "<原文>"` 检验（相似度 ≥ 0.5 判 PASS）。
+  2. 默认播放端点**出厂就是静音的**（勘测实测），本轮已解除；采集增益默认 +5.5 dB，噪声底几乎 1:1 跟着它走，
+     建议设 0 dB（控制台只提示、不修改系统设置）。
+
+### 2.15 多段回复（ADR-0010）与主动开口（M5-lite）+ 三栏控制台
+
+- **多段回复**：`config/xixi.example.yaml` 的 `reply: {max_segments: 3, segment_max_chars: 60, gap_ms: 450}`
+  （代码里被 `resolveReplyLimits(config.reply)` 夹进 ADR-0010 的硬上限）。独立验证（t43）：
+  `onSegment` 与 `onTextChunk` 互斥（chunks=0）、85/127/230 字分别 2/3/3 段、**字符零丢失**、
+  该轮事件恰好 1 user + 1 assistant + 1 decision（**状态机只推进一次**）。
+  **接线现状**：终端 `scripts/chat.ts` **已接**分段播放（`onSegment`）；试用页与 `voice-turn.ts` 仍整段 `synthesize(turn.text)`。
+- **主动开口（M5-lite）**：`ProactiveLoop`（默认关）+ 候选只来自事实（在场 / 会话悬置 / 时间钩子 / 话题池 / 随机闲聊）；
+  **判定全部走同一条 `ProactiveEngine.consider`**（铁律 3），内容由模型在 `deliver` 接缝里生成、失败回退固定句。
+  真机实测：`presence_arrived` PASSED（2 段真音频 430KB + 290KB）→ 随后 4 次 tick 全被 `QUOTA_DAY_EXCEEDED` 拦（当日额度=1）。
+- **人格强度与「怎么调、怎么关」**：`personality.base.proactivity` 默认 **0.85**（代码 `DEFAULT_PROACTIVITY = 0.85`），
+  阈值 `0.45 + 0.30 × (1 − proactivity)` = **0.495**（核对：`git grep -n "DEFAULT_PROACTIVITY" -- packages`）。
+  控制台「配置」栏可调 proactivity / talkativeness / verbosity（写入 `self_profile` + `self_profile_history`，
+  来源 `console:personality`，并落一条 `system.health` 审计）；**一键关闭** = 不开「自动考虑」开关或点停用。
+  每次开口或被拦都落 `conversation.decision` 事件（被拦也落 `speak:false`，可回答「为什么今天没说话」）。
+  ⚠️ **时点提醒**：t43/t80 报告里写的 0.70 / 0.54 是**当时快照**，t77 已改为 0.85 / 0.495。
+- **三栏控制台**：`npm run field-test` → http://127.0.0.1:8792，三栏（传感器 / 配置 / 对话）+ 一键启用 + 实时画面
+  + 设备自检引导 + 隐私与保留策略；<1200px 自动堆叠。库默认 `data/field-test`（`--data-dir` / `--presence-data-dir` 可改；
+  未知参数**中文报错 + exit 2**）。
+
+### 2.16 三条已知取舍与限制（写清楚，别当成没做）
+
+1. **`engine.state` 是带副作用的 getter（读取即推进，t19 的核心取舍）**：读状态会推进 FSM 的时间判定，
+   所以「看一眼现在是什么状态」不是纯查询。任何新的读取方（面板、脚本、将来的常驻服务）都必须知道这一点。
+2. **`REJECTED_NOT_ADDRESSED` 目前没有真实样本**：稳定的拒绝只有 `SUSPENDED`（安静模式）一种，
+   另一条路径的样本只在测试与历史报告里出现（t10 的 F2 记录过「当时不成立」的验证）。
+3. **`data/` 目录的隐私比较是「文件名集合」**：同名覆盖不会被发现。今天无法触发（服务里没有任何写图路径），
+   **将来若加调试落图，必须改成 mtime + 大小或内容哈希**（评审 t80 的 O4 也是同一口径：隐私的含义是「不留图像」，不是「不写库」）。
+
+## 2b. 评审与验证汇总（本轮）
+
+**四份实现评审的 verdict 与 findings 去向**（findings 编号与严重度取自各自报告；「闭环」= 复审已 pass）：
+
+| 评审 | 对象 | verdict | findings | 修复任务 | 复审任务与结论 | 是否闭环 |
+|---|---|---|---|---|---|---|
+| **t7** `voice-implementation-review` | t2 语音前端 | needs_revision | F1 medium / F2 medium / F3 low / F4 low / F5 info | **t23**（round-2/3） | **t24** needs_revision（F1 残留）→ **t38** 修复 → `voice-repair-round-3-review` **pass** | ✅ |
+| **t8** `perception-implementation-review` | t3 摄像头在场 | needs_revision | F1 medium / F2 medium / F3 medium / F4 low / F5 low / F6 info | **t26** | **t27** `perception-repair-review` **pass** | ✅ |
+| **t9** `console-implementation-review` | t4 现场测试控制台 | needs_revision | F1 low（自检项数已漂移） | **t29** | **t30** needs_revision（F1 medium + F2–F5 low）→ t45 → round-3 仍 needs_revision → 后续 t53/t59/t64 逐处订正 | ⚠️ 文档数字链仍在收尾（每次复审都能抓到新的漂移） |
+| **t10** `core-wiring-review` | t5 核心接线 | needs_revision | F1 low / F2 low / F3 low | **t31** | **t32** `core-wiring-repair-review` **pass** | ✅ |
+
+**t10 评审 F3 的教训（必须记住）**：任务回报里的测试计数是**当时快照**——t5 报「87/87」，而本文件此刻实测是 209 项。
+引用任何他人回报里的数字时**必须注明时点**，不要当作现状；本文件里的计数一律以实跑末行为准。
+
+**独立验证（不是实现者自述）**：`docs/verification/` 下 2 份——多段回复与主动性门禁（t43：27/27 门禁用例、
+投递恰好 1 次、崩溃后绝不重发、6h 额度实测 4 = 配置上限）、现场测试控制台（t4 的独立验证）。
+**评审报告**共 20+ 份在 `docs/review/`（含 6 份复审），verdict 分布与观测都留在各自文件里。
+
+**t29 负责的三份文件（`docs/testing.md` / `README.md` / `docs/handoff.md`）**：本轮只做**最终一致性核对**，
+未重复修改（遵守派单约束）。**核对结论：仍有漂移，需另派单订正**——
+`docs/testing.md:5` 写「实测 **180 项**：unit 124 + integration 30 + perception 11 + console 15」，
+同文件 `:132` 又写「实测 **139 项**全绿」（同一份文件两个数），`docs/handoff.md` 两处写「实测 139 项」
+（还带「空载约 27–30s」的耗时旧结论）。**此刻实测是 `npm test` 209 项、`--self-test` 31 项**（本文件 §0b），
+三处数字都应按「以实跑末行为准」改写（`docs/design/README.md` §3 规则 13 与 `AGENTS.md` §9.18 都是同一原则）。
 
 ## 3. 关键决策
 
@@ -207,17 +324,36 @@ compat: { thinkingFormat: deepseek, requiresReasoningContentOnAssistantMessages:
 | Node 原生 TS + `node:sqlite`，唯一运行依赖 `js-yaml` | 减少工具链与依赖面（这台机器易崩） | ADR-0006 |
 | 每轮一个 `dsh` 进程 | 让「重启恢复」成为默认行为而非特例；延迟代价在 M1 用常驻宿主解决 | ADR-0001 / 本文 2.2 |
 
-## 4. 下一步
+## 4. 下一步 / 未完成项
 
-1. **M2 唤醒与搭话判定**（当前最大缺口）：`wake_word: false`，首句靠 UI 按钮视为已直呼。
-   需要：自定义唤醒词（openWakeWord 路线，另有 `E:\worker\models` 里已验证过的 sherpa-onnx KWS 用法可参考）+ 说话人相似度 +
-   会话状态 + 语义承接的融合判定（§13）。**两家语音框架都无法区分电视与真人**（见 ADR-0007），这一步必须自己做。
-2. **设备验收**：用户开麦/开音量后跑 [设备验收两条命令](recon/device-acceptance-2026-09-30.md)，完成 §33 的设备部分；
-   再把 Node 驱动 Python 的一次性进程换成常驻语音服务（当前每次 VAD 都要付 Python 冷启动）。
-3. **M3 人格反馈**：「你话太多了」→ Feedback Interpreter（结构化输出 + 受控增量 + history + 回滚），
-   当前只有管理员的 `overrideSelfProfile`，**模型驱动的学习尚未实现**。
-4. **M4 Memory**：当前只有会话内工作记忆（最近 8 轮）；长期记忆、纠正优先级、FutureHook 都还没有。
-5. 已知待补：`tsc --noEmit` 类型检查、`tests/replay/`（§22.3 回放属 M5）。
+1. **M6 的真人自测（唯一还没由人跑过的关键项）**——**原样**照跑，不得用合成图或外部图片冒充：
+   ```powershell
+   cd E:\worker2
+   node scripts/verify-camera-presence.ts --seconds 40 --require-transition
+   ```
+   做法：跑之前确保画面里**没有人**，运行中**走进画面再走出**（`--require-transition` 要求真的看到一次翻转，
+   敲错参数会中文报错而不是静默通过）。**跑完把输出回填本文件**（贴命令、时间、帧数、`present` 翻转次数、
+   `confidence` 与磁盘图像文件数），并更新 §0 结论表里「摄像头在场检测」的状态。
+2. **M2 唤醒与搭话判定**（当前最大功能缺口）：`wake_word: false`，首句靠 UI 按钮视为已直呼。
+   需要：自定义唤醒词（openWakeWord 路线，另有 `E:\worker\models` 里已验证过的 sherpa-onnx KWS 用法可参考）+
+   说话人相似度 + 会话状态 + 语义承接的融合判定（§13）。**两家语音框架都无法区分电视与真人**（ADR-0007），必须自己做。
+3. **真实麦克风的人耳确认**：回采余量 FAIL（2.41 dB）已解释（§2.14），但「用户对麦克风说话能否被听到」
+   仍需真人跑 `node scripts/voice-device-check.ts --wav <录音> --expect "<原文>"`；噪声下的真实对话响应也会变慢（§2.13 第三条）。
+4. **生产入口的常驻语音服务**：runner 已有常驻 Python worker，生产入口（`serve-chat.ts` / `voice-turn.ts`）仍是每次一进程。
+5. **三条文档-实现一致性待办（都不在本任务 inScope，需另派单）**：
+   - `docs/testing.md`（`:5` 写 180 项、`:132` 写 139 项）与 `docs/handoff.md`（两处写 139 项 + 「空载约 27–30s」）
+     的测试计数与耗时都已过期（**此刻实测 209 项 / self-test 31 项**）——按「以实跑末行为准」改写。
+   - `docs/adr/0010-multi-segment-replies.md` 有三处「**没有任何生产入口传 `onSegment`**」，而
+     `scripts/chat.ts` **已经传了**（核对：`git grep -n "onSegment" -- scripts`）——那三处现在已经是假话；
+     准确的现状是「chat CLI 已接分段播放，试用页与 `voice-turn.ts` 仍整段合成」。
+   - `docs/design/conversation.md` §6 的「播放侧尚未接线」同样过期（同上核对命令）。
+   （这就是 t54 的前瞻观测：接线落地的那一刻，这几处就变成假话。）
+6. **已知小项（下次动那两处时顺手改）**：`conversation.md` 里 `confidence` 字段的括号说明容易被读成「也是 1/0」
+   （实际是 1 或 0.5）；`packages/domain/src/store.ts` 的 `toStoredEvent` 不回填 `sessionId`（低危：列已写入、按 sessionId 过滤仍正常）。
+7. **M3 人格反馈**：「你话太多了」→ Feedback Interpreter（结构化输出 + 受控增量 + history + 回滚），
+   当前只有管理员的 `overrideSelfProfile`（控制台面板走的就是它），**模型驱动的学习尚未实现**。
+8. **M4 Memory**：当前只有会话内工作记忆（最近 8 轮）；长期记忆、纠正优先级、FutureHook 都还没有。
+9. 已知待补：`tsc --noEmit` 类型检查、`tests/replay/`（§22.3 回放属 M5）。
 
 ## 5. 已完成的委派
 
@@ -235,6 +371,18 @@ compat: { thinkingFormat: deepseek, requiresReasoningContentOnAssistantMessages:
 - **DSH 是 RC**：升级可能破坏配置；必须固定版本，升级前先跑 `npm test` 与两个 verify 脚本。
 - **联网搜索对该密钥不可用**：方案里的新闻/天气类话题需要自建搜索通道。
 - **单机单进程假设**：`recordTurn` 在事务外先读会话，多进程并发写需要重新审视。
+- **已知耦合（后续改进项）**：`scripts/voice-turn.ts` **反向 import** `scripts/field-test.ts`（CLI 依赖 CLI）。
+  评审建议把共享核心移到 `scripts/lib/`；**本轮不做，留给后续**。
+- **文档与实现的两处已过期表述**（不在本轮 inScope，见 §4 第 5 条）：ADR-0010 的三处「没有任何生产入口传 `onSegment`」
+  与 `conversation.md` §6 的「播放侧尚未接线」——`scripts/chat.ts` 已接。
+- **`docs/recon/` 层在 t26 时被增补过**（勘测报告的三处内容，captain 决定保留）：recon 是「某一时点的实测快照」，
+  但 t26 之后它不是纯快照了——后来者不要以为 recon 层从未被无痕改动；引用时看报告内的订正标记。
+- **本轮流程限制（方法论，不是产品缺陷）**：
+  1. **契约校验只核对成员声明的 `changedPaths`**——未声明的越界编辑不会被自动拦截，唯一防线是成员如实披露 + 评审逐处核对；
+  2. **验收条款涉及的路径若没写进 `inScope`，会把达标实现判成 failed**（t2 / t4 都这样失败过）；
+  3. **`deliverables` 与 `inScope` 不一致时，编辑不会进 `changedPaths`**（t26 的实例）；
+  4. **任何「全绿 / 已接入」声明必须带修订号与实测输出**；
+  5. **全量测试结果要在成员在途编辑窗口之外判读**（`scripts/field-test.ts` 被测试 import，改它会让全队 `npm test` 变红）。
 
 ## 7. 崩溃后如何恢复
 
@@ -242,7 +390,8 @@ compat: { thinkingFormat: deepseek, requiresReasoningContentOnAssistantMessages:
 cd E:\worker2
 npm install                             # workspace 链接 + js-yaml + dsh-tools（网络失败可挂代理 127.0.0.1:7890）
 node scripts/install-dsh-profile.ts      # 幂等；重建 .dsh/profile
-npm test                                # 应为 36 项以上全绿
+npm test                                # 离线测试全绿（**项数以实跑末行为准**，别把数字抄进文档）
+node scripts/field-test.ts --self-test   # 现场测试控制台离线自检（项数以末行为准）
 npm run verify:provider                 # 一次真实调用（需要 .env 里的 MIMO_API_KEY）
 npm run verify:m0                       # 两进程重启验收
 ```
