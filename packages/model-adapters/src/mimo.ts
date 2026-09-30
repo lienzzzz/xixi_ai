@@ -17,9 +17,29 @@ import { classifyStatus, ModelError } from './errors.ts';
 
 export type MimoRole = 'system' | 'user' | 'assistant' | 'tool';
 
+/**
+ * One still image attached to a message.
+ *
+ * Images are **optional and per-turn** on purpose (铁律 6: 连续音视频不上云). The
+ * caller decides when to attach one; this client only knows how to encode it.
+ */
+export interface MimoImageInput {
+  /** MIME type of the encoded image, e.g. `image/jpeg`. */
+  readonly mediaType: string;
+  /** Base64 of the encoded bytes, without a `data:` prefix. */
+  readonly base64: string;
+}
+
 export interface MimoMessage {
   readonly role: MimoRole;
   readonly content: string;
+  /**
+   * Images for this message, if any. A text-only message keeps `content` as a
+   * plain string — the wire body for a turn without images is unchanged.
+   * Verified against the live API 2026-09-30 (docs/recon/mimo-vision-probe-2026-09-30.md):
+   * accepted as an OpenAI-style `image_url` part carrying a base64 `data:` URL.
+   */
+  readonly images?: readonly MimoImageInput[];
   /** Present on the assistant message that requested tools. */
   readonly tool_calls?: {
     readonly id: string;
@@ -425,9 +445,13 @@ export class MimoClient {
 
   #body(options: MimoChatOptions, stream: boolean): Record<string, unknown> {
     const thinking = options.thinking ?? false;
+    // Only rewrite the messages when a turn actually carries an image: a body
+    // without images must stay byte-for-byte what it is today (pinned by
+    // tests/unit/core/mimo-image-payload.test.ts).
+    const carriesImages = options.messages.some((message) => (message.images?.length ?? 0) > 0);
     return {
       model: options.model ?? this.defaultModel,
-      messages: options.messages,
+      messages: carriesImages ? options.messages.map(toWireMessage) : options.messages,
       max_completion_tokens: options.maxCompletionTokens ?? 400,
       stream,
       temperature: options.temperature ?? 0.8,
@@ -466,6 +490,32 @@ export class MimoClient {
           }),
     };
   }
+}
+
+/** `data:<media type>;base64,<bytes>` — the only image form this API accepted (measured 2026-09-30). */
+export function imageDataUrl(image: MimoImageInput): string {
+  return `data:${image.mediaType};base64,${image.base64}`;
+}
+
+/**
+ * One message as the wire body sends it.
+ *
+ * A message without images is returned untouched (so its `content` stays a
+ * string and unknown extra fields survive); a message with images becomes the
+ * OpenAI-style content array `[text?, image_url…]`, and the local-only `images`
+ * field is dropped — sending it upstream would be an invented field.
+ */
+function toWireMessage(message: MimoMessage): unknown {
+  const images = message.images ?? [];
+  if (images.length === 0) return message;
+  const { images: _images, ...rest } = message;
+  return {
+    ...rest,
+    content: [
+      ...(message.content.length === 0 ? [] : [{ type: 'text', text: message.content }]),
+      ...images.map((image) => ({ type: 'image_url', image_url: { url: imageDataUrl(image) } })),
+    ],
+  };
 }
 
 function toUsage(payload: RawResponse): MimoUsage {

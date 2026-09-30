@@ -32,6 +32,22 @@ export interface BrainContext {
   readonly worldState?: Readonly<Record<string, JsonValue>>;
 }
 
+/**
+ * One still image attached to a user turn.
+ *
+ * Deliberately **optional and per-turn**: 铁律 6 forbids continuous audio/video
+ * leaving the machine, so the caller (a program, not the model) decides when a
+ * single frame accompanies a turn. Adapters that cannot send images must refuse
+ * the turn rather than drop it — otherwise the model would answer as if it had
+ * seen something it never received.
+ */
+export interface BrainImageInput {
+  /** MIME type of the encoded image, e.g. `image/jpeg`. */
+  readonly mediaType: string;
+  /** Base64 of the encoded bytes, without a `data:` prefix. */
+  readonly base64: string;
+}
+
 export interface UserTurnInput {
   readonly sessionId: string;
   readonly text: string;
@@ -42,6 +58,8 @@ export interface UserTurnInput {
    * must flatten everything into one task string join them deterministically.
    */
   readonly prompt?: AssembledPromptLike;
+  /** Optional still image(s) for **this** turn; attached to the last user message. */
+  readonly images?: readonly BrainImageInput[];
   readonly timeoutMs?: number;
 }
 

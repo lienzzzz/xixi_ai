@@ -129,13 +129,16 @@ export class MimoBrainAdapter implements BrainAdapter {
 
   #messages(input: UserTurnInput): MimoMessage[] {
     const messages: MimoMessage[] = [];
+    // Images belong to the current user turn, so they ride on the last user
+    // message of whichever path builds the list.
+    const images = input.images === undefined || input.images.length === 0 ? undefined : input.images;
     if (input.prompt !== undefined) {
       messages.push({ role: 'system', content: input.prompt.system });
       for (const turn of input.prompt.history) {
         if (turn.content.length === 0) continue;
         messages.push({ role: turn.role === 'user' ? 'user' : 'assistant', content: turn.content });
       }
-      messages.push({ role: 'user', content: input.prompt.user });
+      messages.push({ role: 'user', content: input.prompt.user, ...(images === undefined ? {} : { images }) });
       return messages;
     }
     if (input.context !== undefined) {
@@ -148,7 +151,7 @@ export class MimoBrainAdapter implements BrainAdapter {
         messages.push({ role: turn.role === 'user' ? 'user' : 'assistant', content: turn.text });
       }
     }
-    messages.push({ role: 'user', content: input.text });
+    messages.push({ role: 'user', content: input.text, ...(images === undefined ? {} : { images }) });
     return messages;
   }
 

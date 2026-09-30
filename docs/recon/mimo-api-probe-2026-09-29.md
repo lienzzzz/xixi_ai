@@ -46,12 +46,17 @@ Ordering detail: a malformed JSON body with a **bad key** returns `400 {"error":
 
 ## 2. MODELS
 
-- `GET https://api.xiaomimimo.com/v1/models` → **404** (openresty HTML `<title>404 Not Found</title>`), with or without auth, api-key or Bearer.
-- **`GET https://api.xiaomimimo.com/models`** (no `/v1`) → **200**, raw:
+- ⚠️ **订正 2026-09-30（t87，实测）**：这两条的**状态已经对调**——现在 `GET https://api.xiaomimimo.com/v1/models` → **200**
+  （带 `api-key`，返回的正是下面那份 9 个 id 的清单），而 `GET https://api.xiaomimimo.com/models`（**不带** `/v1`）→ **404**
+  （openresty 的 `<title>404 Not Found</title>`）。**不要再按 09-29 这句去写代码**；复现：`node scripts/probe-mimo-vision.ts`
+  （它会同时打印两个端点的状态与 id 数量）。
+- 09-29 的原始观察（保留为「这个端点变过」的记录）：`GET /v1/models` → **404**（openresty HTML，带不带 auth 都一样）；
+  **`GET /models`**（不带 `/v1`）→ **200**，raw：
 ```json
 {"object":"list","data":[{"id":"mimo-v2.5","object":"model","owned_by":"xiaomi"},{"id":"mimo-v2.5-asr","object":"model","owned_by":"xiaomi"},{"id":"mimo-v2.5-pro","object":"model","owned_by":"xiaomi"},{"id":"mimo-v2.5-tts","object":"model","owned_by":"xiaomi"},{"id":"mimo-v2.5-tts-voiceclone","object":"model","owned_by":"xiaomi"},{"id":"mimo-v2.5-tts-voicedesign","object":"model","owned_by":"xiaomi"},{"id":"mimo-v2.6-flash","object":"model","owned_by":"xiaomi"},{"id":"mimo-v2.6-pro","object":"model","owned_by":"xiaomi"},{"id":"mimo-v2.6-pro-ultraspeed","object":"model","owned_by":"xiaomi"}]}
 ```
-- `GET /models?detail=1` → same payload (query ignored). `GET /models/mimo-v2.6-flash` → `400 {"error":{"code":"400","message":"Invalid request","param":"404 NOT_FOUND","type":""}}`.
+- （09-29 观察，**已被上面的订正作废**）`GET /models?detail=1` → same payload (query ignored)；`GET /models/mimo-v2.6-flash` → `400 {"error":{"code":"400","message":"Invalid request","param":"404 NOT_FOUND","type":""}}`。
+  2026-09-30 只复核了 `/v1/models` 与 `/models` 两个状态的互换，**没有**重测 `?detail=1` 与 `/v1/models/<id>` 这两种形态。
 
 **Exact ids available to this key:** `mimo-v2.5`, `mimo-v2.5-asr`, `mimo-v2.5-pro`, `mimo-v2.5-tts`, `mimo-v2.5-tts-voiceclone`, `mimo-v2.5-tts-voicedesign`, `mimo-v2.6-flash`, `mimo-v2.6-pro`, `mimo-v2.6-pro-ultraspeed`.
 

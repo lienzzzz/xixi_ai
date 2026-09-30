@@ -116,6 +116,16 @@ export class DshBrainAdapter implements BrainAdapter {
   }
 
   async handleUserTurn(input: UserTurnInput): Promise<BrainTurnStream> {
+    // The harness path flattens a turn into one task string, so it cannot carry
+    // an image yet. Dropping `input.images` here would let the model answer as if
+    // it had seen the frame, so the seam refuses instead: the caller can fall back
+    // to the direct MiMo path (`MimoBrainAdapter`), which does send images
+    // (docs/recon/mimo-vision-probe-2026-09-30.md).
+    if (input.images !== undefined && input.images.length > 0) {
+      throw new BrainError('BAD_REQUEST', 'the DSH harness path cannot send images yet', {
+        detail: `${input.images.length} image(s) were supplied; use the direct MiMo path for image turns`,
+      });
+    }
     const resumeBrainSessionId = this.#store.brainSessionId(input.sessionId, this.provider);
     const context: BrainContext = input.context ?? { identityName: '西西', personality: {} };
     const request: DshTurnRequest = {

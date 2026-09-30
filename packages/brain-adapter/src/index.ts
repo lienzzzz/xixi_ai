@@ -41,6 +41,7 @@ export {
   type BrainAdapter,
   type BrainContext,
   type BrainDescription,
+  type BrainImageInput,
   type BrainTurnChunk,
   type BrainTurnResult,
   type BrainTurnStream,

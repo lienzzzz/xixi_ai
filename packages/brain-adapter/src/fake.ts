@@ -47,6 +47,11 @@ const DEFAULT_REPLY = (input: UserTurnInput): ScriptedOutcome => {
  * Deterministic adapter for tests, replay and offline demos. No network, no
  * key, no harness: it exists so the seams above and below the adapter can be
  * tested without a model in the loop.
+ *
+ * `input.images` is deliberately ignored: this stand-in makes no claim about
+ * seeing anything, and a scripted reply must not depend on pixels. A test that
+ * cares about the image pipeline inspects the wire body instead
+ * (tests/unit/core/mimo-image-payload.test.ts).
  */
 export class FakeBrainAdapter implements BrainAdapter {
   readonly provider: string;

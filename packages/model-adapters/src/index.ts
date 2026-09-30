@@ -7,11 +7,13 @@ export {
   type WeatherReport,
 } from './weather.ts';
 export {
+  imageDataUrl,
   MimoClient,
   tryParse,
   type MimoChatOptions,
   type MimoChatResult,
   type MimoClientOptions,
+  type MimoImageInput,
   type MimoMessage,
   type MimoToolCall,
   type MimoToolDefinition,
