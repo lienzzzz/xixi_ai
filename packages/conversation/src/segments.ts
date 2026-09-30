@@ -8,9 +8,10 @@
  * segment counts — it cannot perceive playback time.
  *
  * The limits are hard ceilings: callers may tighten them, never exceed them
- * (ADR-0010 §3). A caller asking for 40 segments gets 8 and a merged tail; the
- * concatenation invariant (`segments.join('') === normalizeReplyText(text)`) holds
- * for every input, including the clamped ones.
+ * (ADR-0010 §3). `resolveReplyLimits` clamps a request for 40 segments to 8 and remembers
+ * that the caller asked for more; the concatenation invariant
+ * (`segments.join('') === normalizeReplyText(text)`) holds for every input, including the
+ * clamped ones.
  *
  * P1 (2026-10-01) raised the segment ceiling from 3 to 8 and left `segmentMaxChars`
  * at 60, because the two numbers mean different things:
@@ -21,11 +22,20 @@
  *     A long explanation (4–6 sentences, or one story) needs room, so the capacity is
  *     now 8 × 60 = 480 characters while the spoken rhythm stays the same.
  *
- * Where the two ceilings still cannot both hold — a reply longer than the capacity —
- * the invariant "never add or delete a character" (M4) wins: the tail merges into
- * the last allowed segment, that segment goes over `segmentMaxChars`, and
- * `mergedOverflow` reports it. Every reply that fits the capacity has all segments
- * within the ceiling — see the boundary tests.
+ * When the ceilings hold and when they do not — the condition the boundary tests pin:
+ *   * the greedy packer fills segments up to `segmentMaxChars`, cutting at sentence enders
+ *     (and hard-chopping a single sentence that is longer than the ceiling). If that yields
+ *     **at most `maxSegments` groups, every segment is ≤ `segmentMaxChars`** and
+ *     `mergedOverflow` is false;
+ *   * if it yields **more than `maxSegments` groups**, the packs from `maxSegments - 1` on are
+ *     joined into the last segment, `mergedOverflow` becomes true, and that last segment is
+ *     **longer than `segmentMaxChars`** (the 279-character counterexample in
+ *     `tests/unit/core/reply-segments.test.ts` is the smallest shape of this);
+ *   * `mergedOverflow` is also true when the caller simply *asked* for more segments than the
+ *     ceiling, even if the text would have fit.
+ *
+ * In the merge case the invariant "never add or delete a character" (M4) is the one kept:
+ * text is never dropped to satisfy the per-segment ceiling.
  */
 
 import { SILENCE_TOKEN } from './prompt.ts';

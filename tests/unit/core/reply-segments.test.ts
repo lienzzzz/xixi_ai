@@ -58,7 +58,7 @@ test('normalizeReplyText only removes line breaks and surrounding whitespace', (
   assert.equal(normalizeReplyText('一。\n\n二。'), '一。二。');
 });
 
-test('M1/M2: a reply that fits the capacity is split into segments of at most 60 characters', () => {
+test('M1/M2: when the greedy packer yields at most 8 groups, every segment is at most 60 characters', () => {
   // Two 40-character sentences: 80 characters, so it cannot be one segment.
   const two = splitReplyIntoSegments(sentence(40, '甲') + sentence(40, '乙'));
   assert.equal(two.segments.length, 2);
@@ -81,7 +81,7 @@ test('M1/M2: a reply that fits the capacity is split into segments of at most 60
   assert.equal(long.segments.join(''), sentence(130));
 });
 
-test('P1: the per-turn ceiling is 8 × 60 = 480 characters, so a long explanation is not squeezed', () => {
+test('P1: the capacity is 8 × 60 = 480 characters, so a long explanation is not squeezed', () => {
   // V0.1's ceiling was 3 × 60 = 180 characters, and the baseline found 9/19 real turns sitting
   // right against it — i.e. the cap was shaping the reply, not just the playback (baseline §2.5).
   assert.equal(REPLY_LIMITS.maxSegments, 8);
@@ -97,16 +97,31 @@ test('P1: the per-turn ceiling is 8 × 60 = 480 characters, so a long explanatio
   for (const segment of result.segments) assert.ok(segment.length <= 60, `bad length ${segment.length}`);
 });
 
-test('M1 beyond capacity: the tail merges into the last segment and mergedOverflow says so', () => {
-  // 13 × 40 = 520 characters > 8 × 60 = 480: both ceilings cannot hold, and the
+test('more than 8 groups: the tail merges into the last segment, mergedOverflow is true, and that segment goes over 60', () => {
+  // 13 × 40 = 520 characters: the greedy packer makes 13 groups, both ceilings cannot hold, and the
   // documented choice is to keep every character instead of dropping the tail.
   const text = Array.from({ length: 13 }, (_unused, index) => sentence(40, '甲乙丙丁戊己庚辛壬癸子丑'[index] ?? '字')).join('');
   const result = splitReplyIntoSegments(text);
   assert.equal(result.segments.length, 8, 'the segment ceiling is the one that holds');
   assert.deepEqual(result.segments.map((segment) => segment.length), [40, 40, 40, 40, 40, 40, 40, 240]);
   assert.equal(result.mergedOverflow, true);
+  assert.ok((result.segments.at(-1)?.length ?? 0) > REPLY_LIMITS.segmentMaxChars, 'the merged tail is longer than the per-segment ceiling');
   assert.equal(result.segments.join(''), text, 'nothing may be dropped to satisfy the length ceiling');
   assert.equal(text.length, 520);
+});
+
+test('the 279-character boundary: 9 groups of 31 merge into 8, and mergedOverflow is true (t16)', () => {
+  // The smallest realistic shape of the merge: 9 sentences × 31 characters. The greedy packer cannot
+  // put two 31-character sentences into one segment (31 + 31 > 60), so it produces **9 groups** — one
+  // more than the ceiling — and the last two merge into a 62-character segment.
+  const text = Array.from({ length: 9 }, (_unused, index) => sentence(31, '甲乙丙丁戊己庚辛壬'[index] ?? '字')).join('');
+  assert.equal([...text].length, 279, 'the counterexample is exactly 279 characters');
+  const result = splitReplyIntoSegments(text);
+  assert.equal(result.segments.length, 8, 'the segment ceiling holds');
+  assert.equal(result.mergedOverflow, true, 'the tail merged, so the caller must be told');
+  assert.deepEqual(result.segments.map((segment) => segment.length), [31, 31, 31, 31, 31, 31, 31, 62]);
+  assert.ok((result.segments.at(-1)?.length ?? 0) > REPLY_LIMITS.segmentMaxChars, 'the merged segment goes over the per-segment ceiling');
+  assert.equal(result.segments.join(''), text, 'every character survives');
 });
 
 test('asking for more segments than allowed is clamped, never honoured', () => {

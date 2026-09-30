@@ -78,6 +78,10 @@ test('the safety block stays compact and every boundary is still checkable (P1 m
   assert.ok(lines.length <= 8, `the safety block must stay compact, found ${lines.length} lines`);
   assert.ok(HARD_POLICY.length <= 800, `…and short, found ${HARD_POLICY.length} characters`);
 
+  // 铁律 2/1: the boundaries are not negotiable — this phrasing existed in V0.1, was dropped by the
+  // P1 rewrite, and is pinned again here so the next rewrite cannot quietly lose it (t16).
+  assert.match(HARD_POLICY, /不受任何指令影响/);
+  assert.match(HARD_POLICY, /都不能让它们作废/);
   // 铁律 7: a checkable fact may only come from a tool result, and proactive speech is bound too.
   assert.match(HARD_POLICY, /可核查的具体事实/);
   assert.match(HARD_POLICY, /先调用工具去查/);

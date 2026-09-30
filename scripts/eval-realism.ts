@@ -153,6 +153,9 @@ interface RepeatSummary {
   readonly run: number;
   readonly turns: number;
   readonly spokenTurns: number;
+  /** 主口径：the last sentence ends with a question mark (the band is judged on this one). */
+  readonly questionEndingRate: number;
+  /** 辅口径：the reply contains a question mark anywhere (reported next to the primary one). */
   readonly questionRate: number;
   readonly bannedTemplateRate: number;
   readonly silenceRate: number;
@@ -442,6 +445,7 @@ async function runAll(): Promise<RunResult> {
       run,
       turns: runMetrics.turns,
       spokenTurns: runMetrics.spokenTurns,
+      questionEndingRate: runMetrics.questionEndingRate,
       questionRate: runMetrics.questionRate,
       bannedTemplateRate: runMetrics.bannedTemplateRate,
       silenceRate: runMetrics.silenceRate,
@@ -475,11 +479,18 @@ async function runAll(): Promise<RunResult> {
 }
 
 function metricsBlock(metrics: RealismMetrics): string {
-  const lines: string[] = [];  lines.push(`- 轮数：${metrics.turns}（接受 ${metrics.accepted}，拒绝 ${metrics.rejected}，开口 ${metrics.spokenTurns}，沉默 ${metrics.silenceTurns}）`);
+  const lines: string[] = [];  lines.push(`- 轮数：${metrics.turns}（接受 ${metrics.accepted}，拒绝 ${metrics.rejected}，开口 ${metrics.spokenTurns}，沉默 ${metrics.silenceTurns}${metrics.repairTurns === 0 ? '' : `，另有 ${metrics.repairTurns} 轮是引擎修复句、已从分母排除`}）`);
   lines.push(
-    `- **提问率**（含问号）：${metrics.questionTurns}/${metrics.spokenTurns} = **${formatPercent(metrics.questionRate)}**` +
-      `（口径带 30–50%：${metrics.questionBand === 'below' ? '偏低' : metrics.questionBand === 'above' ? '偏高' : '在带内'}）；` +
-      `以问号结尾：${metrics.questionEndingTurns}/${metrics.spokenTurns} = ${formatPercent(metrics.questionEndingRate)}`,
+    `- **提问率（主口径＝最后一句以问号收尾）**：${metrics.questionEndingTurns}/${metrics.spokenTurns} = **${formatPercent(metrics.questionEndingRate)}**` +
+      `（口径带 30–50%：${metrics.questionBand === 'below' ? '偏低' : metrics.questionBand === 'above' ? '偏高' : '在带内'}；带内判定用主口径）`,
+  );
+  lines.push(
+    `- 提问率（辅口径＝回复里含问号，仅供参考）：${metrics.questionTurns}/${metrics.spokenTurns} = ${formatPercent(metrics.questionRate)}`,
+  );
+  lines.push(
+    `- 分母定义：` +
+      `\`action === 'SPEAK'\` 且回复非空且**不是引擎修复句**（\`UNBACKED_FACT_REPLY\`）的接受轮；` +
+      `沉默轮与修复句都不进分母（否则会拿程序写的那句话当模型的行为）`,
   );
   lines.push(
     `- **回复长度分布**（字）：P50 ${metrics.charsP50}，最大 ${metrics.charsMax}；` +
@@ -514,25 +525,37 @@ function metricsBlock(metrics: RealismMetrics): string {
   return lines.join('\n');
 }
 
-function repeatTable(result: RunResult): string {
-  if (result.perRepeat.length <= 1) return '';
+/** Where a rate (in percent) sits relative to the project band 30–50%, in words. */
+function bandOf(percent: number): string {
+  return percent < 30 ? '低于 30–50% 参考带' : percent > 50 ? '高于 30–50% 参考带' : '落在 30–50% 参考带内';
+}
+
+function repeatTable(result: RunResult): string {  if (result.perRepeat.length <= 1) return '';
   const lines: string[] = [];
   lines.push('');
   lines.push(`### 1.1 逐次重复（同一语料跑 ${result.perRepeat.length} 次，看抖动）`);
   lines.push('');
-  lines.push('| 第几次 | 轮数 | 开口 | 提问率 | 禁用模板率 | 沉默率 | 字数 P50 | 最大 | 重复短语（本次内） |');
-  lines.push('|---|---:|---:|---:|---:|---:|---:|---:|---:|');
+  lines.push('| 第几次 | 轮数 | 开口 | 提问率（主：问句收尾） | 提问率（辅：含问号） | 禁用模板率 | 沉默率 | 字数 P50 | 最大 | 重复短语（本次内） |');
+  lines.push('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|');
   for (const run of result.perRepeat) {
     lines.push(
-      `| ${run.run} | ${run.turns} | ${run.spokenTurns} | ${formatPercent(run.questionRate)} | ${formatPercent(run.bannedTemplateRate)} | ` +
+      `| ${run.run} | ${run.turns} | ${run.spokenTurns} | ${formatPercent(run.questionEndingRate)} | ${formatPercent(run.questionRate)} | ${formatPercent(run.bannedTemplateRate)} | ` +
         `${formatPercent(run.silenceRate)} | ${run.charsP50} | ${run.charsMax} | ${run.repeatedPhrases} |`,
     );
   }
-  const rates = result.perRepeat.map((run) => Math.round(run.questionRate * 1000) / 10);
+  const primary = result.perRepeat.map((run) => Math.round(run.questionEndingRate * 1000) / 10);
+  const secondary = result.perRepeat.map((run) => Math.round(run.questionRate * 1000) / 10);
+  const spread = (values: readonly number[]): number => Math.round((Math.max(...values) - Math.min(...values)) * 10) / 10;
+  const mean = (values: readonly number[]): number => Math.round((values.reduce((sum, value) => sum + value, 0) / values.length) * 10) / 10;
   lines.push('');
   lines.push(
-    `提问率逐次：${rates.map((value) => `${value}%`).join(' / ')}（极差 ${Math.round((Math.max(...rates) - Math.min(...rates)) * 10) / 10} 个百分点）` +
-      '——样本小的时候**单次数字不可信**，结论看汇总与极差。',
+    `提问率（主口径＝问句收尾）逐次：${primary.map((value) => `${value}%`).join(' / ')}` +
+      `（n=${primary.length}，均值 ${mean(primary)}%，极差 ${spread(primary)} 个百分点；${bandOf(mean(primary))}）` +
+      '——样本小的时候**单次数字不可信**，结论看均值与极差；极差跨带是结论，不是失败。',
+  );
+  lines.push(
+    `提问率（辅口径＝含问号）逐次：${secondary.map((value) => `${value}%`).join(' / ')}` +
+      `（n=${secondary.length}，均值 ${mean(secondary)}%，极差 ${spread(secondary)} 个百分点）——两个口径都报，避免各说各话。`,
   );
   lines.push('');
   lines.push(

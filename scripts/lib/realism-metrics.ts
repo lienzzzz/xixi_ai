@@ -8,8 +8,12 @@
  * attempt. Definitions are documented on each metric because "提问率" means
  * different things to different readers:
  *
- *   - `questionRate`        回复**含**问号的开口轮占比（"她这一轮问了吗"）
- *   - `questionEndingRate`  回复**以**问号结尾的开口轮占比（pack 的 wording）
+ *   - `questionEndingRate`  **主口径**：最后一句以问号收尾的开口轮占比（pack 的 wording）。
+ *                           The last sentence counts even when a closing quote follows it
+ *                           (「…好吗？」 ends with 「」 but is still a question).
+ *   - `questionRate`        **辅口径**：回复里**出现过**问号的开口轮占比
+ *                           （"她这一轮问了吗"）。两个都报：同一批对话里一个可能偏高、另一个在带内，
+ *                           只看一个就是各说各话（t4 的 F1 实测过这一点）。
  *   - `lengthBuckets`       半句 / 短句 / 中句 / 长解释 四档（见 BUCKETS）
  *   - `bannedTemplateRate`  命中「AI 套话」词表的开口轮占比
  *   - `repeatedPhraseRate`  同一 6 字窗口出现在 >=3 轮的占比（模板化痕迹）
@@ -17,13 +21,29 @@
  *
  * A "turn" is one accepted conversation turn; metrics that describe replies are
  * computed over *spoken* turns only, so a silence-heavy conversation is not
- * silently turned into a "low question rate" one.
+ * silently turned into a "low question rate" one. **One denominator, applied once**:
+ * `action === 'SPEAK'` and a non-empty reply **and not the engine's own repair line**
+ * (`UNBACKED_FACT_REPLY`, produced by the t111 gate rather than by the model). A repaired turn is
+ * not something the model said, so counting it as "did she ask a question" would be measuring the
+ * program. `repairTurns` reports how many were excluded.
+ *
+ * `questionBand` is judged on the **primary** (question-ending) rate — that is the project's
+ * wording, and the acceptance criterion for P1 is phrased that way.
  *
  * Scope note: `scripts/benchmarks/v01-text-metrics.ts` is the one-off V0.1
  * transcript instrument from the P0 baseline. This module is the canonical
  * implementation for corpus/session runs going forward; keep new definitions
  * here so the before/after numbers cannot drift apart.
  */
+
+/**
+ * The engine's repair line, imported from the module that defines it rather than from the package
+ * entry: the entry does not re-export it, and a *copy* of the string here would be a second
+ * definition of "what counts as a program-written reply" — exactly the drift this module exists to
+ * prevent. (A one-line re-export in `packages/conversation/src/index.ts` would let this be the
+ * normal import; that file is outside this task's contract.)
+ */
+import { UNBACKED_FACT_REPLY } from '../../packages/conversation/src/engine.ts';
 
 export interface RealismTurn {
   /** Scenario/conversation id the turn belongs to. */
@@ -95,11 +115,15 @@ export interface RealismMetrics {
   readonly accepted: number;
   readonly rejected: number;
   readonly spokenTurns: number;
+  /** Spoken turns excluded because the reply was the engine's own repair line (t111 gate). */
+  readonly repairTurns: number;
   readonly silenceTurns: number;
   readonly silenceRate: number;
   readonly questionTurns: number;
+  /** 辅口径：a reply that contains a question mark anywhere. */
   readonly questionRate: number;
   readonly questionEndingTurns: number;
+  /** 主口径：the last sentence ends with a question mark. */
   readonly questionEndingRate: number;
   readonly chars: readonly number[];
   readonly charsP50: number;
@@ -127,7 +151,7 @@ export interface RealismMetrics {
   readonly longestSameStructureRun: number;
   /** Alarms copied from pack §2.1; each one is a named, explainable condition. */
   readonly alarms: readonly string[];
-  /** Where the question rate sits relative to the project band (pack says 30–50%). */
+  /** Where the **primary** question rate (question-ending) sits relative to the band (30–50%). */
   readonly questionBand: 'below' | 'in-band' | 'above';
 }
 
@@ -157,7 +181,11 @@ export function replyChars(reply: string): number {
 
 export function measureRealism(turns: readonly RealismTurn[]): RealismMetrics {
   const accepted = turns.filter((turn) => turn.accepted);
-  const spoken = accepted.filter((turn) => turn.action === 'SPEAK' && (turn.reply ?? '').trim().length > 0);
+  const speakTurns = accepted.filter((turn) => turn.action === 'SPEAK' && (turn.reply ?? '').trim().length > 0);
+  // The engine's repair line is program text, not something the model said: counting it would make
+  // 提问率 measure the program (t16, from t4's F1 finding).
+  const repairTurns = speakTurns.filter((turn) => (turn.reply ?? '').trim() === UNBACKED_FACT_REPLY).length;
+  const spoken = speakTurns.filter((turn) => (turn.reply ?? '').trim() !== UNBACKED_FACT_REPLY);
   const silences = accepted.filter((turn) => turn.action === 'SILENCE');
 
   const chars = spoken.map((turn) => replyChars(turn.reply ?? ''));
@@ -178,7 +206,8 @@ export function measureRealism(turns: readonly RealismTurn[]): RealismMetrics {
   const dominantShare = dominantBucket === null || spoken.length === 0 ? 0 : Math.round(((dominant?.[1] ?? 0) / spoken.length) * 1000) / 1000;
 
   const questionTurns = spoken.filter((turn) => /[？?]/.test(turn.reply ?? '')).length;
-  const questionEndingTurns = spoken.filter((turn) => /[？?]\s*$/.test((turn.reply ?? '').trim())).length;
+  // 主口径: the *last sentence* is a question, even when a closing quote/bracket follows the mark.
+  const questionEndingTurns = spoken.filter((turn) => /[？?][\s"'”’」』）)\]】]*$/.test((turn.reply ?? '').trim())).length;
 
   const bannedTemplateHits: { scenario: string; index: number; matched: string; why: string }[] = [];
   for (const turn of spoken) {
@@ -244,6 +273,8 @@ export function measureRealism(turns: readonly RealismTurn[]): RealismMetrics {
   };
 
   const questionRate = spoken.length === 0 ? 0 : Math.round((questionTurns / spoken.length) * 1000) / 1000;
+  const questionEndingRate =
+    spoken.length === 0 ? 0 : Math.round((questionEndingTurns / spoken.length) * 1000) / 1000;
   const alarms: string[] = [];
   if (spoken.length > 0 && dominantShare > 0.8) {
     alarms.push(`回复长度 >80% 落在同一档（${dominantBucket}，${Math.round(dominantShare * 100)}%）`);
@@ -268,12 +299,13 @@ export function measureRealism(turns: readonly RealismTurn[]): RealismMetrics {
     accepted: accepted.length,
     rejected: turns.length - accepted.length,
     spokenTurns: spoken.length,
+    repairTurns,
     silenceTurns: silences.length,
     silenceRate: accepted.length === 0 ? 0 : Math.round((silences.length / accepted.length) * 1000) / 1000,
     questionTurns,
     questionRate,
     questionEndingTurns,
-    questionEndingRate: spoken.length === 0 ? 0 : Math.round((questionEndingTurns / spoken.length) * 1000) / 1000,
+    questionEndingRate,
     chars,
     charsP50: quantile(sortedChars, 0.5),
     charsMax: sortedChars[sortedChars.length - 1] ?? 0,
@@ -286,7 +318,9 @@ export function measureRealism(turns: readonly RealismTurn[]): RealismMetrics {
     repeatedPhraseRate,
     longestSameStructureRun: longestRun,
     alarms,
-    questionBand: questionRate < QUESTION_BAND[0] ? 'below' : questionRate > QUESTION_BAND[1] ? 'above' : 'in-band',
+    // Judged on the **primary** wording (last sentence ends with a question mark), not on the
+    // "contains a question mark" helper: the acceptance criterion is phrased that way (t16).
+    questionBand: questionEndingRate < QUESTION_BAND[0] ? 'below' : questionEndingRate > QUESTION_BAND[1] ? 'above' : 'in-band',
   };
 }
 
