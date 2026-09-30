@@ -28,6 +28,7 @@
     "voice:turn": "node scripts/voice-turn.ts",
     "voice:bargein": "node scripts/voice-bargein.ts",
     "chat": "node scripts/chat.ts",
+    "web": "node scripts/serve-chat.ts",
     "turns": "node scripts/show-turns.ts"
   },
   "dependencies": {
