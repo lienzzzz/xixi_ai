@@ -104,6 +104,9 @@ npm run verify:m0              # M0 验收：两进程重启恢复
 npm run verify:provider        # 一次调用核对 MiMo 路由与工具调用
 npm run verify:structured-output  # 结构化输出契约 + 供应商缺陷金丝雀
 npm run eval:conversation:judge   # 语料驱动的对话评测（含评审模型），报告写入 docs/recon/
+node scripts/eval-realism.ts --corpus=all --repeat=3 --label v02   # 真人感指标（提问率主/辅口径、长度分布、
+                               #   禁用模板率、沉默率、重复短语）；--replay <旧 JSON> 不花钱复算、
+                               #   --fake 离线自检、--re-run 真跑。口径与局限见 docs/benchmarks/realism-metrics.md
 node scripts/make-audio-fixtures.ts   # 用 MiMo TTS 生成中文音频夹具（已存在则跳过）
 
 # 语音（需要 .venvs 里的 Python，勿用系统 Python 3.14）
@@ -168,6 +171,9 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    captain 本轮**三次**手写导致失实（`4bd5b01`、`9c1234d`、`5c75ebd`：信息里写 180/180，而当时实测 exit=1）。
    做法：先跑命令并把 `$LASTEXITCODE` 与 `ℹ tests / pass / fail` 捕获进变量，再插进 `-m` 的字符串
    （注意 §9.8 的引号与尖括号陷阱）。**红的时候也要如实写红**，并注明是哪个在途任务造成的。
+   **提交时按「文件」添加，不要按「目录」添加**：captain 本轮用了 `git add tests/`，于是 t2 的提交
+   夹带了 t3 的两个测试文件（评审 t6 的 O1 抓到）——目录会把并发任务的在途产物一起收进来。
+   派单纪律里的 deliverables 只有意义的前提是：提交的人只加「这个任务真正改动的文件」。
 8. **不要用 PowerShell 做批量文本替换/往返读写**：本轮实测它会把 UTF-8 中文写坏（出现 `U+FFFD` 替换字符，直接毁掉源文件）。
    要批量改文本请用编辑工具，或 Python 显式 `encoding='utf-8'` 读写；改完 `git diff --stat` 自检异常体积。
    **另外两个 PowerShell 陷阱（本轮各踩一次）**：① **提交信息里不要出现尖括号**——`<` `>` 会被当成重定向，
