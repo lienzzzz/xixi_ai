@@ -99,8 +99,16 @@ test('the detector fires on lookup-only specifics and leaves ordinary talk alone
     assert.deepEqual(kinds('气温 25℃'), ['temperature:25℃']);
     assert.deepEqual(kinds('降水概率 60%'), ['forecast:降水概率 60%']);
     assert.deepEqual(kinds('湿度 45'), ['forecast:湿度 45']);
+    // The review's (t114 §2) other «该拦» fixtures, so the tightening cannot quietly drop them:
+    assert.deepEqual(kinds('海上风力 4 级'), ['forecast:风力 4 级']);
+    assert.deepEqual(kinds('今天空气质量 120'), ['forecast:空气质量 120']);
+    assert.deepEqual(kinds('紫外线指数 7，注意防晒'), ['forecast:紫外线指数 7']);
+    // Attribution only fires when the source is the *speaker* and the sentence says something
+    // checkable (t117 / review F1):
     assert.deepEqual(kinds('天气预报说明天有雨'), ['attribution:天气预报']);
-    assert.deepEqual(kinds('朋友说他周五来不了'), ['attribution:朋友说']);
+    assert.deepEqual(kinds('气象台说今晚降温'), ['attribution:气象台']);
+    assert.deepEqual(kinds('新闻里说小区要停水'), ['attribution:新闻']);
+    assert.deepEqual(kinds('天气预报说今天 19 到 25 度'), ['temperature:19 到 25 度', 'attribution:天气预报']);
 
     // Ordinary talk must not be blocked: no numbers, no attributed sources.
     assert.deepEqual(kinds('今天有点冷，你多穿点'), []);
@@ -111,6 +119,35 @@ test('the detector fires on lookup-only specifics and leaves ordinary talk alone
     assert.equal(engine.screenUnbackedFacts('明天 19 到 25 度', 'xixi_get_weather').ok, true);
     assert.equal(engine.screenUnbackedFacts('明天 19 到 25 度', null).ok, false);
     assert.equal(engine.screenUnbackedFacts('明天 19 到 25 度', null).text, REPAIR);
+  } finally {
+    s.close();
+  }
+});
+
+test('ordinary talk is not blocked — the class promise the review asked for (t117 / F1)', () => {
+  const s = store();
+  try {
+    const engine = engineFor(scriptedAdapter([], {}), s);
+    const kinds = (text: string): string[] => engine.screenUnbackedFacts(text, null).claims.map((claim) => `${claim.kind}:${claim.match}`);
+
+    // The five sentences from the review's §3 table that used to be replaced wholesale. Four are
+    // bare-source talk (no source word that is *speaking*), one is a temperature the user gave.
+    assert.deepEqual(kinds('今天有点冷，多穿点。'), []);
+    assert.deepEqual(kinds('朋友说今天有点冷'), []);
+    assert.deepEqual(kinds('医生说多喝水对身体好，你也多喝点。'), []);
+    assert.deepEqual(kinds('今天新闻挺热闹的，说小区门口要办集市。'), []);
+    assert.deepEqual(kinds('朋友说要来吃饭，我先把菜洗上。'), []);
+    assert.deepEqual(kinds('专家都觉得这样安排挺好。'), []);
+    // …the 5th («你把烤箱预热到 180 度») is *deliberately still a temperature claim* (F2): the
+    // number is checkable, so it is flagged — but with the **complete** match, not a suffix:
+    assert.deepEqual(kinds('你把烤箱预热到 180 度，我这边切菜。'), ['temperature:180 度']);
+    assert.deepEqual(kinds('水开了是 100 度，小心别烫着。'), ['temperature:100 度']);
+
+    // And the class promise stated as behaviour: a homey sentence never becomes the repair line.
+    for (const sentence of ['朋友说今天有点冷', '医生说多喝水对身体好', '专家都觉得这样安排挺好']) {
+      assert.equal(engine.screenUnbackedFacts(sentence, null).ok, true, `${sentence} must pass through`);
+      assert.equal(engine.screenUnbackedFacts(sentence, null).text, sentence);
+    }
   } finally {
     s.close();
   }

@@ -580,16 +580,32 @@ export interface UnbackedFactClaim {
   readonly match: string;
 }
 
-/** `19 到 25 度`, `零下 3 度`, `-2℃` — temperatures, including ranges. */
+/** `19 到 25 度`, `零下 3 度`, `-2℃`, `180 度` — temperatures, including ranges. */
 const TEMPERATURE_SIGN = '(?:(?:零下|负|[-−])\\s*)?';
+const TEMPERATURE_NUMBER = '\\d{1,3}'; // t117 (F2): `\d{1,2}` truncated `180 度` into `80 度` in the audit note.
 const TEMPERATURE_RANGE = new RegExp(
-  `${TEMPERATURE_SIGN}\\d{1,2}\\s*(?:到|至|~|～|-|—|–)\\s*${TEMPERATURE_SIGN}\\d{1,2}\\s*(?:度|℃|°C)`,
+  `${TEMPERATURE_SIGN}${TEMPERATURE_NUMBER}\\s*(?:到|至|~|～|-|—|–)\\s*${TEMPERATURE_SIGN}${TEMPERATURE_NUMBER}\\s*(?:度|℃|°C)`,
 );
-const TEMPERATURE_SINGLE = new RegExp(`${TEMPERATURE_SIGN}\\d{1,2}\\s*(?:度|℃|°C)`);
+const TEMPERATURE_SINGLE = new RegExp(`${TEMPERATURE_SIGN}${TEMPERATURE_NUMBER}\\s*(?:度|℃|°C)`);
 /** Numbers only a measurement can produce: 概率 / 湿度 / 风力 / 空气质量 / 紫外线. */
 const FORECAST_METRIC = /(?:降水概率|降雨概率|湿度|风力|空气质量|空气指数|紫外线(?:指数)?)\s*(?:为|是|约|大概|在)?\s*\d{1,3}\s*(?:%|％|级|度)?/;
-/** Claims attributed to a source that was never consulted. */
-const ATTRIBUTION = /(?:天气预报|气象台|预报|新闻|报道|专家|医生说|医生|朋友说|别人说|他们(?:说|告诉))/;
+/**
+ * Claims attributed to a source that was never consulted — **tightened in t117 (review F1)**.
+ *
+ * The first version matched any source word (`医生|专家|朋友说|别人说|他们告诉|新闻|…`), which
+ * replaced whole ordinary sentences: 「朋友说要来吃饭」「专家都觉得这样安排挺好」、
+ * 「今天新闻挺热闹的，说小区门口要办集市」. Two rules now keep it to 「有内容可核查」:
+ *   1. the source must be the **speaker** — `天气预报/气象台/预报/报道/新闻` followed by a
+ *      reporting verb (`说/称/报/提到/讲/显示/预计`). 「新闻挺热闹的」 has no verb, so it passes;
+ *   2. the sentence must carry a fact element (a number, a quotation, or a predicate that can be
+ *      true or false). 「天气预报说明天有雨」 and 「新闻里说小区要停水」 still fire;
+ *      「医生说多喝水对身体好」 never reaches rule 1 at all.
+ * Bare source words (`医生/专家/朋友说/别人说/他们告诉`) are **gone on purpose**: they show up in
+ * ordinary talk far more often than in fabrications.
+ */
+const ATTRIBUTION_SOURCE = /(天气预报|气象台|预报|报道|新闻)\s*里?\s*(?:说|称|报|提到|讲|显示|预计)/;
+/** A fact element: a number, a quotation, or a predicate that can be true or false (t117). */
+const ATTRIBUTION_CONTENT = /(?:\d|[「“『']|有|要|会|将|是|在|停|降|升|来|去|办|开|改|取消|恢复|雨|雪|风|温|冷|热|晴|阴|涨|跌)/;
 
 /** What she says instead of an unverified claim: no numbers, no new facts, no pretending. */
 export const UNBACKED_FACT_REPLY = '这个我记不准，不敢乱说——要不我查一下再告诉你？';
@@ -597,9 +613,11 @@ export const UNBACKED_FACT_REPLY = '这个我记不准，不敢乱说——要�
 /**
  * Find concrete claims in a reply that need a tool result to be true.
  *
- * Deliberately narrow (t111): it only fires on *specifics* a lookup would produce — numbers with
- * units, attributed statements — not on ordinary talk like 「今天有点冷，多穿点」. Broadening it
- * would start blocking natural conversation, which is the opposite of the goal.
+ * Deliberately narrow (t111, tightened in t117): it only fires on *specifics* a lookup would
+ * produce — numbers with units, a metric, or a statement by a source that was never consulted and
+ * that carries something checkable. It must not fire on ordinary talk (「今天有点冷，多穿点」
+ * 「朋友说要来吃饭」「医生说多喝水」): a gate that answers 「我不敢乱说」 to a homey sentence is
+ * worse than the bug it fixes, and the review (t114 §3) caught exactly that class of damage.
  */
 export function findUnbackedFactClaims(text: string): UnbackedFactClaim[] {
   const claims: UnbackedFactClaim[] = [];
@@ -614,9 +632,24 @@ export function findUnbackedFactClaims(text: string): UnbackedFactClaim[] {
   }
   const metric = FORECAST_METRIC.exec(text);
   if (metric !== null) add('forecast', metric[0]);
-  const attributed = ATTRIBUTION.exec(text);
-  if (attributed !== null) add('attribution', attributed[0]);
+  const attributed = ATTRIBUTION_SOURCE.exec(text);
+  if (attributed !== null) {
+    // Judge the *sentence* around the source, not the whole reply: the fact element has to sit in
+    // the same statement the source is making (t117).
+    const sentence = sentenceAround(text, attributed.index);
+    if (ATTRIBUTION_CONTENT.test(sentence)) add('attribution', attributed[1] ?? attributed[0]);
+  }
   return claims;
+}
+
+/** The sentence a match sits in — 「。」「！」「？」「；」and newlines are the boundaries (t117). */
+function sentenceAround(text: string, index: number): string {
+  const boundaries = ['。', '！', '？', '；', '\n'];
+  const before = boundaries.map((mark) => text.lastIndexOf(mark, index));
+  const after = boundaries.map((mark) => text.indexOf(mark, index)).filter((at) => at >= 0);
+  const start = Math.max(...before, -1);
+  const end = after.length === 0 ? text.length : Math.min(...after);
+  return text.slice(start + 1, end);
 }
 
 function languageName(code: string): string {

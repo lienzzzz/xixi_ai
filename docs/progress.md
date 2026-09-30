@@ -289,6 +289,37 @@ compat: { thinkingFormat: deepseek, requiresReasoningContentOnAssistantMessages:
 3. **`data/` 目录的隐私比较是「文件名集合」**：同名覆盖不会被发现。今天无法触发（服务里没有任何写图路径），
    **将来若加调试落图，必须改成 mtime + 大小或内容哈希**（评审 t80 的 O4 也是同一口径：隐私的含义是「不留图像」，不是「不写库」）。
 
+### 2.17 不许编造可核查的具体事实（t111 落地 + t117 按评审收紧）
+
+**机制（两层）**：提示词层 `HARD_POLICY` 第 7 条要求「天气/气温/降水概率/风力/空气质量/新闻/日程/别人说的话」
+只能来自工具结果，要说必须先调用工具查，查不到就说不知道；程序层 `ConversationEngine` 的
+`findUnbackedFactClaims()` / `screenUnbackedFacts()` 是确定性闸门——本轮没有工具调用却出现「只有查得到才知道的具体值」时，
+文本被扣住（不进 TTS、不写 `conversation.turn`、不改工作记忆），改说修复句并给调用方
+`onNotice({code:'UNBACKED_FACT_CLAIM'})`；主动开口的投递接缝用同一个判据，未核实就换成该触发源的固定短句，
+并把 `toolName` 写进 assistant 轮的 `tool_name`。
+
+**t117 按评审（t114）收紧的两处**：① 归属规则从「出现过来源词」改成「来源在说话 + 同句有可核查内容」——
+`医生/专家/朋友说/别人说/他们告诉` 这类裸来源词不再触发（此前会把「朋友说要来吃饭」「专家都觉得这样安排挺好」
+「今天新闻挺热闹的，说小区门口要办集市」整句替换成「我不敢乱说」）；② 温度量词从 `\d{1,2}` 放宽到 `\d{1,3}`，
+`180 度`/`100 度` 的审计 `match` 不再被截断成后两位。
+
+**台账口径（把结论限定成事实，t114 的 F3）**：扫三个库的 `conversation.turn`（`data/chat`、`data/field-test`、`data/web-chat`），
+含具体值的 assistant 轮共 **4 条，全部伴随 `xixi_get_weather`**（10:04 / 11:12 / 13:02 / 15:05）；
+另有 **7 条**含具体值却 `tool_name=null` 的轮次（`data/chat` 6 条：07:57×2、08:16×4、08:17；`data/field-test` 1 条：11:12:54）。
+**这 7 条全部发生在修复（约 19:55）之前，不会被追溯修改**——台账是当时发生的事实记录，修的是「从现在起不再发生」。
+**这些库里没有任何修复之后的轮次**，所以「修复之后零违规」只在 t111 自己的运行窗口（它用的是 `%TEMP%` 下的临时库）
+与离线探针上成立，**不能在仓库台账上证实**；「4 条全部伴随工具」说的也是那 4 条**修复前**的轮次（它们恰好都调用了工具）。
+复算命令（评审 t114 的脚本，扫 `data/chat` 与 `data/field-test` 两个库）：
+
+```powershell
+node data/rev-tmp/t114-invariant.mjs   # 末几行给出每库「含具体值的轮次：伴随工具 N / 无工具 M」与 tool_name 分布
+```
+
+它当前打印：`data/chat` 伴随工具 1 / 无工具 **6**；`data/field-test` 伴随工具 2 / 无工具 **1** —— 即上面那 7 条。
+等价的一次性查询是 `select timestamp, payload_json from events where event_type='conversation.turn'`
+（只取 `payload_json.role='assistant'`），再用同一个 `findUnbackedFactClaims()` 判 `payload_json.text`；
+`data/web-chat` 那一条（10:04，伴随 `xixi_get_weather`）不在该脚本的扫描范围内，所以「4 条伴随工具」要三个库一起数才成立。
+
 ## 2b. 评审与验证汇总（本轮）
 
 **四份实现评审的 verdict 与 findings 去向**（findings 编号与严重度取自各自报告；「闭环」= 复审已 pass）：
