@@ -180,6 +180,14 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
 两者都会先做类型与范围校验：未知属性 → `UNKNOWN_PERSONALITY_PROPERTY`，
 超出该属性范围 → `PROPERTY_OUT_OF_RANGE`；落库前统一经 `clampPersonality`。
 
+两条经常被问到的推论（README 的快速开始就靠它们）：
+
+- **跨重启有效**：两种写入都落同一张 SQLite 表 `self_profile`，所以 `npm run chat -- --personality …`
+  的效果**不是命令行里的临时开关**——它写进库，进程重启、换入口（`chat` / `web` / `voice-turn`）都还在。
+- **回基线要再覆盖一次**：没有「撤销」命令。`seedSelfProfile` 是 `DO NOTHING`（只补缺、绝不覆盖已有的行），
+  所以想让某个属性回到 `config:base` 的基线值，必须**再用 `--personality` 显式写回那个值**；
+  想查/回滚逐条变更则读 `self_profile_history`（每条覆盖都带 `before_value` 与 `source_type`）。
+
 > **明确写清：模型驱动的学习（M3）尚未实现。**
 > `BrainAdapter.interpretFeedback()` 目前直接抛 `BrainError('NOT_IMPLEMENTED', milestone: 'M3')`
 > （`packages/brain-adapter/src/mimo.ts`、`dsh.ts`、`fake.ts` 三处一致）。

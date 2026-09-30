@@ -37,12 +37,13 @@ Copy-Item .env.example .env                   # 填入 MIMO_API_KEY（.env 已�
 npm run field-test                            # 👉 一条命令的现场测试控制台：http://127.0.0.1:8792
                                               #    麦克风电平/噪声底 + 摄像头在场 + 每轮延迟与动作 + 设备验收引导
 npm run web                                   # 试用对话页：http://127.0.0.1:8791（含按住🎤语音输入）
-npm test                                      # 全部离线测试，不花 API 费用（2026-09-30 实测 139 项，干净机器约 21s）
+npm test                                      # 全部离线测试，不花 API 费用（2026-09-30 实测 139 项；
+                                              #   耗时以实跑为准、门禁目标 <25s，近期实测 21–39s 视负载而定）
 npm run chat                                  # 终端对话（直连 MiMo 实时路径）
 npm run chat -- --personality verbosity=0.1,talkativeness=0.2
-                                              # ↑ 人格的**持久化行政覆盖**（写 self_profile，重启后仍生效；
-                                              #   要回基线就再覆盖一次）——详见 docs/README.md（文档地图/接手须知）
-                                              #   与 docs/handoff.md §2/§3
+                                              # ↑ 人格的**持久化行政覆盖**：写进 self_profile（含 self_profile_history），
+                                              #   重启后仍然生效；要回基线就再覆盖一次（没有「撤销」命令）。
+                                              #   详见 docs/design/domain-model.md §6「人格属性与两种写入方式」
 npm run demo:m0:text                          # 离线单轮演示（FakeBrainAdapter）
 npm run voice:turn -- --wav tests/audio-fixtures/direct-question.wav   # 语音闭环
 npm run voice:bargein                         # 打断判定延迟（纯本地）
@@ -97,7 +98,8 @@ docs/                     architecture.md、event-contracts.md、testing.md、pr
   `tests/replay/` 仍为空（章节 §32/§22.3 的回放能力属 M5）。
 - 现场测试控制台（`npm run field-test`）的 15 项控制台测试在 `tests/console/`，**已接入 `npm test` 的 glob（t16 起）**，
   也可用 `npm run test:console` 单跑（它们在默认门禁里真的会跑；只是各自要起 HTTP 服务与 Python VAD，所以是门禁里较慢的一批）。
-- 摄像头在场检测（perception）的 10 项在 `tests/perception/`，同样**已接入默认门禁**（`npm run test:perception` 可单跑）；
+- 摄像头在场检测（perception）的 11 项在 `tests/perception/`（2026-09-30 实测 `npm run test:perception` → 11/11），同样**已接入默认门禁**（`npm run test:perception` 可单跑）；
   它内部会转发 Python 回归套件（cv2 + 合成场景，不需要真相机）。
-- 摄像头在场检测（M6）未接入时页面显示「未接入」（不是错误）；麦克风噪声底偏高（实测 −33 ~ −35 dBFS）仍是首要风险。
+- 摄像头在场检测（M6）自身的「真人站在镜头前能否被检出」**尚未实测**（当前摄像头朝天）；页面因此可能显示「未接入」而不是「没人」——这是状态不是报错。
+- 麦克风噪声底偏高（实测 −33 ~ −35 dBFS）仍是首要风险；现场验收的扬声器项在修正口径后判 FAIL，口径说明见 [`docs/recon/field-test-report-2026-09-30.md`](docs/recon/field-test-report-2026-09-30.md) 顶部。
 - WorldState、Memory、FutureHook、ProactiveEngine，以及唤醒词与模型驱动的人格学习均未开始，按 §45 顺序推进。

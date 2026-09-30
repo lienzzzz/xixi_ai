@@ -3,8 +3,11 @@
 > 最后更新：2026-09-30
 > 权威来源：`tests/**`、`scripts/**`、`package.json` 的脚本；与代码不一致时以代码为准并立即修正本文
 > 当前状态：`npm test` → **全绿**（2026-09-30 实测 **139 项**：unit 94 + integration 19 + perception 11 + console 15；`tests/scenarios/` 是语料模块、`tests/replay/` 仍为空，都不产生用例），**不发起任何网络请求**。
-> 壁钟：干净机器上实测 **21.3 / 21.4 / 21.5s**（t28 连续三次；t28 把串行的 Python 检查改成并发 + 缩小夹具子集，从 53.3s 降下来），
-> 同机同时有别的重活时会退化到 **25–43s**（t29 期间实测 24.9 / 29.2 / 42.8s）——数字随负载浮动，别把它当性能门禁。
+> 壁钟：**以实跑为准**（默认门禁的目标是 **<25s**，见 [`AGENTS.md` §7](../AGENTS.md)）——**不要把这行当性能门禁**，数字只当区间看：
+> 同一天不同条件下的实测区间是 **21–39s**：空载改完并发那一刻连续三次 21.3 / 21.4 / 21.5s（t28）；t9 复核在**成员全 idle** 时三次 26.5–29.4s；
+> t45 复核（同机有其它成员在跑）两次 38.2 / 39.3s。**归因修正（t9 复核 F1）**：不是「只有同机有别的重活时才慢」——空载也已 26–30s，
+> 因为关键路径是单个文件 `tests/unit/voice/frontend.test.ts`（它自己就要 ~21s，内含多次 Python + VAD 子进程启动）。
+> 也就是说 **t28 的并发 + 缩小夹具手段已用尽，当前门禁在 25–30s 一带、并不满足 <25s**；要真正回到目标只能继续压缩那个长尾文件（见 §6 已知缺口）。
 > 项数与耗时都会随开发变化（写这份文档的十几分钟里就从 137 涨到 139：别人在加测试）——以 `npm test` 的实际输出为准，本文里的数字都标了实测日期与来源。
 > 实测结论集中在 [`progress.md` §0](progress.md)：对话质量、语音闭环、打断与结构化输出都有单独脚本与证据。
 > 上游依据：《方案》§51（CI / Regression）、§52（Model Contract Testing）、§22.3（Event Replay）、§33（PoC 指标）。
@@ -14,7 +17,7 @@
 
 | 层 | 目录 | 跑什么 | 是否联网 | 现在有什么 |
 |---|---|---|---|---|
-| 单元 | `tests/unit/` | 契约校验、领域持久化、transport 解析、会话 FSM、Prompt 组装、工具、语音前端、核心接线 | 否 | 13 个测试文件、94 项（2026-09-30 实测） |
+| 单元 | `tests/unit/` | 契约校验、领域持久化、transport 解析、会话 FSM、Prompt 组装、工具、语音前端、核心接线 | 否 | 14 个测试文件、94 项（2026-09-30 实测；文件数用 `Get-ChildItem tests/unit -Recurse -Filter *.test.ts` 可数） |
 | 集成 | `tests/integration/` | BrainAdapter ↔ transport ↔ store、会话引擎、离线重启恢复 | 否 | 19 项（2026-09-30 实测） |
 | 场景 | `tests/scenarios/` | 对话语料（8 场景，数据驱动），由 `scripts/eval-conversation.ts` 执行 | 执行时联网 | `corpus.ts`（**不是**空目录，也不产生 `npm test` 用例：它是数据模块） |
 | 回放 | `tests/replay/` | 导出事件区间 → 重放 → 复现决策（§22.3） | 否 | **空**（属 M5） |
@@ -154,7 +157,9 @@ node scripts/field-test.ts --acceptance     # 只跑一次真机设备验收，�
 把它们从 53.3s 压到 21.5s（见文档头部实测数字），没有把任何断言移出门禁。
 
 ### 3.1 怎么给 CLI / 试用页制造「超过跟进窗口的停顿」
-会话的跟进窗口 = `lingerMs` 30s × 人格 `silence_tolerance` 缩放（本机人格 0.7 → **36 s**，`npm run chat` 启动横幅会打印）。
+会话的跟进窗口 = **`lingerMs`（默认 30s）×（0.5 + 人格 `silence_tolerance`）**——是「0.5 + t」不是「× t」，
+实现在 [`packages/conversation/src/fsm.ts`](../packages/conversation/src/fsm.ts) 的 `lingerMs` getter（`Math.round(lingerMs * (0.5 + tolerance))`：
+tolerance 0 → 半个窗口，1 → 1.5 倍）。本机人格 `silence_tolerance = 0.7` → 30s × 1.2 = **36 s**（`npm run chat` 启动横幅会打印）。
 要触发「窗口过期 → 下一句被拒 / 被当作新会话直呼」这条路径，必须让**两轮之间的真实时间**超过它：
 
 - **管道一次性喂 stdin 不行**（最常见写法见下）：readline 会把一次性写入的多行立刻按行交给会话，两行背靠背执行。

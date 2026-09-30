@@ -11,7 +11,17 @@
  * (ADR-0010 §3). A caller asking for 5 segments gets 3 and a merged tail; the
  * concatenation invariant (`segments.join('') === normalizeReplyText(text)`) holds
  * for every input, including the clamped ones.
+ *
+ * One deliberate exception, because the two ceilings cannot both hold for a long
+ * reply: 3 segments × 60 characters is 180 characters of capacity, so a model
+ * reply longer than that cannot be split into ≤3 segments of ≤60 characters
+ * without deleting text. The invariant "never add or delete a character" (M4) is
+ * the one kept; the tail merges into the last allowed segment, that segment goes
+ * over `segmentMaxChars`, and `mergedOverflow` reports it. Every reply that fits
+ * the capacity has all segments within the ceiling — see the boundary tests.
  */
+
+import { SILENCE_TOKEN } from './prompt.ts';
 
 export const REPLY_LIMITS = Object.freeze({
   /** Hard ceiling on segments per turn (ADR-0010 M1). */
@@ -28,6 +38,39 @@ export interface ReplySegmentOptions {
   readonly maxSegments?: number;
   readonly segmentMaxChars?: number;
   readonly gapMs?: number;
+}
+
+/**
+ * Turn the `reply` block of `config/xixi.example.yaml` into limits.
+ *
+ * ADR-0010 §3: the config section may only **tighten** the hard ceilings, so
+ * every value is clamped into the range `REPLY_LIMITS` allows. Anything
+ * unusable (a string, a negative number, a missing key) falls back to the
+ * documented default rather than crashing a conversation — the limits are a
+ * tuning knob, not a safety boundary, and the safety boundary (the clamp) is
+ * applied regardless. `override` is the explicit test/replay seam and wins over
+ * the config, but it is clamped the same way: a caller cannot raise a ceiling
+ * either.
+ */
+export function resolveReplyLimits(
+  config?: Readonly<Record<string, unknown>> | undefined,
+  override?: ReplySegmentOptions | undefined,
+): ReplySegmentOptions {
+  const merged: ReplySegmentOptions = {
+    maxSegments: override?.maxSegments ?? numericField(config, 'max_segments'),
+    segmentMaxChars: override?.segmentMaxChars ?? numericField(config, 'segment_max_chars'),
+    gapMs: override?.gapMs ?? numericField(config, 'gap_ms'),
+  };
+  return {
+    maxSegments: clampInt(merged.maxSegments, REPLY_LIMITS.maxSegments, 1, REPLY_LIMITS.maxSegments),
+    segmentMaxChars: clampInt(merged.segmentMaxChars, REPLY_LIMITS.segmentMaxChars, 1, REPLY_LIMITS.segmentMaxChars),
+    gapMs: clampInt(merged.gapMs, REPLY_LIMITS.defaultGapMs, REPLY_LIMITS.minGapMs, REPLY_LIMITS.maxGapMs),
+  };
+}
+
+function numericField(source: Readonly<Record<string, unknown>> | undefined, key: string): number | undefined {
+  const value = source?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 export interface SegmentedReply {
@@ -84,6 +127,12 @@ export function splitReplyIntoSegments(text: string, options: ReplySegmentOption
 
   const normalized = normalizeReplyText(text);
   if (normalized.length === 0) return { segments: [], gapMs, mergedOverflow: mergedOverflowRequested };
+
+  // M5: the silence control token is judged as a whole (§55), so it must never
+  // be split — whatever the limits are. `ConversationEngine` already turns it
+  // into SILENCE before this point; the guard is here so the splitter cannot be
+  // the thing that breaks the rule if it is called directly.
+  if (normalized === SILENCE_TOKEN) return { segments: [normalized], gapMs, mergedOverflow: mergedOverflowRequested };
 
   // Greedy fill: append whole sentences while they fit, otherwise start a new one.
   const segments: string[] = [];

@@ -12,6 +12,7 @@ import {
 } from './fsm.ts';
 import { PromptAssembler, SILENCE_TOKEN, worldStateLite, type AssembledPrompt, type PromptTurn } from './prompt.ts';
 import { DEFAULT_SILENCE_TOLERANCE } from './personality.ts';
+import { resolveReplyLimits, splitReplyIntoSegments, type ReplySegmentOptions } from './segments.ts';
 
 export interface ConversationEngineOptions {
   readonly adapter: BrainAdapter;
@@ -32,6 +33,12 @@ export interface ConversationEngineOptions {
   readonly historyLimit?: number;
   /** Local UTC offset override, for tests and replay. */
   readonly offsetMinutes?: number;
+  /**
+   * Multi-segment reply limits (ADR-0010). `config.reply` is the normal source;
+   * this is the explicit test/replay override. Neither can exceed the hard
+   * ceilings in `REPLY_LIMITS` — see `resolveReplyLimits`.
+   */
+  readonly reply?: ReplySegmentOptions;
 }
 
 export interface RespondInput {
@@ -45,9 +52,29 @@ export interface RespondInput {
   readonly at?: Date;
 }
 
+/** One segment as it is handed to the playback seam (ADR-0010). */
+export interface ReplySegmentPlayback {
+  readonly index: number;
+  readonly text: string;
+  readonly total: number;
+  /** Pause to leave after this segment; `null` on the last one (the turn ends). */
+  readonly gapMsAfter: number | null;
+}
+
 export interface RespondHooks {
   /** Called for each text delta as it arrives, so TTS can start early (§46.1). */
   readonly onTextChunk?: (text: string) => void | Promise<void>;
+  /**
+   * The playback seam for multi-segment replies (ADR-0010): awaited once per
+   * segment, in order, so the caller speaks them with `gapMsAfter` between them.
+   *
+   * Mutually exclusive with `onTextChunk` **on purpose**: when this hook is
+   * supplied the engine stops handing out raw deltas, because driving audio from
+   * both seams would speak the same reply twice. A caller that wants segmented
+   * playback passes `onSegment`; a caller that wants the legacy single-utterance
+   * streaming passes `onTextChunk`.
+   */
+  readonly onSegment?: (segment: ReplySegmentPlayback) => void | Promise<void>;
 }
 
 export interface ConversationTurn {
@@ -56,6 +83,10 @@ export interface ConversationTurn {
   readonly state: ConversationState;
   readonly action: TurnAction;
   readonly text: string | null;
+  /** How the reply is spoken: 1..3 segments (ADR-0010); empty on SILENCE. */
+  readonly segments: readonly string[];
+  /** Pause between those segments, in milliseconds. */
+  readonly segmentGapMs: number;
   readonly provider: string;
   readonly model: string;
   readonly latencyMs: number;
@@ -83,6 +114,8 @@ export class ConversationEngine {
   readonly #turnTimeoutMs: number;
   readonly #historyLimit: number;
   readonly #offsetMinutes: number | undefined;
+  /** Effective reply limits, already clamped to the hard ceilings (ADR-0010 §3). */
+  readonly #replyLimits: ReplySegmentOptions;
   /** Set only when the caller passed `fsm.silenceTolerance` explicitly. */
   readonly #silenceToleranceOverride: number | null;
   /**
@@ -103,6 +136,10 @@ export class ConversationEngine {
     this.#turnTimeoutMs = options.turnTimeoutMs ?? 30_000;
     this.#historyLimit = options.historyLimit ?? 8;
     this.#offsetMinutes = options.offsetMinutes;
+    // `reply` is a declaration in `config/xixi.example.yaml` until something reads
+    // it; reading it here is what makes the section true. Every value is clamped,
+    // so neither the config nor a caller can raise the ADR-0010 ceilings.
+    this.#replyLimits = resolveReplyLimits(this.#config.reply, options.reply);
     // The personality is the source of truth, so it is read at construction and
     // re-read on every turn. Forgetting this wiring is no longer invisible: an
     // unset tolerance leaves the window unscaled instead of silently matching
