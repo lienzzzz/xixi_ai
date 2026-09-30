@@ -1,7 +1,7 @@
 # 对话层：FSM、提示词组装与沉默
 
 > 最后更新：2026-09-30
-> 权威来源：`packages/conversation/src/{fsm,prompt,engine}.ts`、`packages/brain-adapter/src/{types,tools,mimo}.ts`、`packages/domain/src/store.ts`
+> 权威来源：`packages/conversation/src/{fsm,prompt,engine,personality}.ts`、`packages/brain-adapter/src/{types,tools,mimo}.ts`、`packages/contracts/schemas/events/conversation.decision.v1.json`、`packages/domain/src/store.ts`
 > 若与代码不一致，以代码为准，并请立即修正本文件
 
 对话层负责**确定性的一半**（铁律 1）：该不该接这句话、模型能看到什么、说了要不要落库。
@@ -24,7 +24,8 @@ ACTIVE/LINGERING --suspend()--> SUSPENDED --到期(tick) 或 resume()--> IDLE
 - 状态只有五个：`IDLE | ENGAGING | ACTIVE | LINGERING | SUSPENDED`。
 - 所有决策都基于**注入的毫秒时间戳**（构造函数收 `at`，`tick(at)` 显式推进），因此可在测试与
   §22.3 的回放里逐字复现。
-- 默认配置 `DEFAULT_FSM_CONFIG`：`lingerMs = 30_000`、`engageTimeoutMs = 15_000`、`silenceTolerance = 0.7`。
+- 默认配置 `DEFAULT_FSM_CONFIG`：`lingerMs = 30_000`、`engageTimeoutMs = 15_000`。
+  **`silenceTolerance` 没有默认值**（见下）：它只能来自人格。
 - `SUSPENDED` 的到期时间可以是 `null`（「今天想安静点」到显式 `resume()` 为止）。
 - `snapshot()` 返回 `{state, since, lastTurnAt, suspendedUntil, turnCount}`——`turnCount` 是**本进程内**的计数，
   与持久化的 `conversation_sessions.turn_count`（跨进程累积）不是同一个东西。
@@ -34,43 +35,59 @@ ACTIVE/LINGERING --suspend()--> SUSPENDED --到期(tick) 或 resume()--> IDLE
 | 状态 | `addressed` | 结果 |
 |---|---|---|
 | `IDLE` | `true` | 接受，`ACCEPTED_WAKE_OR_DIRECT` |
-| `IDLE` | `false` | **拒绝**，`REJECTED_NOT_ADDRESSED`（不写任何事件） |
+| `IDLE` | `false` | **拒绝**，`REJECTED_NOT_ADDRESSED`（不写轮次，但写一条 `conversation.decision`） |
 | `ENGAGING` / `ACTIVE` / `LINGERING` | 任意 | 接受，`ACCEPTED_CONTINUATION`（已开着的会话不必再喊名字） |
 | `SUSPENDED` | 任意 | 拒绝，`REJECTED_SUSPENDED` |
 
-`addressed` 由**调用方**判定，因为 M2 之前没有唤醒词：
+`addressed` 由**调用方**判定，因为 M2 之前没有唤醒词。三条调用方现在用的是**同一条规则**：
 
-- 试用页 `scripts/serve-chat.ts`：状态为 `IDLE` 时把这一次点击/这句话当作直呼
-  （`addressed: engine.state === 'IDLE'`），会话已开启时按继续处理；
-- 终端 `scripts/chat.ts`：只有第一句 `addressed: true`；
-- 评测器 `scripts/eval-conversation.ts`：由语料逐轮声明（`tests/scenarios/corpus.ts` 的 `addressed?`）。
+| 调用方 | 规则 |
+|---|---|
+| 试用页 `scripts/serve-chat.ts` | `addressed: engine.state === 'IDLE'`（`handleTurn` 与 `/api/voice` 都是这一句） |
+| 终端 `scripts/chat.ts` | 同上：`engine.state === 'IDLE'`，即「IDLE 时这句话就是叫醒，会话开着就是继续」 |
+| 评测器 `scripts/eval-conversation.ts` | 由语料逐轮声明（`tests/scenarios/corpus.ts` 的 `addressed?`） |
 
-**接线现状带来的两个真实行为**（代码如此，未必符合直觉）：
+因此在这两个真实入口上，「`IDLE` 且未直呼」这条拒绝分支**不可达**（它们都按状态传对），
+唯一会被拒的情况是 `SUSPENDED`（点过「今天安静点」/ 输入过 `/quiet` 之后）。
 
-- 试用页的 `addressed` 由**发送那一刻的 FSM 状态**决定：`IDLE → true`，其余状态 → `false`。
-  因此「`IDLE` 且未直呼」这一条拒绝分支在页面上**不可达**（两个按钮都传对它）；
-  页面上唯一会被拒的情况是 §55 之外的 `SUSPENDED`（点过「今天安静点」按钮之后）。
-- 终端 `npm run chat` 只在**第一句**传 `addressed: true`（局部变量 `first`），
-  所以如果中途停顿超过跟进窗口、FSM 回到 `IDLE`，后面这句会被判定为
-  `REJECTED_NOT_ADDRESSED` 而不被接受。这正是 M2 的唤醒词/搭话判定要接管的位置。
+> 已修（本轮）：`scripts/chat.ts` 曾经用局部变量 `first`，**只在第一句**传 `addressed: true`。
+> 跟进窗口超时回到 `IDLE` 之后，后面每一句都会被判成 `REJECTED_NOT_ADDRESSED`——
+> 复现与前后对比见 [`progress.md`](../progress.md) §0 的本轮段落与
+> `tests/integration/conversation-engine.test.ts` 的
+> `a long pause closes the session, and the next addressed line is accepted again`。
 
 ### 静默容忍度如何缩放跟进窗口
 
 `ConversationStateMachine.lingerMs` 是一个 getter，按有效人格的 `silence_tolerance` 缩放基础窗口：
 
 ```text
-lingerMs(实际) = round(lingerMs(配置) × (0.5 + silenceTolerance))
+lingerMs(实际) = tolerance 未接线 ? lingerMs(配置)
+                                 : round(lingerMs(配置) × (0.5 + silenceTolerance))
 ```
 
-- `silenceTolerance = 0` → `× 0.5`；`0.7`（默认）→ `× 1.2`；`1` → `× 1.5`。
-- 以默认配置 30s 为例：`0.7 → 36_000ms`、`0 → 15_000ms`、`1 → 45_000ms`。
+- 默认配置 30s 为例：`0 → 15_000ms`、`0.7 → 36_000ms`、`1 → 45_000ms`。
 - 注释里给的理由是「容忍度高的用户不怕停顿，所以西西多听一会儿，而不是退出会话」，
-  并且刻意**不引入第二个魔法常数**（见 `tests/unit/conversation-fsm.test.ts` 的断言）。
-- **接线现状（易踩）**：`silence_tolerance` 必须由调用方通过 `ConversationEngine` 的
-  `fsm` 选项显式传入（如 `scripts/eval-conversation.ts` 直接构造引擎、`tests/integration/conversation-engine.test.ts`
-  传 `fsm: { lingerMs: 30_000, silenceTolerance: 0.7 }`）。`ConversationEngine` 目前**不会**自动把
-  `store.selfProfile()` 里的 `silence_tolerance` 读进 FSM——人格影响的是提示词，不影响超时。
-  默认值恰好也是 0.7，所以「忘记接线」在默认人格下看不出来。
+  并且刻意**不引入第二个魔法常数**（`tests/unit/conversation-fsm.test.ts` 直接断言这三个数）。
+- **接线（本轮修掉的缺陷）**：`ConversationEngine` 自己读 `store.selfProfile()` 的
+  `silence_tolerance` 并调用 `fsm.setSilenceTolerance()`；构造时读一次，**每轮 `respond()` 前重读一次**，
+  因此运行中的人格变更（`overrideSelfProfile`，M3 之后的学习引擎）下一轮就生效。
+  取值优先级只有一处决定（`packages/conversation/src/engine.ts` 的 `#syncSilenceTolerance`）：
+
+  ```text
+  store.selfProfile()['silence_tolerance']
+    ?? 调用方显式传入的 fsm.silenceTolerance（测试/回放）
+    ?? DEFAULT_SILENCE_TOLERANCE   // 0.7，见 packages/conversation/src/personality.ts
+  ```
+
+- **FSM 自己不再有默认值**：以前 `lingerMs` 的 getter 会退回 `0.7`，而配置里的基线值恰好也是 0.7，
+  于是「忘记接线」在默认人格下完全看不出来，却会在人格被调高/调低后静默失效。
+  现在 `ConversationStateMachine` 未接线时就是**不加缩放**（`silenceTolerance === null` → 30s），
+  兜底上移到引擎并变成一个**有名字的常量**，不再冒充「人格已接线」。
+  `tests/unit/core/engine-personality.test.ts` 用「同一次停顿在两种人格下得到不同接受结果」
+  证明它是经由引擎生效的，而不是测试里手工构造 FSM 参数；`tests/unit/conversation-fsm.test.ts`
+  则断言 FSM 层未接线时不缩放。
+- 引擎把实际用的两个数（`linger_ms`、`silence_tolerance`）写进 `conversation.decision`，
+  所以「为什么这句话被接了/被拒了」可以从日志里对回来。
 
 ## 2. Prompt 组装（§26）
 
@@ -182,17 +199,20 @@ HARD_POLICY（不可变硬策略，常量）
 ## 5. 一轮的完整时序（`ConversationEngine.respond`）
 
 ```text
-①  acceptance = fsm.shouldAcceptTurn({addressed, at})        未接受 → 立即返回，零写入
+⓪  syncSilenceTolerance()                                    读 selfProfile → fsm.setSilenceTolerance
+①  acceptance = fsm.shouldAcceptTurn({addressed, at})
+       未接受 → appendEvent(conversation.decision, accepted=false) 后立即返回（不写轮次、不调模型）
 ②  fsm.onUserTurn(at)                                        ACTIVE
 ③  prompt = buildPrompt(…)                                   取 recentTurns(limit 8) 与 selfProfile()
 ④  store.recordTurn(user, SPEAK, text)                       事务：事件 + turn_count 投影
 ⑤  adapter.handleUserTurn({sessionId, text, prompt, timeoutMs})
 ⑥  逐 chunk：压住可能的 [静默] 前缀，其余交给 hooks.onTextChunk（TTS 可提前开始）
-⑦  result = await stream.result                             适配器抛错 → 异常上抛（见下）
+⑦  result = await stream.result                             适配器抛错 → finally 里先落 decision，再上抛
 ⑧  沉默兜底：isSilenceReply → action=SILENCE / text=null
 ⑨  store.recordTurn(assistant, action, text, toolName)       事务：事件 + 投影
 ⑩  fsm.onReplyCompleted()                                    LINGERING
-⑪  返回 {accepted, reason, state, action, text, provider, model, latencyMs, firstTokenMs, prompt}
+⑪  finally: appendEvent(conversation.decision, accepted=true, action, fsm_state)
+⑫  返回 {accepted, reason, state, action, text, provider, model, latencyMs, firstTokenMs, prompt}
 ```
 
 细节与陷阱：
@@ -203,16 +223,42 @@ HARD_POLICY（不可变硬策略，常量）
   各自独立事务。
 - **`turn_index` 来自投影**：`recordTurn` 用 `session.turnCount` 作为本轮的 `turn_index`，
   因此用户轮与助手轮的 index 不同（0 与 1），与事件条数一致。
+  **`conversation.decision` 的 `turn_index` 不用投影**，而是用引擎进程内的 `#decisionCount`
+  （从 0 开始、每条 decision 加一）：被拒绝的轮次不写 `conversation.turn`，用投影就会反复出现同一个 index。
 - **prompt 里的轮次是「调用模型之前」的值**：`buildPrompt` 用 `session.turnCount`，
   所以第一句显示「本会话第 1 轮」，并且工作记忆里**不包含**本句（第 ④ 步还没执行）。
-- **模型抛错时不写助手轮次**：第 ⑦ 步的异常直接上抛，用户轮次已经在库里，
+- **模型抛错时不写助手轮次，但 decision 一定落库**：第 ⑦ 步的异常直接上抛，用户轮次已经在库里，
   助手侧既不写事件也不写 health；`ConversationEngine` 没有重试。调用方（试用页/脚本）自行处理错误。
+  第 ⑪ 步在 `finally` 里执行，所以「这一轮被接受了、随后供应商失败」也是可审计的事实
+  （§21 降级要用到这个区分）。
 - **两种时钟并存**：`latencyMs` / `firstTokenMs` 用 `Date.now()`（真实墙钟），
   而事件 `timestamp`、`turn_count` 更新与 FSM 决策用注入的 `Clock`（`store.clock` / `engine.clock`，默认 `systemClock`）。
   测试用 `fixedClock` 才能得到确定的时间戳。
 - **`quiet()` 会写事件**：`engine.quiet()` 走 `fsm.suspend()` 并追加一条
   `system.health`（`service='conversation'`, `status='ok'`, `detail='quiet mode until …'`）；
   普通轮次不写 health。
+
+### `conversation.decision`：为什么这句话被接了/被拒了
+
+这是本轮新增的第三个事件类型（schema：`packages/contracts/schemas/events/conversation.decision.v1.json`，
+在 `EVENT_TYPES` 里注册，envelope 的 `event_type` 枚举同步扩过，契约测试会拦住漂移）。
+
+| 字段 | 含义 |
+|---|---|
+| `session_id` / `turn_index` | 哪个会话的第几个决策（决策序号，见上） |
+| `accepted` / `reason` | `ACCEPTED_WAKE_OR_DIRECT` / `ACCEPTED_CONTINUATION` / `REJECTED_NOT_ADDRESSED` / `REJECTED_SUSPENDED` |
+| `action` | 这一轮实际做了什么：接受时是 `SPEAK/SILENCE/TOOL`，拒绝时固定 `SILENCE` |
+| `fsm_state_before` / `fsm_state` | 决策前后的状态槽位（拒绝路径下两者相同） |
+| `addressed` | 调用方给出的判定输入（不是唤醒词检测本身） |
+| `acceptance_score` | 1 = 接受、0 = 拒绝（`confidence` 字段同样用于此） |
+| `linger_ms` / `silence_tolerance` | 当时真正生效的跟进窗口与人格值，用来把「为什么这会儿还在听」对回来 |
+
+envelope 层：`source = 'brain'`、`actor = 'system'`、`confidence = accepted ? 1 : 0.5`。
+
+**为什么不存用户原话**：他说了什么已经在 `conversation.turn` 里（那是事实），
+decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值，所以
+`tests/integration/conversation-engine.test.ts` 断言这条 payload 里**不含本轮文本**，
+也没有任何 `reasoning` 类字段。事件因此可以在不扩大隐私暴露面的前提下支撑 §22.2 的调试视图。
 
 ## 6. 未实现（对话层相关）
 
@@ -222,7 +268,7 @@ HARD_POLICY（不可变硬策略，常量）
 | 主动开口（§15） | 无代码；`evaluateProactiveCandidate` 抛 `NOT_IMPLEMENTED(M5)` |
 | 长期记忆与关系（§10/§18） | 工作记忆只有 `recentTurns(limit 8)`；长期记忆属 M4 |
 | 回溯打断时的语义截断 | 只有 VAD 判定层面的离线测量（`scripts/voice-bargein.ts`） |
-| 提示词与延迟进事件日志 | 刻意不存（铁律 5 的方向：只存事实与 `reason_code`） |
+| 提示词与延迟进事件日志 | 刻意不存（铁律 5 的方向：只存事实与 `reason_code`）；接受判定已按同一原则落 `conversation.decision` |
 | 多轮工具调用与强制工具 | `tool_choice` 只能 `auto`，模型可拒绝调用；适配器上限 2 轮 |
 
 ## 维护规则
@@ -233,9 +279,11 @@ HARD_POLICY（不可变硬策略，常量）
 |---|---|
 | `packages/conversation/src/fsm.ts`（状态、`DEFAULT_FSM_CONFIG`、判定或 `lingerMs` 算法） | §1（并同步 `tests/unit/conversation-fsm.test.ts`） |
 | `packages/conversation/src/prompt.ts`（§26 顺序、`HARD_POLICY`、阈值或指令文案、`sections`） | §2、§3、§4（并同步 `tests/unit/prompt.test.ts`） |
-| `packages/conversation/src/engine.ts`（编排步骤、沉默兜底、落库时机、时钟用法） | §4、§5 |
+| `packages/conversation/src/engine.ts`（编排步骤、沉默兜底、落库时机、时钟用法、decision 事件） | §4、§5 |
+| `packages/conversation/src/personality.ts`（`DEFAULT_SILENCE_TOLERANCE` 与取值优先级） | §1 |
 | `packages/brain-adapter/src/mimo.ts` 的 `SILENCE_TOKEN` / `isSilenceReply` / 工具循环 | §4、§6（两处 token 必须保持一致） |
 | `packages/domain/src/store.ts` 的 `recordTurn` / `recentTurns` 语义 | §5（并同步 [`domain-model.md`](domain-model.md) §5） |
 | `packages/domain/src/personality.ts` 属性或 `config` 基线值 | §3（指令映射依赖具体属性名与阈值） |
-| 新增会话状态、或 `silence_tolerance` 真正接进 FSM | §1（并把「接线现状」改写为事实） |
+| 新增事件类型（如 `conversation.decision`） | §5（并同步 [`event-contracts.md`](../event-contracts.md)、[`domain-model.md`](domain-model.md) 的事件表） |
+| 新增会话状态 | §1 |
 | 唤醒词 / 主动开口落地 | §6 与 [`../architecture.md`](../architecture.md) §7 |

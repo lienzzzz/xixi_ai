@@ -17,7 +17,7 @@ const CONFIG: XixiConfig = {
     asr: { provider: 'fake', asr: 'fake' } as never,
     tts: { provider: 'fake' } as never,
   } as never,
-  personality: { base: { verbosity: 0.4, warmth: 0.8 } },
+  personality: { base: { verbosity: 0.4, warmth: 0.8, silence_tolerance: 0.7 } },
   proactive: {},
   memory: {},
   privacy: {},
@@ -35,7 +35,9 @@ function engineWith(
     config: CONFIG,
     clock: fixedClock(new Date(T0), 1_000),
     offsetMinutes,
-    fsm: { lingerMs: 30_000, silenceTolerance: 0.7 },
+    // No `silenceTolerance` here: the window must come from the persisted
+    // personality, which is the wiring these tests exist to protect.
+    fsm: { lingerMs: 30_000 },
   });
 }
 
@@ -46,7 +48,7 @@ function freshStore(): XixiStore {
   return store;
 }
 
-test('a turn is refused when nobody addressed Xixi, and nothing is written to the log', async () => {
+test('a turn is refused when nobody addressed Xixi, and the refusal itself is auditable', async () => {
   const store = freshStore();
   try {
     const engine = engineWith((input) => ({ action: 'SPEAK', text: `收到：${input.text}` }), store);
@@ -55,7 +57,21 @@ test('a turn is refused when nobody addressed Xixi, and nothing is written to th
     assert.equal(turn.accepted, false);
     assert.equal(turn.reason, 'REJECTED_NOT_ADDRESSED');
     assert.equal(turn.action, 'SILENCE');
-    assert.equal(store.eventCount(), 0, 'unaddressed audio (e.g. the TV) must not become conversation history');
+    // The refusal must not become conversation history…
+    assert.equal(store.recentTurns(session.sessionId).length, 0, 'unaddressed audio (e.g. the TV) must not become history');
+    assert.equal(store.readEvents({ type: 'conversation.turn' }).length, 0);
+    // …but the log must be able to answer "why wasn't this accepted?" (铁律 5).
+    const decisions = store.readEvents({ type: 'conversation.decision' });
+    assert.equal(decisions.length, 1);
+    const payload = decisions[0]?.payload as Record<string, unknown>;
+    assert.equal(payload.accepted, false);
+    assert.equal(payload.reason, 'REJECTED_NOT_ADDRESSED');
+    assert.equal(payload.action, 'SILENCE');
+    assert.equal(payload.turn_index, 0);
+    assert.equal(payload.accepted === false, true);
+    // 铁律 5: no user words, no model reasoning — only the reason code and scores.
+    assert.equal(JSON.stringify(payload).includes('明天'), false, 'the decision event must not carry the utterance');
+    assert.equal('text' in payload, false);
   } finally {
     store.close();
   }
@@ -215,17 +231,55 @@ test('quiet mode stops accepting turns and can be lifted', async () => {
   }
 });
 
-test('a long pause closes the session, so the next turn needs addressing again', async () => {
+test('a long pause closes the session, and the next addressed line is accepted again', async () => {
   const store = freshStore();
   try {
     const engine = engineWith((input) => ({ action: 'SPEAK', text: `收到：${input.text}` }), store);
     const session = store.createSession();
     await engine.respond({ sessionId: session.sessionId, text: '第一句', addressed: true });
     assert.equal(engine.state, 'LINGERING');
+    // 0.7 → window = 30s × 1.2 = 36s
+    assert.equal(engine.lingerMs, 36_000);
     engine.tick(new Date(Date.now() + 10 * 60 * 1000));
     assert.equal(engine.state, 'IDLE');
+
+    // In IDLE an unaddressed line is still refused…
     const ignored = await engine.respond({ sessionId: session.sessionId, text: '还在吗', addressed: false });
     assert.equal(ignored.accepted, false);
+    assert.equal(ignored.reason, 'REJECTED_NOT_ADDRESSED');
+
+    // …and this is exactly the fix for `scripts/chat.ts`: the callers rule is
+    // "IDLE means the click/line is a wake-up", so the next line is accepted
+    // instead of being rejected forever after the first follow-up timeout.
+    const resumed = await engine.respond({ sessionId: session.sessionId, text: '还在吗', addressed: true });
+    assert.equal(resumed.accepted, true);
+    assert.equal(resumed.reason, 'ACCEPTED_WAKE_OR_DIRECT');
+  } finally {
+    store.close();
+  }
+});
+
+test('every accepted turn leaves a decision event the log can explain', async () => {
+  const store = freshStore();
+  try {
+    const engine = engineWith((input) => ({ action: 'SPEAK', text: `收到：${input.text}` }), store);
+    const session = store.createSession();
+    await engine.respond({ sessionId: session.sessionId, text: '第一句', addressed: true });
+    await engine.respond({ sessionId: session.sessionId, text: '第二句', addressed: false });
+    const decisions = store.readEvents({ type: 'conversation.decision' });
+    assert.deepEqual(
+      decisions.map((event) => (event.payload as { reason: string }).reason),
+      ['ACCEPTED_WAKE_OR_DIRECT', 'ACCEPTED_CONTINUATION'],
+    );
+    assert.deepEqual(
+      decisions.map((event) => (event.payload as { turn_index: number }).turn_index),
+      [0, 1],
+      'decision indexes must advance even though only turns change the projection',
+    );
+    assert.deepEqual(
+      decisions.map((event) => (event.payload as { action: string }).action),
+      ['SPEAK', 'SPEAK'],
+    );
   } finally {
     store.close();
   }

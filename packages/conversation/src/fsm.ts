@@ -34,6 +34,12 @@ export interface FsmConfig {
    * Silence tolerance from the effective personality (§7.2) scales the linger
    * window: a high tolerance means the user is comfortable with pauses, so the
    * assistant keeps listening longer instead of dropping out of the session.
+   *
+   * There is deliberately **no default value**. A missing tolerance used to fall
+   * back to 0.7 — which happened to equal the seeded personality — so forgetting
+   * to wire the personality into the FSM was invisible. Now an unset value means
+   * "the raw window, unscaled", and only `ConversationEngine` (which reads
+   * `store.selfProfile()`) supplies the real one.
    */
   readonly silenceTolerance?: number;
 }
@@ -41,7 +47,6 @@ export interface FsmConfig {
 export const DEFAULT_FSM_CONFIG: FsmConfig = Object.freeze({
   lingerMs: 30_000,
   engageTimeoutMs: 15_000,
-  silenceTolerance: 0.7,
 });
 
 export interface FsmSnapshot {
@@ -70,10 +75,42 @@ export class ConversationStateMachine {
   }
 
   get lingerMs(): number {
-    const tolerance = this.#config.silenceTolerance ?? DEFAULT_FSM_CONFIG.silenceTolerance ?? 0.7;
+    const tolerance = this.#config.silenceTolerance;
+    if (tolerance === undefined) return this.#config.lingerMs;
     // tolerance 0 → half the base window; tolerance 1 → 1.5×. Keeps the number
     // bounded and explainable instead of inventing a second magic constant.
     return Math.round(this.#config.lingerMs * (0.5 + tolerance));
+  }
+
+  /** The effective tolerance currently scaling the window (`null` = not wired). */
+  get silenceTolerance(): number | null {
+    return this.#config.silenceTolerance ?? null;
+  }
+
+  /**
+   * Feed the effective personality's `silence_tolerance` in (§7.2, §12.2).
+   *
+   * Live, not construct-time only: the self model can change while a process
+   * runs (admin override today, M3 learning later), and the follow-up window is
+   * read on every `tick`/`shouldAcceptTurn`, so the next decision already uses
+   * the new value.
+   */
+  setSilenceTolerance(tolerance: number): void {
+    if (!Number.isFinite(tolerance)) return;
+    this.#config = { ...this.#config, silenceTolerance: Math.min(1, Math.max(0, tolerance)) };
+  }
+
+  /**
+   * Forget the tolerance: the window becomes the raw configured one again.
+   *
+   * Not called by `ConversationEngine` (it always resolves a value — personality,
+   * then an explicit override, then `DEFAULT_SILENCE_TOLERANCE`), but a state
+   * machine built by hand in a test or a replay tool needs a way back to the
+   * unwired state it was constructed in.
+   */
+  clearSilenceTolerance(): void {
+    const { silenceTolerance: _ignored, ...rest } = this.#config;
+    this.#config = rest;
   }
 
   #move(state: ConversationState, at: number): void {

@@ -5,7 +5,39 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { BrainError, DshBrainAdapter, ScriptedDshTransport, collectTurn } from '@xixi/brain-adapter';
+import { ModelError, MimoClient } from '@xixi/model-adapters';
 import { openXixiStore, type XixiStore } from '@xixi/domain';
+
+/**
+ * A missing credential must stay `MISSING_KEY`.
+ *
+ * `MimoClient.#post` used to build its headers inside the fetch try-block, so
+ * this local configuration fault was caught and re-labelled `NETWORK`: a user who
+ * forgot to fill `.env` was told the network was broken. The classification is
+ * now decided before any I/O, so the two diagnoses stay apart (§21.1) and the
+ * request is never attempted.
+ */
+test('a missing API key fails as MISSING_KEY before any request is attempted', async () => {
+  let attempted = 0;
+  const fetchImpl = (async () => {
+    attempted += 1;
+    return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+  }) as unknown as typeof fetch;
+  const client = new MimoClient({ fetchImpl });
+
+  await assert.rejects(
+    () => client.chat({ model: 'mimo-v2.6-flash', messages: [{ role: 'user', content: '你好' }] }),
+    (error: unknown) =>
+      error instanceof ModelError &&
+      error.code === 'MISSING_KEY' &&
+      (error as ModelError).detail !== 'could not reach the model endpoint',
+  );
+  await assert.rejects(
+    () => client.chatJson({ messages: [{ role: 'user', content: '你好' }], schema: { type: 'object' } }),
+    (error: unknown) => error instanceof ModelError && error.code === 'MISSING_KEY',
+  );
+  assert.equal(attempted, 0, 'a missing key is refused locally, not sent upstream');
+});
 
 function freshStore(): XixiStore {
   const dir = mkdtempSync(join(tmpdir(), 'xixi-adapter-'));

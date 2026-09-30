@@ -37,7 +37,12 @@
 
 `TurnAction` 由 `packages/domain/src/store.ts` 定义为 `'SPEAK' | 'BACKCHANNEL' | 'WAIT' | 'SILENCE' | 'TOOL'`，
 但**没有任何适配器/传输层会产出 `BACKCHANNEL` 或 `WAIT`**：直连路径只产出 `SPEAK`/`SILENCE`/`TOOL`（`src/mimo.ts` 的 `#interpret`），
-DSH 路径同样（`apps/brain-dsh/src/transport.ts` 的 `action` 计算）。→ 未实现（方案 §55 的 BACKCHANNEL/WAIT 语义）。
+Dsh 路径同样（`apps/brain-dsh/src/transport.ts` 的 `action` 计算），引擎只在拒绝时落 `SILENCE`。
+→ **当前无生产者**（方案 §55 的 BACKCHANNEL/WAIT 语义未实现）。这个事实被测试固化，而不是只写在注释里：
+`tests/unit/core/dead-code-truthfulness.test.ts` 会扫描 `packages/`、`apps/`、`scripts/`、`plugins/`、`services/`
+（只放行 `packages/domain/src/store.ts` 的类型定义与 `packages/contracts/src/events.ts` 的注册表描述），
+一旦有人添加生产者，测试立刻失败，必须同时更新本文件。事件契约本身仍然接受这两个值，
+所以将来落地 BACKCHANNEL/WAIT 不需要改 schema。
 
 ## 3. 两种真实实现对比
 
@@ -107,8 +112,30 @@ resume 的两个硬约束（相同 cwd、相同 profile）在 `CliDshTransport` 
 - `place` 配置来自 `config.identity.place`（可选字段，`packages/domain/src/config.ts`）；
   `scripts/serve-chat.ts` 用它构造 `defaultTools({defaultPlace: config.identity.place ?? ''})`。
 - **没有** shell / 文件系统 / 消息 / 高风险工具（§27 与铁律 7）；工具集合刻意最小且只读。
-- DSH 一侧另有一份工具实现：`plugins/xixi-tools/index.js` 用 `defineTool` 只注册了 `xixi_get_current_time`
-  （`parameters: {}`）。**DSH 路径目前没有天气工具**。
+- DSH 一侧另有一份工具实现：`plugins/xixi-tools/index.js`（插件包名 `dsh-xixi-tool`，由 profile 的
+  `cordis.patch.yml` 挂载），用 `defineTool` 注册**同一套两个工具**：
+
+| DSH 侧工具 | 权限 | 参数 | 行为 |
+|---|---|---|---|
+| `xixi_get_current_time` | L0 | `parameters: {}`（无参数） | 返回 `iso` |
+| `xixi_get_weather` | L1 外部只读 | `place`(string)、`day`(enum `today`/`tomorrow`/`day_after_tomorrow`)、**`additionalProperties:false`** | 与直连路径同源同形（Open-Meteo、30 分钟缓存、同一返回字段），见下 |
+
+- **DSH 天气工具（本轮补齐）**：之所以必须补，是因为工具**按路径注册**——走 `--dsh` 时
+  `packages/brain-adapter/src/tools.ts` 完全不参与，模型手上只有时间工具，问天气只能编造或回避。
+  - 同一数据源：`plugins/xixi-tools/index.js` 内的 `WeatherClient` 重新实现了一份（插件包只有一个
+    peerDependency `@deepseek-ai/dsh-tools`，且铁律 9 要求 Harness 代码不外泄），
+    **不使用 `packages/model-adapters`**；两条路径的等价性由
+    `tests/unit/core/plugin-tools.test.ts` 断言（同参数 schema、同返回字段、
+    WMO 码中文映射与 30 分钟缓存一致，全部走 stub fetch，不触网）。
+  - `place` 省略时的默认地点与直连路径同源：环境变量 `XIXI_PLACE` →
+    本机私有配置 config/xixi.yaml 的 `identity.place` → config/xixi.example.yaml 的同一字段；都没有就**返回错误而不是猜城市**。
+  - 失败一律是**工具结果里的 `error`**（网络不可达 / 不认识的地名 / 没有默认地点），
+    输出 schema 用 `oneOf` 区分「成功」与「拒绝」两个形状，拒绝形状没有预报字段，
+    所以失败不可能被念成一份预报。
+  - **参数封闭的实现细节**：`defineTool` 把 `parameters` 编译成根对象时**不带 `additionalProperties:false`**
+    （实测 `@deepseek-ai/dsh-tools` 0.1.7-rc.2），未声明的键会被接受。因此工具体在触网前调用
+    `rejectUnknownArguments(args)` 再校验一次，返回 `不认识的参数「…」`；`day` 的 enum 由注册表先拦。
+    这一点在真机上要留意：**封闭性来自工具体，不是来自 DSH 的 schema 校验**。
 - `tool_choice` 在 `MimoClient.#body` 里被硬编码为 `'auto'`：实测其它取值（`required`/具名/`none`）全被静默忽略
   （recon §3），所以**不能把「必须调用工具」当硬门禁**，只能提示词驱动 + 自行校验 `tool_calls`。
 
@@ -143,31 +170,62 @@ resume 的两个硬约束（相同 cwd、相同 profile）在 `CliDshTransport` 
 | code | 含义 / 触发点 |
 |---|---|
 | `NOT_IMPLEMENTED` | 四个未实现能力；带 `milestone` |
-| `TRANSPORT_FAILED` | transport 未回答（`src/dsh.ts`）；找不到 `dsh`、`bin.js` 不存在、cwd 不存在（`apps/brain-dsh/src/transport.ts`）；`MimoBrainAdapter` 的兜底（`src/mimo.ts`） |
-| `PROVIDER_FAILED` | harness 返回 `ok:false`（`src/dsh.ts`）；**除 `TIMEOUT` 外所有 `ModelError` 的映射结果**（`src/mimo.ts`） |
-| `TIMEOUT` | `CliDshTransport` 超时并 kill 子进程；`ModelError('TIMEOUT')` 映射 |
-| `INVALID_RESPONSE` | harness 回的 `requestId` 与请求不一致（`src/dsh.ts`） |
-| `SESSION_MISMATCH` | **只在类型里声明，代码中没有任何一处抛出**（当前未使用） |
+| `TRANSPORT_FAILED` | transport 未回答（`src/dsh.ts`）；找不到 `dsh`、`bin.js` 不存在、cwd 不存在（`apps/brain-dsh/src/transport.ts`）；`ModelError` 的 `MISSING_KEY` / `NETWORK`；`MimoBrainAdapter` 的兜底（`src/mimo.ts`） |
+| `PROVIDER_FAILED` | harness 返回 `ok:false`（原始码保留在 `originalCode`/`detail`）；`ModelError('PROVIDER')`（HTTP ≥ 500）；`ModelError` 的默认分支 |
+| `TIMEOUT` | `CliDshTransport` 超时并 kill 子进程；`ModelError('TIMEOUT')` |
+| `INVALID_RESPONSE` | harness 回的 `requestId` 与请求不一致（`src/dsh.ts`）；`ModelError('INVALID_RESPONSE')` |
+| `AUTH` | `ModelError('AUTH')`（401/403） |
+| `RATE_LIMIT` | `ModelError('RATE_LIMIT')`（429） |
+| `QUOTA` | `ModelError('QUOTA')`（402） |
+| `BAD_REQUEST` | `ModelError('BAD_REQUEST')`（400/404/422） |
+
+`BrainError` 还带 `originalCode`（`MISSING_KEY`/`AUTH`/`QUOTA`/`RATE_LIMIT`/`BAD_REQUEST`/`PROVIDER`/`NETWORK`/`TIMEOUT`/`INVALID_RESPONSE`，或 `null`）。
+两条真实路径共用同一个映射函数 `brainErrorCodeFor(providerCode)`（`src/errors.ts`），所以两条路径不可能对同一个码有不同理解：
+
+- **直连路径**：`ModelError.code` 直接决定 `BrainError.code`，同时记进 `originalCode`；
+- **DSH 路径**：harness 的 `error.code` **不**直接改 `code`（harness 报失败仍记 `PROVIDER_FAILED`，
+  与 `tests/integration/brain-adapter.test.ts` 的既有契约一致），但会经同一张表记进 `originalCode`，
+  并原样留在 `detail`；未知码两者都可以从 `detail` 里读到，不会丢。
+
+> 已修（本轮）：以前**只有 `TIMEOUT` 被保留**，`AUTH`/`RATE_LIMIT`/`QUOTA` 在适配器边界一律变成
+> `PROVIDER_FAILED`，§21.1 的降级因此分不清「该换密钥」「该退避重试」「供应商挂了」。
+> 覆盖测试：`tests/unit/core/brain-error-classification.test.ts`——直连侧逐 HTTP 状态断言 `code` + `originalCode`
+> （401/403→AUTH、402→QUOTA、429→RATE_LIMIT、400→BAD_REQUEST、503→PROVIDER_FAILED、网络→TRANSPORT_FAILED），
+> DSH 侧用 `ScriptedDshTransport` 断言 AUTH/RATE_LIMIT/QUOTA/BAD_REQUEST 进 `originalCode`、
+> `MISSING_CREDENTIAL` 这类未知码留在 `detail`。
+>
+> **仍存在的上游缺陷（未修，已测试固化）**：`MimoClient.#post` 把 `#headers()` 放在 fetch 的 `try` 里，
+> 于是缺少密钥时抛出的 `ModelError('MISSING_KEY')` 会被同一个 catch 重新包装成 `ModelError('NETWORK')`。
+> 适配器忠实地传递它收到的码，所以最终仍是 `TRANSPORT_FAILED`（分类不致命），但
+> **「没配密钥」与「连不上供应商」在日志里分不开**，§21.1 想区分这两者时需要先修
+> `packages/model-adapters/src/mimo.ts`（把 `#headers()` 提到 try 之前）。
+> `tests/unit/core/brain-error-classification.test.ts` 的 `KNOWN GAP:` 用例把这个行为钉住，
+> 修好后该用例会失败并提示更新这条记录。
 
 `ModelError`（`packages/model-adapters/src/errors.ts`，`classifyStatus`）：`MISSING_KEY`（无 key，`MimoClient.#headers`）、
 `AUTH`(401/403)、`QUOTA`(402)、`RATE_LIMIT`(429)、`BAD_REQUEST`(400/404/422，含未知地名)、
 `PROVIDER`(≥500，含天气服务拒绝)、`NETWORK`(fetch 失败)、`TIMEOUT`(abort)、
 `INVALID_RESPONSE`(非 JSON / 无 choices / 流无 body / ASR 无转写 / TTS 无音频 / `chatJson` 两次皆败)。
 
-**注意**：只有 `TIMEOUT` 在适配器边界被保留；`AUTH`/`RATE_LIMIT`/`QUOTA` 等在这里统一变成 `PROVIDER_FAILED`，
-上层拿不到更细的分类。
+**保真（本轮修）**：直连路径的每一类现在都能穿过适配器边界；`AUTH`/`RATE_LIMIT`/`QUOTA`/`BAD_REQUEST`
+不再被压成 `PROVIDER_FAILED`，`MISSING_KEY`/`NETWORK` 归到 `TRANSPORT_FAILED`，其余仍为 `PROVIDER_FAILED`
+（对照表见 §7）。上层因此可以直接 `switch (error.code)` 决定降级动作；DSH 路径的分类仍保留在
+`originalCode` 里，harness 失败本身继续记 `PROVIDER_FAILED`。
 
 §21 降级现状（progress §2.6）：用无效密钥跑 `verify:provider`，**3.9 秒**内失败、退出码 1、不挂起、无重试风暴，
-并保留 provider 原始错误（`dsh: AUTH: 401: Invalid API Key`）→ `BrainError(PROVIDER_FAILED)`。
+并保留 provider 原始错误（`dsh: AUTH: 401: Invalid API Key`）；分类修好之后这条路径现在报
+`BrainError(AUTH)`（此前是 `PROVIDER_FAILED`）。
 未实现：§21.1 的本地兜底话术、§21.2 本地 TTS 备选、§21.3 本地 ASR 兜底、§21.6 的
 FatherModel/RelationshipModel/FutureHooks 恢复（这些领域对象尚不存在）。当前重启只恢复会话、轮次与人格基线。
 
 ## 8. 未实现清单（与本文相关）
 
-- `BACKCHANNEL` / `WAIT` 两种 action 没有任何生产者。
+- `BACKCHANNEL` / `WAIT` 两种 action **没有任何生产者**（事实由 `tests/unit/core/dead-code-truthfulness.test.ts` 固化，见 §2）。
 - 四个 meta-agent 能力（§2 表）。
-- DSH 路径缺天气工具；DSH 路径的提示词拼装是 `composeTask` 占位（§26 的正式拼装由 `packages/conversation` 的 `PromptAssembler` 负责，直连路径已用上）。
+- DSH 路径的提示词拼装是 `composeTask` 占位（§26 的正式拼装由 `packages/conversation` 的 `PromptAssembler` 负责，直连路径已用上）。
+  （**DSH 路径的天气工具已在本轮补齐**，见 §5。）
 - 本地 ASR / TTS 兜底、模型私有推理之外的失败话术。
+- `MimoClient.#post` 会把「缺密钥」误标成 `NETWORK`（§7 的 KNOWN GAP）。
 - `brain-adapter` 无 type check（无 `tsc --noEmit`），类型错误只在运行时暴露（progress §6）。
 
 ## 维护规则
@@ -181,7 +239,8 @@ FatherModel/RelationshipModel/FutureHooks 恢复（这些领域对象尚不存�
 | `packages/model-adapters/src/mimo.ts`（含 `chatJson`/`strict`） | §6、§7、§3（默认参数） |
 | `packages/model-adapters/src/weather.ts` | §5（数据源、缓存、返回字段） |
 | `packages/model-adapters/src/errors.ts` | §7 |
-| `packages/brain-adapter/src/errors.ts` | §7（码表，含未被使用的码） |
+| `packages/brain-adapter/src/errors.ts`（码表、`brainErrorCodeFor`） | §7（码表与两条路径共用的映射） |
 | `apps/brain-dsh/profile/cordis.patch.yml` | §3（thinking/工具路由）、§5（DSH 侧工具） |
-| `plugins/xixi-tools/index.js` | §5（DSH 侧工具清单） |
+| `plugins/xixi-tools/index.js`（工具清单、参数封闭、默认地点、输出形状） | §5（DSH 侧工具表），并同步 `tests/unit/core/plugin-tools.test.ts` |
 | 里程碑推进（M3/M4/M5 落地） | §2（状态）、§8（未实现清单），并同步 [handoff.md](../handoff.md) 现状矩阵 |
+| 某个 action 的「有/无生产者」发生变化 | §2、§8 与 `tests/unit/core/dead-code-truthfulness.test.ts` |

@@ -4,6 +4,12 @@
  * This is the runnable demo the objective asks for: real multi-turn conversation
  * with continuity, personality and silence, plus per-turn latency numbers.
  *
+ * Addressing (until M2 has a wake word): the same rule as the trial page — a line
+ * typed while the FSM is IDLE counts as calling her, and while a session is open
+ * the FSM treats the line as a continuation. A follow-up-window timeout returns
+ * the session to IDLE, so the next line is accepted again instead of being
+ * rejected for the rest of the process.
+ *
  * Usage:
  *   node scripts/chat.ts                     # direct MiMo (realtime path)
  *   node scripts/chat.ts --fake              # offline deterministic adapter
@@ -76,10 +82,12 @@ const engine = new ConversationEngine({ adapter, store, config, turnTimeoutMs: 6
 
 console.log(`西西（${adapter.describe().provider} / ${adapter.describe().model}）已就绪。`);
 console.log(`会话 ${session.sessionId}，已有 ${session.turnCount} 轮；人格 ${JSON.stringify(store.selfProfile())}`);
-console.log('直接说话即可（首句视为已叫醒西西）。输入 /exit 结束。\n');
+console.log(
+  `跟进窗口 ${engine.lingerMs}ms（由人格 silence_tolerance=${engine.silenceTolerance} 缩放）；` +
+    'IDLE 时直接说话即为叫醒，会话开了就按继续处理。输入 /exit 结束。\n',
+);
 
 const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY === true });
-let first = true;
 
 async function handle(line: string): Promise<void> {
   const text = line.trim();
@@ -111,8 +119,14 @@ async function handle(line: string): Promise<void> {
   const streaming: string[] = [];
   process.stdout.write('西西: ');
   try {
+    // Same rule as the trial page (`scripts/serve-chat.ts`): the terminal has no
+    // wake word yet (M2), so a line typed while the session is idle counts as
+    // calling her — a follow-up-window timeout returns the FSM to IDLE, and the
+    // next line must be accepted again. While a session is open, `addressed` is
+    // ignored by the FSM (continuation), so mirroring the page is enough.
+    const addressed = engine.state === 'IDLE';
     const turn = await engine.respond(
-      { sessionId: session.sessionId, text, addressed: first },
+      { sessionId: session.sessionId, text, addressed },
       {
         onTextChunk: (chunk) => {
           process.stdout.write(chunk);
@@ -120,10 +134,10 @@ async function handle(line: string): Promise<void> {
         },
       },
     );
-    first = false;
-    const timing = `[${turn.action} ${turn.latencyMs}ms${turn.firstTokenMs === null ? '' : ` 首字${turn.firstTokenMs}ms`} state=${turn.state}]`;
+    const timing = `[${turn.action} ${turn.latencyMs}ms${turn.firstTokenMs === null ? '' : ` 首字${turn.firstTokenMs}ms`} state=${turn.state} linger=${engine.lingerMs}ms 人格=${engine.silenceTolerance}]`;
     if (!turn.accepted) {
-      console.log(`未接受（${turn.reason}）`);
+      // Say what this means instead of just refusing.
+      console.log(`未接受（${turn.reason}）：西西正处在安静模式，用 /resume 恢复。`);
     } else if (turn.action === 'SILENCE') {
       console.log(`（沉默）${timing}`);
     } else {

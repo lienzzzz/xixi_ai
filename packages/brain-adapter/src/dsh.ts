@@ -1,7 +1,7 @@
 import type { JsonValue } from '@xixi/contracts';
 import type { TurnAction } from '@xixi/domain';
 
-import { BrainError } from './errors.ts';
+import { BrainError, brainErrorCodeFor, toBrainErrorCauseCode } from './errors.ts';
 import {
   createBrainTurnStream,
   flattenPrompt,
@@ -150,8 +150,16 @@ export class DshBrainAdapter implements BrainAdapter {
       });
     }
     if (!response.ok) {
+      // The harness reports its own error code, and this is where the useful class
+      // is lost today: `BrainError.code` stays PROVIDER_FAILED for the harness
+      // boundary, but the real code travels in `originalCode` (and the detail), so
+      // §21.1 does not have to parse text to tell "bad credential" from "provider
+      // fault". `brainErrorCodeFor` is the same table the direct path uses, so the
+      // two paths cannot disagree about what a code means.
+      const providerCode = response.error?.code ?? 'UNKNOWN';
       throw new BrainError('PROVIDER_FAILED', 'the harness reported a failed turn', {
-        detail: `${response.error?.code ?? 'UNKNOWN'}: ${response.error?.message ?? 'no detail'}`,
+        detail: `${providerCode}: ${response.error?.message ?? 'no detail'}`,
+        originalCode: toBrainErrorCauseCode(providerCode),
       });
     }
     if (response.brainSessionId !== null && response.brainSessionId !== resumeBrainSessionId) {

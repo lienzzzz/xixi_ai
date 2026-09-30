@@ -49,6 +49,12 @@ function define(type: string, payloadVersion: number, description: string, file:
 export const EVENT_TYPES: readonly EventTypeDefinition[] = Object.freeze([
   define('presence.changed', 1, '有人/无人状态变化；M6 摄像头接入前由模拟器产生。', 'events/presence.changed.v1.json'),
   define('conversation.turn', 1, '一轮对话；action 允许 SPEAK/BACKCHANNEL/WAIT/SILENCE/TOOL。', 'events/conversation.turn.v1.json'),
+  define(
+    'conversation.decision',
+    1,
+    '一轮的接受判定：为什么这句话被接受/被拒绝（只存 reason_code、状态与分值，不存用户原话与模型推理）。',
+    'events/conversation.decision.v1.json',
+  ),
   define('system.health', 1, '服务健康状态；用于故障降级与可观测性。', 'events/system.health.v1.json'),
 ]);
 

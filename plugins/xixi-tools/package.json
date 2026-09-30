@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "西西最小工具集（M0：xixi_get_current_time）。DSH 插件包，通过 bundle patch 挂载。",
+  "description": "西西最小工具集（只读：xixi_get_current_time + xixi_get_weather）。DSH 插件包，通过 bundle patch 挂载。",
   "main": "index.js",
   "exports": {
     ".": "./index.js",

@@ -32,3 +32,4 @@ export {
   type PromptTurn,
   type WorldStateLite,
 } from './prompt.ts';
+export { DEFAULT_SILENCE_TOLERANCE } from './personality.ts';

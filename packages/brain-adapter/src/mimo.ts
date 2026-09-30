@@ -1,6 +1,6 @@
 import { MimoClient, ModelError, type MimoChatResult, type MimoMessage, type MimoToolDefinition } from '@xixi/model-adapters';
 
-import { BrainError } from './errors.ts';
+import { BrainError, brainErrorCodeFor } from './errors.ts';
 import type { ToolCallRecord, XixiTool } from './tools.ts';
 import {
   createBrainTurnStream,
@@ -42,11 +42,22 @@ export interface MimoBrainAdapterOptions {
   readonly onToolCall?: (record: ToolCallRecord) => void;
 }
 
+/**
+ * Translate a provider-layer failure without losing its class (§21.1).
+ *
+ * The old mapping collapsed everything except TIMEOUT into PROVIDER_FAILED, so a
+ * wrong key, a rate limit and a 500 were indistinguishable above this seam and
+ * §21 降级 could not tell "fix the credential" from "back off and retry" from
+ * "the provider is broken". `originalCode` keeps the provider code as well, so a
+ * consumer never has to parse the message text.
+ */
 function toBrainError(cause: unknown): BrainError {
   if (cause instanceof BrainError) return cause;
   if (cause instanceof ModelError) {
-    return new BrainError(cause.code === 'TIMEOUT' ? 'TIMEOUT' : 'PROVIDER_FAILED', 'model call failed', {
+    const { code } = brainErrorCodeFor(cause.code);
+    return new BrainError(code, 'model call failed', {
       detail: `${cause.code}: ${cause.message}`,
+      originalCode: cause.code,
     });
   }
   return new BrainError('TRANSPORT_FAILED', 'model call failed', {

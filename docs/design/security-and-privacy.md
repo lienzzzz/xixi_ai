@@ -113,20 +113,30 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
 
 ## 6. §41.7 / §55 审计：`reason_code` 与分数
 
-- **事件是唯一事实来源**（ADR-0003）。但全仓库只有两个 `appendEvent` 调用点（`packages/domain/src/store.ts`）：
-  `recordTurn`（`conversation.turn`）与 `recordHealth`（`system.health`）。
+- **事件是唯一事实来源**（ADR-0003）。`packages/domain/src/store.ts` 只提供两个 `appendEvent` 调用点——
+  `recordTurn`（`conversation.turn`）与 `recordHealth`（`system.health`）；
+  第三个事件类型 `conversation.decision` 由**引擎**调用 `store.appendEvent` 直接追加
+  （`packages/conversation/src/engine.ts` 的 `#recordDecision`）。
   **`createSession` 不写事件；`seedSelfProfile` / `overrideSelfProfile` 只写 `self_profile` 与 `self_profile_history`，同样不写事件。**
-  所以「每条状态变更都进事件表」目前只对**对话轮次与健康状态**成立。
-- **被拒绝的轮次没有记录**：`ConversationEngine.respond` 在 `accepted === false` 时**直接返回**，
-  不调用 `recordTurn`。判定结果只出现在返回值 / HTTP 响应 / 页面上，事件日志里查不到「这句话为什么没被接受」。
-- **`reason_code` 没有落库**：`TurnAcceptanceReason`（`packages/conversation/src/fsm.ts`，如
-  `ACCEPTED_WAKE_OR_DIRECT` / `ACCEPTED_CONTINUATION` / `REJECTED_NOT_ADDRESSED` / `REJECTED_SUSPENDED`）
-  只存在于内存中的 `ConversationTurn.reason`；`conversation.turn` 的 payload 是
-  `session_id / turn_index / role / action / text / tool_name`（`packages/contracts/schemas/events/conversation.turn.v1.json`，
-  `additionalProperties: false`），**没有任何 reason/score 字段**。
-  §41.7「存 `reason_code` 与分值，不存模型私有推理」目前只能算「不存私有推理」这一半成立：
-  模型私有推理确实没落库（`MimoChatResult` 的 reasoning 不进事件），但 `reason_code`/分数也**没进**事件日志。
-  要落地必须新增 schema 版本（`additionalProperties:false` 已冻结 v1 的形状）。
+  所以「每条状态变更都进事件表」目前只对**对话轮次、接受判定与健康状态**成立。
+- **被拒绝的轮次有记录**：`ConversationEngine.respond` 在 `accepted === false` 时**不**调用 `recordTurn`
+  （所以它不会变成对话历史，也不会进入工作记忆），但会先追加一条 `conversation.decision`，
+  因此在事件日志里可以查到「这句话为什么没被接受」。
+  接受的一轮也会写一条（在 `finally` 里，所以「接受了、随后供应商报错」同样留痕）。
+- **`reason_code` 与分值已落库**（`conversation.decision`）：payload 是
+  `session_id / turn_index / accepted / reason / action / fsm_state / fsm_state_before / addressed /
+  acceptance_score / linger_ms / silence_tolerance`
+  （`packages/contracts/schemas/events/conversation.decision.v1.json`，`additionalProperties: false`）。
+  `reason` 取值就是 `TurnAcceptanceReason`（`packages/conversation/src/fsm.ts`）的四个值：
+  `ACCEPTED_WAKE_OR_DIRECT` / `ACCEPTED_CONTINUATION` / `REJECTED_NOT_ADDRESSED` / `REJECTED_SUSPENDED`；
+  分值由 `acceptance_score`（1/0）与 envelope 的 `confidence`（1 / 0.5）承担。
+  **仍然只存 `reason_code` 与分值**：payload 里没有用户原话（他说了什么只在 `conversation.turn` 里，
+  那是事实本身）、没有提示词、没有任何模型私有推理——`tests/integration/conversation-engine.test.ts`
+  断言该 payload 不含本轮文本且没有 `text` 字段。
+  `conversation.turn` 的 payload 保持
+  `session_id / turn_index / role / action / text / tool_name`
+  （`packages/contracts/schemas/events/conversation.turn.v1.json`）不变，因此 `reason_code` 是**新事件类型**
+  而不是给已发布的 v1 加字段（`additionalProperties: false` 冻结了 v1 的形状）。
 - **self profile 变更**：`overrideSelfProfile(values, reason = 'admin:override')` 每条属性写一行
   `self_profile_history`（`before_value`/`after_value`/`source_type`/`summary`/`created_at`），
   但 `source_event_id` **恒为 NULL**、`confidence` **硬编码为 1**；
@@ -140,8 +150,9 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
 | 改了哪个源文件 | 必须同步更新本文件的小节 |
 |---|---|
 | `packages/contracts/src/envelope.ts`（ACTORS） | §1 |
-| `packages/domain/src/store.ts`（`recordTurn` 的 actor、`appendEvent` 调用点、`overrideSelfProfile`） | §1、§6 |
-| `packages/contracts/schemas/events/conversation.turn.v1.json`（新增字段） | §6（`reason_code` 是否落库） |
+| `packages/domain/src/store.ts`（`recordTurn` 的 actor、`appendEvent` 调用点、`overrideSelfProfile`） | §1、§6（`appendEvent` 的调用点清单） |
+| `packages/contracts/schemas/events/conversation.turn.v1.json` 或 `conversation.decision.v1.json`（新增字段 / 新事件类型） | §6（`reason_code` 与分值是否落库、是否只存 code 与分数） |
+| `packages/conversation/src/engine.ts` 的 `#recordDecision`（decision 事件字段） | §6（拒绝轮次的记录方式与字段清单） |
 | `packages/brain-adapter/src/tools.ts` 或新增任何工具 | §2（等级表、参数封闭、未知工具处理） |
 | `apps/brain-dsh/profile/cordis.patch.yml`、`plugins/xixi-tools/index.js` | §2（Harness 侧最小权限面） |
 | `packages/model-adapters/src/mimo.ts`（错误构造、密钥读取） | §3.20.4（密钥纪律、是否有回显路径） |

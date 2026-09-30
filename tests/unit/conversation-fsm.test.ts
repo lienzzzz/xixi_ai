@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ConversationStateMachine, DEFAULT_FSM_CONFIG } from '@xixi/conversation';
+import { ConversationStateMachine } from '@xixi/conversation';
 
 const T0 = 1_700_000_000_000;
 
@@ -41,7 +41,28 @@ test('silence tolerance scales the follow-up window instead of inventing a secon
   const patient = new ConversationStateMachine({ lingerMs: 30_000, silenceTolerance: 1 }, T0);
   const impatient = new ConversationStateMachine({ lingerMs: 30_000, silenceTolerance: 0 }, T0);
   assert.equal(impatient.lingerMs, 15_000);
-  assert.ok(patient.lingerMs > DEFAULT_FSM_CONFIG.lingerMs);
+  assert.equal(patient.lingerMs, 45_000);
+});
+
+test('an unwired FSM leaves the window unscaled — no hidden 0.7 fallback', () => {
+  // The personality is the only source of this value. When the caller does not
+  // supply it the window is the raw configured one, so "forgot to wire the
+  // personality" is a visible number instead of a silent 36s that happens to
+  // match the seeded personality.
+  const unwired = new ConversationStateMachine({ lingerMs: 30_000 }, T0);
+  assert.equal(unwired.silenceTolerance, null);
+  assert.equal(unwired.lingerMs, 30_000);
+
+  // The engine feeds the live value in; a later change takes effect immediately.
+  unwired.setSilenceTolerance(0.7);
+  assert.equal(unwired.lingerMs, 36_000);
+  unwired.setSilenceTolerance(1);
+  assert.equal(unwired.lingerMs, 45_000);
+  // Out-of-range values are clamped rather than producing a nonsensical window.
+  unwired.setSilenceTolerance(3);
+  assert.equal(unwired.silenceTolerance, 1);
+  unwired.clearSilenceTolerance();
+  assert.equal(unwired.lingerMs, 30_000);
 });
 
 test('ENGAGING gives up if nobody actually speaks', () => {

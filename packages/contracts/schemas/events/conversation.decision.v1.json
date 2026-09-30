@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "xixi.event.v1/conversation.decision",
+  "title": "conversation.decision payload v1",
+  "description": "一轮的接受判定（§13）：这句话为什么被接受或被拒绝。只存 reason_code、状态槽位与分值；不存用户原话、不存模型私有推理（铁律 5）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session_id", "turn_index", "accepted", "reason", "action", "fsm_state"],
+  "properties": {
+    "session_id": { "type": "string", "pattern": "^sess_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+    "turn_index": { "type": "integer", "minimum": 0 },
+    "accepted": { "type": "boolean" },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "ACCEPTED_WAKE_OR_DIRECT",
+        "ACCEPTED_CONTINUATION",
+        "REJECTED_NOT_ADDRESSED",
+        "REJECTED_SUSPENDED"
+      ]
+    },
+    "action": { "type": "string", "enum": ["SPEAK", "BACKCHANNEL", "WAIT", "SILENCE", "TOOL"] },
+    "fsm_state": { "type": "string", "enum": ["IDLE", "ENGAGING", "ACTIVE", "LINGERING", "SUSPENDED"] },
+    "fsm_state_before": { "type": ["string", "null"], "maxLength": 20 },
+    "addressed": { "type": ["boolean", "null"] },
+    "acceptance_score": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+    "linger_ms": { "type": ["integer", "null"], "minimum": 0 },
+    "silence_tolerance": { "type": ["number", "null"], "minimum": 0, "maximum": 1 }
+  }
+}

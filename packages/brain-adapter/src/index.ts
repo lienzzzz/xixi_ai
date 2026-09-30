@@ -13,7 +13,13 @@ export {
   type DshTurnRequest,
   type DshTurnResponse,
 } from './dsh.ts';
-export { BrainError, type BrainErrorCode } from './errors.ts';
+export {
+  BrainError,
+  brainErrorCodeFor,
+  toBrainErrorCauseCode,
+  type BrainErrorCauseCode,
+  type BrainErrorCode,
+} from './errors.ts';
 export { FakeBrainAdapter, type FakeBrainOptions, type ScriptedOutcome } from './fake.ts';
 export { isSilenceReply, MimoBrainAdapter, SILENCE_TOKEN, type MimoBrainAdapterOptions } from './mimo.ts';
 export {

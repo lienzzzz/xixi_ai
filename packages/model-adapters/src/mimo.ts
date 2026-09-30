@@ -136,11 +136,18 @@ export class MimoClient {
   async #post(path: string, body: unknown, timeoutMs: number, signal?: AbortSignal): Promise<Response> {
     const timeout = AbortSignal.timeout(timeoutMs);
     const combined = signal === undefined ? timeout : AbortSignal.any([timeout, signal]);
+    // Built before the try-block on purpose. `#headers()` throws
+    // `ModelError('MISSING_KEY')` when the key is not configured, and building it
+    // inside the fetch try let that failure be caught and re-labelled as
+    // `NETWORK` — which told a user who forgot to fill `.env` that the network was
+    // broken. A local configuration fault and an unreachable provider are
+    // different diagnoses, so the classification is decided before any I/O.
+    const headers = this.#headers();
     let response: Response;
     try {
       response = await this.#fetch(`${this.baseUrl}${path}`, {
         method: 'POST',
-        headers: this.#headers(),
+        headers,
         body: JSON.stringify(body),
         signal: combined,
       });

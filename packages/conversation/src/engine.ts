@@ -1,3 +1,4 @@
+import { buildEvent, toOffsetIso } from '@xixi/contracts';
 import { isSilenceReply, type BrainAdapter } from '@xixi/brain-adapter';
 import type { Clock, TurnAction, XixiConfig, XixiStore } from '@xixi/domain';
 import { systemClock } from '@xixi/domain';
@@ -6,9 +7,11 @@ import {
   ConversationStateMachine,
   type ConversationState,
   type FsmConfig,
+  type TurnAcceptance,
   type TurnAcceptanceReason,
 } from './fsm.ts';
 import { PromptAssembler, SILENCE_TOKEN, worldStateLite, type AssembledPrompt, type PromptTurn } from './prompt.ts';
+import { DEFAULT_SILENCE_TOLERANCE } from './personality.ts';
 
 export interface ConversationEngineOptions {
   readonly adapter: BrainAdapter;
@@ -16,6 +19,12 @@ export interface ConversationEngineOptions {
   readonly config: XixiConfig;
   readonly clock?: Clock;
   readonly assembler?: PromptAssembler;
+  /**
+   * FSM tuning. `lingerMs` / `engageTimeoutMs` are decisions this layer owns;
+   * `silenceTolerance` is an explicit override for tests and replay, because the
+   * normal source is the persisted personality (§7.2) — see
+   * `ConversationEngine.#syncSilenceTolerance`.
+   */
   readonly fsm?: Partial<FsmConfig>;
   /** Per-turn model timeout. Realtime replies should fail fast rather than hang. */
   readonly turnTimeoutMs?: number;
@@ -74,6 +83,14 @@ export class ConversationEngine {
   readonly #turnTimeoutMs: number;
   readonly #historyLimit: number;
   readonly #offsetMinutes: number | undefined;
+  /** Set only when the caller passed `fsm.silenceTolerance` explicitly. */
+  readonly #silenceToleranceOverride: number | null;
+  /**
+   * How many decisions this process has recorded, so a decision event always
+   * advances `turn_index`. Derived from the durable projection, a rejected turn
+   * would repeat the previous index because it never writes a turn.
+   */
+  #decisionCount = 0;
 
   constructor(options: ConversationEngineOptions) {
     this.#adapter = options.adapter;
@@ -82,9 +99,15 @@ export class ConversationEngine {
     this.#clock = options.clock ?? systemClock;
     this.#assembler = options.assembler ?? new PromptAssembler();
     this.#fsm = new ConversationStateMachine(options.fsm, this.#clock().getTime());
+    this.#silenceToleranceOverride = options.fsm?.silenceTolerance ?? null;
     this.#turnTimeoutMs = options.turnTimeoutMs ?? 30_000;
     this.#historyLimit = options.historyLimit ?? 8;
     this.#offsetMinutes = options.offsetMinutes;
+    // The personality is the source of truth, so it is read at construction and
+    // re-read on every turn. Forgetting this wiring is no longer invisible: an
+    // unset tolerance leaves the window unscaled instead of silently matching
+    // the seeded 0.7.
+    this.#syncSilenceTolerance();
   }
 
   get adapter(): BrainAdapter {
@@ -95,8 +118,81 @@ export class ConversationEngine {
     return this.#fsm.state;
   }
 
+  /** How long the follow-up window currently is, personality included (§12.2). */
+  get lingerMs(): number {
+    return this.#fsm.lingerMs;
+  }
+
   snapshot(): ReturnType<ConversationStateMachine['snapshot']> {
     return this.#fsm.snapshot();
+  }
+
+  /**
+   * Read the effective personality and push `silence_tolerance` into the FSM.
+   *
+   * The engine is the only place that knows both the store and the state
+   * machine, which is why the wiring lives here: a caller that builds an FSM by
+   * hand (tests, replay) must pass the value explicitly.
+   */
+  #syncSilenceTolerance(): void {
+    const fromStore = this.#store.selfProfile()['silence_tolerance'];
+    // Precedence, and the only place it is decided:
+    //   1. the persisted personality (the real source, re-read every turn);
+    //   2. an explicit `fsm.silenceTolerance` from the caller — tests and replay;
+    //   3. `DEFAULT_SILENCE_TOLERANCE` for a store that never seeded the property
+    //      (e.g. a profile created before it existed).
+    // The FSM itself has no default, so none of these can silently stand in for
+    // "personality not wired" the way the old hidden 0.7 did.
+    const tolerance = fromStore ?? this.#silenceToleranceOverride ?? DEFAULT_SILENCE_TOLERANCE;
+    this.#fsm.setSilenceTolerance(tolerance);
+  }
+
+  /** The tolerance currently scaling the follow-up window (never null). */
+  get silenceTolerance(): number {
+    return this.#fsm.silenceTolerance ?? DEFAULT_SILENCE_TOLERANCE;
+  }
+
+  /**
+   * Append the auditable acceptance decision (铁律 5: a reason code and scores,
+   * never the user's words and never model reasoning).
+   *
+   * Without this the log could not answer "why wasn't this sentence accepted?" —
+   * a rejected turn used to leave no trace at all.
+   */
+  #recordDecision(input: {
+    readonly sessionId: string;
+    readonly at: Date;
+    readonly addressed: boolean;
+    readonly acceptance: TurnAcceptance;
+    readonly before: ConversationState;
+    readonly state: ConversationState;
+    readonly action: TurnAction;
+  }): void {
+    const { acceptance } = input;
+    const turnIndex = this.#decisionCount;
+    this.#decisionCount += 1;
+    this.#store.appendEvent(
+      buildEvent({
+        event_type: 'conversation.decision',
+        source: 'brain',
+        actor: 'system',
+        confidence: acceptance.accept ? 1 : 0.5,
+        timestamp: toOffsetIso(input.at),
+        payload: {
+          session_id: input.sessionId,
+          turn_index: turnIndex,
+          accepted: acceptance.accept,
+          reason: acceptance.reason,
+          action: input.action,
+          fsm_state: input.state,
+          fsm_state_before: input.before,
+          addressed: input.addressed,
+          acceptance_score: acceptance.accept ? 1 : 0,
+          linger_ms: this.#fsm.lingerMs,
+          silence_tolerance: this.silenceTolerance,
+        },
+      }),
+    );
   }
 
   /** Expire timed states without producing a turn (used by the loop and by tests). */
@@ -141,8 +237,24 @@ export class ConversationEngine {
 
   async respond(input: RespondInput, hooks: RespondHooks = {}): Promise<ConversationTurn> {
     const at = input.at ?? this.#clock();
-    const acceptance = this.#fsm.shouldAcceptTurn({ addressed: input.addressed ?? true, at: at.getTime() });
+    // Personality first: the follow-up window is part of "how tolerant is she
+    // with silence", so the value that scales it must be current when the
+    // acceptance decision is made (an override may have landed since last turn).
+    this.#syncSilenceTolerance();
+    const session = this.#store.getSession(input.sessionId);
+    const addressed = input.addressed ?? true;
+    const before = this.#fsm.state;
+    const acceptance = this.#fsm.shouldAcceptTurn({ addressed, at: at.getTime() });
     if (!acceptance.accept) {
+      this.#recordDecision({
+        sessionId: input.sessionId,
+        at,
+        addressed,
+        acceptance,
+        before,
+        state: acceptance.state,
+        action: 'SILENCE',
+      });
       return {
         accepted: false,
         reason: acceptance.reason,
@@ -162,64 +274,91 @@ export class ConversationEngine {
     const startedAt = Date.now();
     this.#store.recordTurn({ sessionId: input.sessionId, role: 'user', action: 'SPEAK', text: input.text });
 
-    const stream = await this.#adapter.handleUserTurn({
-      sessionId: input.sessionId,
-      text: input.text,
-      prompt,
-      timeoutMs: this.#turnTimeoutMs,
-    });
+    let decisionRecorded = false;
+    const recordAcceptedDecision = (action: TurnAction, state: ConversationState): void => {
+      if (decisionRecorded) return;
+      decisionRecorded = true;
+      this.#recordDecision({
+        sessionId: input.sessionId,
+        at,
+        addressed,
+        acceptance,
+        before,
+        state,
+        action,
+      });
+    };
 
+    let turnAction: TurnAction = 'SILENCE';
+    let turnText: string | null = null;
+    let turnProvider = this.#adapter.provider;
+    let turnModel = this.#adapter.describe().model;
     let firstChunkAt: number | null = null;
-    // The silence token can arrive split across deltas ("[" + "静默" + "]"), so a
-    // per-chunk check is not enough. Text is held back only while it could still
-    // become the token; anything that diverges is flushed immediately, which
-    // keeps normal replies streaming at full speed.
-    let held = '';
-    let suppressed = false;
-    for await (const chunk of stream) {
-      if (chunk.type !== 'text') continue;
-      if (firstChunkAt === null) firstChunkAt = Date.now();
-      if (suppressed) continue;
-      held += chunk.text;
-      const candidate = held.trim();
-      if (SILENCE_TOKEN.startsWith(candidate)) {
-        if (candidate === SILENCE_TOKEN) {
-          suppressed = true;
-          held = '';
+    try {
+      const stream = await this.#adapter.handleUserTurn({
+        sessionId: input.sessionId,
+        text: input.text,
+        prompt,
+        timeoutMs: this.#turnTimeoutMs,
+      });
+
+      // The silence token can arrive split across deltas ("[" + "静默" + "]"), so a
+      // per-chunk check is not enough. Text is held back only while it could still
+      // become the token; anything that diverges is flushed immediately, which
+      // keeps normal replies streaming at full speed.
+      let held = '';
+      let suppressed = false;
+      for await (const chunk of stream) {
+        if (chunk.type !== 'text') continue;
+        if (firstChunkAt === null) firstChunkAt = Date.now();
+        if (suppressed) continue;
+        held += chunk.text;
+        const candidate = held.trim();
+        if (SILENCE_TOKEN.startsWith(candidate)) {
+          if (candidate === SILENCE_TOKEN) {
+            suppressed = true;
+            held = '';
+          }
+          continue;
         }
-        continue;
+        await hooks.onTextChunk?.(held);
+        held = '';
       }
-      await hooks.onTextChunk?.(held);
-      held = '';
+      if (!suppressed && held.length > 0) await hooks.onTextChunk?.(held);
+      const result = await stream.result;
+
+      // §55 is an engine-level rule, not an adapter's promise: whatever the adapter
+      // reports, a reply that is only the silence token becomes SILENCE here, so a
+      // stray control token can never reach TTS or the transcript.
+      const silent = result.action === 'SILENCE' || result.text === null || isSilenceReply(result.text);
+      turnAction = silent ? 'SILENCE' : result.action;
+      turnText = silent ? null : result.text;
+      turnProvider = result.provider;
+      turnModel = result.model;
+
+      this.#store.recordTurn({
+        sessionId: input.sessionId,
+        role: 'assistant',
+        action: turnAction,
+        text: turnText,
+        toolName: silent ? null : result.toolName,
+      });
+      const finishedAt = this.#clock();
+      this.#fsm.onReplyCompleted(finishedAt.getTime());
+    } finally {
+      // Recorded even when the model throws: "the turn was accepted, then the
+      // provider failed" is exactly the fact §21 降级 needs later.
+      recordAcceptedDecision(turnAction, this.#fsm.state);
     }
-    if (!suppressed && held.length > 0) await hooks.onTextChunk?.(held);
-    const { result } = await stream.result.then((value) => ({ result: value }));
-
-    // §55 is an engine-level rule, not an adapter's promise: whatever the adapter
-    // reports, a reply that is only the silence token becomes SILENCE here, so a
-    // stray control token can never reach TTS or the transcript.
-    const silent = result.action === 'SILENCE' || result.text === null || isSilenceReply(result.text);
-    const action: TurnAction = silent ? 'SILENCE' : result.action;
-    const text = silent ? null : result.text;
-
-    this.#store.recordTurn({
-      sessionId: input.sessionId,
-      role: 'assistant',
-      action,
-      text,
-      toolName: silent ? null : result.toolName,
-    });
-    const finishedAt = this.#clock();
-    this.#fsm.onReplyCompleted(finishedAt.getTime());
 
     return {
       accepted: true,
       reason: acceptance.reason,
       state: this.#fsm.state,
-      action,
-      text,
-      provider: result.provider,
-      model: result.model,
+      action: turnAction,
+      text: turnText,
+      provider: turnProvider,
+      model: turnModel,
       latencyMs: Date.now() - startedAt,
       firstTokenMs: firstChunkAt === null ? null : firstChunkAt - startedAt,
       prompt,
