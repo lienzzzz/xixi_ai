@@ -360,7 +360,7 @@ decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值�
 |---|---|
 | 唤醒词与搭话判定（§13 完整版） | §13 的 **POC 判定规则已实现**（`shouldAcceptTurn`，见 §1）；**唤醒词检测本身无代码**——`addressed` 由 UI 按钮/语料给出（M2） |
 | 主动开口（§15） | **程序侧已落地（t41），内容侧还没有**：`packages/conversation/src/proactive.ts` 的 `ProactiveEngine` 逐条过硬门禁（[ADR-0009](../adr/0009-proactive-triggers-and-hard-gates.md) 的九条）、每次判定落一条 `proactive.decision` 审计、投递「先记后播」（重启不重发同一条），`config` 的 `proactive` 段也已被读取。**缺口**：没有候选生成器、没有常驻的考虑循环调用方（`ProactiveEngine` 目前只有测试在调用），模型侧 `evaluateProactiveCandidate` 仍抛 `NOT_IMPLEMENTED(M5)`——即「该不该说」已由程序判定，「说什么」尚未接线 |
-| 多段回复（一轮说 1~3 段） | **引擎侧已落地（t41）**：`packages/conversation/src/segments.ts` 的确定性分段器 + `RespondHooks.onSegment` 逐段播放 + §5 的 ⑨′ 步，`config` 的 `reply` 段已被读取；契约与可测条款见 §7 与 [ADR-0010](../adr/0010-multi-segment-replies.md)。**缺口**：语音侧尚未接线——`scripts/` 的入口仍只传 `onTextChunk`（核对：`git grep -n "onSegment" -- scripts`），所以真机上目前仍是单段合成 |
+| 多段回复（一轮说 1~3 段） | **引擎侧已落地（t41）**：`packages/conversation/src/segments.ts` 的确定性分段器 + `RespondHooks.onSegment` 逐段播放 + §5 的 ⑨′ 步，`config` 的 `reply` 段已被读取；契约与可测条款见 §7 与 [ADR-0010](../adr/0010-multi-segment-replies.md)。**缺口**：语音侧尚未接线——`scripts/` 的入口仍只传 `onTextChunk`（核对：`git grep -n "onSegment" -- scripts`，预期无命中），所以真机上目前仍是单段合成 |
 | 长期记忆与关系（§10/§18） | 工作记忆只有 `recentTurns(limit 8)`；长期记忆属 M4 |
 | 回溯打断时的语义截断 | 只有 VAD 判定层面的离线测量（`scripts/voice-bargein.ts`） |
 | 提示词与延迟进事件日志 | 刻意不存（铁律 5 的方向：只存事实与 `reason_code`）；接受判定已按同一原则落 `conversation.decision` |

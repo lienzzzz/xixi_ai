@@ -55,10 +55,12 @@ import { CliDshTransport } from '@xixi/brain-dsh';
 import {
   ConversationEngine,
   DEFAULT_PROACTIVITY,
+  isWithinQuietHours,
   PROACTIVE_REASON_CODES,
   PROACTIVE_TRIGGERS,
   ProactiveEngine,
   parseProactiveSettings,
+  proactiveThreshold,
   readProactiveHistory,
   resolveReplyLimits,
   splitReplyIntoSegments,
@@ -2230,6 +2232,604 @@ export interface FieldBootstrap {
   readonly modelConfigured: boolean;
   readonly calibration: CalibrationView;
   readonly policy: RetentionPolicy;
+}
+
+// ==================================================== proactive console core (t42)
+//
+// ADR-0010 (multi-segment replies) and ADR-0009 (proactive engine) are package-level
+// behaviour. What lives here is only what a *human* needs in order to trust them:
+//
+//   * the segment plan the page renders one-by-one (with the real gap) and the terminal
+//     prints one-by-one — so "功能没生效" cannot be confused with "第二段还没到";
+//   * the proactive settings a page may tune, persisted as an audit record so a restart
+//     keeps them (the engine itself keeps no state: quotas/cooldown are recomputed from
+//     the log by `readProactiveHistory`);
+//   * a per-gate table for one consideration, so 「为什么西西这次没开口」 has an answer.
+//
+// `scripts/serve-chat.ts` imports these. They live in this file (rather than a new
+// `scripts/lib/*.ts`) because this file already owns the shared console core (voice turn,
+// retention policy, report writer) and because `scripts/lib/` is outside t42's scope.
+
+/** `system.health.service` of the audit records that persist console-tuned proactive settings. */
+export const PROACTIVE_SETTINGS_SERVICE = 'proactive-settings';
+
+/** Shape version of the audit record's `detail` field. */
+const PROACTIVE_SETTINGS_AUDIT_VERSION = 1;
+
+/** Chinese label for every reason code, in the engine's fixed evaluation order. */
+export const PROACTIVE_GATE_LABELS: Readonly<Record<ProactiveReasonCode, string>> = Object.freeze({
+  DISABLED: '主动性总开关关闭',
+  TRIGGER_DISABLED: '这个触发源关掉了',
+  ALREADY_DELIVERED: '这条已经说过了（不重发）',
+  DND_ACTIVE: '安静模式 / 今天安静点',
+  QUIET_HOURS: '静默时段（安全底线，不可放宽）',
+  COOLDOWN_ACTIVE: '距上一条主动开口还没到冷却时间',
+  QUOTA_6H_EXCEEDED: '6 小时额度已用完',
+  QUOTA_DAY_EXCEEDED: '当日额度已用完',
+  TOPIC_REPEATED: '同一话题在抑制窗口内说过了',
+  CONVERSATION_ACTIVE: '正在对话里（或还有一轮没结束）',
+  SCORE_BELOW_THRESHOLD: '分数没到阈值',
+  SCENE_UNAVAILABLE: '场景不合适（媒体播放中 / 通话中）',
+  SPEECH_UNAVAILABLE: '语音输出不可用',
+  PASSED: '全部通过：可以开口',
+});
+
+/** Chinese label for every trigger source (§16 priority order). */
+export const PROACTIVE_TRIGGER_LABELS: Readonly<Record<ProactiveTrigger, string>> = Object.freeze({
+  future_hook_due: '未来钩子到期（你之前提过的事）',
+  presence_arrived: '有人到家（摄像头在场）',
+  conversation_dangling: '对话悬着没说完',
+  routine_expected: '作息预期（这个点通常会发生）',
+  topic_pool: '话题池里轮到一个',
+  random_smalltalk: '随机闲聊（默认关：没合适话题就别开口）',
+});
+
+export function formatClockMinutes(minutes: number): string {
+  const wrapped = ((Math.round(minutes) % 1440) + 1440) % 1440;
+  return `${`${Math.floor(wrapped / 60)}`.padStart(2, '0')}:${`${wrapped % 60}`.padStart(2, '0')}`;
+}
+
+/** `"22:30"` → 1350; anything unusable → `null` (the caller decides what to fall back to). */
+export function parseClockMinutesInput(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+  if (match === null) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return null;
+  return hours * 60 + minutes;
+}
+
+export interface ProactiveSettingsSnapshot {
+  readonly settings: ProactiveSettings;
+  /** `console` = restored from the page's audit record; `config` = `config/xixi.yaml`'s `proactive` block. */
+  readonly source: 'console' | 'config';
+  readonly updatedAt: string | null;
+  /** What the last save changed, in Chinese, for the audit trail. */
+  readonly changes: readonly string[];
+}
+
+export interface ProactiveSettingsAuditRow {
+  readonly at: string;
+  readonly sequence: number;
+  readonly changes: readonly string[];
+  readonly settings: ProactiveSettings;
+}
+
+function proactiveSettingsAuditRows(store: XixiStore): ProactiveSettingsAuditRow[] {
+  const rows: ProactiveSettingsAuditRow[] = [];
+  for (const event of store.readEvents({ type: 'system.health', limit: Number.MAX_SAFE_INTEGER })) {
+    const payload = event.payload as Record<string, unknown>;
+    if (payload['service'] !== PROACTIVE_SETTINGS_SERVICE) continue;
+    const detail = payload['detail'];
+    if (typeof detail !== 'string') continue;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(detail) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (parsed['v'] !== PROACTIVE_SETTINGS_AUDIT_VERSION) continue;
+    const source = parsed['settings'];
+    rows.push({
+      at: event.timestamp,
+      sequence: event.sequence,
+      changes: Array.isArray(parsed['changes']) ? (parsed['changes'] as string[]) : [],
+      settings: parseProactiveSettings(isMapping(source) ? (source as Record<string, unknown>) : undefined),
+    });
+  }
+  return rows;
+}
+
+/** The settings a page should show: the last console save, else the config file's `proactive`. */
+export function restoreProactiveSettings(store: XixiStore, config?: Readonly<Record<string, unknown>> | undefined): ProactiveSettingsSnapshot {
+  const rows = proactiveSettingsAuditRows(store);
+  const last = rows[rows.length - 1];
+  if (last !== undefined) {
+    return { settings: last.settings, source: 'console', updatedAt: last.at, changes: last.changes };
+  }
+  return { settings: parseProactiveSettings(config), source: 'config', updatedAt: null, changes: [] };
+}
+
+/**
+ * Persist tuned settings as a `system.health` record (schema v1, `service = proactive-settings`).
+ *
+ * Why not a new event type: `packages/` is outside t42's scope, and `system.health` is the
+ * existing versioned "something about the running system changed" record — the same channel
+ * `field-test` already uses for its own startup line. The payload is compact (one line of
+ * JSON, well inside the 500-char `detail` cap) and carries the *effective* values, so
+ * `restoreProactiveSettings` can rebuild them without trusting any other file.
+ */
+export function persistProactiveSettings(
+  store: XixiStore,
+  settings: ProactiveSettings,
+  changes: readonly string[],
+): StoredEvent {
+  const detail = JSON.stringify({
+    v: PROACTIVE_SETTINGS_AUDIT_VERSION,
+    settings: proactiveSettingsToConfig(settings),
+    changes,
+  });
+  return store.recordHealth(PROACTIVE_SETTINGS_SERVICE, 'ok', detail);
+}
+
+/** Typed settings → the `config.proactive` shape, so one parser validates both sources. */
+export function proactiveSettingsToConfig(settings: ProactiveSettings): Record<string, unknown> {
+  return {
+    enabled: settings.enabled,
+    base_cooldown_min: settings.baseCooldownMinutes,
+    max_per_6h: settings.maxPer6h,
+    max_per_day: settings.maxPerDay,
+    topic_repeat_window_h: settings.topicRepeatWindowHours,
+    negative_feedback_cooldown_multiplier: settings.negativeFeedbackCooldownMultiplier,
+    quiet_hours: { start: formatClockMinutes(settings.quietHours.startMinutes), end: formatClockMinutes(settings.quietHours.endMinutes) },
+    triggers: { ...settings.triggers },
+  };
+}
+
+export interface ProactiveSettingsPatchResult {
+  readonly settings: ProactiveSettings;
+  /** Human-readable list of what changed (empty = the patch was a no-op). */
+  readonly changes: readonly string[];
+  /** Fields the page sent that were ignored, with the reason. */
+  readonly rejected: readonly string[];
+}
+
+/**
+ * Apply a page patch to the current settings.
+ *
+ * Validation goes through the engine's own `parseProactiveSettings`, so a bad input can
+ * never produce a settings object the engine would not have accepted: out-of-range numbers
+ * and malformed clock strings fall back to the *current* value, and the page is told which
+ * fields were rejected instead of silently getting a different number than it typed.
+ */
+export function applyProactiveSettingsPatch(current: ProactiveSettings, patch: Readonly<Record<string, unknown>>): ProactiveSettingsPatchResult {
+  const rejected: string[] = [];
+  const merged = proactiveSettingsToConfig(current) as Record<string, unknown>;
+
+  if (patch['enabled'] !== undefined) merged['enabled'] = patch['enabled'] === true || patch['enabled'] === 'true';
+  for (const [field, key] of [
+    ['baseCooldownMinutes', 'base_cooldown_min'],
+    ['maxPer6h', 'max_per_6h'],
+    ['maxPerDay', 'max_per_day'],
+    ['topicRepeatWindowHours', 'topic_repeat_window_h'],
+    ['negativeFeedbackCooldownMultiplier', 'negative_feedback_cooldown_multiplier'],
+  ] as const) {
+    const value = patch[field];
+    if (value === undefined) continue;
+    const parsed = typeof value === 'number' ? value : Number(String(value).trim());
+    if (!Number.isFinite(parsed)) {
+      rejected.push(`${field}：不是数字，已忽略`);
+      continue;
+    }
+    merged[key] = parsed;
+  }
+
+  const quiet = merged['quiet_hours'] as Record<string, unknown>;
+  for (const [field, key] of [
+    ['quietStart', 'start'],
+    ['quietEnd', 'end'],
+  ] as const) {
+    const value = patch[field];
+    if (value === undefined) continue;
+    if (parseClockMinutesInput(value) === null) {
+      rejected.push(`${field}：时间要写成 HH:MM（如 22:30），已忽略`);
+      continue;
+    }
+    quiet[key] = value;
+  }
+
+  if (isMapping(patch['triggers'])) {
+    const triggers = merged['triggers'] as Record<string, boolean>;
+    for (const trigger of PROACTIVE_TRIGGERS) {
+      const value = (patch['triggers'] as Record<string, unknown>)[trigger];
+      if (value === undefined) continue;
+      triggers[trigger] = value === true || value === 'true';
+    }
+  } else if (patch['triggers'] !== undefined) {
+    rejected.push('triggers：要传一个对象（键=触发源，值=开关），已忽略');
+  }
+
+  const settings = parseProactiveSettings(merged);
+  const changes: string[] = [];
+  if (settings.enabled !== current.enabled) changes.push(`主动开口：${current.enabled ? '开' : '关'} → ${settings.enabled ? '开' : '关'}`);
+  if (settings.baseCooldownMinutes !== current.baseCooldownMinutes) changes.push(`冷却：${current.baseCooldownMinutes} → ${settings.baseCooldownMinutes} 分钟`);
+  if (settings.maxPer6h !== current.maxPer6h) changes.push(`6 小时额度：${current.maxPer6h} → ${settings.maxPer6h}`);
+  if (settings.maxPerDay !== current.maxPerDay) changes.push(`当日额度：${current.maxPerDay} → ${settings.maxPerDay}`);
+  if (settings.topicRepeatWindowHours !== current.topicRepeatWindowHours) {
+    changes.push(`同主题抑制窗口：${current.topicRepeatWindowHours} → ${settings.topicRepeatWindowHours} 小时`);
+  }
+  if (settings.negativeFeedbackCooldownMultiplier !== current.negativeFeedbackCooldownMultiplier) {
+    changes.push(`负面反馈倍率：${current.negativeFeedbackCooldownMultiplier} → ${settings.negativeFeedbackCooldownMultiplier}`);
+  }
+  if (settings.quietHours.startMinutes !== current.quietHours.startMinutes || settings.quietHours.endMinutes !== current.quietHours.endMinutes) {
+    changes.push(
+      `静默时段：${formatClockMinutes(current.quietHours.startMinutes)}–${formatClockMinutes(current.quietHours.endMinutes)}` +
+        ` → ${formatClockMinutes(settings.quietHours.startMinutes)}–${formatClockMinutes(settings.quietHours.endMinutes)}`,
+    );
+  }
+  for (const trigger of PROACTIVE_TRIGGERS) {
+    if (settings.triggers[trigger] !== current.triggers[trigger]) {
+      changes.push(`${PROACTIVE_TRIGGER_LABELS[trigger]}：${current.triggers[trigger] ? '开' : '关'} → ${settings.triggers[trigger] ? '开' : '关'}`);
+    }
+  }
+  return { settings, changes, rejected };
+}
+
+export interface ProactiveGateRow {
+  readonly code: ProactiveReasonCode;
+  readonly label: string;
+  /** `passed` = evaluated and allowed; `blocked` = the first gate that fired; `skipped` = never reached. */
+  readonly status: 'passed' | 'blocked' | 'skipped';
+}
+
+/**
+ * The gate table for one consideration.
+ *
+ * The engine evaluates the gates in `PROACTIVE_REASON_CODES` order and reports only the
+ * first hit, so the rows are derived from that single code: everything *before* the hit
+ * passed, the hit itself blocked (or passed, for `PASSED`), everything after was never
+ * evaluated. That keeps the table honest without duplicating any gate logic here.
+ */
+export function proactiveGateRows(reasonCode: ProactiveReasonCode | null): ProactiveGateRow[] {
+  if (reasonCode === null) return PROACTIVE_REASON_CODES.map((code) => ({ code, label: PROACTIVE_GATE_LABELS[code], status: 'skipped' as const }));
+  const hit = PROACTIVE_REASON_CODES.indexOf(reasonCode);
+  return PROACTIVE_REASON_CODES.map((code, index) => ({
+    code,
+    label: PROACTIVE_GATE_LABELS[code],
+    status: index < hit ? 'passed' : index === hit ? (code === 'PASSED' ? 'passed' : 'blocked') : 'skipped',
+  }));
+}
+
+export interface ProactiveUsage {
+  readonly deliveries: number;
+  readonly lastDeliveryAt: string | null;
+  readonly cooldownRemainingMs: number;
+  readonly in6h: number;
+  readonly today: number;
+  readonly day: string;
+}
+
+/** Budget/cooldown usage, recomputed from the log (never cached — a restart must not lose it). */
+export function proactiveUsage(store: XixiStore, settings: ProactiveSettings, now: Date, offsetMinutes?: number): ProactiveUsage {
+  const history = readProactiveHistory(store);
+  const day = localDayOf(now, offsetMinutes);
+  const last = history[history.length - 1];
+  const cooldownMs = settings.baseCooldownMinutes * 60_000;
+  const sinceLast = last === undefined ? Number.POSITIVE_INFINITY : now.getTime() - last.at.getTime();
+  return {
+    deliveries: history.length,
+    lastDeliveryAt: last === undefined ? null : last.at.toISOString(),
+    cooldownRemainingMs: last === undefined || cooldownMs === 0 ? 0 : Math.max(0, cooldownMs - sinceLast),
+    in6h: history.filter((record) => now.getTime() - record.at.getTime() < 6 * 60 * 60_000).length,
+    today: history.filter((record) => localDayOf(record.at, offsetMinutes) === day).length,
+    day,
+  };
+}
+
+/** `YYYY-MM-DD` of the local natural day; `offsetMinutes` is the test/replay seam. */
+export function localDayOf(at: Date, offsetMinutes?: number): string {
+  const shifted = offsetMinutes === undefined ? at : new Date(at.getTime() + offsetMinutes * 60_000);
+  const year = offsetMinutes === undefined ? shifted.getFullYear() : shifted.getUTCFullYear();
+  const month = `${(offsetMinutes === undefined ? shifted.getMonth() : shifted.getUTCMonth()) + 1}`.padStart(2, '0');
+  const day = `${(offsetMinutes === undefined ? shifted.getDate() : shifted.getUTCDate())}`.padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export interface ProactiveDecisionRow {
+  readonly at: string;
+  readonly sequence: number;
+  readonly candidateId: string;
+  readonly trigger: string;
+  readonly speak: boolean;
+  readonly reasonCode: string;
+  readonly score: number;
+  readonly threshold: number;
+}
+
+/** The last few considerations, straight from the log (this is the auditable trail). */
+export function proactiveDecisionHistory(store: XixiStore, limit = 8): ProactiveDecisionRow[] {
+  const events = store.readEvents({ type: 'proactive.decision', limit: Number.MAX_SAFE_INTEGER });
+  return events
+    .slice(-limit)
+    .map((event) => {
+      const payload = event.payload as Record<string, unknown>;
+      return {
+        at: event.timestamp,
+        sequence: event.sequence,
+        candidateId: typeof payload['candidate_id'] === 'string' ? payload['candidate_id'] : '?',
+        trigger: typeof payload['trigger'] === 'string' ? payload['trigger'] : '?',
+        speak: payload['speak'] === true,
+        reasonCode: typeof payload['reason_code'] === 'string' ? payload['reason_code'] : '?',
+        score: typeof payload['score'] === 'number' ? payload['score'] : 0,
+        threshold: typeof payload['threshold'] === 'number' ? payload['threshold'] : 0,
+      };
+    });
+}
+
+/**
+ * The drill's canned utterances.
+ *
+ * A drill exercises the *pipeline* (score → gates → decision event → delivery seam →
+ * segment playback); the wording is a fixture and is labelled as one in the UI, because
+ * generating the text is M5's job (the trigger sources). `presence_arrived` is
+ * deliberately longer than one segment so the multi-segment playback is demonstrable.
+ */
+export const PROACTIVE_DRILL_LINES: Readonly<Record<ProactiveTrigger, string>> = Object.freeze({
+  future_hook_due: '你上周提过这两天要去复诊，别忘了带医保卡。要不要我到时候再提醒你一次？',
+  presence_arrived: '哎，你回来啦。今天外面挺冷的，我看你外套都没穿厚。要不要先喝口热水？我把你要问的天气也一起记下来了。',
+  conversation_dangling: '刚才你说到一半的那件事，后来怎么样了？我记着呢，不用怕我不记得。',
+  routine_expected: '这个点你通常在厨房忙，我就问一句：需要我帮你看着时间吗？',
+  topic_pool: '你前两天说想找的那本书，我还记着；要不要我念一下当时你说的话？',
+  random_smalltalk: '（随口一句）今天家里挺安静的。',
+});
+
+/** Score components that make a drill candidate pass the threshold; negative terms stay low. */
+export const PROACTIVE_DRILL_COMPONENTS: Readonly<Record<string, number>> = Object.freeze({
+  event_salience: 0.9,
+  social_value: 0.8,
+  memory_relevance: 0.7,
+  novelty: 0.6,
+  time_since_last_interaction: 0.9,
+  user_receptiveness: 0.7,
+  future_hook_bonus: 0.5,
+  interruption_risk: 0.1,
+  recent_proactive_penalty: 0.1,
+  repetition_penalty: 0.0,
+  uncertainty_penalty: 0.1,
+});
+
+export interface ProactiveDrillRequest {
+  readonly trigger?: unknown;
+  readonly components?: unknown;
+  readonly topicRef?: unknown;
+  readonly candidateId?: unknown;
+}
+
+export interface ProactiveDrillResult {
+  readonly speak: boolean;
+  readonly delivered: boolean;
+  readonly reasonCode: ProactiveReasonCode;
+  readonly reasonLabel: string;
+  readonly trigger: ProactiveTrigger;
+  readonly candidateId: string;
+  readonly score: number;
+  readonly threshold: number;
+  readonly gates: readonly ProactiveGateRow[];
+  /** The spoken text when the gates let it through (null when blocked). */
+  readonly text: string | null;
+  /** The same text as the page should play it: one entry per segment, in order. */
+  readonly segments: readonly string[];
+  readonly gapMs: number;
+  readonly eventSequence: number | null;
+  readonly usage: ProactiveUsage;
+  /** What the user should do about a blocked candidate (Chinese, actionable). */
+  readonly nextStep: string;
+}
+
+/**
+ * Run one consideration through the **real** engine and return everything a page needs.
+ *
+ * "Real" matters: the score, the nine gates in their fixed order, the `proactive.decision`
+ * audit row and the at-most-once delivery write all go through `ProactiveEngine.consider`.
+ * The drill only supplies a candidate (trigger + §15.4 components) and the spoken text.
+ */
+export function proactiveDrill(options: {
+  readonly store: XixiStore;
+  readonly settings: ProactiveSettings;
+  readonly now: Date;
+  readonly conversationState: ConversationState;
+  readonly inFlightTurn?: boolean;
+  readonly proactivity?: number;
+  readonly negativeFeedback?: boolean;
+  readonly sceneAvailable?: boolean;
+  readonly speechAvailable?: boolean;
+  readonly sessionId?: string | null;
+  readonly replyLimits?: Readonly<Record<string, unknown>> | undefined;
+  readonly request: ProactiveDrillRequest;
+  readonly offsetMinutes?: number;
+}): ProactiveDrillResult {
+  const trigger: ProactiveTrigger = PROACTIVE_TRIGGERS.includes(options.request.trigger as ProactiveTrigger)
+    ? (options.request.trigger as ProactiveTrigger)
+    : 'presence_arrived';
+  const candidateId =
+    typeof options.request.candidateId === 'string' && options.request.candidateId.trim().length > 0
+      ? options.request.candidateId.trim()
+      : `drill-${trigger}-${options.now.getTime()}`;
+  const components = isMapping(options.request.components)
+    ? (Object.fromEntries(
+        Object.entries(options.request.components as Record<string, unknown>).filter(([, value]) => typeof value === 'number'),
+      ) as Record<string, number>)
+    : { ...PROACTIVE_DRILL_COMPONENTS };
+  const topicRef = typeof options.request.topicRef === 'string' && options.request.topicRef.length > 0 ? options.request.topicRef : trigger;
+
+  const engine = new ProactiveEngine({
+    store: options.store,
+    settings: options.settings,
+    clock: () => options.now,
+    offsetMinutes: options.offsetMinutes,
+  });
+  let delivered: string | null = null;
+  const outcome = engine.consider({
+    candidate: { candidateId, trigger, components, topicRef, intent: 'drill' },
+    at: options.now,
+    conversationState: options.conversationState,
+    inFlightTurn: options.inFlightTurn ?? false,
+    proactivity: options.proactivity,
+    negativeFeedback: options.negativeFeedback,
+    sceneAvailable: options.sceneAvailable,
+    speechAvailable: options.speechAvailable,
+    sessionId: options.sessionId ?? null,
+    deliver: (delivery) => {
+      delivered = PROACTIVE_DRILL_LINES[delivery.trigger];
+    },
+  });
+
+  const split = delivered === null ? null : splitReplyIntoSegments(delivered, resolveReplyLimits(options.replyLimits));
+  return {
+    speak: outcome.speak,
+    delivered: outcome.delivered,
+    reasonCode: outcome.reasonCode,
+    reasonLabel: PROACTIVE_GATE_LABELS[outcome.reasonCode],
+    trigger,
+    candidateId,
+    score: outcome.score,
+    threshold: outcome.threshold,
+    gates: proactiveGateRows(outcome.reasonCode),
+    text: delivered,
+    segments: split?.segments ?? [],
+    gapMs: split?.gapMs ?? 0,
+    eventSequence: outcome.event === null ? null : outcome.event.sequence,
+    usage: proactiveUsage(options.store, options.settings, options.now, options.offsetMinutes),
+    nextStep: PROACTIVE_GATE_NEXT_STEPS[outcome.reasonCode],
+  };
+}
+
+/** What to do about a blocked candidate — the page prints this verbatim. */
+const PROACTIVE_GATE_NEXT_STEPS: Readonly<Record<ProactiveReasonCode, string>> = Object.freeze({
+  DISABLED: '把「允许西西主动开口」打开（或点页面上的开关），再试一次。',
+  TRIGGER_DISABLED: '在触发源里把这一项打开，或换一个触发源再试。',
+  ALREADY_DELIVERED: '这是同一条候选（candidate_id 相同），按「最多说一次」的规矩不再重发；换一个 id 再试。',
+  DND_ACTIVE: '西西现在处在安静模式：点「新会话」或 /resume 恢复后再试。',
+  QUIET_HOURS: '现在在静默时段内（安全底线，接口不允许放宽）。把静默时段改到自己不在家的时段再试，或等过了这个时段。',
+  COOLDOWN_ACTIVE: '还在冷却里：等冷却走完，或把冷却分钟数调小（0 表示不等）。',
+  QUOTA_6H_EXCEEDED: '6 小时额度用完了：等窗口滚动，或把 6 小时额度调大。',
+  QUOTA_DAY_EXCEEDED: '当日额度用完了：等明天，或把当日额度调大。',
+  TOPIC_REPEATED: '同一个话题刚说过：把同主题抑制窗口调小，或换一个 topic_ref。',
+  CONVERSATION_ACTIVE: '正在对话里：等这一轮结束（或 FSM 回到 IDLE）再试。',
+  SCORE_BELOW_THRESHOLD: '分数不够：提高人格里的 proactivity（阈值 = 0.45 + 0.30 × (1 − proactivity)），或换一个更有价值的事件。',
+  SCENE_UNAVAILABLE: '场景不合适：等媒体播完 / 通话结束再试。',
+  SPEECH_UNAVAILABLE: '语音输出不可用：检查 TTS/扬声器，或先只看文字。',
+  PASSED: '已开口。',
+});
+
+function isMapping(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export interface SegmentPlan {
+  readonly segments: readonly string[];
+  readonly gapMs: number;
+  readonly total: number;
+  /** 「第 2/3 段 · 间隔 450ms」 — what the page and the terminal print next to a segment. */
+  readonly playbackHint: string;
+  /** One line a non-engineer can read before the messages start appearing. */
+  readonly summary: string;
+}
+
+/**
+ * How a reply is played: `ADR-0010` segments plus the pause between them.
+ *
+ * Both pages and `scripts/chat.ts` render from this one plan, so "分三段、每段之间 450ms"
+ * is the same statement in the terminal and in the browser — which is the whole point of
+ * showing it (a user who sees only the last segment must be able to tell that the others
+ * were *earlier*, not lost).
+ */
+export function segmentPlan(text: string | null | undefined, limits?: Readonly<Record<string, unknown>> | undefined): SegmentPlan {
+  if (text === null || text === undefined || text.trim().length === 0) {
+    return { segments: [], gapMs: 0, total: 0, playbackHint: '', summary: '没有可播放的内容' };
+  }
+  const split = splitReplyIntoSegments(text, resolveReplyLimits(limits));
+  return {
+    segments: split.segments,
+    gapMs: split.gapMs,
+    total: split.segments.length,
+    playbackHint: split.segments.length > 1 ? `按间隔逐条出现：每段之间 ${split.gapMs}ms` : '只有一段',
+    summary:
+      split.segments.length > 1
+        ? `这条回复会分 ${split.segments.length} 段说出，段与段之间停 ${split.gapMs}ms（不是一次说完）`
+        : '这条回复只有一段',
+  };
+}
+
+export interface ProactiveConsoleState {
+  readonly settings: ProactiveSettings;
+  readonly source: 'console' | 'config';
+  readonly updatedAt: string | null;
+  readonly changes: readonly string[];
+  readonly quietHours: { readonly start: string; readonly end: string; readonly activeNow: boolean };
+  readonly proactivity: number;
+  readonly threshold: number;
+  readonly usage: ProactiveUsage;
+  readonly triggerLabels: readonly { readonly trigger: ProactiveTrigger; readonly label: string; readonly enabled: boolean }[];
+  readonly gateOrder: readonly { readonly code: ProactiveReasonCode; readonly label: string; readonly status: ProactiveGateRow['status'] }[];
+  readonly lastDecision: ProactiveDecisionRow | null;
+  readonly decisions: readonly ProactiveDecisionRow[];
+  readonly audit: readonly { readonly at: string; readonly sequence: number; readonly changes: readonly string[] }[];
+  /** `true` when the engine would consider a candidate at all (the switch, in one word). */
+  readonly enabled: boolean;
+}
+
+/**
+ * Everything the proactive card shows, in one payload.
+ *
+ * The gate table is rendered for the **last** decision (from the log), so a page reload
+ * shows exactly why the last attempt was blocked; a fresh drill returns its own table.
+ */
+export function proactiveConsoleState(options: {
+  readonly store: XixiStore;
+  readonly settings: ProactiveSettings;
+  readonly source: 'console' | 'config';
+  readonly updatedAt: string | null;
+  readonly changes: readonly string[];
+  readonly now: Date;
+  readonly proactivity: number;
+  readonly offsetMinutes?: number;
+  readonly historyLimit?: number;
+}): ProactiveConsoleState {
+  const decisions = proactiveDecisionHistory(options.store, options.historyLimit ?? 8);
+  const last = decisions[decisions.length - 1] ?? null;
+  const localMinutes = options.now.getHours() * 60 + options.now.getMinutes();
+  return {
+    settings: options.settings,
+    source: options.source,
+    updatedAt: options.updatedAt,
+    changes: options.changes,
+    quietHours: {
+      start: formatClockMinutes(options.settings.quietHours.startMinutes),
+      end: formatClockMinutes(options.settings.quietHours.endMinutes),
+      activeNow: isWithinQuietHours(localMinutes, options.settings.quietHours.startMinutes, options.settings.quietHours.endMinutes),
+    },
+    proactivity: options.proactivity,
+    threshold: proactiveThreshold(options.proactivity),
+    usage: proactiveUsage(options.store, options.settings, options.now, options.offsetMinutes),
+    triggerLabels: PROACTIVE_TRIGGERS.map((trigger) => ({
+      trigger,
+      label: PROACTIVE_TRIGGER_LABELS[trigger],
+      enabled: options.settings.triggers[trigger],
+    })),
+    gateOrder: proactiveGateRows((last?.reasonCode as ProactiveReasonCode | undefined) ?? null),
+    lastDecision: last,
+    decisions,
+    audit: proactiveSettingsAuditRows(options.store).map((row) => ({ at: row.at, sequence: row.sequence, changes: row.changes })),
+    enabled: options.settings.enabled,
+  };
+}
+
+/** The engine's own default proactivity, for pages that show the threshold before any profile exists. */
+export function effectiveProactivity(profile: Readonly<Record<string, unknown>> | undefined): number {
+  const value = profile?.['proactivity'];
+  return typeof value === 'number' && Number.isFinite(value) ? value : DEFAULT_PROACTIVITY;
 }
 
 export function buildFieldPage(boot: FieldBootstrap): string {

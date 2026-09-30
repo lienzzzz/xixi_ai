@@ -2,7 +2,10 @@
 
 - 状态：已接受（2026-09-30）
 - 相关：方案 §2.3 / §15 / §16、[ADR-0003](0003-raw-events-vs-memory.md)、[ADR-0005](0005-brain-session-mapping-in-domain.md)、[docs/design/conversation.md](../design/conversation.md)、`config/xixi.example.yaml`
-- 归属：**M5**（本 ADR 只定义契约与默认值；`packages/brain-adapter` 的 `evaluateProactiveCandidate` 目前抛 `NOT_IMPLEMENTED(M5)`，示例配置里的 `proactive` 段**还没有任何代码读取**）
+- 归属：**M5**。本 ADR 定义契约与默认值；**程序侧已按它落地**（订正 2026-09-30）：`packages/conversation/src/proactive.ts`
+  的 `ProactiveEngine` 逐条过第 3 条的九门禁、算第 4 条的分数与阈值、落第 6 条的 `proactive.decision` 审计，
+  `config.proactive` 段已被读取。**仍未落地的两半**：候选生成器（第 2 条的事实输入还没有生产者）与内容生成
+  （`packages/brain-adapter` 的 `evaluateProactiveCandidate` 仍抛 `NOT_IMPLEMENTED(M5)`）。
 
 ## Decision
 
