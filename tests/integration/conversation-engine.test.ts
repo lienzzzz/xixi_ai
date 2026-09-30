@@ -97,9 +97,9 @@ test('an accepted turn records both sides and opens the follow-up window', async
 test('the second turn continues without a wake word and sees the first turn as history', async () => {
   const store = freshStore();
   try {
-    const seen: string[] = [];
+    const seen: { user: string; history: readonly { role: string; content: string }[] }[] = [];
     const engine = engineWith((input) => {
-      seen.push(input.prompt?.user ?? '');
+      seen.push({ user: input.prompt?.user ?? '', history: input.prompt?.history ?? [] });
       return { action: 'SPEAK', text: `回复${seen.length}` };
     }, store);
     const session = store.createSession();
@@ -107,8 +107,13 @@ test('the second turn continues without a wake word and sees the first turn as h
     const second = await engine.respond({ sessionId: session.sessionId, text: '那后天呢？', addressed: false });
     assert.equal(second.accepted, true, 'once a session is open, continuation needs no wake word');
     assert.equal(second.reason, 'ACCEPTED_CONTINUATION');
-    assert.ok(seen[1].includes('明天天气怎么样？'), 'the earlier user turn must be in working memory');
-    assert.ok(seen[1].includes('回复1'), 'the earlier assistant reply must be in working memory');
+    // P1: the earlier turns travel as messages (roles), which is what the adapters send.
+    const transcript = seen[1].history.map((turn) => `${turn.role}:${turn.content}`).join('\n');
+    assert.ok(transcript.includes('明天天气怎么样？'), 'the earlier user turn must be in working memory');
+    assert.ok(transcript.includes('回复1'), 'the earlier assistant reply must be in working memory');
+    // …and they are not expanded into the prompt text a second time (`user` is the changing suffix).
+    assert.ok(!seen[1].user.includes('明天天气怎么样？'), 'no duplicate copy of the earlier turn (P1)');
+    assert.ok(!seen[1].user.includes('回复1'), 'no duplicate copy of the earlier reply (P1)');
   } finally {
     store.close();
   }
@@ -345,6 +350,8 @@ function sentence50(filler: string): string {
 
 const THREE_SEGMENTS = sentence50('甲') + sentence50('乙') + sentence50('丙'); // 150 chars
 const TWO_SEGMENTS = sentence50('甲') + sentence50('乙'); // 80 chars
+/** 13 × 50 = 650 characters: beyond P1's 8 × 60 = 480 capacity, so the tail must merge. */
+const LONG_ANSWER = Array.from({ length: 13 }, (_unused, index) => sentence50('甲乙丙丁戊己庚辛壬癸子丑'[index] ?? '字')).join('');
 
 test('ADR-0010: one turn is spoken as up to three segments and still advances the state machine once', async () => {
   const store = freshStore();
@@ -377,7 +384,8 @@ test('ADR-0010: one turn is spoken as up to three segments and still advances th
 test('the reply limits come from config.reply, and only tightening is honoured', async () => {
   const store = freshStore();
   try {
-    const adapter = new FakeBrainAdapter({ reply: () => ({ action: 'SPEAK', text: THREE_SEGMENTS }) });
+    let text = THREE_SEGMENTS;
+    const adapter = new FakeBrainAdapter({ reply: () => ({ action: 'SPEAK', text }) });
     const build = (reply: Record<string, unknown>): ConversationEngine =>
       new ConversationEngine({
         adapter,
@@ -396,15 +404,18 @@ test('the reply limits come from config.reply, and only tightening is honoured',
     assert.equal(single.segments.length, 1);
     assert.equal(single.segments[0], THREE_SEGMENTS);
 
-    // Raising a ceiling is refused; the engine clamps instead of honouring it.
-    const clamped = await build({ max_segments: 9, segment_max_chars: 999, gap_ms: 60_000 }).respond({
+    // Raising a ceiling is refused; the engine clamps instead of honouring it. Asking for 99 segments
+    // and 999 characters is clamped to the P1 ceilings (8 × 60), so a 650-character reply merges its
+    // tail rather than gaining segments — and still loses no character.
+    text = LONG_ANSWER;
+    const clamped = await build({ max_segments: 99, segment_max_chars: 999, gap_ms: 60_000 }).respond({
       sessionId: store.createSession().sessionId,
       text: '在吗',
       addressed: true,
     });
-    assert.equal(clamped.segments.length, 3, 'the hard ceiling is 3 (ADR-0010 §3)');
+    assert.equal(clamped.segments.length, 8, 'the hard ceiling is 8 segments (ADR-0010 §3, raised in P1)');
     assert.equal(clamped.segmentGapMs, 1_200, 'the hard ceiling for the gap is 1200 ms');
-    assert.equal(clamped.segments.join(''), THREE_SEGMENTS);
+    assert.equal(clamped.segments.join(''), LONG_ANSWER);
   } finally {
     store.close();
   }

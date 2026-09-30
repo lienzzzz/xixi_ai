@@ -60,12 +60,15 @@ xixi:
       topic_pool: true
       random_smalltalk: false      # §16：没有合适的话题就不要为了主动而主动
 
-  # 多段回复（ADR-0010）。一轮最多 3 段；这里只能在上限内收紧，不能突破。
+  # 多段回复（ADR-0010）。一轮最多 8 段；这里只能在上限内收紧，不能突破。
   # 本段**已被代码读取**：`ConversationEngine` 构造时 `resolveReplyLimits(config.reply)` 会把它们夹进
   # ADR-0010 的硬上限（packages/conversation/src/segments.ts），试用页与现场测试控制台也用它算分段展示。
+  # P1（2026-10-01）：`segment_max_chars` 是每段的块长（一次播报的粒度），`max_segments` 才是「一轮能说多长」
+  # 的容量。V0.1 的 3 × 60 = 180 字把回复长度锁死在 180 字（基线 §2.5 实测 9/19 轮贴着上限），
+  # 现在容量是 8 × 60 = 480 字：长解释不必被截，也不再逼着每轮都说满。
   reply:
-    max_segments: 3                # 硬上限 3
-    segment_max_chars: 60          # 硬上限 60（汉字）
+    max_segments: 8                # 硬上限 8（P1 由 3 提高）
+    segment_max_chars: 60          # 每段块长（汉字），硬上限 60
     gap_ms: 450                    # 段间停顿，允许范围 [250, 1200]
 
   memory:

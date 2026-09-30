@@ -8,24 +8,31 @@
  * segment counts — it cannot perceive playback time.
  *
  * The limits are hard ceilings: callers may tighten them, never exceed them
- * (ADR-0010 §3). A caller asking for 5 segments gets 3 and a merged tail; the
+ * (ADR-0010 §3). A caller asking for 40 segments gets 8 and a merged tail; the
  * concatenation invariant (`segments.join('') === normalizeReplyText(text)`) holds
  * for every input, including the clamped ones.
  *
- * One deliberate exception, because the two ceilings cannot both hold for a long
- * reply: 3 segments × 60 characters is 180 characters of capacity, so a model
- * reply longer than that cannot be split into ≤3 segments of ≤60 characters
- * without deleting text. The invariant "never add or delete a character" (M4) is
- * the one kept; the tail merges into the last allowed segment, that segment goes
- * over `segmentMaxChars`, and `mergedOverflow` reports it. Every reply that fits
- * the capacity has all segments within the ceiling — see the boundary tests.
+ * P1 (2026-10-01) raised the segment ceiling from 3 to 8 and left `segmentMaxChars`
+ * at 60, because the two numbers mean different things:
+ *   * `segmentMaxChars` is how much is spoken in one breath between two audible
+ *     pauses — a playback chunk size, not a limit on what she may say;
+ *   * `maxSegments × segmentMaxChars` was, in V0.1, an accidental **reply-length
+ *     ceiling** of 180 characters (baseline §2.5: 9/19 turns sat right against it).
+ *     A long explanation (4–6 sentences, or one story) needs room, so the capacity is
+ *     now 8 × 60 = 480 characters while the spoken rhythm stays the same.
+ *
+ * Where the two ceilings still cannot both hold — a reply longer than the capacity —
+ * the invariant "never add or delete a character" (M4) wins: the tail merges into
+ * the last allowed segment, that segment goes over `segmentMaxChars`, and
+ * `mergedOverflow` reports it. Every reply that fits the capacity has all segments
+ * within the ceiling — see the boundary tests.
  */
 
 import { SILENCE_TOKEN } from './prompt.ts';
 
 export const REPLY_LIMITS = Object.freeze({
-  /** Hard ceiling on segments per turn (ADR-0010 M1). */
-  maxSegments: 3,
+  /** Hard ceiling on segments per turn (ADR-0010 M1, raised 3 → 8 in P1). */
+  maxSegments: 8,
   /** Hard ceiling on characters per segment; CJK text, so "characters" = code points (M2). */
   segmentMaxChars: 60,
   /** Pause between segments, from the end of the previous one (M3). */

@@ -136,11 +136,13 @@ test('the parsed override reaches the prompt the model actually sees', async () 
     const prompt = engine.buildPrompt({ sessionId: session.sessionId, text: '预览' });
 
     // The low-verbosity directive only appears for the overridden value…
-    assert.match(prompt.system, /回答尽量短：通常 1 句，最多 2 句。/);
-    assert.doesNotMatch(prompt.system, /可以多说一点（3~5 句）/);
-    // …and the raw parameters carry the override, not the seeded 0.7.
-    assert.match(prompt.system, /verbosity=0\.1/);
-    assert.doesNotMatch(prompt.system, /verbosity=0\.7/);
+    assert.match(prompt.system, /说话偏简短/);
+    assert.doesNotMatch(prompt.system, /愿意多说几句/, 'the seeded verbosity 0.70 must not still be in the high band');
+    // …and the override owns the wording: the untouched properties still render theirs.
+    assert.match(prompt.system, /可以主动接话/, 'talkativeness 0.75 is untouched and must still be described');
+    // …while the raw parameters never reach the model at all (P1: words, not floats).
+    assert.doesNotMatch(prompt.system, /verbosity\s*=/);
+    assert.doesNotMatch(prompt.system, /talkativeness\s*=/);
     // silence_tolerance drives the follow-up window too, so the engine must show it.
     assert.equal(engine.silenceTolerance, 1);
     assert.equal(engine.lingerMs, 45_000);

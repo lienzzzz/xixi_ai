@@ -15,6 +15,11 @@ import {
  * assertions here are the contract: segment counts, per-segment length, the gap,
  * the concatenation invariant and where a split may fall. What the state machine
  * does with them (M6/M7/M8) is covered in the integration test.
+ *
+ * P1 (2026-10-01) raised `REPLY_LIMITS.maxSegments` 3 → 8 and kept
+ * `segmentMaxChars` at 60: the block size is a spoken chunk, the product is the
+ * reply-length capacity. V0.1's 3 × 60 = 180 capped what she could say in one
+ * turn (baseline §2.5), which is what these assertions have to keep open.
  */
 
 /** A sentence of exactly `length` characters ending in a full stop. */
@@ -53,15 +58,15 @@ test('normalizeReplyText only removes line breaks and surrounding whitespace', (
   assert.equal(normalizeReplyText('一。\n\n二。'), '一。二。');
 });
 
-test('M1/M2: a reply that fits the capacity is split into at most 3 segments of at most 60', () => {
+test('M1/M2: a reply that fits the capacity is split into segments of at most 60 characters', () => {
   // Two 40-character sentences: 80 characters, so it cannot be one segment.
   const two = splitReplyIntoSegments(sentence(40, '甲') + sentence(40, '乙'));
   assert.equal(two.segments.length, 2);
   assert.deepEqual(two.segments, [sentence(40, '甲'), sentence(40, '乙')]);
   assert.equal(two.mergedOverflow, false);
 
-  // Three 50-character sentences: 150 characters, exactly the 3 × 50 an ADR
-  // expects, and every segment stays under the ceiling.
+  // Three 50-character sentences: 150 characters, well inside the 480-character capacity, and
+  // the greedy fill still breaks at the sentence boundary (50 + 50 > 60) so each is its own segment.
   const three = splitReplyIntoSegments(sentence(50, '甲') + sentence(50, '乙') + sentence(50, '丙'));
   assert.equal(three.segments.length, 3);
   for (const segment of three.segments) {
@@ -76,23 +81,40 @@ test('M1/M2: a reply that fits the capacity is split into at most 3 segments of 
   assert.equal(long.segments.join(''), sentence(130));
 });
 
+test('P1: the per-turn ceiling is 8 × 60 = 480 characters, so a long explanation is not squeezed', () => {
+  // V0.1's ceiling was 3 × 60 = 180 characters, and the baseline found 9/19 real turns sitting
+  // right against it — i.e. the cap was shaping the reply, not just the playback (baseline §2.5).
+  assert.equal(REPLY_LIMITS.maxSegments, 8);
+  assert.equal(REPLY_LIMITS.segmentMaxChars, 60, 'the block size stays 60: it is a spoken chunk, not a length cap');
+
+  // 8 × 40 characters of prose ≈ a long answer: split, never merged, never shortened.
+  const long = Array.from({ length: 8 }, (_unused, index) => sentence(40, '甲乙丙丁戊己庚辛'[index] ?? '字')).join('');
+  const result = splitReplyIntoSegments(long);
+  assert.equal(long.length, 320);
+  assert.equal(result.mergedOverflow, false, 'a 320-character answer fits the new capacity');
+  assert.ok(result.segments.length > 3, 'a long answer is spoken as more than three chunks, with pauses between them');
+  assert.equal(result.segments.join(''), long);
+  for (const segment of result.segments) assert.ok(segment.length <= 60, `bad length ${segment.length}`);
+});
+
 test('M1 beyond capacity: the tail merges into the last segment and mergedOverflow says so', () => {
-  // 5 × 40 = 200 characters > 3 × 60 = 180: both ceilings cannot hold, and the
+  // 13 × 40 = 520 characters > 8 × 60 = 480: both ceilings cannot hold, and the
   // documented choice is to keep every character instead of dropping the tail.
-  const text = sentence(40, '甲') + sentence(40, '乙') + sentence(40, '丙') + sentence(40, '丁') + sentence(40, '戊');
+  const text = Array.from({ length: 13 }, (_unused, index) => sentence(40, '甲乙丙丁戊己庚辛壬癸子丑'[index] ?? '字')).join('');
   const result = splitReplyIntoSegments(text);
-  assert.equal(result.segments.length, 3, 'the segment ceiling is the one that holds');
-  assert.deepEqual(result.segments.map((segment) => segment.length), [40, 40, 120]);
+  assert.equal(result.segments.length, 8, 'the segment ceiling is the one that holds');
+  assert.deepEqual(result.segments.map((segment) => segment.length), [40, 40, 40, 40, 40, 40, 40, 240]);
   assert.equal(result.mergedOverflow, true);
   assert.equal(result.segments.join(''), text, 'nothing may be dropped to satisfy the length ceiling');
+  assert.equal(text.length, 520);
 });
 
 test('asking for more segments than allowed is clamped, never honoured', () => {
   const result = splitReplyIntoSegments(sentence(40, '甲') + sentence(40, '乙') + sentence(40, '丙') + sentence(40, '丁'), {
-    maxSegments: 5,
+    maxSegments: 99,
   });
-  assert.equal(result.segments.length, 3);
-  assert.equal(result.mergedOverflow, true, 'a caller asking for 5 must be told it did not get 5');
+  assert.equal(result.segments.length, 4);
+  assert.equal(result.mergedOverflow, true, 'a caller asking for 99 must be told it did not get 99');
 });
 
 test('M3: the gap is clamped into [250, 1200] and defaults to 450', () => {
@@ -126,9 +148,9 @@ test('empty or whitespace-only text yields no segments', () => {
 });
 
 test('resolveReplyLimits reads the config section, clamps it and lets an override win', () => {
-  // The config as written in config/xixi.example.yaml.
-  assert.deepEqual(resolveReplyLimits({ max_segments: 3, segment_max_chars: 60, gap_ms: 450 }), {
-    maxSegments: 3,
+  // The config as written in config/xixi.example.yaml (P1 raised max_segments 3 → 8).
+  assert.deepEqual(resolveReplyLimits({ max_segments: 8, segment_max_chars: 60, gap_ms: 450 }), {
+    maxSegments: 8,
     segmentMaxChars: 60,
     gapMs: 450,
   });
@@ -139,22 +161,22 @@ test('resolveReplyLimits reads the config section, clamps it and lets an overrid
     gapMs: 300,
   });
   // …raising a ceiling is not.
-  assert.deepEqual(resolveReplyLimits({ max_segments: 9, segment_max_chars: 999, gap_ms: 60_000 }), {
-    maxSegments: 3,
+  assert.deepEqual(resolveReplyLimits({ max_segments: 99, segment_max_chars: 999, gap_ms: 60_000 }), {
+    maxSegments: 8,
     segmentMaxChars: 60,
     gapMs: 1_200,
   });
   // Unusable values fall back to the documented defaults instead of crashing a turn.
-  assert.deepEqual(resolveReplyLimits({ max_segments: '3', segment_max_chars: null, gap_ms: -5 }), {
-    maxSegments: 3,
+  assert.deepEqual(resolveReplyLimits({ max_segments: '8', segment_max_chars: null, gap_ms: -5 }), {
+    maxSegments: 8,
     segmentMaxChars: 60,
     gapMs: 250,
   });
-  assert.deepEqual(resolveReplyLimits(undefined), { maxSegments: 3, segmentMaxChars: 60, gapMs: 450 });
+  assert.deepEqual(resolveReplyLimits(undefined), { maxSegments: 8, segmentMaxChars: 60, gapMs: 450 });
   // The explicit test/replay override wins over the config and is clamped too.
-  assert.equal(resolveReplyLimits({ max_segments: 3 }, { maxSegments: 1 }).maxSegments, 1);
-  assert.equal(resolveReplyLimits({ max_segments: 1 }, { maxSegments: 3 }).maxSegments, 3);
-  assert.equal(resolveReplyLimits({ max_segments: 1 }, { maxSegments: 3 }).maxSegments <= REPLY_LIMITS.maxSegments, true);
+  assert.equal(resolveReplyLimits({ max_segments: 8 }, { maxSegments: 1 }).maxSegments, 1);
+  assert.equal(resolveReplyLimits({ max_segments: 1 }, { maxSegments: 8 }).maxSegments, 8);
+  assert.equal(resolveReplyLimits({ max_segments: 8 }, { maxSegments: 99 }).maxSegments, REPLY_LIMITS.maxSegments);
 });
 
 test('the splitter is pure: the same text always yields the same split', () => {

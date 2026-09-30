@@ -22,6 +22,7 @@ export {
   type TurnAcceptanceReason,
 } from './fsm.ts';
 export {
+  CORE_IDENTITY,
   describeTimeOfDay,
   HARD_POLICY,
   personalityDirectives,
