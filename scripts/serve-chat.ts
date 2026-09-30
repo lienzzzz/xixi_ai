@@ -57,6 +57,8 @@ const args = process.argv.slice(2);
 const portArg = args.indexOf('--port');
 const PORT = Number(portArg >= 0 && args[portArg + 1] !== undefined ? args[portArg + 1] : (process.env.XIXI_WEB_PORT ?? 8791));
 const TTS_ENABLED = !args.includes('--no-tts');
+// t78: 朗读 is a runtime switch here too, so the page can turn it off without a restart.
+let ttsOn = TTS_ENABLED;
 /** `--dsh` runs the same page through the DSH harness instead of the direct path (slower). */
 const USE_DSH = args.includes('--dsh');
 /**
@@ -133,7 +135,8 @@ function proactivePayload(): ProactiveConsoleState & { readonly ok: true } {
 // Resident consideration loop (t70): same core as the console, off until the page asks for it.
 let turnInFlight = false;
 const presenceStorePath = join(REPO_ROOT, 'data');
-const loopSynthesize = TTS_ENABLED && client.hasKey ? async (text: string): Promise<Buffer> => await client.synthesize(text) : undefined;
+const loopSynthesizeProvider = (): ((text: string) => Promise<Buffer>) | undefined =>
+  ttsOn && client.hasKey ? async (text: string): Promise<Buffer> => await client.synthesize(text) : undefined;
 const proactiveLoop = new ProactiveLoop({
   store,
   readSettings: () => proactiveSnapshot.settings,
@@ -148,7 +151,7 @@ const proactiveLoop = new ProactiveLoop({
   readRecentUserTopics: () => recentUserTopics(store, session.sessionId),
   readSessionId: () => session.sessionId,
   replyLimits: config.reply,
-  synthesize: loopSynthesize,
+  synthesizeProvider: loopSynthesizeProvider,
   // Same composer as the console: the model writes the line (tools included), from inside the
   // delivery seam only — the gates have already decided by then (t74).
   compose: createModelComposer({
@@ -170,9 +173,9 @@ function loopPayload(cursor: number): Record<string, unknown> {
     minIntervalMs: MIN_LOOP_INTERVAL_MS,
     defaultIntervalMs: DEFAULT_LOOP_INTERVAL_MS,
     tts: {
-      available: loopSynthesize !== undefined,
+      available: loopSynthesizeProvider() !== undefined,
       note:
-        loopSynthesize !== undefined
+        loopSynthesizeProvider() !== undefined
           ? '放行时会用真实 TTS 逐段合成，并在页面上逐条播出来。'
           : '当前没有可用密钥或朗读被关掉：放行时只显示文字，不会发声（这会在每条记录里写明）。',
     },
@@ -192,7 +195,7 @@ const voiceDeps: VoiceDeps = {
   client,
   engine,
   currentSessionId: () => session.sessionId,
-  ttsEnabled: TTS_ENABLED,
+  ttsEnabled: ttsOn,
   policy,
   log: (line) => console.log(line),
 };
@@ -238,7 +241,7 @@ async function handleTurn(body: TurnBody, response: ServerResponse): Promise<voi
   const turn = await engine.respond({ sessionId: session.sessionId, text, addressed });
 
   let audio: string | null = null;
-  if (TTS_ENABLED && body.speak !== false && turn.action === 'SPEAK' && turn.text !== null) {
+  if (ttsOn && body.speak !== false && turn.action === 'SPEAK' && turn.text !== null) {
     audio = (await client.synthesize(turn.text)).toString('base64');
   }
   // `segments`/`segmentGapMs` are the engine's own plan (ADR-0010): the page plays them one by
@@ -324,6 +327,17 @@ const server = createServer((request, response) => {
         json(response, 200, loopPayload(Number(url.searchParams.get('cursor') ?? '0')));
         return;
       }
+      if (request.method === 'POST' && url.pathname === '/api/tts') {
+        // t78: the trial page gets the same runtime 朗读 switch as the console.
+        const body = (await readBody(request)) as Record<string, unknown>;
+        if (typeof body['enabled'] !== 'boolean') {
+          throw new ConsoleError('TTS_SWITCH_INVALID', 'TTS 开关需要一个布尔值', '页面上的复选框会传 true / false');
+        }
+        ttsOn = body['enabled'];
+        console.log(`[tts] 朗读已${ttsOn ? '打开' : '关闭'}（回复与主动开口都生效）`);
+        json(response, 200, { ok: true, ttsEnabled: ttsOn, ttsAvailable: loopSynthesizeProvider() !== undefined });
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/api/proactive/loop') {
         const body = (await readBody(request)) as Record<string, unknown>;
         const action = typeof body['action'] === 'string' ? body['action'] : 'tick';
@@ -369,7 +383,7 @@ const server = createServer((request, response) => {
           proactivity: effectiveProactivity(store.selfProfile()),
           sessionId: session.sessionId,
           replyLimits: config.reply,
-          synthesize: loopSynthesize,
+          synthesize: loopSynthesizeProvider(),
           request: body,
         });
         console.log(`[proactive] 演练 ${drill.trigger} → ${drill.reasonCode}（分数 ${drill.score}/${drill.threshold}${drill.speak ? `，分 ${drill.segments.length} 段` : ''}）`);

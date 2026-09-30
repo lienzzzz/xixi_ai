@@ -42,7 +42,7 @@
  * Shared with `scripts/serve-chat.ts`: the voice-turn core, the retention policy,
  * the presence reader and the report writer are exported from here.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -1840,6 +1840,8 @@ export interface FieldServerOptions {
   readonly reportDir?: string;
   readonly autoPrune?: boolean;
   readonly probeRunner?: ProbeRunner;
+  /** Test seam for the live camera loop (t78): the real one spawns the perception edge. */
+  readonly liveRunner?: LiveCameraRunner;
   readonly log?: (line: string) => void;
 }
 
@@ -1926,8 +1928,11 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   // settings or the FSM state, so a knob saved a second ago (or a conversation that just
   // started) is honoured on the very next tick.
   let turnInFlight = false;
-  const loopSynthesize =
-    ttsEnabled && client.hasKey ? async (text: string): Promise<Buffer> => await client.synthesize(text) : undefined;
+  // 朗读 is now a runtime switch (t78): the page can turn TTS off without restarting the console,
+  // and both the reply path and the proactive loop read it at the moment they speak.
+  let ttsOn = ttsEnabled;
+  const loopSynthesizeProvider = (): ((text: string) => Promise<Buffer>) | undefined =>
+    ttsOn && client.hasKey ? async (text: string): Promise<Buffer> => await client.synthesize(text) : undefined;
   const proactiveLoop = new ProactiveLoop({
     store,
     readSettings: () => proactiveSnapshot.settings,
@@ -1942,7 +1947,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
     readRecentUserTopics: () => recentUserTopics(store, session.sessionId),
     readSessionId: () => session.sessionId,
     replyLimits: config.reply,
-    synthesize: loopSynthesize,
+    synthesizeProvider: loopSynthesizeProvider,
     // Content is composed through the same prompt + adapter path a reply uses (tools included),
     // and only from inside the delivery seam — see `ProactiveLoopOptions.compose`.
     compose: createModelComposer({
@@ -1954,6 +1959,35 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
     }),
     log,
   });
+
+  // -------------------------------------------------- live camera + 「启用」 (t78)
+  let liveCameraIndex = 0;
+  let liveSource: 'camera' | 'synthetic' = 'camera';
+  let liveScenario: string | null = 'person-arrives-moves-leaves';
+  const liveSensors = new LiveSensors({
+    runner: options.liveRunner ?? createPerceptionLiveRunner({ python: () => resolvePerceptionPython(log), serviceDir: PERCEPTION_SERVICE_DIR, repoRoot: REPO_ROOT, log }),
+    // The child needs the store *file* (`perception_edge.run --db <file> --append`), not the dir.
+    presenceDbPath: () => {
+      const opened = getPresenceStore() as { dbPath?: string } | undefined;
+      return opened?.dbPath ?? join(presenceDataDir, 'xixi.sqlite');
+    },
+    cameraIndex: () => liveCameraIndex,
+    log,
+  });
+  function livePayload(): Record<string, unknown> {
+    return {
+      status: liveSensors.status(),
+      frame: liveSensors.frame(),
+      loop: proactiveLoop.status(),
+      ttsEnabled: ttsOn,
+      ttsAvailable: ttsOn && client.hasKey,
+      cameraIndex: liveCameraIndex,
+      source: liveSource,
+      scenario: liveScenario,
+      privacy: LIVE_PRIVACY_NOTE,
+      hint: '「启用」= 摄像头在场检测 + 常驻主动循环立刻先考虑一次；「停用」会把子进程一起停掉。',
+    };
+  }
   function loopPayload(cursor: number): Record<string, unknown> {
     const since = proactiveLoop.messagesSince(Number.isFinite(cursor) ? cursor : 0);
     return {
@@ -1964,9 +1998,9 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       minIntervalMs: MIN_LOOP_INTERVAL_MS,
       defaultIntervalMs: DEFAULT_LOOP_INTERVAL_MS,
       tts: {
-        available: loopSynthesize !== undefined,
+        available: loopSynthesizeProvider() !== undefined,
         note:
-          loopSynthesize !== undefined
+          loopSynthesizeProvider() !== undefined
             ? '放行时会用真实 TTS 逐段合成，并在页面上逐条播出来。'
             : '当前没有可用密钥或朗读被关掉：放行时只显示文字，不会发声（这会在每条记录里写明）。',
       },
@@ -2081,7 +2115,10 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       calibration,
       presence,
       recent: turns,
-      ttsEnabled,
+      ttsEnabled: ttsOn,
+      ttsAvailable: ttsOn && client.hasKey,
+      live: liveSensors.status(),
+      liveLoop: proactiveLoop.status(),
       reportDir,
     };
   }
@@ -2125,6 +2162,48 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
         }
         if (request.method === 'GET' && url.pathname === '/api/field/proactive/loop') {
           json(response, 200, loopPayload(Number(url.searchParams.get('cursor') ?? '0')));
+          return;
+        }
+        if (request.method === 'GET' && url.pathname === '/api/field/live') {
+          json(response, 200, { ok: true, ...livePayload() });
+          return;
+        }
+        if (request.method === 'POST' && url.pathname === '/api/field/live') {
+          const body = (await readBody(request)) as Record<string, unknown>;
+          const action = typeof body['action'] === 'string' ? body['action'] : 'start';
+          if (action === 'start') {
+            // 「启用」 = 摄像头在场检测 + 常驻主动循环，并且立刻先考虑一次（loop.start 自己会先 tick）。
+            liveSensors.setCameraEnabled(body['camera'] !== false);
+            if (typeof body['cameraIndex'] === 'number') liveCameraIndex = body['cameraIndex'];
+            if (typeof body['source'] === 'string' && (body['source'] === 'camera' || body['source'] === 'synthetic')) {
+              liveSource = body['source'];
+            }
+            if (typeof body['scenario'] === 'string' && body['scenario'].trim().length > 0) liveScenario = body['scenario'].trim();
+            if (liveSensors.cameraEnabled()) {
+              // Open (and migrate) the presence store *before* the child starts writing into it:
+              // the child runs with `--append`, which refuses to create tables itself (t78).
+              getPresenceStore();
+              liveSensors.start({ source: liveSource, scenario: liveSource === 'synthetic' ? liveScenario : null });
+            } else {              log('[live] 摄像头开关是关的：只启动主动循环，不启动在场检测');
+            }
+            proactiveLoop.start(typeof body['intervalMs'] === 'number' ? body['intervalMs'] : undefined);
+          } else if (action === 'stop') {
+            proactiveLoop.stop();
+            liveSensors.stop();
+          } else {
+            throw new ConsoleError('UNKNOWN_LIVE_ACTION', `不认识的启用操作「${action}」`, '可用：start（启用西西）、stop（停用）');
+          }
+          json(response, 200, { ok: true, ...livePayload() });
+          return;
+        }
+        if (request.method === 'POST' && url.pathname === '/api/field/tts') {
+          const body = (await readBody(request)) as Record<string, unknown>;
+          if (typeof body['enabled'] !== 'boolean') {
+            throw new ConsoleError('TTS_SWITCH_INVALID', 'TTS 开关需要一个布尔值', '页面上的复选框会传 true / false');
+          }
+          ttsOn = body['enabled'];
+          log(`[tts] 朗读已${ttsOn ? '打开' : '关闭'}（回复与主动开口都生效；没有密钥时仍然是只显示文字）`);
+          json(response, 200, { ok: true, ttsEnabled: ttsOn, ttsAvailable: ttsOn && client.hasKey, state: statePayload() });
           return;
         }
         if (request.method === 'POST' && url.pathname === '/api/field/proactive/loop') {
@@ -2180,7 +2259,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
             proactivity: effectiveProactivity(store.selfProfile()),
             sessionId: session.sessionId,
             replyLimits: config.reply,
-            synthesize: loopSynthesize,
+            synthesize: loopSynthesizeProvider(),
             request: body,
           });
           log(`[proactive] 演练 ${drill.trigger} → ${drill.reasonCode}（分数 ${drill.score}/${drill.threshold}${drill.speak ? `，分 ${drill.segments.length} 段` : ''}）`);
@@ -3201,6 +3280,393 @@ export function effectiveProactivity(profile: Readonly<Record<string, unknown>> 
   return typeof value === 'number' && Number.isFinite(value) ? value : DEFAULT_PROACTIVITY;
 }
 
+// ---------------------------------------------------- live sensors (t78)
+//
+// The 「启用」 button starts two things at once: the camera presence loop (the real
+// `perception_edge.run --live`, which keeps writing `presence.changed` exactly as before) and the
+// resident consideration loop. The picture the page shows comes from the child's stdout as base64
+// JPEG and lives **in memory only**: nothing is written to disk, nothing is uploaded, and the
+// frame is dropped as soon as a newer one arrives. The page says so, and the tests check it.
+
+/** One live frame, as the page receives it (the bytes stay in this process). */
+export interface LiveFrameView {
+  readonly at: string;
+  readonly frameIndex: number;
+  readonly present: boolean;
+  readonly confidence: number;
+  readonly motionRatio: number;
+  readonly faces: number;
+  readonly detectMs: number;
+  readonly jpegBytes: number;
+  readonly width: number;
+  readonly height: number;
+  /** `data:image/jpeg;base64,…` — the whole picture, inline in the JSON response. */
+  readonly dataUrl: string;
+}
+
+export interface LiveChildStatus {
+  readonly running: boolean;
+  readonly pid: number | null;
+  readonly source: 'camera' | 'synthetic';
+  readonly startedAt: string | null;
+  readonly frames: number;
+  readonly presenceEvents: number;
+  /** The last thing the child said on stderr (camera busy, model missing, …). */
+  readonly lastNote: string | null;
+  readonly exitCode: number | null;
+  /** `true` once the process really exited (the 停用 button must not lie about this). */
+  readonly exited: boolean;
+}
+
+export interface LiveSensorsStatus {
+  readonly running: boolean;
+  readonly cameraEnabled: boolean;
+  readonly child: LiveChildStatus;
+  readonly lastFrame: Omit<LiveFrameView, 'dataUrl'> & { readonly hasPicture: boolean } | null;
+  readonly privacy: string;
+}
+
+export interface LiveCameraStartOptions {
+  readonly source: 'camera' | 'synthetic';
+  readonly scenario?: string | null;
+  readonly cameraIndex: number;
+  readonly presenceDbPath: string;
+}
+
+export interface LiveCameraHandle {
+  readonly pid: number;
+  readonly kill: () => void;
+  readonly write: (line: string) => void;
+}
+
+/** The seam that lets tests drive the live loop without a camera or Python. */
+export interface LiveCameraRunner {
+  start(
+    options: LiveCameraStartOptions & { readonly onLine: (line: string) => void; readonly onExit: (code: number | null) => void },
+  ): LiveCameraHandle;
+}
+
+export const LIVE_PRIVACY_NOTE =
+  '摄像头画面只在内存里显示：控制台把每一帧解码后原样发给这个页面，不写文件、不上传、不落盘；关掉「启用」后连进程一起退出。';
+
+/**
+ * The live camera process + the最新一帧 it produced (t78).
+ *
+ * Everything here is deliberately "latest frame wins": the console keeps at most one picture, so
+ * a long session cannot grow memory, and the page always shows *now* rather than a backlog.
+ */
+export class LiveSensors {
+  readonly #options: {
+    readonly runner: LiveCameraRunner;
+    readonly presenceDbPath: () => string;
+    readonly cameraIndex: () => number;
+    readonly now?: (() => Date) | undefined;
+    readonly log?: ((line: string) => void) | undefined;
+  };
+  #handle: LiveCameraHandle | null = null;
+  #running = false;
+  #cameraEnabled = true;
+  #source: 'camera' | 'synthetic' = 'camera';
+  #scenario: string | null = null;
+  #startedAt: string | null = null;
+  #frames = 0;
+  #presenceEvents = 0;
+  #lastNote: string | null = null;
+  #exitCode: number | null = null;
+  #exited = false;
+  #lastFrame: LiveFrameView | null = null;
+
+  constructor(options: {
+    readonly runner: LiveCameraRunner;
+    readonly presenceDbPath: () => string;
+    readonly cameraIndex: () => number;
+    readonly now?: (() => Date) | undefined;
+    readonly log?: ((line: string) => void) | undefined;
+  }) {
+    this.#options = options;
+  }
+
+  get running(): boolean {
+    return this.#running;
+  }
+
+  setCameraEnabled(enabled: boolean): void {
+    this.#cameraEnabled = enabled;
+  }
+
+  cameraEnabled(): boolean {
+    return this.#cameraEnabled;
+  }
+
+  /** Start the camera loop. Returns the status right after the spawn attempt. */
+  start(options?: { readonly source?: 'camera' | 'synthetic'; readonly scenario?: string | null }): LiveChildStatus {
+    if (this.#running) return this.status().child;
+    this.#source = options?.source ?? 'camera';
+    this.#scenario = options?.scenario ?? null;
+    this.#frames = 0;
+    this.#presenceEvents = 0;
+    this.#lastNote = null;
+    this.#exitCode = null;
+    this.#exited = false;
+    this.#lastFrame = null;
+    const at = this.#options.now?.() ?? new Date();
+    try {
+      this.#handle = this.#options.runner.start({
+        source: this.#source,
+        scenario: this.#scenario,
+        cameraIndex: this.#options.cameraIndex(),
+        presenceDbPath: this.#options.presenceDbPath(),
+        onLine: (line) => this.#onLine(line),
+        onExit: (code) => this.#onExit(code),
+      });
+      this.#running = true;
+      this.#startedAt = at.toISOString();
+      this.#options.log?.(`[live] 摄像头在场检测已启动（pid ${this.#handle.pid}，source=${this.#source}${this.#scenario === null ? '' : `，scenario=${this.#scenario}`}）`);
+    } catch (error) {
+      this.#running = false;
+      this.#exited = true;
+      this.#lastNote = `启动失败：${error instanceof Error ? error.message : String(error)}`;
+      this.#options.log?.(`[live] ${this.#lastNote}`);
+    }
+    return this.status().child;
+  }
+
+  /** Stop it: close the pipe, then terminate. `exited` only becomes true when the process is gone. */
+  stop(): LiveChildStatus {
+    const handle = this.#handle;
+    if (handle === null) {
+      this.#running = false;
+      return this.status().child;
+    }
+    this.#running = false;
+    try {
+      handle.kill();
+    } catch (error) {
+      this.#lastNote = `停止时出错：${error instanceof Error ? error.message : String(error)}`;
+    }
+    this.#options.log?.('[live] 已发送停止信号（摄像头在场检测进程应随之退出）');
+    this.#handle = null;
+    return this.status().child;
+  }
+
+  #onLine(line: string): void {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) return;
+    if (!trimmed.startsWith('{')) {
+      this.#lastNote = trimmed.slice(0, 300);
+      return;
+    }
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      this.#lastNote = trimmed.slice(0, 300);
+      return;
+    }
+    if (parsed['type'] === 'frame') {
+      this.#frames += 1;
+      const jpeg = typeof parsed['jpeg'] === 'string' ? parsed['jpeg'] : null;
+      this.#lastFrame = {
+        at: typeof parsed['at'] === 'string' ? parsed['at'] : (this.#options.now?.() ?? new Date()).toISOString(),
+        frameIndex: Number(parsed['frame_index'] ?? 0),
+        present: parsed['present'] === true,
+        confidence: Number(parsed['confidence'] ?? 0),
+        motionRatio: Number(parsed['motion_ratio'] ?? 0),
+        faces: Number(parsed['faces'] ?? 0),
+        detectMs: Number(parsed['detect_ms'] ?? 0),
+        jpegBytes: Number(parsed['jpeg_bytes'] ?? 0),
+        width: Number(parsed['width'] ?? 0),
+        height: Number(parsed['height'] ?? 0),
+        dataUrl: jpeg === null ? '' : `data:image/jpeg;base64,${jpeg}`,
+      };
+      return;
+    }
+    const payload = parsed['payload'];
+    if (parsed['record'] === 'event' && typeof payload === 'object' && payload !== null) {
+      const presence = payload as Record<string, unknown>;
+      if (typeof presence['present'] === 'boolean') this.#presenceEvents += 1;
+      return;
+    }
+    if (parsed['record'] === 'frame') return; // the child's own evidence line: not needed here
+    if (parsed['record'] === 'summary' || parsed['type'] === 'live_summary') return;
+  }
+
+  #onExit(code: number | null): void {
+    this.#exited = true;
+    this.#exitCode = code;
+    this.#running = false;
+    this.#options.log?.(`[live] 摄像头在场检测进程已退出（exit ${code ?? 'signal'}）`);
+  }
+
+  status(): LiveSensorsStatus {
+    return {
+      running: this.#running,
+      cameraEnabled: this.#cameraEnabled,
+      child: {
+        running: this.#running,
+        pid: this.#handle?.pid ?? null,
+        source: this.#source,
+        startedAt: this.#startedAt,
+        frames: this.#frames,
+        presenceEvents: this.#presenceEvents,
+        lastNote: this.#lastNote,
+        exitCode: this.#exitCode,
+        exited: this.#exited,
+      },
+      lastFrame:
+        this.#lastFrame === null
+          ? null
+          : {
+              at: this.#lastFrame.at,
+              frameIndex: this.#lastFrame.frameIndex,
+              present: this.#lastFrame.present,
+              confidence: this.#lastFrame.confidence,
+              motionRatio: this.#lastFrame.motionRatio,
+              faces: this.#lastFrame.faces,
+              detectMs: this.#lastFrame.detectMs,
+              jpegBytes: this.#lastFrame.jpegBytes,
+              width: this.#lastFrame.width,
+              height: this.#lastFrame.height,
+              hasPicture: this.#lastFrame.dataUrl.length > 0,
+            },
+      privacy: LIVE_PRIVACY_NOTE,
+    };
+  }
+
+  /** The frame itself, only for the endpoint that hands it to the page. */
+  frame(): LiveFrameView | null {
+    return this.#lastFrame;
+  }
+}
+
+/** The perception edge lives here (`-m perception_edge.run` is run with this as cwd). */
+export const PERCEPTION_SERVICE_DIR = join(REPO_ROOT, 'services', 'perception-edge');
+/** Enough OpenCV + numpy to run the detector: `verify-camera-presence.ts` probes the same way. */
+const PERCEPTION_PROBE = 'import cv2, numpy';
+let perceptionPython: string | null = null;
+
+/**
+ * Find a Python that can actually run the perception edge (t78).
+ *
+ * Same candidate order as `scripts/verify-camera-presence.ts` (which cannot be imported here: it
+ * runs its verification at module load). The probe result is cached, and a failure is an explicit
+ * Chinese error rather than "the picture is just empty".
+ */
+export function resolvePerceptionPython(log?: ((line: string) => void) | undefined): string {
+  if (perceptionPython !== null) return perceptionPython;
+  const candidates: string[] = [];
+  const fromEnv = process.env.XIXI_PERCEPTION_PYTHON;
+  if (fromEnv !== undefined && fromEnv.length > 0) candidates.push(fromEnv);
+  for (const name of ['cv4', 'field-probe', 'voice-pipecat']) {
+    candidates.push(join(REPO_ROOT, '.venvs', name, 'Scripts', 'python.exe'));
+    candidates.push(join(REPO_ROOT, '.venvs', name, 'bin', 'python3'));
+  }
+  candidates.push('python', 'python3');
+  for (const candidate of candidates) {
+    if ((candidate.includes('\\') || candidate.includes('/')) && !existsSync(candidate)) continue;
+    const result = spawnSync(candidate, ['-c', PERCEPTION_PROBE], { encoding: 'utf8', timeout: 60_000 });
+    if (result.status === 0) {
+      perceptionPython = candidate;
+      log?.(`[live] 用这个 Python 跑摄像头在场检测：${candidate}`);
+      return candidate;
+    }
+  }
+  throw new Error(
+    '找不到带 OpenCV 的 Python（试过 XIXI_PERCEPTION_PYTHON、.venvs/cv4、.venvs/field-probe、.venvs/voice-pipecat、python）；' +
+      '建一个：py -3.12 -m venv .venvs/cv4 然后 .venvs/cv4/Scripts/python.exe -m pip install "opencv-python-headless<5" numpy',
+  );
+}
+
+
+/**
+ * The real runner: the perception edge in `--live` mode.
+ *
+ * It reuses the shipped detection loop (`perception_edge.run --live`), so the presence events the
+ * rest of the system sees are produced by the same code as always — the console only adds a
+ * picture on stdout.
+ */
+export function createPerceptionLiveRunner(options: {
+  /** Resolved lazily: the probe costs a Python start, so it only happens when 启用 is pressed. */
+  readonly python: () => string;
+  readonly serviceDir: string;
+  readonly repoRoot: string;
+  readonly log?: ((line: string) => void) | undefined;
+}): LiveCameraRunner {
+  return {
+    start(settings) {
+      const python = options.python();
+      const args = [
+        '-m',
+        'perception_edge.run',
+        '--live',
+        '--source',
+        settings.source,
+        ...(settings.scenario === null || settings.scenario === undefined ? [] : ['--scenario', settings.scenario]),
+        '--camera-index',
+        String(settings.cameraIndex),
+        '--db',
+        settings.presenceDbPath,
+        '--append',
+        '--quiet-frames',
+      ];
+      const child = spawn(python, args, {
+        cwd: options.serviceDir,
+        env: { ...process.env, PYTHONPATH: options.serviceDir, PYTHONUNBUFFERED: '1' },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      let buffered = '';
+      child.stdout?.setEncoding('utf8');
+      child.stdout?.on('data', (chunk: string) => {
+        buffered += chunk;
+        const lines = buffered.split('\n');
+        buffered = lines.pop() ?? '';
+        for (const line of lines) settings.onLine(line);
+      });
+      child.stderr?.setEncoding('utf8');
+      child.stderr?.on('data', (chunk: string) => {
+        for (const line of chunk.split('\n')) {
+          const trimmed = line.trim();
+          if (trimmed.length === 0) continue;
+          options.log?.(`[live/child] ${trimmed.slice(0, 300)}`);
+          // Non-JSON output is the child complaining (camera busy, bad DB path): the panel must
+          // show it, otherwise 启用 looks like it silently did nothing.
+          settings.onLine(trimmed);
+        }
+      });
+      child.on('exit', (code) => settings.onExit(code));
+      child.on('error', (error) => {
+        settings.onLine(`子进程启动失败：${error.message}`);
+        settings.onExit(null);
+      });
+      return {
+        pid: child.pid ?? -1,
+        kill: () => {
+          // Close the pipe first (the child stops on stdin EOF), then terminate: the camera is
+          // released either way, and a half-dead child cannot keep the device busy.
+          try {
+            child.stdin?.end();
+          } catch {
+            /* the pipe may already be gone */
+          }
+          try {
+            child.kill('SIGTERM');
+          } catch {
+            /* already dead */
+          }
+        },
+        write: (line: string) => {
+          try {
+            child.stdin?.write(`${line}\n`);
+          } catch {
+            /* ignore */
+          }
+        },
+      };
+    },
+  };
+}
+
+
 // ---------------------------------------------------- resident consideration loop (t70)
 //
 // M5-lite: the console may run the consideration loop by itself. It is **off by default** and
@@ -3585,6 +4051,11 @@ export interface ProactiveLoopOptions {
   readonly replyLimits?: Readonly<Record<string, unknown>> | undefined;
   readonly synthesize?: ((text: string) => Promise<Buffer>) | undefined;
   /**
+   * Runtime-resolved TTS seam (t78): the console has a 朗读 switch, so the *availability* of
+   * synthesis must be read at delivery time, not fixed when the loop is constructed.
+   */
+  readonly synthesizeProvider?: (() => ((text: string) => Promise<Buffer>) | undefined) | undefined;
+  /**
    * How the spoken line is produced — called **from inside the delivery seam**, i.e. only after
    * every gate has let the candidate through (t74). A model call here means "we already decided
    * to speak"; it can never be what made the decision.
@@ -3775,7 +4246,8 @@ export class ProactiveLoop {
     let audio: (string | null)[] | null = null;
     let audioNote: string | null = null;
     if (outcome.speak) {
-      if (this.#options.synthesize === undefined) {
+      const synthesize = this.#options.synthesizeProvider?.() ?? this.#options.synthesize;
+      if (synthesize === undefined) {
         audioNote = '只显示文字：朗读关闭（--no-tts）或没有可用密钥，所以这次没有合成语音。';
       } else {
         // Per segment on purpose: the page plays them with `gapMs` between them, which is what
@@ -3783,7 +4255,7 @@ export class ProactiveLoop {
         const clips: (string | null)[] = [];
         for (const segment of segments) {
           try {
-            clips.push((await this.#options.synthesize(segment)).toString('base64'));
+            clips.push((await synthesize(segment)).toString('base64'));
           } catch (error) {
             clips.push(null);
             audioNote = `第 ${clips.length} 段合成失败：${error instanceof Error ? error.message : String(error)}`;
@@ -4311,6 +4783,8 @@ function pxLoopEntry(entry) {
     }
     // Let a host page (the trial page) also show it in its own conversation log.
     if (typeof window.pxOnProactiveMessage === 'function') window.pxOnProactiveMessage(entry);
+    // t78: the 对话记录 column shows 西西's own lines too, labelled 「主动开口」.
+    pxAppendConversation('xixi', entry.text, entry.segments, entry.gapMs, entry.triggerLabel);
   } else {
     var why = document.createElement('div');
     why.style.marginTop = '4px';
@@ -4357,6 +4831,112 @@ async function pxLoopTick() {
   if (!first) for (var i = 0; i < payload.entries.length; i += 1) pxLoopEntry(payload.entries[i]);
 }
 
+/* ---------------------------------------------------------------- 启用 + 传感器（t78） */
+
+/** Append one line to the 对话记录 column (the user's own turns come from renderTurn above). */
+function pxAppendConversation(who, text, segments, gapMs, label) {
+  var box = document.getElementById('turns');
+  if (!box) return;
+  if (box.classList.contains('muted')) { box.className = ''; box.innerHTML = ''; }
+  var item = document.createElement('div');
+  item.className = 'item';
+  var head = document.createElement('div');
+  head.className = 'head';
+  var tag = document.createElement('span');
+  tag.className = 'tag pass';
+  tag.textContent = who === 'xixi' ? '主动开口' : '你';
+  head.appendChild(tag);
+  var meta = document.createElement('span');
+  meta.className = 'muted';
+  meta.textContent = (label ? label + ' · ' : '') + new Date().toLocaleTimeString()
+    + (segments && segments.length > 1 ? ' · 分 ' + segments.length + ' 段（段间 ' + gapMs + 'ms）' : '');
+  head.appendChild(meta);
+  item.appendChild(head);
+  var rows = segments && segments.length > 0 ? segments : [text];
+  for (var i = 0; i < rows.length; i += 1) {
+    var line = document.createElement('div');
+    line.style.margin = '4px 0';
+    line.textContent = (rows.length > 1 ? '第 ' + (i + 1) + '/' + rows.length + ' 段：' : '') + rows[i];
+    item.appendChild(line);
+  }
+  box.insertBefore(item, box.firstChild);
+}
+
+function pxLiveState(status) {
+  var pill = document.getElementById('px-enable-state');
+  var detail = document.getElementById('px-enable-detail');
+  var child = status.status.child;
+  if (pill) {
+    pill.textContent = status.status.running ? '已启用' : '未启用';
+    pill.className = 'pill ' + (status.status.running ? 'good' : '');
+  }
+  if (detail) {
+    detail.textContent = '摄像头检测：' + (child.running ? '运行中（pid ' + child.pid + '，已收 ' + child.frames + ' 帧，在场事件 ' + child.presenceEvents + ' 次）' : (child.exited ? '已退出（上次 exit ' + (child.exitCode === null ? '信号' : child.exitCode) + '）' : '未启动'))
+      + '；主动循环：' + (status.loop.running ? '运行中（每 ' + Math.round(status.loop.intervalMs / 1000) + 's，已考虑 ' + status.loop.ticks + ' 次）' : '未运行')
+      + (child.lastNote ? '｜子进程说：' + child.lastNote : '');
+  }
+  var ttsBox = document.getElementById('px-tts-switch');
+  if (ttsBox) ttsBox.checked = status.ttsEnabled === true;
+  var camBox = document.getElementById('px-camera-switch');
+  if (camBox) camBox.checked = status.status.cameraEnabled !== false;
+}
+
+function pxLiveSensors(payload) {
+  var frame = payload.frame;
+  var img = document.getElementById('px-cam');
+  var note = document.getElementById('px-cam-note');
+  if (img && frame && frame.dataUrl) img.src = frame.dataUrl;
+  if (note) {
+    note.textContent = frame
+      ? '第 ' + frame.frameIndex + ' 帧 · ' + frame.width + 'x' + frame.height + ' · ' + Math.round(frame.jpegBytes / 1024) + 'KB · 检测耗时 ' + frame.detectMs.toFixed(1) + 'ms · ' + new Date(frame.at).toLocaleTimeString() + '（画面只在内存里，不落盘、不上传）'
+      : (payload.status.child.running ? '正在等第一帧…' : '未启用：点上面的「启用」开始——画面只在内存里显示，不写任何文件。');
+  }
+  var frames = document.getElementById('px-live-frames');
+  var frameNote = document.getElementById('px-live-frame-note');
+  if (frames) frames.textContent = payload.status.child.frames;
+  if (frameNote && frame) frameNote.textContent = '最新一帧 ' + Math.round(frame.jpegBytes / 1024) + 'KB，' + frame.width + 'x' + frame.height + '，置信度 ' + frame.confidence.toFixed(2) + '，faces=' + frame.faces + '，motion=' + frame.motionRatio.toFixed(4);
+  if (frame) {
+    var presenceText = document.getElementById('presence-text');
+    if (presenceText) presenceText.textContent = frame.present ? '有人在场（实时）' : '没看到人（实时）';
+  }
+}
+
+async function pxLiveRefresh() {
+  var payload = await (await fetch(PX.base + '/live')).json();
+  if (payload.ok === false) return;
+  pxLiveState(payload);
+  pxLiveSensors(payload);
+  return payload;
+}
+
+async function pxEnable(on) {
+  var seconds = Number(pxVal('enableInterval'));
+  var camBox = document.getElementById('px-camera-switch');
+  var body = {
+    action: on ? 'start' : 'stop',
+    camera: camBox ? camBox.checked : true,
+    intervalMs: (isFinite(seconds) && seconds > 0 ? seconds : 30) * 1000,
+  };
+  var payload = await pxPost('/live', body);
+  if (payload.ok === false) {
+    showError('px-live-error', '启用失败：' + payload.error, payload.hint);
+    return;
+  }
+  clearError('px-live-error');
+  pxLiveState(payload);
+  pxLiveSensors(payload);
+  pxStatus(on ? '已启用西西：摄像头在场检测 + 常驻主动循环（已立刻考虑一次）' : '已停用：子进程与主动循环都停了');
+  // The stop must be visible: ask again right away so the page shows 「已退出」.
+  if (!on) setTimeout(function () { void pxLiveRefresh(); }, 800);
+}
+
+async function pxTtsToggle(on) {
+  var payload = await pxPost('/tts', { enabled: on });
+  if (payload.ok === false) { pxStatus('朗读开关失败：' + payload.error); return; }
+  pxStatus(on ? '朗读已打开' : '朗读已关闭（只有文字）');
+  void pxLiveRefresh();
+}
+
 (function pxWire() {
   var save = document.getElementById(PX.ids.save); if (save) save.addEventListener('click', function () { void pxSave(); });
   var off = document.getElementById(PX.ids.off); if (off) off.addEventListener('click', function () { void pxSave({ enabled: false }, '已一键关闭主动开口'); });
@@ -4367,9 +4947,17 @@ async function pxLoopTick() {
     loopBox.addEventListener('change', function () { void pxLoopToggle(); });
   }
   var loopTick = document.getElementById(PX.ids.loopTick); if (loopTick) loopTick.addEventListener('click', function () { void pxLoopTick(); });
+  // t78: the one-button 启用/停用 + the two switches + the live sensor view.
+  var enable = document.getElementById('px-enable'); if (enable) enable.addEventListener('click', function () { void pxEnable(true); });
+  var disable = document.getElementById('px-disable'); if (disable) disable.addEventListener('click', function () { void pxEnable(false); });
+  var tts = document.getElementById('px-tts-switch'); if (tts) tts.addEventListener('change', function () { void pxTtsToggle(tts.checked); });
+  var camSwitch = document.getElementById('px-camera-switch'); if (camSwitch) camSwitch.addEventListener('change', function () { pxStatus(camSwitch.checked ? '摄像头在场检测已打开（下次启用生效）' : '摄像头在场检测已关闭（只跑主动循环）'); });
   void pxLoad();
   void pxLoopPoll();
+  void pxLiveRefresh();
   PX.loopPoller = setInterval(function () { void pxLoopPoll(); }, 2000);
+  // The sensor column must show *now*: frames every second while the camera loop runs.
+  PX.livePoller = setInterval(function () { void pxLiveRefresh(); }, 1000);
 })();
 `;
 }
@@ -4398,7 +4986,12 @@ export function buildFieldPage(boot: FieldBootstrap): string {
   .pill.warn { color:#ffcf7a; border-color:#5c4a1f; background:#241d0d; }
   .pill.bad { color:#ff9d9d; border-color:#5c2222; background:#2a1414; }
   .pill.good { color:#8fe3a2; border-color:#1f5c31; background:#0d2415; }
-  main { padding:16px; display:grid; gap:14px; grid-template-columns:repeat(auto-fit, minmax(340px, 1fr)); max-width:1400px; margin:0 auto; }
+  main { padding:16px; display:grid; gap:14px; align-items:start; grid-template-columns:minmax(320px,1fr) minmax(320px,1fr) minmax(320px,1fr); max-width:1800px; margin:0 auto; }
+  /* t78: three columns — 传感器 / 配置 / 对话记录. Below 1200px they stack, so the page stays usable. */
+  @media (max-width:1200px) { main { grid-template-columns:1fr; } }
+  .col { display:grid; gap:14px; align-content:start; min-width:0; }
+  .col > section.card { margin:0; }
+  #px-cam:not([src]), #px-cam[src=""] { min-height:180px; }
   section.card { border:1px solid #262a33; border-radius:12px; padding:14px; background:#14171d; }
   section.card h2 { margin:0 0 10px; font-size:15px; }
   .muted { color:#8b93a3; font-size:12px; line-height:1.6; }
@@ -4448,87 +5041,119 @@ ${PROACTIVE_PANEL_CSS}
   <div class="muted" id="p-privacy" style="margin-top:8px">隐私策略加载中…</div>
 </header>
 <main>
-  <section class="card">
-    <h2>怎么用（三步）</h2>
-    <ol class="steps">
-      <li>看这块下面的「麦克风电平」：不说话时它在 <b>−60 ~ −30 dBFS</b> 之间是正常的；说话时应明显跳到噪声底之上。</li>
-      <li>按住页面最下面的 <b>🎤 按住说</b>，说一句「西西，明天天气怎么样？」，松开。也可以用键盘打字。</li>
-      <li>在「最近几轮」里看结果：转写文字、<b>动作</b>（说话 / 沉默 / 拒绝原因）、<b>延迟分段</b>（VAD / ASR / 首字 / 总时长）。</li>
-    </ol>
-    <div class="muted" style="margin-top:8px">结束：回到启动它的终端按 <code>Ctrl+C</code>。页面只监听本机（127.0.0.1），别人访问不到。</div>
-    <div id="page-error"></div>
-  </section>
+  <div class="col" id="col-sensors">
+    <section class="card" id="px-enable-card">
+      <h2>启用西西（一键）</h2>
+      <div class="muted">开启 <b>摄像头在场检测</b>（<code>perception_edge.run --live</code>，画面只在内存里）+ <b>常驻主动循环</b>，并且<b>立刻先考虑一次</b>，之后按间隔继续。</div>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:10px 0">
+        <button id="px-enable" class="primary">启用</button>
+        <button id="px-disable">停用</button>
+        <span class="pill" id="px-enable-state">未启用</span>
+        <span class="muted" id="px-enable-detail">子进程与循环都还没起来</span>
+      </div>
+      <div class="muted" id="px-live-privacy">${LIVE_PRIVACY_NOTE}</div>
+      <div class="muted" id="px-live-error"></div>
+    </section>
 
-  <section class="card">
-    <h2>麦克风实时电平与噪声底</h2>
-    <div class="big"><span id="mic-level">—</span><span class="unit">dBFS</span></div>
-    <div class="bar"><i id="mic-bar"></i><span id="mic-floor-mark" class="floor"></span><span id="mic-gate-mark"></span></div>
-    <table>
-      <tr><th style="width:44%">数字</th><th>含义</th></tr>
-      <tr><td>当前电平 <b id="mic-level2">—</b> dBFS</td><td>0 = 数字满量程，越接近 0 越响；<b>−60 dBFS 以下基本等于听不见</b>。</td></tr>
-      <tr><td>本次会话估计噪声底 <b id="mic-floor">—</b> dBFS</td><td>你说的每句话都应该明显高于它。安静时页面会自己估出来。</td></tr>
-      <tr><td>校准噪声底（实测）<b id="mic-cal-floor">—</b> dBFS</td><td id="mic-cal-note">加载中…</td></tr>
-      <tr><td>说话门限（校准建议）<b id="mic-gate">—</b> dBFS</td><td>低于它的声音会被当噪声，不会送去识别。</td></tr>
-    </table>
-    <div class="muted" id="mic-device">输入设备：未获取（点下面按钮授权）</div>
-    <div class="muted">电平表用的是<b>原始信号</b>（浏览器的降噪 / 自动增益已关闭），否则看不到真实噪声底。</div>
-    <div><button id="mic-on" class="primary" style="margin-top:8px">允许使用麦克风并开始监测</button></div>
-    <div id="mic-error"></div>
-  </section>
+    <section class="card">
+      <h2>摄像头在场状态（M6）与实时画面</h2>
+      <img id="px-cam" alt="摄像头实时画面" style="width:100%; max-width:480px; border-radius:10px; background:#0b0d11; border:1px solid #262a33; display:block" />
+      <div class="muted" id="px-cam-note">未启用：点上面的「启用」开始——摄像头实时画面只在内存里显示，不写任何文件。</div>
+      <div class="big" id="presence-text" style="margin-top:8px">—</div>
+      <table>
+        <tr><th style="width:44%">字段</th><th>含义</th></tr>
+        <tr><td>来源 <b id="presence-mode">—</b></td><td id="presence-mode-help">在场状态从哪里来</td></tr>
+        <tr><td>置信度 <b id="presence-confidence">—</b></td><td>检测器有多确定（0–1）。</td></tr>
+        <tr><td>更新时间 <b id="presence-updated">—</b></td><td>这条状态是什么时候写的；<b>过期就不代表「现在」</b>。</td></tr>
+        <tr><td>实时帧 <b id="px-live-frames">—</b></td><td id="px-live-frame-note">已收到的帧数 / 最新一帧大小与置信度（来自子进程 stdout，只留在内存）。</td></tr>
+      </table>
+      <div class="muted" id="presence-note">加载中…</div>
+      <div class="muted">摄像头能不能用、画面是否正常，看下面的「设备自检 → 摄像头」；这里显示的是<b>在场判定</b>本身。</div>
+    </section>
 
-  <section class="card">
-    <h2>摄像头在场状态（M6）</h2>
-    <div class="big" id="presence-text">—</div>
-    <table>
-      <tr><th style="width:44%">字段</th><th>含义</th></tr>
-      <tr><td>来源 <b id="presence-mode">—</b></td><td id="presence-mode-help">在场状态从哪里来</td></tr>
-      <tr><td>置信度 <b id="presence-confidence">—</b></td><td>检测器有多确定（0–1）。</td></tr>
-      <tr><td>更新时间 <b id="presence-updated">—</b></td><td>这条状态是什么时候写的；<b>过期就不代表「现在」</b>。</td></tr>
-    </table>
-    <div class="muted" id="presence-note">加载中…</div>
-    <div class="muted">摄像头能不能用、画面是否正常，看下面的「设备自检 → 摄像头」；这里显示的是<b>在场判定</b>本身。</div>
-  </section>
+    <section class="card">
+      <h2>麦克风实时电平与噪声底</h2>
+      <div class="big"><span id="mic-level">—</span><span class="unit">dBFS</span></div>
+      <div class="bar"><i id="mic-bar"></i><span id="mic-floor-mark" class="floor"></span><span id="mic-gate-mark"></span></div>
+      <table>
+        <tr><th style="width:44%">数字</th><th>含义</th></tr>
+        <tr><td>当前电平 <b id="mic-level2">—</b> dBFS</td><td>0 = 数字满量程，越接近 0 越响；<b>−60 dBFS 以下基本等于听不见</b>。</td></tr>
+        <tr><td>本次会话估计噪声底 <b id="mic-floor">—</b> dBFS</td><td>你说的每句话都应该明显高于它。安静时页面会自己估出来。</td></tr>
+        <tr><td>校准噪声底（实测）<b id="mic-cal-floor">—</b> dBFS</td><td id="mic-cal-note">加载中…</td></tr>
+        <tr><td>说话门限（校准建议）<b id="mic-gate">—</b> dBFS</td><td>低于它的声音会被当噪声，不会送去识别。</td></tr>
+      </table>
+      <div class="muted" id="mic-device">输入设备：未获取（点下面按钮授权）</div>
+      <div class="muted">电平表用的是<b>原始信号</b>（浏览器的降噪 / 自动增益已关闭），否则看不到真实噪声底。</div>
+      <div><button id="mic-on" class="primary" style="margin-top:8px">允许使用麦克风并开始监测</button></div>
+      <div id="mic-error"></div>
+    </section>
 
-  <section class="card">
-    <h2>Windows 设备读数（系统设置，只读）</h2>
-    <table>
-      <tr><th style="width:44%">读数</th><th>含义</th></tr>
-      <tr><td>默认输入「<b id="ep-capture-name">—</b>」</td><td>静音 <b id="ep-capture-muted">—</b>，音量 <b id="ep-capture-volume">—</b>%，<b>采集增益 <span id="ep-capture-gain">—</span> dB</b>（Windows 把输入端点音量就叫增益；噪声底偏高时这条最关键）</td></tr>
-      <tr><td>默认输出「<b id="ep-render-name">—</b>」</td><td>静音 <b id="ep-render-muted">—</b>，音量 <b id="ep-render-volume">—</b>%（出厂静音过一次，这是上一轮验收失败的根因）</td></tr>
-    </table>
-    <div class="muted" id="ep-hint">加载中…</div>
-    <div class="muted" id="ep-readonly">这组读数由 pycaw 只读取得；本仓库代码不会修改系统音频设置。</div>
-    <div style="margin-top:8px"><button id="ep-refresh">刷新设备读数</button> <span class="muted" id="ep-error"></span></div>
-  </section>
+    <section class="card">
+      <h2>Windows 设备读数（系统设置，只读）</h2>
+      <table>
+        <tr><th style="width:44%">读数</th><th>含义</th></tr>
+        <tr><td>默认输入「<b id="ep-capture-name">—</b>」</td><td>静音 <b id="ep-capture-muted">—</b>，音量 <b id="ep-capture-volume">—</b>%，<b>采集增益 <span id="ep-capture-gain">—</span> dB</b>（Windows 把输入端点音量就叫增益；噪声底偏高时这条最关键）</td></tr>
+        <tr><td>默认输出「<b id="ep-render-name">—</b>」</td><td>静音 <b id="ep-render-muted">—</b>，音量 <b id="ep-render-volume">—</b>%（出厂静音过一次，这是上一轮验收失败的根因）</td></tr>
+      </table>
+      <div class="muted" id="ep-hint">加载中…</div>
+      <div class="muted" id="ep-readonly">这组读数由 pycaw 只读取得；本仓库代码不会修改系统音频设置。</div>
+      <div style="margin-top:8px"><button id="ep-refresh">刷新设备读数</button> <span class="muted" id="ep-error"></span></div>
+    </section>
 
-  <section class="card">
-    <h2>设备验收引导（麦克风 → 扬声器 → 摄像头）</h2>
-    <div class="muted">点一次「开始设备自检」：程序会自己录 3 秒环境声、放 3 遍音频并用麦克风回采、再打开摄像头取 15 帧。全程约 20–35 秒，不需要你说话。结果与「下一步动作」会写进 <code>docs/recon/field-test-report-&lt;日期&gt;.md</code>。</div>
-    <div class="muted">扬声器一项会给两个口径的数字：<b>能量比</b>（主判据，保守，≥10 dB）与<b>帧级分位</b>（乐观上界，仅参考）。只看分位会高估声学余量。</div>
-    <div style="margin:10px 0"><button id="accept" class="primary">开始设备自检</button> <span class="muted" id="accept-status"></span></div>
-    <div id="accept-items"></div>
-    <div id="accept-error"></div>
-  </section>
+    <section class="card">
+      <h2>本页用的是哪个数据库</h2>
+      ${databaseNoteHtml(boot.databasePath)}
+    </section>
 
-  <section class="card">
-    <h2>最近几轮（动作 / 拒绝原因 / 延迟分段）</h2>
-    <div id="turns" class="muted">还没有轮次。按住 🎤 说一句试试。</div>
-    <div class="muted" style="margin-top:6px">多段回复（ADR-0010）在这里显示为「第 i/N 段 · 段间 450ms」（页面上逐条出现，终端也逐条打印）；完整一条也会写进事件日志。</div>
-    <div class="err" style="border-color:#5c4a22; background:#2a2314; color:#ffe6b8; margin-top:8px">${SEGMENT_TTS_NOTE}</div>
-  </section>
+    <section class="card">
+      <h2>设备验收引导（麦克风 → 扬声器 → 摄像头）</h2>
+      <div class="muted">点一次「开始设备自检」：程序会自己录 3 秒环境声、放 3 遍音频并用麦克风回采、再打开摄像头取 15 帧。全程约 20–35 秒，不需要你说话。结果与「下一步动作」会写进 <code>docs/recon/field-test-report-&lt;日期&gt;.md</code>。</div>
+      <div class="muted">扬声器一项会给两个口径的数字：<b>能量比</b>（主判据，保守，≥10 dB）与<b>帧级分位</b>（乐观上界，仅参考）。只看分位会高估声学余量。</div>
+      <div style="margin:10px 0"><button id="accept" class="primary">开始设备自检</button> <span class="muted" id="accept-status"></span></div>
+      <div id="accept-items"></div>
+      <div id="accept-error"></div>
+    </section>
+  </div>
 
-  <section class="card">
-    <h2>本页用的是哪个数据库</h2>
-    ${databaseNoteHtml(boot.databasePath)}
-  </section>
+  <div class="col" id="col-config">
+    <section class="card" id="px-run-switches">
+      <h2>运行开关（启用/停用用左栏那个按钮）</h2>
+      <table>
+        <tr><th style="width:46%">开关</th><th>说明</th></tr>
+        <tr><td><label><input type="checkbox" id="px-camera-switch" checked /> 摄像头在场检测</label></td><td>关掉就只跑主动循环（没有现场画面，也没有「有人到家」这个事实来源）。</td></tr>
+        <tr><td><label><input type="checkbox" id="px-tts-switch" /> 朗读（TTS）</label></td><td>回复与主动开口是否合成语音；关掉就只有文字。改完立刻生效，不用重启。</td></tr>
+        <tr><td>循环间隔 <input type="number" id="px-enable-interval" min="5" max="3600" step="5" value="30" style="width:88px" /> 秒</td><td>主动循环多久考虑一次（下限 5 秒）；点「启用」会立刻先考虑一次，之后按这个间隔继续。</td></tr>
+      </table>
+      <div class="muted">这三个开关和下面的「主动性」是同一套设置：都在中栏，改完立刻生效、留审计。</div>
+    </section>
+    <section class="card">
+      <h2>怎么用（三步）</h2>
+      <ol class="steps">
+        <li>先点左栏最上面的 <b>启用</b>：摄像头在场检测 + 主动循环一起起来，西西会立刻先考虑一次。</li>
+        <li>看左栏的<b>摄像头画面</b>与<b>麦克风电平</b>：不说话时电平在 <b>−60 ~ −30 dBFS</b> 之间是正常的。</li>
+        <li>按住页面最下面的 <b>🎤 按住说</b> 说一句，然后在右栏看结果（转写、<b>动作</b>：说话 / 沉默 / 拒绝原因、延迟分段）；西西自己开口的话也在右栏，标着「主动开口」。</li>
+      </ol>
+      <div class="muted" style="margin-top:8px">结束：回到启动它的终端按 <code>Ctrl+C</code>。页面只监听本机（127.0.0.1），别人访问不到。</div>
+      <div id="page-error"></div>
+    </section>
 
 ${proactivePanelHtml()}
 
-  <section class="card">
-    <h2>隐私与保留策略</h2>
-    <div id="privacy-detail" class="muted">加载中…</div>
-    <div class="muted" style="margin-top:8px">原始整段录音<b>不落盘</b>：它只在系统临时目录里存在到 VAD 结束，随后立即删除；没有语音时磁盘上不会留下任何录音。语音段只在配置明确要求时才写入 <code>data/voice-web/</code>，并按保留期自动清理。</div>
-  </section>
+    <section class="card">
+      <h2>隐私与保留策略</h2>
+      <div id="privacy-detail" class="muted">加载中…</div>
+      <div class="muted" style="margin-top:8px">原始整段录音<b>不落盘</b>：它只在系统临时目录里存在到 VAD 结束，随后立即删除；没有语音时磁盘上不会留下任何录音。语音段只在配置明确要求时才写入 <code>data/voice-web/</code>，并按保留期自动清理。摄像头画面同样<b>只在内存里</b>：这一页的每一帧都不写文件、不上传。</div>
+    </section>
+  </div>
+
+  <div class="col" id="col-conversation">
+    <section class="card">
+      <h2>对话记录（你 → 西西，以及西西自己开口）</h2>
+      <div id="turns" class="muted">还没有轮次。按住 🎤 说一句试试，或先点左栏的「启用」让西西自己开口。</div>
+      <div class="muted" style="margin-top:6px">多段回复（ADR-0010）在这里显示为「第 i/N 段 · 段间 450ms」（页面上逐条出现，终端也逐条打印）；完整一条也会写进事件日志。标注「主动开口」的条目是西西<b>没过问你就说的</b>，它也过了全部硬门禁。</div>
+      <div class="err" style="border-color:#5c4a22; background:#2a2314; color:#ffe6b8; margin-top:8px">${SEGMENT_TTS_NOTE}</div>
+    </section>
+  </div>
 </main>
 <footer>
   <form id="form">

@@ -74,7 +74,8 @@ const USAGE = `摄像头在场检测验收（M6）
 例：
   node scripts/verify-camera-presence.ts --seconds 15
   node scripts/verify-camera-presence.ts --self-test
-  node scripts/verify-camera-presence.ts --seconds 40 --require-transition`;
+  node scripts/verify-camera-presence.ts --seconds 40 --require-transition
+  node scripts/verify-camera-presence.ts --live --seconds 10     实时预览路径（控制台「启用」用的同一条：帧带画面、事件照常落库、磁盘上不留图像文件）`;
 
 /** Every accepted option. Anything else is refused loudly instead of being ignored. */
 const OPTIONS_WITH_VALUE = new Set([
@@ -83,8 +84,9 @@ const OPTIONS_WITH_VALUE = new Set([
   '--camera-index',
   '--scenario',
   '--min-fps',
+  '--live-fps',
 ]);
-const FLAGS = new Set(['--self-test', '--require-transition', '--require-event', '--help']);
+const FLAGS = new Set(['--self-test', '--require-transition', '--require-event', '--help', '--live']);
 
 function parseArgs(argv: string[]): { values: Map<string, string>; flags: Set<string> } {
   const values = new Map<string, string>();
@@ -244,6 +246,26 @@ if (hasFlag('--self-test')) {
   // documented as a user step in docs/design/perception.md §8.3.
   pythonArgs.push('--source', 'synthetic', '--scenario', argValue('--scenario', 'long-occlusion'), '--frames', '2000');
 }
+// t78: the console's 「启用」 runs the same module in `--live` mode (frames on stdout as base64
+// JPEG, picture in memory only). This flag is the CLI way to check that path on this machine.
+const liveMode = hasFlag('--live');
+if (liveMode) {
+  pythonArgs.length = 0;
+  pythonArgs.push(
+    '-m',
+    'perception_edge.run',
+    '--live',
+    '--live-fps',
+    argValue('--live-fps', '8'),
+    '--db',
+    dbFile,
+    '--append',
+    '--quiet-frames',
+    '--threads',
+    '1',
+  );
+  if (hasFlag('--self-test')) pythonArgs.push('--source', 'synthetic', '--scenario', argValue('--scenario', 'long-occlusion'));
+}
 
 console.log(
   hasFlag('--self-test')
@@ -251,13 +273,29 @@ console.log(
     : `用真实摄像头跑 ${seconds} s：${python} -m perception_edge.run（摄像头 DSHOW，画面不出本机）；写入台账 ${dbPath}`,
 );
 const frames: FrameRecord[] = [];
+/** t78 `--live`: one entry per frame the child streamed on stdout (base64 JPEG in memory). */
+const liveFrames: Record<string, unknown>[] = [];
 let summary: SummaryRecord | null = null;
 let stderrTail = '';
+let stoppedForLive = false;
 const pythonExit = await new Promise<number>((resolve) => {
   const child = spawn(python, pythonArgs, { cwd: PERCEPTION_DIR, windowsHide: true });
   let buffered = '';
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
+  if (liveMode) {
+    // The live loop runs until its stdin closes; this CLI stops it after --seconds (the console
+    // stops it with the 停用 button instead).
+    setTimeout(() => {
+      stoppedForLive = true;
+      try {
+        child.stdin?.end();
+      } catch {
+        /* already gone */
+      }
+      child.kill();
+    }, Math.max(1, seconds) * 1000);
+  }
   child.stdout.on('data', (chunk: string) => {
     buffered += chunk;
     const lines = buffered.split(/\r?\n/);
@@ -266,7 +304,9 @@ const pythonExit = await new Promise<number>((resolve) => {
       if (line.trim().length === 0) continue;
       const record = JSON.parse(line) as Record<string, unknown>;
       if (record.record === 'frame') frames.push(record as unknown as FrameRecord);
+      else if (record.type === 'frame') liveFrames.push(record);
       else if (record.record === 'summary') summary = record as unknown as SummaryRecord;
+      else if (record.type === 'live_summary') summary = record as unknown as SummaryRecord;
       else if (record.record === 'event') console.log(`  事件 ${String(record.event_id)} present=${String((record.payload as { present: boolean }).present)}`);
     }
   });
@@ -300,9 +340,56 @@ if (pythonExit === 3) {
   console.error(`摄像头在场检测验收 FAILED：缺少模型文件。\n${stderrTail.trim()}`);
   process.exit(3);
 }
-if (pythonExit !== 0) {
+if (pythonExit !== 0 && !(liveMode && stoppedForLive)) {
+  // In `--live` mode we stop the child on purpose after `--seconds`; on Windows a killed process
+  // reports exit code 1 (no signal marker), which is a successful stop, not a failure.
   console.error(`摄像头在场检测验收 FAILED：perception-edge 退出码 ${pythonExit}\n${stderrTail.trim()}`);
   process.exit(1);
+}
+
+if (liveMode) {
+  // t78: the same check for the console's 「启用」 path — frames must arrive *with a picture*, the
+  // picture must stay in memory (nothing on disk), and the presence events must still be written.
+  const withPicture = liveFrames.filter((frame) => typeof frame.jpeg === 'string' && String(frame.jpeg).length > 0);
+  const bytes = withPicture.map((frame) => Number(frame.jpeg_bytes ?? 0));
+  const liveProblems: string[] = [];
+  if (liveFrames.length === 0) liveProblems.push('实时模式一帧都没收到：子进程没有进入 --live 循环');
+  if (withPicture.length !== liveFrames.length) {
+    liveProblems.push(`有 ${liveFrames.length - withPicture.length} 帧没有 JPEG 数据（页面会看不到画面）`);
+  }
+  if (bytes.some((value) => value <= 0)) liveProblems.push('有帧的 jpeg_bytes 是 0');
+  const eventsWritten = after - before;
+  if (eventsWritten <= 0) liveProblems.push('实时模式的 presence 事件没有落库（world_state 投影不会更新）');
+  const imageFiles: string[] = [];
+  const walk = (dir: string): void => {
+    let entries; 
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.(jpe?g|png|bmp|webp)$/i.test(entry.name)) imageFiles.push(full);
+    }
+  };
+  walk(dirname(dbPath));
+  if (imageFiles.length > 0) liveProblems.push(`实时模式在 ${dirname(dbPath)} 下留下了图像文件：${imageFiles.join(', ')}`);
+  console.log(
+    [
+      `实时模式（--live）结果：收到 ${liveFrames.length} 帧，其中 ${withPicture.length} 帧带画面，`,
+      `平均 ${bytes.length > 0 ? Math.round(bytes.reduce((sum, value) => sum + value, 0) / bytes.length / 1024) : 0} KB/帧，`,
+      `presence 事件落库 ${eventsWritten} 条，磁盘上的图像文件 ${imageFiles.length} 个（必须是 0）。`,
+      `解释器：${python}；库：${dbFile}（画面只在内存里，不写文件、不上传）。`,
+    ].join('\n'),
+  );
+  if (liveProblems.length > 0) {
+    console.error(['实时模式 FAILED：', ...liveProblems.map((row) => `  - ${row}`)].join('\n'));
+    process.exit(1);
+  }
+  console.log('实时模式 OK：画面能到页面、事件照常落库、磁盘上没有图像文件。');
+  process.exit(0);
 }
 
 const uniqueEvents = new Map<string, EventEnvelope>();

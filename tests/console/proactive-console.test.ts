@@ -128,13 +128,15 @@ test('settings changed on the page are persisted, restored, and validated field 
     assert.equal(before.source, 'config', 'nothing saved yet → the value comes from config/xixi.yaml');
 
     const patched = applyProactiveSettingsPatch(before.settings, {
-      baseCooldownMinutes: 5,
+      // `before + 1`, never a literal: t77 moved the shipped cooldown to 5 minutes, and a literal
+      // that happens to equal the current default turns this patch into a silent no-op.
+      baseCooldownMinutes: before.settings.baseCooldownMinutes + 1,
       maxPerDay: '3',
       quietStart: '21:15',
       quietEnd: 'nonsense',
       triggers: { random_smalltalk: true },
     });
-    assert.equal(patched.settings.baseCooldownMinutes, 5);
+    assert.equal(patched.settings.baseCooldownMinutes, before.settings.baseCooldownMinutes + 1);
     assert.equal(patched.settings.maxPerDay, 3, 'a numeric string is accepted');
     assert.equal(patched.settings.quietHours.startMinutes, 21 * 60 + 15);
     assert.equal(patched.settings.quietHours.endMinutes, before.settings.quietHours.endMinutes, 'a bad clock string keeps the current value');
@@ -147,11 +149,12 @@ test('settings changed on the page are persisted, restored, and validated field 
     assert.equal((event.payload as Record<string, unknown>).service, 'proactive-settings');
     const after = restoreProactiveSettings(store, config.proactive as unknown as Record<string, unknown>);
     assert.equal(after.source, 'console', 'the saved value wins over the config file');
-    assert.equal(after.settings.baseCooldownMinutes, 5);
+    assert.equal(after.settings.baseCooldownMinutes, before.settings.baseCooldownMinutes + 1);
     assert.equal(after.settings.quietHours.startMinutes, 21 * 60 + 15);
     assert.deepEqual(after.changes, patched.changes, 'the audit row keeps what changed');
 
-    const noop = applyProactiveSettingsPatch(after.settings, { baseCooldownMinutes: 5 });
+    // A patch that asks for the value that is already in effect must stay a no-op.
+    const noop = applyProactiveSettingsPatch(after.settings, { baseCooldownMinutes: after.settings.baseCooldownMinutes });
     assert.equal(noop.changes.length, 0, 'saving the same value writes nothing');
     assert.equal(noop.rejected.length, 0, 'a no-op is not a rejection either');
 

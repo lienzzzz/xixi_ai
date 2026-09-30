@@ -246,8 +246,13 @@ test('the page is Chinese, self-describing and carries the boot state', () => {
     databasePath: join(REPO_ROOT, 'data', 'field-test'),
   };
   const page = buildFieldPage(boot);
-  for (const marker of ['麦克风实时电平与噪声底', '摄像头在场状态', '设备验收引导', '最近几轮', 'dBFS', '沉默', '下一步动作', '127.0.0.1:8792', '整段录音', '未接入', '本页用的是哪个数据库', '主动开口']) {
+  // t78 renamed the camera card (it now carries the live picture too) and added the three columns.
+  for (const marker of ['麦克风实时电平与噪声底', '摄像头实时画面', '摄像头在场状态', '设备验收引导', '最近几轮', 'dBFS', '沉默', '下一步动作', '127.0.0.1:8792', '整段录音', '未接入', '本页用的是哪个数据库', '主动开口']) {
     assert.ok(page.includes(marker), `page is missing ${marker}`);
+  }
+  // t78: 左（传感器）中（配置）右（对话记录）三栏 + 一键启用。
+  for (const marker of ['id="col-sensors"', 'id="col-config"', 'id="col-conversation"', 'id="px-enable"', 'id="px-disable"', 'id="px-cam"', 'id="px-tts-switch"', 'id="px-camera-switch"']) {
+    assert.ok(page.includes(marker), `the three-column layout is missing ${marker}`);
   }
   // t42 acceptance item 3: a page must not let a reader think TTS is segmented too.
   assert.ok(page.includes('整条回复一次合成'), 'the page states the TTS granularity');

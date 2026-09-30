@@ -21,10 +21,14 @@ unimplemented — see `semantic.py`.
 from __future__ import annotations
 
 import argparse
+import base64
+import json
+import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Callable, Sequence
 
 import cv2
 import numpy as np
@@ -145,11 +149,19 @@ def run(
     emitter: EventEmitter,
     semantic: SemanticAnalysisHook | None = None,
     frames: Sequence[tuple[np.ndarray, float]] | None = None,
+    on_frame: Callable[[np.ndarray, object, object], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    pace_fps: float | None = None,
 ) -> dict:
     """Run the loop once. Returns the summary dict (also printed as a `summary` record).
 
     `frames` lets a caller (a test, a replay tool) inject its own frame script instead of
     using the camera or one of the named synthetic scenarios.
+
+    `on_frame` is the t78 live-preview seam: it is called with `(frame, signals, decision)`
+    after every processed frame, so a caller (the field-test console) can show the picture
+    **in memory** without any file ever being written. `should_stop` lets that caller end the
+    loop from outside (a stop button, a closed pipe).
     """
     detection = DetectionConfig(
         motion_pixel_threshold=cfg.motion_pixel_threshold,
@@ -185,6 +197,7 @@ def run(
     started = time.perf_counter()
     loop_ms: list[float] = []
     detect_ms: list[float] = []
+    next_frame_at = started
     grabber = None
     source = None
 
@@ -226,11 +239,22 @@ def run(
                 # Semantic analysis stays a stub: it must never be called automatically.
                 semantic.on_presence_changed(decision.state == PRESENT, frame)
             loop_ms.append((time.perf_counter() - frame_started) * 1000.0)
+            if on_frame is not None:
+                on_frame(frame, signals, decision)
 
+            if should_stop is not None and should_stop():
+                break
             if cfg.max_frames is not None and frames_seen >= cfg.max_frames:
                 break
-            if time.perf_counter() - started >= cfg.seconds:
+            if cfg.seconds > 0 and time.perf_counter() - started >= cfg.seconds:
                 break
+            if pace_fps is not None and pace_fps > 0:
+                # Live preview: hold the processing rate down so the camera and the CPU stay
+                # available for the audio path (the console runs both at once).
+                next_frame_at += 1.0 / pace_fps
+                delay = next_frame_at - time.perf_counter()
+                if delay > 0:
+                    time.sleep(min(delay, 0.5))
     finally:
         if grabber is not None:
             grabber.close()
@@ -302,6 +326,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="限制 OpenCV 线程数（默认交给 OpenCV；实时对话链路上建议 1-2，给音频留余量）",
     )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="t78 实时预览模式：一直跑（由 stdin 关闭或 Ctrl+C 结束），每处理 n 帧在 stdout 打一行 frame 记录，"
+        "其中 jpeg 字段是**内存里**编码的画面（base64），不写任何文件、不上传",
+    )
+    parser.add_argument("--live-fps", type=float, default=8.0, help="--live 时的目标处理帧率（默认 8，够了、省 CPU）")
+    parser.add_argument("--jpeg-quality", type=int, default=60, help="--live 的 JPEG 质量（默认 60）")
+    parser.add_argument("--frame-max-width", type=int, default=480, help="--live 输出画面的最大宽度（默认 480，缩小后才编码）")
     return parser
 
 
@@ -313,15 +346,118 @@ def _apply_thread_limit(threads: int | None) -> None:
         setup(max(1, int(threads)))
 
 
+def build_live_emitter(options: dict[str, Any], source: Callable[[], None] | None = None):
+    """The t78 live-preview frame callback: JSON lines on stdout, **picture in memory only**.
+
+    Always returns `(on_frame, should_stop, close)`. The stop condition is not a timer: it is
+    "stdin closed or Ctrl+C", which is exactly what the console's 停用 button produces (it closes
+    the pipe and then terminates the process). `close()` flushes and reports the final summary.
+    """
+    import numpy as np  # noqa: F401  (kept local: this module must import without numpy for --help)
+
+    quality = int(options.get("jpeg_quality", 60))
+    max_width = int(options.get("frame_max_width", 480))
+    every = max(1, int(options.get("frame_every_n_frames", 1)))
+    quiet = bool(options.get("quiet_frames", False))
+    stopped = threading.Event()
+    counter = {"emitted": 0, "skipped": 0}
+
+    def on_frame(frame, signals, decision) -> None:
+        counter["emitted_attempt"] = counter.get("emitted_attempt", 0) + 1
+        if counter["emitted_attempt"] % every != 0:
+            counter["skipped"] += 1
+            return
+        height, width = frame.shape[:2]
+        scale = max_width / float(width) if width > max_width else 1.0
+        picture = frame if scale >= 1.0 else cv2.resize(frame, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
+        ok, buffer = cv2.imencode(".jpg", picture, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+        record = {
+            "type": "frame",
+            "at": local_timestamp(),
+            "frame_index": int(getattr(signals, "frame_index", 0)),
+            "present": bool(decision.state == PRESENT),
+            "state": str(decision.state),
+            "confidence": float(decision.confidence),
+            "changed": bool(decision.changed),
+            "motion_ratio": float(getattr(signals, "motion_ratio", 0.0)),
+            "faces": int(getattr(signals, "faces", 0)),
+            "detect_ms": float(getattr(signals, "detect_ms", 0.0)),
+            "jpeg_bytes": int(buffer.size) if ok else 0,
+            "width": int(picture.shape[1]),
+            "height": int(picture.shape[0]),
+            # The picture is base64 **in the JSON line**: it is never written to a file.
+            "jpeg": base64.b64encode(buffer.tobytes()).decode("ascii") if ok else None,
+        }
+        counter["emitted"] += 1
+        print(json.dumps(record, ensure_ascii=False), flush=True)
+        if not quiet:
+            print(f"# frame {record['frame_index']} state={record['state']} conf={record['confidence']:.2f}", file=sys.stderr, flush=True)
+
+    def should_stop() -> bool:
+        return stopped.is_set()
+
+    def close() -> None:
+        stopped.set()
+
+    def _watch_stdin() -> None:
+        # When the parent dies (or closes our stdin), read() returns "" and we stop by ourselves:
+        # no orphan process keeps the camera busy.
+        try:
+            while True:
+                chunk = sys.stdin.readline()
+                if chunk == "":
+                    break
+        except Exception:  # pragma: no cover - stdin may already be gone
+            pass
+        stopped.set()
+
+    def _on_signal(signum, frame) -> None:  # pragma: no cover - signal path
+        stopped.set()
+
+    try:
+        signal.signal(signal.SIGINT, _on_signal)
+        signal.signal(signal.SIGTERM, _on_signal)
+    except ValueError:  # pragma: no cover - not in the main thread
+        pass
+    watcher = threading.Thread(target=_watch_stdin, daemon=True)
+    watcher.start()
+
+    def report() -> None:
+        print(json.dumps({"type": "live_summary", "frames_emitted": counter["emitted"], "frames_skipped": counter["skipped"]}), flush=True)
+
+    return on_frame, should_stop, report
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parsed = vars(build_parser().parse_args(argv))
     parsed["max_frames"] = parsed.pop("frames")
     threads = parsed.pop("threads")
+    live = bool(parsed.pop("live", False))
+    live_options = {
+        "jpeg_quality": parsed.pop("jpeg_quality", 60),
+        "frame_max_width": parsed.pop("frame_max_width", 480),
+    }
+    live_fps = float(parsed.pop("live_fps", 8.0))
     _apply_thread_limit(threads)
+    if live:
+        # Unbounded loop, paced to `--live-fps`; the caller stops it (stop button / closed pipe).
+        parsed["seconds"] = 0.0
+        parsed["quiet_frames"] = True
+        # stderr stays for real problems (camera busy, bad --db): the caller already gets every
+        # frame on stdout, so a per-frame note there would be noise.
+        live_options["quiet_frames"] = True
     cfg = RunConfig(**parsed)
     emitter = EventEmitter(db_path=cfg.db, append=cfg.append, ttl_seconds=cfg.ttl_seconds)
+    on_frame = None
+    should_stop = None
+    report = None
+    if live:
+        on_frame, should_stop, report = build_live_emitter(live_options)
     try:
-        run(cfg, emitter)
+        result = run(cfg, emitter, on_frame=on_frame, should_stop=should_stop, pace_fps=live_fps if live else None)
+        if report is not None:
+            report()
+        return 0 if result is not None else 0
     except CameraUnavailable as cause:
         print(f"摄像头不可用：{cause}", file=sys.stderr)
         print("提示：先关掉占用摄像头的程序（相机 App / 会议软件 / 其它预览窗口），或换 --camera-index。", file=sys.stderr)
@@ -331,7 +467,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 3
     finally:
         emitter.close()
-    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
