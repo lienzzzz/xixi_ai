@@ -63,6 +63,9 @@ npm run eval:conversation:judge                # 对话质量评测（含评审�
 ```powershell
 npm run field-test                        # 打开控制台：页面按「麦克风 → 扬声器 → 摄像头」引导自检
 npm run field-test -- --offline           # 没有密钥也能看页面与跑设备自检（ASR/模型用替身）
+npm run field-test -- --data-dir data/field-test-70
+                                          # 换控制台自己的库（self_profile / 事件日志；默认 data/field-test）；
+                                          # 在场状态用 --presence-data-dir（默认 data）；不认识的参数会中文报错并 exit 2
 node scripts/field-test.ts --self-test    # 离线自检：隐私 / 多段语音 / 页面 / 报告，31 项（不碰硬件；项数以末行为准）
 node scripts/field-test.ts --acceptance   # 只跑一次真机验收，重写 docs/recon/field-test-report-<日期>.md
 ```

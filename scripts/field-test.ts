@@ -1931,10 +1931,12 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   };
 
   let presenceStore: unknown;
+  /** Where the presence projection is read from (`--presence-data-dir`, default `data`). */
+  const presenceDataDir = options.presenceDataDir ?? join(REPO_ROOT, 'data');
   function getPresenceStore(): unknown {
     if (presenceStore === undefined) {
       try {
-        presenceStore = openXixiStore({ dataDir: options.presenceDataDir ?? join(REPO_ROOT, 'data') });
+        presenceStore = openXixiStore({ dataDir: presenceDataDir });
       } catch (error) {
         log(`[presence] 打不开在场投影的库：${error instanceof Error ? error.message : String(error)}`);
         presenceStore = null;
@@ -2018,7 +2020,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       identity: config.identity,
       personality: store.selfProfile(),
       privacy: { policy, pruned, voiceDir },
-      database: { path: dataDir, entries: XIXI_DB_ENTRIES, note: '四个入口各用不同的库；在别处设的人格与历史不会带到这里' },
+      database: { path: dataDir, presencePath: presenceDataDir, entries: XIXI_DB_ENTRIES, note: '四个入口各用不同的库；在别处设的人格与历史不会带到这里' },
       segmentPlayback: { textSegmented: true, ttsSegmented: false, note: SEGMENT_TTS_NOTE },
       model: { configured: client.hasKey, offline },
       calibration,
@@ -4194,14 +4196,21 @@ const FIELD_TEST_USAGE = `西西 · 现场测试控制台 —— 用法
   npm run field-test -- --no-tts          关闭回复朗读
   npm run field-test -- --dsh             走 DSH Harness 路径（慢，实时对话不建议）
   npm run field-test -- --no-open         不自动打开浏览器（非交互终端本来就不会打开）
+  npm run field-test -- --data-dir data/whatever        换控制台自己的库（self_profile / 事件日志；默认 data/field-test）
+  npm run field-test -- --presence-data-dir data/whatever-presence
+                                                        换在场状态投影读的库（默认 data，与感知边共用）
 
   node scripts/field-test.ts --self-test      离线自检：隐私 / 多段语音 / 页面 / 报告 / 设备口径，不碰麦克风、不联网
                                               exit 0 = 全过；有任何一项失败会 exit 1。
                                               项数会随回归断言增加（已经漂移过一次：24 → 31），所以这里
                                               **不写死数字**——看它最后一行的「自检结果：N 项通过」。
+                                              它用独立临时目录跑（不碰你的库），所以 --data-dir / --presence-data-dir
+                                              在这个模式下不生效（会明确提示，不静默忽略）。
   node scripts/field-test.ts --acceptance     真机设备验收（麦克风 → 扬声器 → 摄像头），逐项打印通过/失败与下一步，
                                               报告写入 docs/recon/field-test-report-<日期>.md；有失败项时 exit 1
   node scripts/field-test.ts --help           显示这份说明后退出（不启动服务、不占端口）
+
+  **不认识的参数会报错并以 exit 2 结束**（中文说明 + 可用参数列表），不会静默忽略。
 
 页面里能看到：麦克风实时电平与噪声底（含校准门限）、摄像头在场状态（未接入时显示「未接入」而不是报错）、
 每轮的延迟分段（VAD / ASR / 首字 / 总时长）与最终动作（含 SILENCE 与拒绝原因）、以及设备验收引导。
@@ -4211,25 +4220,140 @@ const FIELD_TEST_USAGE = `西西 · 现场测试控制台 —— 用法
 隐私：整段录音不落盘（只在系统临时目录存在到 VAD 结束，随后删除），语音段仅在 config 授权时保留；
       详见页面「隐私与保留策略」一节与 config/xixi.yaml 的 privacy / memory 字段。`;
 
-async function main(argv: string[]): Promise<number> {
-  const valueOf = (flag: string, fallback: string): string => {
-    const index = argv.indexOf(flag);
-    return index >= 0 && argv[index + 1] !== undefined ? (argv[index + 1] as string) : fallback;
+/** One parse of the console's command line: mode + every switch it understands. */
+export interface FieldCliOptions {
+  readonly mode: 'serve' | 'self-test' | 'acceptance' | 'help';
+  readonly port: number;
+  readonly offline: boolean;
+  readonly ttsEnabled: boolean;
+  readonly useDsh: boolean;
+  readonly openBrowser: boolean;
+  /** `--data-dir`: the console's own store (self_profile, event log). `null` = default `data/field-test`. */
+  readonly dataDir: string | null;
+  /** `--presence-data-dir`: the store the presence projection is read from. `null` = default `data`. */
+  readonly presenceDataDir: string | null;
+}
+
+export interface FieldCliParseResult {
+  readonly ok: boolean;
+  readonly options?: FieldCliOptions;
+  readonly error?: { readonly message: string; readonly hint: string };
+}
+
+/** Flags that take the next argv entry as their value. */
+const FIELD_CLI_VALUE_FLAGS = ['--port', '--data-dir', '--presence-data-dir'] as const;
+/** Flags that are on/off by presence. */
+const FIELD_CLI_BOOLEAN_FLAGS = ['--self-test', '--acceptance', '--offline', '--no-tts', '--dsh', '--no-open', '--help', '-h'] as const;
+
+function fieldCliErrorMessage(unknown: string): { message: string; hint: string } {
+  return {
+    message: `不认识的参数「${unknown}」——现场测试控制台不会忽略它，以免你以为某个开关生效了。`,
+    hint:
+      `可用参数：${FIELD_CLI_VALUE_FLAGS.join(' <值>、')} <值>、${FIELD_CLI_BOOLEAN_FLAGS.join('、')}。` +
+      `完整说明：node scripts/field-test.ts --help`,
   };
-  if (argv.includes('--help') || argv.includes('-h')) {
+}
+
+/**
+ * Parse the console's CLI (t68).
+ *
+ * Why a real parser instead of the old `argv.includes(...)`: every unrecognised argument was
+ * dropped on the floor, so `--data-dir data/whatever` **looked** like it worked (the run
+ * continued against the default store, exit 0). Two consequences, both silent: a typo in a
+ * switch (`--data-dri`) meant the intended store was never used, and a flag the console does
+ * not implement at all was reported as "done". Anything unknown is now a usage error with a
+ * Chinese explanation and a non-zero exit.
+ */
+export function parseFieldCliArgs(argv: readonly string[], env: Readonly<Record<string, string | undefined>> = process.env): FieldCliParseResult {
+  const options = {
+    mode: 'serve' as FieldCliOptions['mode'],
+    port: Number(env['XIXI_FIELD_PORT'] ?? String(DEFAULT_PORT)),
+    offline: false,
+    ttsEnabled: true,
+    useDsh: false,
+    openBrowser: true,
+    dataDir: null as string | null,
+    presenceDataDir: null as string | null,
+  };
+  if (!Number.isFinite(options.port) || options.port < 0 || options.port > 65535) {
+    return {
+      ok: false,
+      error: {
+        message: `XIXI_FIELD_PORT 不是合法端口：${String(env['XIXI_FIELD_PORT'])}`,
+        hint: '端口要在 0–65535 之间（0 = 让系统挑一个空闲端口）。',
+      },
+    };
+  }
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index] as string;
+    if ((FIELD_CLI_VALUE_FLAGS as readonly string[]).includes(arg)) {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith('-')) {
+        return { ok: false, error: { message: `${arg} 后面需要一个值。`, hint: `例如：node scripts/field-test.ts ${arg} ${arg === '--port' ? '8793' : 'data/whatever'}` } };
+      }
+      index += 1;
+      if (arg === '--port') {
+        const port = Number(value);
+        if (!Number.isFinite(port) || port < 0 || port > 65535) {
+          return { ok: false, error: { message: `--port 收到了不是端口的值：「${value}」。`, hint: '端口要在 0–65535 之间（0 = 让系统挑一个空闲端口）。' } };
+        }
+        options.port = port;
+      } else if (arg === '--data-dir') {
+        options.dataDir = value;
+      } else {
+        options.presenceDataDir = value;
+      }
+      continue;
+    }
+    if ((FIELD_CLI_BOOLEAN_FLAGS as readonly string[]).includes(arg)) {
+      if (arg === '--help' || arg === '-h') options.mode = 'help';
+      else if (arg === '--self-test' && options.mode === 'serve') options.mode = 'self-test';
+      else if (arg === '--acceptance' && options.mode === 'serve') options.mode = 'acceptance';
+      else if (arg === '--offline') options.offline = true;
+      else if (arg === '--no-tts') options.ttsEnabled = false;
+      else if (arg === '--dsh') options.useDsh = true;
+      else if (arg === '--no-open') options.openBrowser = false;
+      continue;
+    }
+    return { ok: false, error: fieldCliErrorMessage(arg) };
+  }
+  return { ok: true, options };
+}
+
+async function main(argv: string[]): Promise<number> {
+  const parsed = parseFieldCliArgs(argv);
+  if (!parsed.ok || parsed.options === undefined) {
+    // A usage error, not a crash: print it in Chinese and exit non-zero (t68).
+    console.error(`现场测试控制台：${parsed.error?.message ?? '参数解析失败'}`);
+    console.error(`下一步：${parsed.error?.hint ?? 'node scripts/field-test.ts --help'}`);
+    return 2;
+  }
+  const options = parsed.options;
+  if (options.mode === 'help') {
     // Printed *before* anything binds a port on purpose: `--help` must never start
     // the console (it used to start it, which made the flag look broken and could
     // collide with an already-running field test).
     console.log(FIELD_TEST_USAGE);
     return 0;
   }
-  if (argv.includes('--self-test')) {
+  const dirNote = (): void => {
+    if (options.dataDir !== null || options.presenceDataDir !== null) {
+      console.log(
+        '提示：--self-test / --acceptance 在独立临时目录里跑（故意不碰你的库），所以 --data-dir / --presence-data-dir 在这个模式下不生效；' +
+          '要指定库就直接起控制台（不加 --self-test）。',
+      );
+    }
+  };
+  if (options.mode === 'self-test') {
+    dirNote();
     console.log('现场测试控制台 · 离线自检（不碰麦克风/摄像头/网络）\n');
     const result = await runSelfTest({ log: (line) => console.log(line) });
     console.log(`\n自检结果：${result.passed} 项通过 / ${result.failed} 项失败`);
     return result.ok ? 0 : 1;
   }
-  if (argv.includes('--acceptance')) {
+  if (options.mode === 'acceptance') {
+    dirNote();
     const report = await runDeviceAcceptance({ log: (line) => console.log(line) });
     console.log('');
     for (const item of report.items) {
@@ -4239,19 +4363,20 @@ async function main(argv: string[]): Promise<number> {
     console.log(`\n总体：${report.overall === 'pass' ? '通过' : '未通过'}｜报告：${report.reportPath ?? '(未落盘)'}`);
     return report.overall === 'pass' ? 0 : 1;
   }
-  const port = Number(valueOf('--port', process.env.XIXI_FIELD_PORT ?? String(DEFAULT_PORT)));
-  const offline = argv.includes('--offline');
-  const ttsEnabled = !argv.includes('--no-tts');
   const handle = await createFieldServer({
-    port: Number.isFinite(port) ? port : DEFAULT_PORT,
-    offline,
-    ttsEnabled,
-    useDsh: argv.includes('--dsh'),
+    port: options.port,
+    offline: options.offline,
+    ttsEnabled: options.ttsEnabled,
+    useDsh: options.useDsh,
+    dataDir: options.dataDir ?? undefined,
+    presenceDataDir: options.presenceDataDir ?? undefined,
     log: (line) => console.log(line),
   });
   const config = loadConfig();
-  printStartup(handle, { offline, ttsEnabled, policy: retentionPolicy(config), calibration: readCalibration(), modelConfigured: new MimoClient().hasKey });
-  if (!argv.includes('--no-open') && process.platform === 'win32' && process.stdout.isTTY === true) {
+  printStartup(handle, { offline: options.offline, ttsEnabled: options.ttsEnabled, policy: retentionPolicy(config), calibration: readCalibration(), modelConfigured: new MimoClient().hasKey });
+  if (options.dataDir !== null) console.log(`库（self_profile / 事件日志）：${options.dataDir}（--data-dir）`);
+  if (options.presenceDataDir !== null) console.log(`在场投影读的库：${options.presenceDataDir}（--presence-data-dir）`);
+  if (options.openBrowser && process.platform === 'win32' && process.stdout.isTTY === true) {
     try {
       spawn('cmd', ['/c', 'start', '', handle.url], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
     } catch {

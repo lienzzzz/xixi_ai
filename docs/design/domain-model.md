@@ -189,16 +189,16 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
   `scripts/field-test.ts` → `data/field-test/`；核对：`git grep -n "openXixiStore" -- scripts`）。
   **库路径可被覆盖**（测试与并行实例用）：`chat` 认 `XIXI_CHAT_DATA_DIR`、试用页认 `XIXI_WEB_DATA_DIR`
   （`git grep -n "XIXI_CHAT_DATA_DIR\|XIXI_WEB_DATA_DIR" -- scripts`）；
-  现场测试控制台的库路径由 `createFieldServer` 的 `dataDir` / `presenceDataDir` 选项决定
-  （自检与测试用它指向临时库；**目前没有 CLI 开关，`--help` 里也没有**，默认分别是 `data/field-test` 与 `data/`；
-  **以上以当前实现为准**——若日后把这两个选项做成 CLI 开关，本节须同步改写）。
-  核对（2026-09-30 实测，两条都可重跑）：`git grep -n -o -- "'--[a-z-]*'" -- scripts/field-test.ts` 只列出
-  `--help` / `--self-test` / `--acceptance` / `--port` / `--offline` / `--no-tts` / `--dsh` / `--no-open` 八个开关，
-  `valueOf()` 只用于 `--port`；`git grep -n -- "data-dir" -- scripts packages apps` **无命中**。
-  另外要区分两类「静默忽略」：`main()` 对**命令行未知参数**不校验（`--data-dir …` 会被直接忽略、照常启动），
-  而 t63 修的是**HTTP 请求体里的未知字段**（`applyProactiveSettingsPatch` 的白名单会给出具名中文拒绝）——
-  **API 侧已修，CLI 侧尚未**，别把两者混为一谈。
-  所以要换库就直接挪目录，或在代码里传 `createFieldServer` 的选项；**别把不存在的开关写进操作说明**。
+  现场测试控制台的库路径由两个 CLI 开关决定：`--data-dir <目录>`（控制台自己的库：`self_profile` / 事件日志，
+  默认 `data/field-test`）与 `--presence-data-dir <目录>`（在场状态，默认 `data`）。
+  例：`node scripts/field-test.ts --offline --no-open --data-dir data/field-test-70 --presence-data-dir data/presence-70`
+  （实测：库文件 `xixi.sqlite` 会落在指定目录里）。
+  **不认识的参数会中文报错并以 exit 2 结束**（消息里列出全部可用参数），不再静默忽略。
+  核对方式：`node scripts/field-test.ts --help`——**本节以它的实际输出为准**；若某个开关在 `--help` 里没有列出
+  （老版本），回退办法是直接挪目录（`Move-Item data\field-test data\field-test-old`，可逆），
+  或在代码里传 `createFieldServer` 的 `dataDir` / `presenceDataDir` 选项（自检与测试就是这么指向临时库的）。
+  另注意 t63 修的是 **HTTP 请求体里的未知字段**（`applyProactiveSettingsPatch` 白名单给具名中文拒绝），
+  与命令行未知参数是两件事，别混为一谈。
   `voice-turn` 固定 `data/voice`。覆盖只改「哪个文件」，**不改变「不跨入口」这条结论**。
   也就是说「在 chat 里改过人格，打开试用页也是新人格」**不成立**——要么在另一个入口再覆盖一次，
   要么把 `config/xixi.example.yaml` 的基线改掉再让各入口 `seedSelfProfile` 补上（见 §5.3 `self_profile` 与本节上面的两张写入方式表）。

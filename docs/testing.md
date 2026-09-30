@@ -146,6 +146,9 @@ npm run demo:m0:restart  # 离线两进程重启演示
 # 现场测试（一条命令启动控制台；页面里点「开始设备自检」）
 npm run field-test                          # http://127.0.0.1:8792，只监听本机
 npm run field-test -- --offline             # 没有密钥也能跑通 UI（ASR/模型用替身）
+npm run field-test -- --data-dir data/field-test-70
+                                            # 换控制台自己的库（默认 data/field-test）；在场状态用 --presence-data-dir（默认 data）
+                                            # 不认识的参数会中文报错并 exit 2（列出可用参数），不再静默忽略
 node scripts/field-test.ts --self-test      # 离线自检：隐私/多段语音/页面/报告，31 项（不碰硬件、不联网）
 node scripts/field-test.ts --acceptance     # 只跑一次真机设备验收，重写 docs/recon/field-test-report-<日期>.md
 # 注意：--self-test 的项数会随回归断言增加而变——以它最后一行的「自检结果：N 项通过」为准
