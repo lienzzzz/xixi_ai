@@ -141,6 +141,9 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    但三条断言旧值的测试不在 inScope（`tests/unit/domain.test.ts`、`tests/unit/core/proactive-gates.test.ts`、
    `tests/console/proactive-console.test.ts`），于是**任务必然 failed**。
    **派单前先 `git grep` 那个值**，把命中的测试文件一并列入 inScope。
+   **amend 只替换你显式给出的字段**：把某个路径加进 inScope 之后，**必须同时检查 outOfScope 是否还禁止着它**
+   （captain 本轮就把 `packages/conversation/src/engine.ts` 加进 inScope，却留着 outOfScope 里的 `packages/`，
+   自相矛盾——成员会不知道该不该改）。**加完 inScope 要重读一遍整份契约。**
 2. **契约校验只核对成员「声明」的 changedPaths**：未声明的越界编辑**不会**被自动拦截（t4 的 `package.json`、`scripts/voice-turn.ts` 就是这样绕过的）。
    因此唯一防线是：成员**如实披露** inScope 外的改动 + 评审**逐条复核**这些披露。
    **披露的固定格式（t45 的写法已被验证有效，请照抄）**：① 改了哪个文件（完整路径）；
