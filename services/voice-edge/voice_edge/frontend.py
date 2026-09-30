@@ -185,10 +185,14 @@ def highpass(samples: np.ndarray, cutoff_hz: float, sample_rate: int = 16_000) -
 
         Zero-phase matters twice here: the same conditioned signal feeds the VAD *and* the
         barge-in latency measurement, so a phase-delayed copy would silently add tens of ms
-        to a reported speech start; and the reverse pass makes the effective cutoff lower
-        than the nominal one (measured −6 dB point ≈ 0.65 × `cutoff_hz`, so 120 Hz nominal
-        behaves like ≈80 Hz — see voice.md §1.6). The reflection pad keeps the filter from
-        ringing on the block edges, which a bare forward-backward pass does.
+        to a reported speech start. Measured on this implementation
+        (`data/voice/highpass-response.json`, sine sweep): the −6 dB point sits **at** the
+        requested cutoff (120 Hz nominal → −6.02 dB @120 Hz), with −9.75 dB @100 Hz,
+        −2.99 dB @150 Hz and <0.03 dB from 500 Hz up. An earlier version of this comment
+        claimed the −6 dB point was ≈0.65 × `cutoff_hz` (120 Hz behaving like 80 Hz); that was
+        wrong — it contradicted the sweep, `docs/design/voice.md` §1.1（1）and the
+        `test_minus_6_db_point_is_close_to_the_requested_cutoff` unit test. The reflection pad
+        keeps the filter from ringing on the block edges, which a bare forward-backward pass does.
     """
     x = remove_dc(samples)
     if x.size == 0 or cutoff_hz <= 0:

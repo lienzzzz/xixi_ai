@@ -132,10 +132,15 @@ interface ClipResult {
   /** Truncated at the clean speech end: this is the span that gets uploaded to the ASR (§20.1). */
   readonly endpointDelayMs: number | null;
   /**
-   * The VAD's own end minus the clean speech end, **not** truncated. `endpointDelayMs` is
-   * clamped by `min(speech.endMs, cleanEndMs)` for the ASR slice, which made it ≤ 0 by
-   * construction and left the `ENDPOINT_DELAY > max` criterion structurally unreachable
-   * (t7 review F2). The criterion now uses this field; the slice still uses the clamped one.
+   * How much later the VAD closes the endpoint than the audio actually stops being speech:
+   * `speech.endMs − segmentation.energyEndMs` (the calibrated-gate energy end, the same
+   * definition `voice_edge.segment` reports as `endpointDelayMs` and the same one
+   * `data/voice/frontend-vad-grid.json` records). It is **not** truncated.
+   *
+   * `endpointDelayMs` above is clamped by `min(speech.endMs, cleanEndMs)` for the ASR slice,
+   * which made it ≤ 0 by construction and left the `ENDPOINT_DELAY > max` criterion
+   * structurally unreachable (t7 review F2). The criterion now uses this field; the slice
+   * still uses the clamped one.
    */
   readonly vadEndpointDelayMs: number | null;
   readonly bargeInDecisionMs: number | null;
@@ -275,12 +280,15 @@ async function measure(args: {
   const endpointDelayMs = speech === null || detectedEnd === null || args.cleanEndMs === null
     ? null
     : Math.round(detectedEnd - args.cleanEndMs);
-  // The untruncated VAD end (t7 review F2). `detectedEnd` is clamped to the clean speech end so
-  // the ASR slice never includes the noise reference tail; measuring the criterion against that
-  // clamped value guaranteed `<= 0` and made `ENDPOINT_DELAY` unreachable.
-  const vadEndpointDelayMs = speech === null || args.cleanEndMs === null
+  // The untruncated VAD endpoint delay (t7 review F2). `detectedEnd` above is clamped to the
+  // clean speech end so the ASR slice never includes the noise reference tail; measuring the
+  // criterion against that clamped value guaranteed `<= 0` and made `ENDPOINT_DELAY`
+  // unreachable. This uses the calibrated-gate energy end, i.e. the same definition the grid
+  // file records (measured 1056 ms for direct-question at 6 dB, matching the docs table).
+  const energyEndMs = segmentation.energyEndMs ?? args.cleanEndMs;
+  const vadEndpointDelayMs = speech === null || energyEndMs === null
     ? null
-    : Math.round(speech.endMs - args.cleanEndMs);
+    : Math.round(speech.endMs - energyEndMs);
   if (vadEndpointDelayMs !== null && vadEndpointDelayMs > maxEndpointDelayMs) {
     failures.push(`ENDPOINT_DELAY>${maxEndpointDelayMs}ms(${vadEndpointDelayMs})`);
   }

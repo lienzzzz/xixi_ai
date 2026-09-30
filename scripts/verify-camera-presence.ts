@@ -427,7 +427,6 @@ if (eventList.length === 0 || transitions.length === 0) {
   console.log(
     `\n摄像头在场检测验收 PASS：${transitions.length} 次状态转换（${transitions
       .map((event) => ((event.payload as { present: boolean }).present ? '有人' : '无人'))
-      .join(' → ')}）；最终投影 ${String(projection?.value)}（stale=${String(projection?.stale)}）；'` +
-      `写入 ${dbFile}`,
+      .join(' → ')}）；最终投影 ${String(projection?.value)}（stale=${String(projection?.stale)}）；写入 ${dbFile}`,
   );
 }

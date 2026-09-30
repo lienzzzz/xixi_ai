@@ -6,7 +6,7 @@
  * suite and then asserting the *published artefacts* (noisy fixtures, manifest, calibration
  * JSON) are internally consistent. No microphone, no network, no VAD model is needed.
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -134,85 +134,137 @@ interface VerifyReport {
   failureList: { id: string; failures: string[] }[];
 }
 
-function runVerification(options: { tiers?: string; extraArgs?: string[] } = {}): { status: number | null; report: VerifyReport } {
-  const outDir = mkdtempSync(join(tmpdir(), 'xixi-verify-noise-'));
-  const outPath = join(outDir, 'report.json');
-  // `--tiers 18` keeps the offline run to 4 VAD invocations. The tier list is a parameter (not
-  // an override) because the runner's `argValue` takes the *first* occurrence of a flag.
-  const result = spawnSync(
-    process.execPath,
-    [
-      join(REPO_ROOT, 'scripts', 'verify-voice-noise.ts'),
-      '--fake',
-      '--tiers',
-      options.tiers ?? '18',
-      '--out',
-      outPath,
-      ...(options.extraArgs ?? []),
-    ],
-    { cwd: REPO_ROOT, encoding: 'utf8', env: { ...process.env, PYTHONIOENCODING: 'utf-8' } },
-  );
-  assert.ok(existsSync(outPath), `runner wrote no report (status ${result.status}):\n${result.stdout}\n${result.stderr}`);
-  return { status: result.status, report: JSON.parse(readFileSync(outPath, 'utf8')) as VerifyReport };
+/**
+ * Runs the real runner once per distinct argument set.
+ *
+ * Two deliberate choices, both about the default gate's wall time (it used to be ~53 s):
+ *
+ * 1. **Async, memoised.** The runner is spawned with `spawn` (not `spawnSync`) so the three
+ *    behaviour checks below can overlap, and identical argument sets share one process. Each
+ *    invocation costs ~3.4 s per fixture (Python + pipecat + Silero load), so overlapping the
+ *    runs is the difference between ~46 s and ~17 s of the file's dominated cost.
+ * 2. **Smallest input that still exercises the path.** The runner always measures the clean
+ *    fixtures, so `--tiers` is the only lever the test has: `999` selects no noisy tier
+ *    (4 fixtures), `18` adds exactly one tier (8 fixtures). Assertions are unchanged — only
+ *    the number of clips each one sees.
+ */
+const verificationRuns = new Map<string, Promise<{ status: number | null; report: VerifyReport }>>();
+
+function runVerification(options: { tiers?: string; extraArgs?: string[] } = {}): Promise<{ status: number | null; report: VerifyReport }> {
+  const tiers = options.tiers ?? '18';
+  const extraArgs = options.extraArgs ?? [];
+  const key = `${tiers}|${extraArgs.join(' ')}`;
+  const cached = verificationRuns.get(key);
+  if (cached !== undefined) return cached;
+  const promise = new Promise<{ status: number | null; report: VerifyReport }>((resolve, reject) => {
+    const outDir = mkdtempSync(join(tmpdir(), 'xixi-verify-noise-'));
+    const outPath = join(outDir, 'report.json');
+    // The tier list is a parameter (not an override) because the runner's `argValue` takes
+    // the *first* occurrence of a flag.
+    const child = spawn(
+      process.execPath,
+      [
+        join(REPO_ROOT, 'scripts', 'verify-voice-noise.ts'),
+        '--fake',
+        '--tiers',
+        tiers,
+        '--out',
+        outPath,
+        ...extraArgs,
+      ],
+      { cwd: REPO_ROOT, env: { ...process.env, PYTHONIOENCODING: 'utf-8' }, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on('error', reject);
+    child.on('close', (status) => {
+      try {
+        assert.ok(existsSync(outPath), `runner wrote no report (status ${status}):\n${stdout}\n${stderr}`);
+        resolve({ status, report: JSON.parse(readFileSync(outPath, 'utf8')) as VerifyReport });
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+  verificationRuns.set(key, promise);
+  return promise;
 }
 
-test(
-  'the runner reports an offline pipeline result and its exit code agrees with it',
-  { skip: !pythonAvailable && 'voice-pipecat venv not present' },
-  () => {
-    const { status, report } = runVerification();
-    // Offline the ASR is a stub, so similarity cannot be judged: the run must say so instead of
-    // pretending the feature is broken, and it must not pretend it was verified either.
-    assert.equal(report.mode, 'offline-plumbing');
-    assert.equal(report.quality.applies, false, 'offline runs must not claim the similarity criterion applies');
-    assert.equal(report.criteria.transcriptSimilarity.applies, false);
-    assert.equal(report.criteria.endpointDelay.applies, true, 'endpoint delay is a VAD property and still applies');
-    assert.ok(report.clips.length > 0, 'the runner must actually measure clips');
-    assert.equal(report.offlineSummary?.structuralFailureClips, 0);
-    // Exit code and report must agree — whichever way the verdict goes.
-    assert.equal(status, report.exitCode, `exit code ${status} disagrees with report.exitCode ${report.exitCode}`);
-    assert.equal(status, 0);
-    assert.equal(report.verdict, 'PIPELINE-OK');
-  },
-);
+/**
+ * The three behaviour checks share one parent so they can run **concurrently**: each one
+ * executes the real runner, and the runner's cost is dominated by Python startup, which is
+ * what makes serial execution slow. Every assertion is identical to what it was when these
+ * were three independent top-level tests.
+ */
+test('the voice-noise runner behaves correctly in offline mode (behaviour, real process)', { concurrency: true }, async (parent) => {
+  await parent.test(
+    'the runner reports an offline pipeline result and its exit code agrees with it',
+    { skip: !pythonAvailable && 'voice-pipecat venv not present' },
+    async () => {
+      const { status, report } = await runVerification();
+      // Offline the ASR is a stub, so similarity cannot be judged: the run must say so instead of
+      // pretending the feature is broken, and it must not pretend it was verified either.
+      assert.equal(report.mode, 'offline-plumbing');
+      assert.equal(report.quality.applies, false, 'offline runs must not claim the similarity criterion applies');
+      assert.equal(report.criteria.transcriptSimilarity.applies, false);
+      assert.equal(report.criteria.endpointDelay.applies, true, 'endpoint delay is a VAD property and still applies');
+      assert.ok(report.clips.length > 0, 'the runner must actually measure clips');
+      assert.equal(report.offlineSummary?.structuralFailureClips, 0);
+      // Exit code and report must agree — whichever way the verdict goes.
+      assert.equal(status, report.exitCode, `exit code ${status} disagrees with report.exitCode ${report.exitCode}`);
+      assert.equal(status, 0);
+      assert.equal(report.verdict, 'PIPELINE-OK');
+    },
+  );
 
-test(
-  'a structural failure fails the run and the report records the failure code',
-  { skip: !pythonAvailable && 'voice-pipecat venv not present' },
-  () => {
-    // A negative endpoint-delay budget is impossible to satisfy, so every measured clip carries
-    // an ENDPOINT_DELAY failure. That is a *structural* failure, which the offline path does not
-    // exempt (it exempts similarity only) — so the run must exit non-zero and the report must say
-    // why. This is the exit-code rule, asserted through observable behaviour.
-    const { status, report } = runVerification({ extraArgs: ['--max-endpoint-delay', '-1'] });
-    assert.equal(report.mode, 'offline-plumbing');
-    assert.ok((report.offlineSummary?.structuralFailureClips ?? 0) > 0, 'expected structural failures');
-    assert.ok(
-      report.failureList.some((row) => row.failures.some((code) => code.startsWith('ENDPOINT_DELAY>'))),
-      `expected an ENDPOINT_DELAY failure code, got ${JSON.stringify(report.failureList)}`,
-    );
-    assert.equal(report.verdict, 'PIPELINE-BROKEN');
-    assert.equal(report.exitCode, 1);
-    assert.equal(status, 1, 'a structurally broken run must exit non-zero');
-  },
-);
+  await parent.test(
+    'a structural failure fails the run and the report records the failure code',
+    { skip: !pythonAvailable && 'voice-pipecat venv not present' },
+    async () => {
+      // A negative endpoint-delay budget is impossible to satisfy, so every measured clip carries
+      // an ENDPOINT_DELAY failure. That is a *structural* failure, which the offline path does not
+      // exempt (it exempts similarity only) — so the run must exit non-zero and the report must say
+      // why. This is the exit-code rule, asserted through observable behaviour. `--tiers 999`
+      // keeps it to the clean fixtures: endpoint delay is measured from the VAD output, so a
+      // clean clip is enough to trigger (and assert) the structural rule.
+      const { status, report } = await runVerification({ tiers: '999', extraArgs: ['--max-endpoint-delay', '-1'] });
+      assert.equal(report.mode, 'offline-plumbing');
+      assert.ok((report.offlineSummary?.structuralFailureClips ?? 0) > 0, 'expected structural failures');
+      assert.ok(
+        report.failureList.some((row) => row.failures.some((code) => code.startsWith('ENDPOINT_DELAY>'))),
+        `expected an ENDPOINT_DELAY failure code, got ${JSON.stringify(report.failureList)}`,
+      );
+      assert.equal(report.verdict, 'PIPELINE-BROKEN');
+      assert.equal(report.exitCode, 1);
+      assert.equal(status, 1, 'a structurally broken run must exit non-zero');
+    },
+  );
 
-test(
-  'a tier that selects no clips is reported as no boundary, not as a pass for that tier',
-  { skip: !pythonAvailable && 'voice-pipecat venv not present' },
-  () => {
-    // No noisy tier matches. The clean fixtures are still measured, but no SNR boundary can be
-    // claimed — a runner that averaged over an empty tier set, or that reported the previous
-    // boundary, would hide the fact that nothing was tested.
-    const { report } = runVerification({ tiers: '999' });
-    assert.ok(report.clips.length > 0, 'the clean fixtures are measured regardless of the tier filter');
-    assert.ok(report.clips.every((clip) => clip.id.length > 0));
-    const noisyTiers = report.tiers.filter((tier) => tier.tier !== 'clean');
-    assert.equal(noisyTiers.length, 0, `no noisy tier should be measured, got ${JSON.stringify(noisyTiers)}`);
-    assert.equal(report.boundary.lowestPassingTierDb, null, 'no measured tier means no claimed boundary');
-    assert.equal(report.verdict, 'PIPELINE-OK');
-  },
-);
+  await parent.test(
+    'a tier that selects no clips is reported as no boundary, not as a pass for that tier',
+    { skip: !pythonAvailable && 'voice-pipecat venv not present' },
+    async () => {
+      // No noisy tier matches. The clean fixtures are still measured, but no SNR boundary can be
+      // claimed — a runner that averaged over an empty tier set, or that reported the previous
+      // boundary, would hide the fact that nothing was tested.
+      const { report } = await runVerification({ tiers: '999' });
+      assert.ok(report.clips.length > 0, 'the clean fixtures are measured regardless of the tier filter');
+      assert.ok(report.clips.every((clip) => clip.id.length > 0));
+      const noisyTiers = report.tiers.filter((tier) => tier.tier !== 'clean');
+      assert.equal(noisyTiers.length, 0, `no noisy tier should be measured, got ${JSON.stringify(noisyTiers)}`);
+      assert.equal(report.boundary.lowestPassingTierDb, null, 'no measured tier means no claimed boundary');
+      assert.equal(report.verdict, 'PIPELINE-OK');
+    },
+  );
+});
 
 test(
   'the calibrate CLI recommends exactly the parameters the front end applies (F8)',

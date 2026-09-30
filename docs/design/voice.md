@@ -148,6 +148,17 @@ E:\worker2\.venvs\voice-pipecat\Scripts\python.exe -m voice_edge.calibrate --lis
 2. **采集增益建议**：噪声底 >−35 dBFS → 0 dB；−45…−35 → 0…+3 dB；更安静 → 可保留出厂 +5.5 dB。
    依据是 recon §1.4 的 1:1 缩放实测（4 档每 6 dB 步进实测 5.68/6.05/6.11 dB）。
 
+**F5（info）：`applied` 目前还没有运行路径读取它。** 这一条要写清楚，避免读者以为「跑一次校准就改了行为」：
+
+- `calibrate --profile-out` 产出的 `applied` 块（以及 `frontend.load_calibrated_params()`）**已经可用、有单测**，
+  但**当前没有任何运行路径调用它**：`voice_edge.segment` 的 `--highpass-hz` 默认仍是常量
+  `DEFAULT_HIGHPASS_HZ = 120`（`services/voice-edge/voice_edge/segment.py`），`scripts/serve-chat.ts`
+  的 `/api/voice` 也走同一个默认。也就是说：**改 profile 目前不会改变实际生效的高通/门限**。
+- 现在的一致性靠的是「常量等于本机实测推导值」（都是 120 Hz，见 §1.1（2）），不是靠「运行路径读了产物」。
+  用户若要按另一份产物跑，必须显式传 `--highpass-hz <applied.highpassHz>`（门限同理用 `--gate-dbfs`）。
+- 把它接进运行路径需要动 `segment.py` 的默认行为（读 profile → 改 VAD 输入与门限），属后续任务；
+  在那之前，本节与 §1.1（2）都只声明「产物可用 + 常量与推导一致」，不声明「校准已生效」。
+
 VAD 参数本身：`stop_secs` 保持 ADR-0007 的 0.6（句内 352 ms 停顿的实测不因噪声失效），
 `confidence` 在噪声底 >−35 dBFS 时保持 0.7、−45…−35 时 0.65、更安静时 0.6。
 **没有**因为噪声改掉 ADR-0007 的 0.6/0.0 基线，见下面第（5）条的实测：改了也没用。
@@ -222,16 +233,24 @@ recon 实测「夹具电平（−24.6 dBFS）下麦克风只比噪声底高 0.8�
 **两张表的出处不同，别混引**（这是 t7 评审 F1 的修正）：
 - **相似度 / 检出 / 判定**来自真实 ASR 运行 `data/voice/verify-voice-noise.json`；
 - **端点延迟 / VAD 起点延迟**来自 VAD 网格 `data/voice/frontend-vad-grid.json` 的 **120 Hz 行**。
-  `verify-voice-noise.json` 的 `tiers[].meanEndPointDelayMs` 实测是 **0 / 0 / 0 / −16 / −96 / null**
-  （检测窗被截到干净语音结束点，所以恒 ≤0，**不能**用来引用端点延迟；这正是 F2 修掉的结构问题）。
+  `verify-voice-noise.json` 的 `tiers[].meanEndPointDelayMs` 实测是 **0 / 0 / 0 / −16 / −96 / null**：
+  它是**被截断**的 ASR 切片口径（`min(speech.endMs, cleanEndMs)`，恒 ≤0），**不能**用来引用端点延迟
+  ——这正是 F2 修掉的结构问题。F2 之后该文件同时给出不截断的 `vadEndpointDelayMs`
+  （= `speech.endMs − energyEndMs`，与网格同一定义）与 `tiers[].meanVadEndpointDelayMs` / `maxVadEndpointDelayMs`。
   下表的端点延迟列因此写成**逐条值（最大）**，而不是均值。
+- **两条命令能各自复现**（都不花钱）：
+  `node scripts/verify-voice-noise.ts --fake --tiers 6` 现在报出
+  `direct-question 1056 / followup-turn 1376 / longer-turn 1472 / tv-dialogue 1088`（均值 1248、最大 1472，
+  与下表逐格一致）；修复前这一列恒为 0。
+  `python -m voice_edge.segment tests/audio-fixtures/noisy/direct-question-snr6db.wav` 报
+  `segments[0].endpointDelayMs = 1056`。
 
 2026-09-30 实测（相似度列：`data/voice/verify-voice-noise.json`；端点/起点列：`frontend-vad-grid.json` 120 Hz 行。
 `backchannel` 不计入：Silero 本来就看不见「嗯。」，§2）：
 
 | SNR 档 | 检出 | 平均字符相似度 | 端点延迟逐条值（最大） | VAD 起点延迟逐条值 | 判定 |
 |---|---|---|---|---|---|
-| 干净 | 4/4 | 0.800 | 0 ms（4 条都是 0） | 0 ms | PASS |
+| 干净 | 4/4 | 0.800 | 600 / 512 / 512 / 480 → 最大 600（`frontend-vad-grid.json` 干净行） | 0 ms | PASS |
 | 18 dB | 4/4 | 0.841 | 640 ms（4 条皆 640 → 最大 640） | −72 ms | PASS |
 | 6 dB | 4/4 | 0.841 | 1056 / 1376 / 1472 / 1088 → **最大 1472**（4 条均值 1248） | −56 ms | PASS |
 | **3 dB** | **4/4** | **0.805** | **仅 1 条有效：1088**（其余 3 条 `endpointDelayMs = null`，不是 640） | −40 ms | **PASS** |
@@ -256,12 +275,14 @@ recon 实测「夹具电平（−24.6 dBFS）下麦克风只比噪声底高 0.8�
 三个已知的测量约定：
 - **困难样本不删**：`tests/audio-fixtures/noisy/` 里的 0 dB 与 −6 dB 档全部保留
   （`tests/unit/voice/frontend.test.ts` 有一条测试专门守住「最低 SNR 档必须仍在盘上」）。
-- **端点延迟在噪声下会变晚，而且逐条差异大**：6 dB 档逐条 1056/1376/1472/1088 ms（干净 600 ms），
-  3 dB 档只有 1 条可算（1088 ms）；0 dB 与 −6 dB 档一条都算不出。所以任何「本档端点延迟 = 某个均值」
-  的写法都不成立，本文件一律给逐条值（最大）。
-- **端点延迟的口径（F2 修正后）**：判据用的 `vadEndpointDelayMs = speech.endMs − cleanEndMs`（**不截断**），
+- **端点延迟在噪声下会变晚，而且逐条差异大**：干净档逐条 600/512/512/480 ms（均值 750），
+  6 dB 档逐条 1056/1376/1472/1088 ms（均值 1248、最大 1472），3 dB 档只有 1 条可算（1088 ms）；
+  0 dB 与 −6 dB 档一条都算不出。所以任何「本档端点延迟 = 某个均值」的写法都不成立，
+  本文件一律给逐条值（最大）。
+- **端点延迟的口径（F2 修正后）**：判据用的 `vadEndpointDelayMs = speech.endMs − energyEndMs`（**不截断**，
+  与 `voice_edge.segment` 的 `segments[].endpointDelayMs`、`frontend-vad-grid.json` 同一定义），
   与 ASR 切片用的 `detectedEnd = min(speech.endMs, cleanEndMs)`（截断，保证只上传语音段）分开。
-  修好之前 `endpointDelayMs` 恒 ≤0，`ENDPOINT_DELAY > 1500 ms` 这条判据结构上不可达。
+  修好之前 `endpointDelayMs` 恒 ≤0，`ENDPOINT_DELAY > 1500 ms` 这条判据结构上不可达（t7 评审 F2）。
 - `0 dB` 档的 `tv-dialogue` 转写为「嗯。」而相似度 0：这是 ASR 在极低 SNR 下的事实输出，保留原样。
 
 #### （7）实时链路优先 WASAPI（沿用 recon 结论）

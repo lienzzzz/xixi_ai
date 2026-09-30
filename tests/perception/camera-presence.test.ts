@@ -24,11 +24,47 @@ import { buildEvent, validateEvent } from '@xixi/contracts';
 const REPO_ROOT = join(import.meta.dirname, '..', '..');
 const PERCEPTION_DIR = join(REPO_ROOT, 'services', 'perception-edge');
 const TESTS_DIR = join(REPO_ROOT, 'tests', 'perception');
+const DATA_DIR = join(REPO_ROOT, 'data');
 const PYTHON_TIMEOUT_MS = 180_000;
 const PROBE = 'import cv2, numpy; print(cv2.__version__)';
+const IMAGE_EXTENSIONS = /\.(png|jpg|jpeg|bmp|avi|mp4)$/i;
 
-/** `data/` is git-ignored and holds no frames from this test run; asserted in the privacy test. */
-const WATCHED_IMAGE_DIRS = [join(REPO_ROOT, 'services', 'perception-edge'), TESTS_DIR];
+/**
+ * Directories the offline test itself may not add image files to. Note the split:
+ *
+ *   * `services/perception-edge` and `tests/perception` are asserted to contain **no image
+ *     file at all** — these two directories belong to the code and must stay asset-free;
+ *   * `data/` is a *before/after* comparison, because it legitimately holds images left by the
+ *     T0 recon (`data/models/largest_selfie.jpg`, `lena.jpg`, `vtest.avi`,
+ *     `data/recon/camera-frame-{DSHOW,ANY}-0.png`). A wholesale "data/ must be empty"
+ *     assertion would be false; "no *new* image appears while the detector runs" is the
+ *     property that actually matters, and it is the one asserted below.
+ */
+const WATCHED_IMAGE_DIRS = [PERCEPTION_DIR, TESTS_DIR];
+
+function walkImageFiles(root: string, found: string[] = []): string[] {
+  if (!existsSync(root)) return found;
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const full = join(root, entry.name);
+    if (entry.isDirectory()) walkImageFiles(full, found);
+    else if (IMAGE_EXTENSIONS.test(entry.name)) found.push(full);
+  }
+  return found;
+}
+
+/** File NAMES under `data/` (not paths): a moved file is not "new", a fresh capture is. */
+function imageNameSet(root: string): Set<string> {
+  return new Set(walkImageFiles(root).map((file) => file.replace(/\\/g, '/').split('/').pop() as string));
+}
+
+/**
+ * Names present after the run but not before. Extracted so the watching rule itself is
+ * testable: an assertion that can never fire is worse than no assertion, because it reads as
+ * coverage. `test('the data/ watching rule detects a newly written image')` pins this down.
+ */
+function newImageNames(before: ReadonlySet<string>, after: readonly string[]): string[] {
+  return after.filter((name) => !before.has(name)).sort();
+}
 
 function pythonCandidates(): string[] {
   const candidates: string[] = [];
@@ -183,18 +219,50 @@ test('the Python producer emits events the released TypeScript contract accepts'
 
 test('the privacy boundary is enforced by the code, not only by the docs', () => {
   const python = requirePython();
+
+  // Baseline BEFORE the detector runs: file NAME sets (not paths), so a moved file is not
+  // reported as new, while a genuinely new capture is.
+  const dataImagesBefore = imageNameSet(DATA_DIR);
+
   const { status, stderr } = run(python, ['-m', 'unittest', 'test_presence.PrivacyBoundaryTests', '-v'], TESTS_DIR);
   // unittest writes its summary to stderr; the exit code is the verdict.
   assert.equal(status, 0, `隐私边界测试必须通过（无网络客户端、无语义分析调用）：\n${stderr.slice(-2000)}`);
   assert.match(stderr, /\bOK\b/);
 
-  // No frame may end up as a file anywhere the service or the tests can reach.
+  // The two code/test directories must hold no image file at all.
   const stray: string[] = [];
   for (const dir of WATCHED_IMAGE_DIRS) {
     for (const entry of readdirSync(dir)) {
       const full = join(dir, entry);
-      if (statSync(full).isFile() && /\.(png|jpg|jpeg|bmp|avi|mp4)$/i.test(entry)) stray.push(full);
+      if (statSync(full).isFile() && IMAGE_EXTENSIONS.test(entry)) stray.push(full);
     }
   }
-  assert.deepEqual(stray, [], '检测过程不得把画面落盘');
+  assert.deepEqual(stray, [], '检测过程不得把画面落盘（服务目录与测试目录必须无图片）');
+
+  // `data/` is compared, not required to be empty: the T0 recon left 5 image files there
+  // (models + camera frames) and they must survive; nothing new may appear.
+  const added = newImageNames(dataImagesBefore, walkImageFiles(DATA_DIR).map((file) => file.replace(/\\/g, '/').split('/').pop() as string));
+  assert.deepEqual(
+    added,
+    [],
+    '本断言只覆盖服务目录与测试目录的无图条件；data/ 用「文件名集合未新增」比较，' +
+      '因为 data/ 里存在 T0 勘测留下的历史抓帧（models/ 的自查图与 recon/ 的 camera-frame-*.png）。' +
+      `新增文件：${added.join(', ')}`,
+  );
+  assert.ok(
+    dataImagesBefore.size >= 4,
+    `data/ 的既有图片集看起来不对（${dataImagesBefore.size} 个）：若确实被清理过，请更新这条下界的说明`,
+  );
+});
+
+test('the data/ watching rule detects a newly written image', () => {
+  // The privacy test compares snapshots; this proves the comparison itself works, so a future
+  // refactor cannot turn it into a check that silently never fires.
+  const baseline = new Set(['camera-frame-DSHOW-0.png', 'largest_selfie.jpg']);
+  assert.deepEqual(newImageNames(baseline, ['camera-frame-DSHOW-0.png', 'largest_selfie.jpg']), []);
+  assert.deepEqual(newImageNames(baseline, ['camera-frame-DSHOW-0.png', 'fresh-capture.png']), ['fresh-capture.png']);
+  // A moved file keeps its name, so moving the existing recon frames is not reported as new.
+  assert.deepEqual(newImageNames(baseline, ['largest_selfie.jpg']), []);
+  // …and the real data/ directory today still holds the recon assets (the baseline is not empty).
+  assert.ok(imageNameSet(DATA_DIR).size >= 4, 'data/ 里应当仍有 T0 勘测留下的图片');
 });

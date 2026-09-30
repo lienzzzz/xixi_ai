@@ -12,7 +12,7 @@
 |---|---|---|---|
 | 1 | 选哪个检测器 | **帧差动做廉价门 + YuNet 人脸做确认**（`cv2.FaceDetectorYN`）。Haar 只作为兜底；**HOG 行人不用**（空场景 0–2 个误报，107.6 ms/帧） | 实测 + 决策 |
 | 2 | 用哪个 venv / 版本 | 主用 **`.venvs/cv4`（opencv-python-headless 4.14.0.94 + numpy 2.5.3，Python 3.12.10）**；`.venvs/field-probe`（opencv 5.0.0.93 + onnxruntime 1.30.0）也能跑，但 Haar 不可用（6 个用例显式 skip） | 实测 |
-| 3 | 要不要下载模型 | YuNet **要**（232,589 B = 227 KB）：`face_detection_yunet_2023mar.onnx`，T0 已存入 `data/models/`（仓库不跟踪二进制）。Haar/HOG 是 OpenCV 自带的，不需要下载 | 实测 |
+| 3 | 要不要下载模型 | YuNet **要**（232,589 B = 227 KB，SHA-256 `8F2383E4DD3CFBB4553EA8718107FC0423210DC964F9F4280604804ED2552FA4`，见 §8.1）：`face_detection_yunet_2023mar.onnx`，T0 已存入 `data/models/`（仓库不跟踪二进制）。Haar/HOG 是 OpenCV 自带的，不需要下载 | 实测 |
 | 4 | 单帧耗时（640×480） | YuNet **29.28 ms 中位**（CPU，8 线程）；Haar frontal **18.64 ms**；组合路径（每帧帧差动 + 每 10 帧一次人脸）**0.44 ms 中位 / 60 帧摊薄 3.08 ms 每帧** | 实测 |
 | 5 | CPU 占用 | YuNet 640×480：**604.8% 单核当量 = 75.6% 整机（8 核）**；320×240：613.5% / 76.7%；Haar 640×480：364.3% / 45.5%；组合路径 60 帧摊薄 **625.7% / 78.2%** | 实测 |
 | 6 | 有没有引入 torch | **没有**。基准里 `torch_installed = false`，并且有测试用 AST 扫描禁止 `torch`/`requests`/`socket` 等 import 进入 `services/perception-edge` | 实测 + 断言 |
@@ -24,7 +24,7 @@
 | 候选 | 模型 | 是否需要下载 | 结论 |
 |---|---|---|---|
 | 帧差动（`cv2.absdiff` + 阈值） | 无（算法） | 否 | **采用**：1 ms 级，任何运动都能触发（包括不朝镜头的人） |
-| YuNet 人脸（`cv2.FaceDetectorYN`） | `face_detection_yunet_2023mar.onnx` 227 KB | **是** | **采用**：空场景 0 检出，正对照（自拍照 640×480）46 张脸全中 |
+| YuNet 人脸（`cv2.FaceDetectorYN`） | `face_detection_yunet_2023mar.onnx` 227 KB，SHA-256 `8F2383E4…52FA4`（见 §8.1） | **是** | **采用**：空场景 0 检出，正对照（自拍照 640×480）46 张脸全中 |
 | Haar 正面脸（`CascadeClassifier`） | `haarcascade_frontalface_default.xml` 930,127 B | 否（OpenCV 自带） | **兜底**：OtR 便宜（18.6 ms）但正对照只中 5 张（YuNet 46 张），召回明显弱 |
 | HOG 行人（内置 SVM） | 30,248 B | 否 | **不用**：同一空场景 `winStride=(8,8)` 报 2 个「人」、默认参数报 0 个——误报随参数漂移，且 107.6 ms/帧（T0 实测） |
 | onnxruntime 上的轻量检测模型 | 未评估 | 是（数 MB 起） | **不用**：需要自己导出 + 写后处理，且 T0 已测出 ORT 原始前向 27.0 ms 并不比 `cv2.FaceDetectorYN` 的 29.3 ms 明显划算，却少了后处理与 NMS |
@@ -146,6 +146,25 @@ CPU 用 `time.process_time()` 增量 ÷ 墙上时间：OpenCV 会内部并行，
 | `torch` | — | **禁止引入**（任务硬约束） | — |
 
 `--headless` 是刻意的：这个服务不需要 GUI，headless wheel 不带 Qt/GTK。
+
+### 8.1 模型指纹（实测，换模型必须同步更新）
+
+本文与 [`docs/design/perception.md`](../design/perception.md) §3.4 里的每一个耗时数字，
+都属于**这一个文件**：
+
+| 项 | 值 |
+|---|---|
+| 路径 | `data/models/face_detection_yunet_2023mar.onnx`（仓库不跟踪二进制） |
+| 大小 | **232,589 B**（227 KB） |
+| SHA-256 | **`8F2383E4DD3CFBB4553EA8718107FC0423210DC964F9F4280604804ED2552FA4`** |
+| 复现 | `Get-FileHash data/models/face_detection_yunet_2023mar.onnx -Algorithm SHA256` |
+| 下载地址 | `https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx` |
+| 校验命令（升级后应一致） | `python -m perception_edge.bench`（`environment` 段会带 cv2 版本与线程数） |
+
+**为什么写进去**：模型文件不进仓库，所以「文档里的 29.28 ms」和「你机器上的 29.28 ms」之间
+唯一的联系就是这份指纹。换了模型（哪怕是同名文件的新版本）**必须**同时更新这里的 SHA-256、
+`docs/design/perception.md` §3.4 与 `perception_edge/detector.py` 里
+`load_yunet_model_path()` 的注释，然后重跑基准；否则纸上的数字描述的已经不是磁盘上的文件。
 
 与上游的冲突以本文件为准，但**没有推翻 T0 的任何结论**：
 

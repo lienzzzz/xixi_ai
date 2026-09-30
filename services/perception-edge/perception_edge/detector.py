@@ -46,15 +46,33 @@ class FaceDetector(Protocol):
 
 @dataclass(frozen=True)
 class DetectionConfig:
-    """All tunables in one place; the defaults are the measured field settings."""
+    """All tunables in one place. Each default is labelled *measured* or *design tradeoff*.
 
-    # Frame-difference gate. Counted at processing resolution (see process_width).
+    Frame-difference gate (counted at processing resolution, see `process_width`):
+
+      * MEASURED — a static scene produced mean absolute difference 0.8 grey levels, p99 5.0,
+        with 0.66% of pixels above 5 grey levels (T0 recon,
+        `docs/recon/field-test-environment-2026-09-30.md` section 4.3). The 6-grey-level
+        per-pixel threshold is taken from that measurement: it must sit above the noise floor
+        and above p99, or every sensor flicker reads as movement.
+      * DESIGN TRADEOFF — the 0.5% "share of changed pixels" rule is *chosen*, not measured.
+        It exists to reject a whole-frame slow drift (auto-exposure settling moves thousands of
+        pixels by a couple of grey levels and never crosses 6, so the ratio stays near zero;
+        a real person moves 0.9%-8.7% of pixels). 0.66% is a *different* quantity — it is the
+        share of pixels above 5 grey levels in a static scene, not this threshold.
+
+    What the service actually measured with these two defaults (offline scenes and the real
+    camera): empty scene and Gaussian-noise scene `motion_ratio = 0.0`; a walking person
+    0.0089-0.087. See `docs/design/perception.md` section 3.1.
+
+    Face confirmation: face detection costs 29.3 ms at 640x480 (measured), so it runs every
+    Nth frame rather than on every frame; at ~30 fps every 10th frame is ~0.3 s, which is well
+    inside the debounce window (15 frames, ~0.5 s).
+    """
+
     motion_pixel_threshold: int = 6
     motion_min_ratio: float = 0.005
     process_width: int = 320
-
-    # Face confirmation. Face detection costs ~14-38 ms, so it runs every Nth frame
-    # rather than on every frame (see the recon report for the timings).
     face_every_n_frames: int = 10
     face_confirm_if_any_face: bool = True
 
@@ -174,6 +192,18 @@ def load_yunet_model_path(explicit: str | Path | None = None) -> Path:
 
     Search order: the `--model` argument, `XIXI_YUNET_MODEL`, then the conventional
     local copy under `data/models/`. The repository does not track the binary.
+
+    The model actually measured for this build (see the recon report):
+
+        file    data/models/face_detection_yunet_2023mar.onnx
+        size    232,589 B (227 KB)
+        sha256  8F2383E4DD3CFBB4553EA8718107FC0423210DC964F9F4280604804ED2552FA4
+                (reproduce: Get-FileHash data/models/face_detection_yunet_2023mar.onnx -Algorithm SHA256)
+
+    Every timing in `docs/recon/camera-detector-choice-2026-09-30.md` and in
+    `docs/design/perception.md` belongs to *that* file. **If you replace the model, update the
+    SHA-256 in both documents** (and re-run `python -m perception_edge.bench`), otherwise the
+    numbers on paper describe a file that is no longer on disk.
     """
     import os
 

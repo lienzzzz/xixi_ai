@@ -83,6 +83,9 @@
 
 - **YuNet** 227 KB、需下载（`data/models/face_detection_yunet_2023mar.onnx`，仓库不跟踪）、
   640×480 中位 **29.28 ms**、CPU 单核当量 **604.8%**（整机 75.6%）；
+  模型指纹（**换模型必须同步更新本行与勘测报告**）：
+  **232,589 B，SHA-256 = `8F2383E4DD3CFBB4553EA8718107FC0423210DC964F9F4280604804ED2552FA4`**
+  （复现：`Get-FileHash data/models/face_detection_yunet_2023mar.onnx -Algorithm SHA256`）；
 - **Haar** 930 KB、OpenCV 自带、18.64 ms 但正对照召回明显弱（自拍照 640×480 只中 5 张脸，YuNet 中 46 张）；
 - **HOG 行人不用**：空场景同一参数下报 0–2 个「人」、107.6 ms/帧；
 - **没有引入 torch**：基准里 `torch_installed=false`，并且有测试用 AST 扫描禁止
@@ -203,18 +206,37 @@ E:\worker2\.venvs\cv4\Scripts\python.exe -m unittest discover -s tests/perceptio
 
 ```powershell
 node scripts/verify-camera-presence.ts --seconds 15
-# 自检路径（生成帧，不需要真人，用来证明「检测→事件→投影」的写库链路是通的）
+# 自检路径（生成帧，不需要真人；写入**专用自检库**，不会混进真实摄像头台账）
 node scripts/verify-camera-presence.ts --self-test
 # 真人实测（需要人参与）
 node scripts/verify-camera-presence.ts --seconds 40 --require-transition
+# 用法（只打印，不开摄像头、不写库）
+node scripts/verify-camera-presence.ts --help
 ```
 
-- 默认库是 `data/perception/field-test.sqlite`（与 `npm run chat` 的 `data/xixi.sqlite` 分开，互不干扰）。
+- **两个库，别写混**（`--db <path>` 可显式覆盖，覆盖时会打印警告）：
+  - 真实摄像头 → `data/perception/field-test.sqlite`（现场测试台账）；
+  - `--self-test` → `data/perception/self-test.sqlite`（合成帧的自检库，默认单独一个文件）。
+  这样「哪个库是真实房间的历史」靠文件名就能回答，不用去读 payload。自检运行会在 stdout 与
+  `summary.db_choice` / `summary.db_note` 里写明这次写的是哪个库。
+- **参数白名单**：只接受 `--seconds`、`--db`、`--camera-index`、`--self-test`、`--scenario`、
+  `--require-transition`、`--require-event`（旧名）、`--min-fps`、`--help`。其它参数（例如把
+  `--require-transition` 拼错成 `--require-transiton`）会**打印中文错误 + 用法列表并 exit 1**，
+  不再静默按默认设置继续跑——静默继续是最坏的结果，因为它看起来像成功了。
 - 输出：事件（含 event_id/payload）、过渡轨迹、处理帧率、抓帧耗时分布、检测耗时、
   最终 `world_state`（含 `stale`）、以及 `privacy` 与 `semantic_analysis` 的自报状态。
-- 退出码：`0` 通过；`2` **没有可用摄像头**（明确失败，打印可能原因与排查动作）；`3` 缺模型；`1` 其它失败。
+- 退出码：`0` 通过（含 `--help`）；`2` **没有可用摄像头**（明确失败，打印可能原因与排查动作）；
+  `3` 缺模型或解释器；`1` 其它失败（含未知参数、`--require-transition` 未满足）。
 - `--require-transition`：整个运行期没有**真实状态转换**（只有启动记录）就判失败——
   这是「人真的站在镜头前」那一步用的。
+
+**已知的遗留数据（点名说明，不要当成现场证据）**：`data/perception/field-test.sqlite` 里
+有 **4 条合成事件**，来自早期版本（那时 `--self-test` 还写同一个库）：两条
+`reason=present_confirmed`（`motion_ratio=0.148` / `0.0318`，无人脸证据）与两条
+`reason=absent_confirmed`，时间戳在 `2026-09-30T12:04:1x`。同一库里另有 3 条
+`reason=camera_started`（2 条来自真实摄像头空场景、1 条来自同一批合成运行）。它们是
+`data/` 下的本机台账（gitignore，不进仓库），**当前不再被执行路径产生**；评审或消费方若需要
+干净台账，删掉这个文件重跑一次 `--seconds 15` 即可，或按时间戳筛选 `12:04:1x` 之后的记录。
 
 ### 8.3 还没做的那一步（未完成项，明确标注）
 
