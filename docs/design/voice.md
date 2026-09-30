@@ -294,10 +294,13 @@ F2 修复后该列**不再恒为 0**）：**
   6 dB 档逐条 1056 / 1376 / 1472 / 1088 ms（均值 1248、最大 1472），3 dB 档 4 条逐条为 104 / 128 / −64 / 96 ms（最大 128）；
   0 dB 档 4 条逐条 72 / −32 / −352 / 64 ms（最大 72），−6 dB 档 0 条（全部漏检）。所以任何「本档端点延迟 = 某个均值」的写法都不成立，
   本文件一律给逐条值（最大）。
-- **端点延迟的口径（F2 修正后）**：判据用的 `vadEndpointDelayMs = speech.endMs − energyEndMs`（**不截断**，
-  与 `voice_edge.segment` 的 `segments[].endpointDelayMs`、`frontend-vad-grid.json` 同一定义），
+- **端点延迟的口径（F2 修正后，全文件只用这一个公式名）**：判据用的
+  `vadEndpointDelayMs = speech.endMs − energyEndMs`（**不截断**；
+  `energyEndMs = segmentation.energyEndMs ?? cleanEndMs`——**只有**在 segment 没给出能量端点时
+  才回退到干净版语音结束点，代码见 `scripts/verify-voice-noise.ts`），
   与 ASR 切片用的 `detectedEnd = min(speech.endMs, cleanEndMs)`（截断，保证只上传语音段）分开。
   修好之前 `endpointDelayMs` 恒 ≤0，`ENDPOINT_DELAY > 1500 ms` 这条判据结构上不可达（t7 评审 F2）。
+  **不要把 `cleanEndMs` 当成端点延迟的第二个公式**：它只是能量端点缺失时的回退。
 - `0 dB` 档的 `tv-dialogue` 转写为「嗯。」而相似度 0：这是 ASR 在极低 SNR 下的事实输出，保留原样。
 
 #### （7）实时链路优先 WASAPI（沿用 recon 结论）
@@ -428,8 +431,9 @@ LiveKit 全套导入 3799.6 ms、峰值 RSS 398.4 MB、turn detector 权重 **41
 - **真实麦克风的噪声底尚未在本轮重新标定**：§1.1 的数字来自 t1 勘测的 `data/recon/ambient-5s.wav`（+5.5 dB 采集增益）。
   现场测试前应跑一次 `python -m voice_edge.calibrate --seconds 5`（并把采集增益调到 0 dB），
   否则门限与采集增益建议可能对不上当前设备状态。
-- **噪声条件下的端点延迟变差**：6 dB SNR 档逐条 1056/1376/1472/1088 ms（最大 1472，干净 600 ms），
-  3 dB 档只有 1 条可算（1088 ms），0 dB 与 −6 dB 档一条都算不出；端到端响应会明显拖长。
+- **噪声条件下的端点延迟变差**：6 dB SNR 档逐条 1056/1376/1472/1088 ms（均值 1248、最大 1472；
+  干净档逐条 728/704/864/704 ms），3 dB 档逐条 104/128/−64/96 ms（最大 128），
+  0 dB 档逐条 72/−32/−352/64 ms；只有 −6 dB 档 4 条全部漏检、一条都算不出。端到端响应会明显拖长。
   `endpointDelayMs`（截断口径，供 ASR 切片）与 `vadEndpointDelayMs`（不截断口径，供判据）在
   `scripts/verify-voice-noise.ts` 里逐条记录；端点延迟不是成功边界的判据（§1.1（6））。
 - **噪声下的打断判定不可靠**（§4）：0 dB 档 `followup-turn` 根本没有 VAD 事件。
