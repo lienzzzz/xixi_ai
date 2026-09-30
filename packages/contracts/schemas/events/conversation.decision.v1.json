@@ -23,7 +23,12 @@
     "fsm_state": { "type": "string", "enum": ["IDLE", "ENGAGING", "ACTIVE", "LINGERING", "SUSPENDED"] },
     "fsm_state_before": { "type": ["string", "null"], "maxLength": 20 },
     "addressed": { "type": ["boolean", "null"] },
-    "acceptance_score": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+    "acceptance_score": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1,
+      "description": "当前为 accept 的二值镜像（1/0）；M2 引入真实接纳度分数前不得当作连续分值消费。"
+    },
     "linger_ms": { "type": ["integer", "null"], "minimum": 0 },
     "silence_tolerance": { "type": ["number", "null"], "minimum": 0, "maximum": 1 }
   }

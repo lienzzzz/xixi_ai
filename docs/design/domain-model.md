@@ -59,7 +59,7 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
   断言「注册表类型集合 == 信封 `event_type` 枚举」「`payloadVersion` == `SCHEMA_VERSION`」「`ACTORS` == 信封 `actor` 枚举」。
 - 新增类型的步骤见 [`../event-contracts.md`](../event-contracts.md) §9。
 
-## 4. 三类事件（当前全部）
+## 4. 四类事件（当前全部）
 
 注册表：`packages/contracts/src/events.ts`；schema：`packages/contracts/schemas/events/`。
 
@@ -67,6 +67,7 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
 |---|---|---|
 | `presence.changed` | `present`, `source_detail` | `present: boolean`；`source_detail: string \| null`（≤200）。**当前无生产者**，只为验证契约（摄像头属 M6） |
 | `conversation.turn` | `session_id`, `turn_index`, `role`, `action`, `text` | `session_id` 必须 `sess_<uuid>`；`turn_index: integer ≥ 0`；`role: user \| assistant`；`action: SPEAK \| BACKCHANNEL \| WAIT \| SILENCE \| TOOL`；`text: string \| null`（≤8000）；可选 `tool_name: string \| null`（≤120） |
+| `conversation.decision` | `session_id`, `turn_index`, `accepted`, `reason`, `action`, `fsm_state` | `session_id` 同上；`turn_index: integer ≥ 0`；`accepted: boolean`；`reason: ACCEPTED_WAKE_OR_DIRECT \| ACCEPTED_CONTINUATION \| REJECTED_NOT_ADDRESSED \| REJECTED_SUSPENDED`；`action` 同 `conversation.turn`；`fsm_state` 五个状态；可选 `fsm_state_before`（string\|null）、`addressed`（boolean\|null）、`acceptance_score`（number\|null，**但不是分数**，见 §4.1）、`linger_ms`（integer\|null）、`silence_tolerance`（number\|null） |
 | `system.health` | `service`, `status`, `detail` | `service` 1–120 字符；`status: ok \| degraded \| down`；`detail: string \| null`（≤500） |
 
 `conversation.turn` 的两个要点：
@@ -76,6 +77,25 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
 - 领域层 `recordTurn` 总是把 `text` 与 `tool_name` 显式写入 payload（`packages/domain/src/store.ts`）。
   **payload 里没有延迟、置信度明细或提示词**：`latencyMs` / `firstTokenMs` / `prompt` 只随调用方返回值传递，
   不进事件日志。
+
+### 4.1 `acceptance_score` 不是分数（F1，2026-09-30 审计）
+
+**字段名目前名不副实**，按名字理解会写错代码，因此在这里写死真实语义：
+
+- **真实语义 = `accepted` 的 0/1 镜像**：写入方是 `packages/conversation/src/engine.ts`
+  （`acceptance_score: acceptance.accept ? 1 : 0`）；判定侧 `TurnAcceptance`
+  （`packages/conversation/src/fsm.ts`）只有 `accept: boolean` + `reason` + `state`，
+  **根本不存在接纳度字段**。所以它今天只可能取 0 或 1，没有中间值。
+- **schema 里的 `number | null`（0–1）是「将来放真分数」的位置，不代表现在有真分数**：
+  声明得比实现宽，是给 M2 留位，不是「已有 0–1 分数」的证据。
+- **不得用于阈值判断**（例如「score < 0.5 就当作没被搭话」）：它恒等于 `accepted`，
+  用阈值只是把布尔判断绕一圈重写，而且会在 M2 引入真分数时**悄悄改变行为**。
+- **固化测试**：`tests/unit/core/acceptance-score-semantics.test.ts` 断言入库的 `acceptance_score`
+  只能是 0/1 且恒等于 `accepted ? 1 : 0`，同时断言 schema 上的 description 仍在
+  （防止「它是个分数」的说法悄悄回来）。
+- **后续计划（M2）**：addressed 的概率模型落地后，这个字段才承载真正的 0–1 接纳度分数；
+  届时**必须升版**——在 `packages/contracts/schemas/events/` 下新增 `conversation.decision.v2.json`
+  并升 `SCHEMA_VERSION`（见 §3 的版本策略），**不得就地放宽/改写 v1 的类型与范围**（铁律 10）。
 
 ## 5. 四张表（`001_initial.sql` 的全部内容）
 

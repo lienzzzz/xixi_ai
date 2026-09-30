@@ -155,5 +155,11 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
 13. **优先「核实后不认同」而不是盲从**：t23 面对评审「表头写反了」的判断，逐格复核后确认没反，于是不改数字、只把表头改成无歧义写法并附原始格值——
    这比盲改更有价值。评审也会错，关键是**谁给出可核对的证据**。
 14. **任务 description 里提到的产物文件名必须与 `inScope`/`deliverables` 逐字一致**。
-   反例：t13 的 description 写 `docs/review/residual-fix-review-2026-09-30.md`，而它的 inScope 是 `docs/review/residual-fix-t12-review-2026-09-30.md`——
+   反例：t13 的 description 与它的 inScope 用了**两个不同的评审报告文件名**（一个带 `t12` 一个不带），
    成员只能按契约落地并回头问 captain，白费一轮沟通。**一个任务只用一个文件名**，不要出现近似名。
+15. **`acceptance` / `description` 文本里不要出现像路径的片段或转义**：本轮实测派单文本会被拼接/误解析——
+   t31 收到的 inScope 混进了 `1/0`、`87/87`、`137/137` 这类**非路径**片段，还漏掉了真实的
+   `docs/design/domain-model.md` 与 `tests/unit/core/`；验收条目也从 5 条变成 3 条。
+   **写法要求**：每条验收写成一整句、单行、不含 `\n` 转义；**路径只出现在 `inScope`/`deliverables` 里**，
+   不要在验收正文里用反引号罗列文件名；数字不要写成 `a/b` 形式（会被当成路径）。
+   成员若发现收到的契约与事实不符，按 §9.12 的提示核对后**在回报里说明**，不要将错就错。

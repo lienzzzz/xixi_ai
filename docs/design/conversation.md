@@ -104,7 +104,11 @@ engine.buildPrompt() → #advance(at)    → prompt 里的会话状态同样是�
 > 已修（t5）：`scripts/chat.ts` 曾经用局部变量 `first`，**只在第一句**传 `addressed: true`。
 > 跟进窗口超时回到 `IDLE` 之后，后面每一句都会被判成 `REJECTED_NOT_ADDRESSED`。
 > t5 把它改成「按状态传」（与试用页一致），但当时没发现状态本身是过期的——两处缺陷叠加才表现为
-> 「长停顿后第一句被拒」。回归测试：
+> 「长停顿后第一句被拒」。**因此在 t5 交付态上，长停顿后的第一句依然被拒**（t5 只把「按状态传」这件事做对了，
+> 而读到的状态是过期缓存）；该条款的字面要求与回归测试都由 t19 的「读取即推进」完成。
+> 留痕（F2，2026-09-30 审计）：t5 的完成回报里写的「复用**集成测试同名断言**」在 t5 当时**并不成立**——
+> 那条用例（下面这一个）是 t19 才加进 `tests/integration/conversation-engine.test.ts` 的，
+> t5 那时只有引擎层的手工 `tick` 用例。回归测试：
 > `tests/integration/conversation-engine.test.ts` 的
 > `a long pause is noticed without calling tick(): the first line after it is a wake-up, not a rejection`（t19 新增，
 > 修复前该用例失败于 `the state a caller reads must describe now, not the last transition`）。
@@ -328,7 +332,7 @@ HARD_POLICY（不可变硬策略，常量）
 | `action` | 这一轮实际做了什么：接受时是 `SPEAK/SILENCE/TOOL`，拒绝时固定 `SILENCE` |
 | `fsm_state_before` / `fsm_state` | 决策前后的状态槽位（拒绝路径下两者相同） |
 | `addressed` | 调用方给出的判定输入（不是唤醒词检测本身） |
-| `acceptance_score` | 1 = 接受、0 = 拒绝（`confidence` 字段同样用于此） |
+| `acceptance_score` | 1 = 接受、0 = 拒绝（`confidence` 字段同样用于此）。**它不是接纳度分数**：当前实现只是 `accepted` 的二值镜像（`engine.ts` 的 `acceptance_score: acceptance.accept ? 1 : 0`，`TurnAcceptance` 也只有 `accept: boolean`，**只可能取 0 或 1**），因此**不得用于阈值判断**（用阈值等于把布尔判断绕一圈重写，且会在 M2 引入真分数时悄悄改变行为）。M2 的 addressed 概率模型落地后才引入真正的 0–1 分数，届时按版本规则升版（新增 `conversation.decision.v2.json` + 升 `SCHEMA_VERSION`，不就地改 v1）。同一句话写在 `acceptance_score.description` 上，完整语义见 [`domain-model.md`](domain-model.md) §4.1 |
 | `linger_ms` / `silence_tolerance` | 当时真正生效的跟进窗口与人格值，用来把「为什么这会儿还在听」对回来 |
 
 envelope 层：`source = 'brain'`、`actor = 'system'`、`confidence = accepted ? 1 : 0.5`。
