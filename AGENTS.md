@@ -80,7 +80,8 @@ $env:NODE_USE_ENV_PROXY = '1'   # Node 需要显式开启才读环境变量代�
 
 ```powershell
 npm test                 # 全部离线测试（unit/integration/perception/console），不花 API 费用
-                         #   项数与耗时随迭代变化，以实跑输出为准；门禁目标 <25s
+                         #   项数与耗时随迭代变化，**以实跑输出为准**（近期实测约 27–30s；
+                         #   单文件 frontend.test.ts 就要约 21s，它是全量的关键路径）
 npm run test:perception  # 只跑摄像头在场与 WorldState 投影
 npm run test:console     # 只跑现场测试控制台
 npm run install:profile  # 幂等：把仓库内的西西 DSH profile 装进 .dsh/
