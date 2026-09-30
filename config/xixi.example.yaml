@@ -36,19 +36,28 @@ xixi:
       emotional_expressiveness: 0.45
 
   proactive:
-    # 主动行为（方案 §15、ADR-0009）。出厂默认取「话痨」档：更短冷却、更高额度（见下面四个数）。
-    # 安全底线不动：quiet_hours 是硬门禁，人格与模型都不能放宽它——它只被缩短（23:30–07:30），
-    # 仍然是一个真实的静默窗口，不是空窗口。
+    # 主动行为（方案 §15、ADR-0009 → P5/ADR-0011）。分两层：
+    # ① 硬底线由程序判定、模型不能绕过：静默时段（quiet_hours）、6 小时与当日额度（含「问模型」的次数）、
+    #    DND、隐私与同意；② 底线之上「要不要说」由模型读空气决定，下面的分数只提供候选与依据。
+    # P5 之前这里是「单一冷却 + 单一阈值一票否决」，实测像定时播报；现在冷却/话题重复/未回应都只是
+    # **扣分信号**（见 base_cooldown_min / same_topic_penalty / unanswered_penalty），不再单独拦人。
+    # 安全底线不动：quiet_hours 仍是硬门禁，人格与模型都不能放宽它。
     # 本段**已被代码读取**：`ProactiveEngine` 的默认构造路径会走
     # `parseProactiveSettings(config.proactive)`（packages/conversation/src/proactive.ts），
     # 现场测试控制台也用它来显示与改写门禁参数（scripts/field-test.ts）。
     # 也就是说改这里的数字会真的改变判定——不要只改代码里的常量。
     enabled: true
-    base_cooldown_min: 5           # 两次主动之间的最短间隔（再乘下面的倍率）
+    base_cooldown_min: 18          # 「刚开口过」的打扰代价衰减窗口（P5 起不再是禁止窗口；pack v02 的 new_session.cooldown_min）
+    continuation_cooldown_min: 0   # 热聊中接话不付打扰代价（pack §14.3：conversation continuation cooldown = 0）
     max_per_6h: 15                 # 6 小时滑动窗口上限
-    max_per_day: 40                # 本地自然日上限
-    topic_repeat_window_h: 2       # 同主题抑制窗口（§15.6 建议 24；出厂取「话痨」档，只压 2 小时内的重复）
-    negative_feedback_cooldown_multiplier: 2.0   # 最近一次主动被负面反馈后收紧
+    max_per_day: 40                # 本地自然日上限（算「真正开口 + 问过模型的次数」；次数额度是费用代理——本项目没有金额级费用上限）
+    topic_repeat_window_h: 12      # 同主题重复惩罚的窗口（pack v02：same_topic_cooldown_hours 12）
+    generic_topic_cooldown_h: 24   # 没带具体话题的泛泛开口，用更长的窗口扣分（pack v02：generic 24）
+    unanswered_penalty: 0.45       # 最近几条主动没人回应时的扣分（pack v02：unanswered 0.45）
+    explicit_reject_penalty: 0.80  # 「别说了 / 今天不想聊」时的扣分（pack v02：explicit_reject 0.80）
+    same_topic_penalty: 0.55       # 同一话题重复的扣分（pack v02：same_topic 0.55）
+    unanswered_window_min: 10      # 一条主动发出后等多久没人回答就算「未回应」
+    negative_feedback_cooldown_multiplier: 2.0   # 最近一次主动被负面反馈后，上述扣分与额度一起收紧
     quiet_hours:
       start: "23:30"
       end: "07:30"

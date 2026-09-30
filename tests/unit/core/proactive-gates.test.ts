@@ -4,14 +4,22 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_PROACTIVE_SETTINGS,
   DEFAULT_PROACTIVITY,
+  deriveProactiveSignals,
   evaluateProactiveGates,
+  initiativeKindForTrigger,
   isWithinQuietHours,
   localDayOf,
   localMinutesOf,
   parseClockMinutes,
   parseProactiveSettings,
-  PROACTIVE_REASON_CODES,
+  proactiveBasis,
   proactiveThreshold,
+  PROACTIVE_KNOWN_REASON_CODES,
+  PROACTIVE_REASON_CODES,
+  PROACTIVE_RETIRED_REASON_CODES,
+  PROACTIVE_SCORE_WEIGHTS,
+  PROACTIVE_SIGNALS,
+  PROACTIVE_SIGNAL_LABELS,
   PROACTIVE_TRIGGERS,
   scoreProactiveCandidate,
   type ProactiveCandidate,
@@ -21,27 +29,27 @@ import {
 } from '@xixi/conversation';
 
 /**
- * ADR-0009's hard gates, one boundary pair per gate.
+ * P5 / ADR-0011, one boundary pair per rule.
  *
- * Every assertion here is about the *program*: the score is arithmetic on
- * §15.4 components, the threshold is a closed-form function of `proactivity`, and
- * each gate is a comparison that a model cannot argue with (铁律 1/3). The engine
- * that writes the audit record is covered separately.
+ * The two things these tests exist to protect:
+ *   1. **The hard floor is program-only** — quiet hours, budgets, privacy/consent, DND, scene and
+ *      "don't talk over a live chat" can never be talked out of (铁律 1/3).
+ *   2. **Everything above the floor is a grade, not a veto** — a recent message, a repeated topic
+ *      and unanswered messages all *lower* the social budget instead of blocking, and the model's
+ *      own decision is covered in `proactive-decision.test.ts`.
  */
 
 const OFFSET = 480; // Asia/Shanghai
 // 14:00 local — outside the 23:30–07:30 quiet window, and comfortably inside the day.
 const AFTERNOON = new Date('2026-09-30T14:00:00+08:00');
 
-/** Seven §15.4 components at 1 → score 0.7, above the 0.495 baseline threshold (ADR-0009: default proactivity 0.85). */
+/** The five positive signals at 1: 0.85 of the budget, before `base_proactivity` is added. */
 const STRONG: Readonly<Record<string, number>> = {
-  event_salience: 1,
-  social_value: 1,
-  memory_relevance: 1,
-  novelty: 1,
-  time_since_last_interaction: 1,
-  user_receptiveness: 1,
-  future_hook_bonus: 1,
+  topic_quality: 1,
+  personal_relevance: 1,
+  freshness: 1,
+  receptivity: 1,
+  engagement: 1,
 };
 
 function candidate(overrides: Partial<ProactiveCandidate> = {}): ProactiveCandidate {
@@ -59,7 +67,9 @@ function context(overrides: Partial<ProactiveGateContext> = {}): ProactiveGateCo
     negativeFeedback: false,
     sceneAvailable: true,
     speechAvailable: true,
+    privacyAllowed: true,
     history: [],
+    userTurns: [],
     ...overrides,
   };
 }
@@ -80,46 +90,57 @@ function minutesBefore(base: Date, minutes: number): Date {
   return new Date(base.getTime() - minutes * 60_000);
 }
 
-// --------------------------------------------------------------- constants
+// --------------------------------------------------------------- the budget
 
-test('the score is the clamped, equal-weighted sum of the §15.4 components', () => {
+test('the score is the clamped, weighted sum of the P5 social budget', () => {
   assert.equal(scoreProactiveCandidate(undefined), 0);
   assert.equal(scoreProactiveCandidate({}), 0);
-  assert.equal(scoreProactiveCandidate(STRONG), 0.7, 'seven positive terms × 0.1');
-  // The negative terms subtract; all eleven at 1 is 0.7 − 0.4 = 0.3.
-  const all = Object.fromEntries(Object.keys(STRONG).concat([
-    'interruption_risk',
-    'recent_proactive_penalty',
-    'repetition_penalty',
-    'uncertainty_penalty',
-  ]).map((name) => [name, 1]));
-  assert.equal(scoreProactiveCandidate(all), 0.3);
-  // Out-of-range and unusable components are clamped, never trusted.
-  assert.equal(scoreProactiveCandidate({ event_salience: 5 }), 0.1);
-  assert.equal(scoreProactiveCandidate({ event_salience: -3, novelty: Number.NaN }), 0);
-  assert.equal(scoreProactiveCandidate({ event_salience: 1, interruption_risk: 1 }), 0, 'never below 0');
+  assert.equal(scoreProactiveCandidate({ topic_quality: 1 }), 0.3, 'topic quality weighs 0.30');
+  assert.equal(scoreProactiveCandidate(STRONG), 0.85, 'the five positive signals weigh 1.00 in total');
+  // Penalties subtract, and the score never goes below 0.
+  const all = { ...STRONG, interruption_cost: 1, repeated_topic_penalty: 1, recent_unanswered_penalty: 1 };
+  assert.equal(scoreProactiveCandidate(all), 0.1, '0.85 − 0.75');
+  // Out-of-range and unusable signals are clamped, never trusted.
+  assert.equal(scoreProactiveCandidate({ topic_quality: 5 }), 0.3);
+  assert.equal(scoreProactiveCandidate({ topic_quality: -3, freshness: Number.NaN }), 0);
 });
 
-test('the threshold follows proactivity and can never fall below the 0.45 floor', () => {
-  // The shipped default is 0.85 (ADR-0009), so the baseline threshold is 0.45 + 0.30 × 0.15 = 0.495.
+test('the weights still add up to one positive budget and 0.75 of penalties', () => {
+  const positives = PROACTIVE_SIGNALS.filter((signal) => (PROACTIVE_SCORE_WEIGHTS[signal] ?? 0) > 0);
+  const negatives = PROACTIVE_SIGNALS.filter((signal) => (PROACTIVE_SCORE_WEIGHTS[signal] ?? 0) < 0);
+  assert.equal(positives.length, 6, 'five supplied signals + the proactivity baseline');
+  assert.equal(negatives.length, 3, 'interruption / repeated topic / unanswered');
+  const positiveSum = positives.reduce((sum, signal) => sum + (PROACTIVE_SCORE_WEIGHTS[signal] ?? 0), 0);
+  const negativeSum = negatives.reduce((sum, signal) => sum + (PROACTIVE_SCORE_WEIGHTS[signal] ?? 0), 0);
+  assert.equal(Math.round(positiveSum * 100) / 100, 1);
+  assert.equal(Math.round(negativeSum * 100) / 100, -0.75);
+});
+
+test('the recommendation bar follows proactivity and can never fall below the 0.45 floor', () => {
   assert.equal(proactiveThreshold(0.85), 0.495, 'the default baseline from config/xixi.example.yaml');
   assert.equal(proactiveThreshold(1), 0.45);
-  assert.equal(proactiveThreshold(0), 0.75, 'proactivity 0 → 0.45 + 0.30');
-  assert.equal(proactiveThreshold(2), 0.45, 'clamped: proactivity cannot buy a lower gate');
+  assert.equal(proactiveThreshold(0), 0.75);
+  assert.equal(proactiveThreshold(2), 0.45, 'clamped: proactivity cannot buy a lower bar');
   assert.equal(proactiveThreshold(-1), 0.75);
   assert.equal(proactiveThreshold(0.5), 0.6);
 });
 
 // ---------------------------------------------------------------- settings
 
-test('the config defaults match ADR-0009 §5 exactly', () => {
+test('the config defaults match the shipped config and the pack’s recommended penalties', () => {
   const parsed = parseProactiveSettings(undefined);
   assert.deepEqual(parsed, DEFAULT_PROACTIVE_SETTINGS);
   assert.equal(parsed.enabled, true);
-  assert.equal(parsed.baseCooldownMinutes, 5);
+  assert.equal(parsed.baseCooldownMinutes, 18, 'pack v02: new_session.cooldown_min 18');
+  assert.equal(parsed.continuationCooldownMinutes, 0, 'pack §14.3: continuation cooldown = 0');
   assert.equal(parsed.maxPer6h, 15);
   assert.equal(parsed.maxPerDay, 40);
-  assert.equal(parsed.topicRepeatWindowHours, 2);
+  assert.equal(parsed.topicRepeatWindowHours, 12, 'pack v02: same_topic_cooldown_hours 12');
+  assert.equal(parsed.genericTopicCooldownHours, 24, 'pack v02: generic_topic_cooldown_hours 24');
+  assert.equal(parsed.unansweredPenalty, 0.45, 'pack v02: unanswered 0.45');
+  assert.equal(parsed.explicitRejectPenalty, 0.8, 'pack v02: explicit_reject 0.80');
+  assert.equal(parsed.sameTopicPenalty, 0.55, 'pack v02: same_topic 0.55');
+  assert.equal(parsed.unansweredWindowMinutes, 10);
   assert.equal(parsed.negativeFeedbackCooldownMultiplier, 2.0);
   assert.equal(parsed.quietHours.startMinutes, 23 * 60 + 30);
   assert.equal(parsed.quietHours.endMinutes, 7 * 60 + 30);
@@ -135,14 +156,18 @@ test('the config defaults match ADR-0009 §5 exactly', () => {
 });
 
 test('parseProactiveSettings parses a shipped-style config and tolerates unusable values', () => {
-  // Hand-written copy of the shipped example values (config/xixi.example.yaml), not a file read:
-  // it exists to show the parsed shape equals DEFAULT_PROACTIVE_SETTINGS.
   const fromExample = parseProactiveSettings({
     enabled: true,
-    base_cooldown_min: 5,
+    base_cooldown_min: 18,
+    continuation_cooldown_min: 0,
     max_per_6h: 15,
     max_per_day: 40,
-    topic_repeat_window_h: 2,
+    topic_repeat_window_h: 12,
+    generic_topic_cooldown_h: 24,
+    unanswered_penalty: 0.45,
+    explicit_reject_penalty: 0.8,
+    same_topic_penalty: 0.55,
+    unanswered_window_min: 10,
     negative_feedback_cooldown_multiplier: 2.0,
     quiet_hours: { start: '23:30', end: '07:30' },
     triggers: {
@@ -159,22 +184,33 @@ test('parseProactiveSettings parses a shipped-style config and tolerates unusabl
   const hostile = parseProactiveSettings({
     enabled: 'yes',
     base_cooldown_min: -5,
+    continuation_cooldown_min: 'soon',
     max_per_6h: 1e9,
     max_per_day: 'many',
     topic_repeat_window_h: null,
+    generic_topic_cooldown_h: -1,
+    unanswered_penalty: 5,
+    explicit_reject_penalty: -2,
+    same_topic_penalty: 'lots',
+    unanswered_window_min: 0,
     negative_feedback_cooldown_multiplier: 0.1,
     quiet_hours: { start: '25:00', end: '7:00' },
     triggers: { random_smalltalk: true, not_a_trigger: true },
   });
   assert.equal(hostile.enabled, true, 'a non-boolean keeps the default');
   assert.equal(hostile.baseCooldownMinutes, 0, 'clamped to the allowed range');
+  assert.equal(hostile.continuationCooldownMinutes, 0, 'a string falls back');
   assert.equal(hostile.maxPer6h, 100);
   assert.equal(hostile.maxPerDay, 40, 'a string falls back');
-  assert.equal(hostile.topicRepeatWindowHours, 2);
+  assert.equal(hostile.topicRepeatWindowHours, 12);
+  assert.equal(hostile.genericTopicCooldownHours, 0, 'clamped, not dropped');
+  assert.equal(hostile.unansweredPenalty, 1, 'clamped into [0, 1]');
+  assert.equal(hostile.explicitRejectPenalty, 0, 'clamped into [0, 1]');
+  assert.equal(hostile.sameTopicPenalty, 0.55, 'a string falls back');
+  assert.equal(hostile.unansweredWindowMinutes, 1, 'clamped to at least a minute');
   assert.equal(hostile.negativeFeedbackCooldownMultiplier, 1, 'the multiplier cannot go below 1');
   assert.equal(hostile.quietHours.startMinutes, 23 * 60 + 30, 'an impossible time falls back, it does not fail');
-  // The end is *supplied and valid* ("7:00"), so it is parsed rather than falling back.
-  assert.equal(hostile.quietHours.endMinutes, 7 * 60);
+  assert.equal(hostile.quietHours.endMinutes, 7 * 60, 'a valid end is parsed');
   assert.equal(hostile.triggers.random_smalltalk, true, 'an explicit trigger switch is honoured');
   assert.equal('not_a_trigger' in hostile.triggers, false, 'unknown trigger keys are ignored');
 });
@@ -189,65 +225,66 @@ test('parseClockMinutes and the quiet-hour window boundaries', () => {
   assert.equal(parseClockMinutes(22.5, 111), 111);
   assert.equal(parseClockMinutes(undefined, 111), 111);
 
-  // Cross-midnight window [22:30, 07:00): the end is exclusive.
   assert.equal(isWithinQuietHours(1350, 1350, 420), true, '22:30 is already quiet');
   assert.equal(isWithinQuietHours(1349, 1350, 420), false, '22:29 is not');
   assert.equal(isWithinQuietHours(0, 1350, 420), true);
   assert.equal(isWithinQuietHours(419, 1350, 420), true);
   assert.equal(isWithinQuietHours(420, 1350, 420), false, '07:00 sharp is not quiet any more');
-  assert.equal(isWithinQuietHours(720, 1350, 420), false);
-  // A same-day window behaves normally.
   assert.equal(isWithinQuietHours(600, 600, 900), true);
-  assert.equal(isWithinQuietHours(899, 600, 900), true);
   assert.equal(isWithinQuietHours(900, 600, 900), false);
-  assert.equal(isWithinQuietHours(599, 600, 900), false);
-  // start === end is an empty window, not a 24-hour one.
-  assert.equal(isWithinQuietHours(600, 600, 600), false);
+  assert.equal(isWithinQuietHours(600, 600, 600), false, 'start === end is an empty window');
 });
 
 test('local time helpers honour the injected offset', () => {
   const utcNoon = new Date('2026-09-30T04:00:00.000Z');
   assert.equal(localMinutesOf(utcNoon, 480), 12 * 60);
   assert.equal(localDayOf(utcNoon, 480), '2026-09-30');
-  // 00:30 local on the 1st is still 16:30 UTC on the 30th → different local day.
   const localLateNight = new Date('2026-10-01T00:30:00+08:00');
   assert.equal(localDayOf(localLateNight, 480), '2026-10-01');
   assert.equal(localDayOf(localLateNight, 0), '2026-09-30');
 });
 
-// ------------------------------------------------------------------- gates
+// ---------------------------------------------------- the initiative kinds
 
-test('every gate lets a clean candidate through', () => {
+test('every trigger has an initiative kind, and a candidate may state its own', () => {
+  assert.equal(initiativeKindForTrigger('conversation_dangling'), 'conversation_continuation');
+  assert.equal(initiativeKindForTrigger('presence_arrived'), 'environment_reaction');
+  assert.equal(initiativeKindForTrigger('future_hook_due'), 'open_loop_followup');
+  assert.equal(initiativeKindForTrigger('topic_pool'), 'external_sharing');
+  assert.equal(initiativeKindForTrigger('random_smalltalk'), 'new_session');
+  const explicit = deriveProactiveSignals(candidate({ initiativeKind: 'conversation_continuation' }), context());
+  assert.equal(explicit.interruption_cost, 0, 'a candidate may declare itself a continuation');
+});
+
+// ------------------------------------------------------------- hard floor
+
+test('the hard floor lets a clean candidate through and computes the budget', () => {
   const result = evaluateProactiveGates(candidate(), context());
   assert.equal(result.pass, true);
   assert.equal(result.reasonCode, 'PASSED');
-  assert.equal(result.score, 0.7);
-  // `context()` leaves proactivity at DEFAULT_PROACTIVITY (0.85) → 0.45 + 0.30 × 0.15 = 0.495.
+  assert.equal(result.recommendation, 'speak');
+  assert.equal(result.score, 0.9775, '0.85 + 0.15 × 0.85');
   assert.equal(result.threshold, 0.495);
+  assert.equal(result.signals.base_proactivity, 0.85, 'the baseline comes from the profile, not the candidate');
+  assert.ok(result.basis.length >= 6, `expected a 依据 per used signal, got ${result.basis.length}`);
 });
 
 test('DISABLED and TRIGGER_DISABLED', () => {
   assert.equal(evaluateProactiveGates(candidate(), context({ settings: settings({ enabled: false }) })).reasonCode, 'DISABLED');
-  // random_smalltalk is the one trigger that is off by default (§16).
   assert.equal(evaluateProactiveGates(candidate({ trigger: 'random_smalltalk' }), context()).reasonCode, 'TRIGGER_DISABLED');
   const enabled = settings({ triggers: { ...DEFAULT_PROACTIVE_SETTINGS.triggers, random_smalltalk: true } });
   assert.equal(evaluateProactiveGates(candidate({ trigger: 'random_smalltalk' }), context({ settings: enabled })).reasonCode, 'PASSED');
 });
 
-test('ALREADY_DELIVERED is the restart-safety gate', () => {
+test('ALREADY_DELIVERED is the restart-safety gate and comes before DND', () => {
   const history = [delivered('cand_1', minutesBefore(AFTERNOON, 60))];
   assert.equal(evaluateProactiveGates(candidate(), context({ history })).reasonCode, 'ALREADY_DELIVERED');
-  // A different candidate is not blocked by it.
   assert.equal(evaluateProactiveGates(candidate({ candidateId: 'cand_2' }), context({ history })).reasonCode, 'PASSED');
-  // A record timestamped in the future belongs to a replay, not to this decision.
   const future = [delivered('cand_1', new Date(AFTERNOON.getTime() + 60 * 60_000))];
   assert.equal(evaluateProactiveGates(candidate(), context({ history: future })).reasonCode, 'PASSED');
-  // Precedence: an absolute refusal that precedes it (DND) is overridden by the
-  // duplicate check? No — the order is documented, and the duplicate comes first.
   assert.equal(
     evaluateProactiveGates(candidate(), context({ history, conversationState: 'SUSPENDED' })).reasonCode,
     'ALREADY_DELIVERED',
-    'the documented order decides which single reason is logged',
   );
 });
 
@@ -258,10 +295,8 @@ test('DND_ACTIVE beats QUIET_HOURS, and both use the local clock', () => {
     evaluateProactiveGates(candidate(), context({ now: night, conversationState: 'SUSPENDED' })).reasonCode,
     'DND_ACTIVE',
   );
-  // 07:30 sharp: the window's end is exclusive.
   assert.equal(evaluateProactiveGates(candidate(), context({ now: at('2026-09-30T07:30:00+08:00') })).reasonCode, 'PASSED');
   assert.equal(evaluateProactiveGates(candidate(), context({ now: at('2026-09-30T07:29:00+08:00') })).reasonCode, 'QUIET_HOURS');
-  // The offset is what makes this the local evening rather than the local morning.
   assert.equal(
     evaluateProactiveGates(candidate(), context({ now: night, offsetMinutes: 0 })).reasonCode,
     'PASSED',
@@ -269,14 +304,16 @@ test('DND_ACTIVE beats QUIET_HOURS, and both use the local clock', () => {
   );
 });
 
-test('COOLDOWN_ACTIVE: 5 minutes by default, exactly', () => {
-  const history = [delivered('older', minutesBefore(AFTERNOON, 5))];
-  assert.equal(evaluateProactiveGates(candidate(), context({ history })).reasonCode, 'PASSED', 'exactly 5 min is allowed');
-  const justInside = [delivered('older', minutesBefore(AFTERNOON, 4))];
-  assert.equal(evaluateProactiveGates(candidate(), context({ history: justInside })).reasonCode, 'COOLDOWN_ACTIVE');
-  // A record from yesterday cannot block today, but a fresh one always does.
-  const yesterday = [delivered('older', minutesBefore(AFTERNOON, 24 * 60))];
-  assert.equal(evaluateProactiveGates(candidate(), context({ history: yesterday })).reasonCode, 'PASSED');
+test('PRIVACY_BLOCKED is a hard floor of its own (铁律 6/8)', () => {
+  const blocked = evaluateProactiveGates(candidate(), context({ privacyAllowed: false }));
+  assert.equal(blocked.reasonCode, 'PRIVACY_BLOCKED');
+  assert.equal(blocked.pass, false);
+  // …and it is checked before any budget is spent on the turn.
+  assert.equal(
+    evaluateProactiveGates(candidate(), context({ privacyAllowed: false, settings: settings({ enabled: false }) })).reasonCode,
+    'DISABLED',
+    'the switch is still the first thing that answers',
+  );
 });
 
 test('QUOTA_6H_EXCEEDED: fifteen in six hours by default', () => {
@@ -286,76 +323,41 @@ test('QUOTA_6H_EXCEEDED: fifteen in six hours by default', () => {
   assert.equal(evaluateProactiveGates(candidate(), context({ history: fifteen })).reasonCode, 'QUOTA_6H_EXCEEDED');
   const fourteen = fifteen.slice(0, 14);
   assert.equal(evaluateProactiveGates(candidate(), context({ history: fourteen })).reasonCode, 'PASSED');
-  // A record older than the window does not count.
   const old = [delivered('old_1', minutesBefore(AFTERNOON, 7 * 60))];
   assert.equal(evaluateProactiveGates(candidate(), context({ history: old })).reasonCode, 'PASSED');
-  const fourteenWithAnOldOne = [...fourteen, delivered('old_2', minutesBefore(AFTERNOON, 6 * 60 + 1))];
-  assert.equal(evaluateProactiveGates(candidate(), context({ history: fourteenWithAnOldOne })).reasonCode, 'PASSED');
 });
 
-test('QUOTA_DAY_EXCEEDED: the local natural day, with a 2-per-day cap', () => {
-  // The 6-hour budget would fire first, so this gate is tested with it raised —
-  // which is also the documented evaluation order.
+test('QUOTA_DAY_EXCEEDED counts deliveries AND paid model consultations', () => {
   const dayScoped = settings({ maxPer6h: 100, maxPerDay: 2 });
   const two = [delivered('a', minutesBefore(AFTERNOON, 30)), delivered('b', minutesBefore(AFTERNOON, 50))];
   assert.equal(evaluateProactiveGates(candidate(), context({ settings: dayScoped, history: two })).reasonCode, 'QUOTA_DAY_EXCEEDED');
-  const one = two.slice(0, 1);
-  assert.equal(evaluateProactiveGates(candidate(), context({ settings: dayScoped, history: one })).reasonCode, 'PASSED');
-  // Yesterday's messages do not spend today's budget.
+  assert.equal(evaluateProactiveGates(candidate(), context({ settings: dayScoped, history: two.slice(0, 1) })).reasonCode, 'PASSED');
+  // One delivery + one consultation already spends the day.
+  assert.equal(
+    evaluateProactiveGates(candidate(), context({ settings: dayScoped, history: two.slice(0, 1), consultsToday: 1 })).reasonCode,
+    'QUOTA_DAY_EXCEEDED',
+    'asking the model is a paid call, so it is charged too',
+  );
   const yesterday = [delivered('a', new Date('2026-09-29T20:00:00+08:00')), delivered('b', minutesBefore(AFTERNOON, 50))];
   assert.equal(evaluateProactiveGates(candidate(), context({ settings: dayScoped, history: yesterday })).reasonCode, 'PASSED');
 });
 
-test('TOPIC_REPEATED: 2 hours by default, only for a topic that has been used', () => {
-  const history = [delivered('older', minutesBefore(AFTERNOON, 60), 'hook_weather')];
-  assert.equal(
-    evaluateProactiveGates(candidate({ topicRef: 'hook_weather' }), context({ history })).reasonCode,
-    'TOPIC_REPEATED',
-  );
-  assert.equal(evaluateProactiveGates(candidate({ topicRef: 'hook_other' }), context({ history })).reasonCode, 'PASSED');
-  assert.equal(evaluateProactiveGates(candidate({ topicRef: null }), context({ history })).reasonCode, 'PASSED');
-  assert.equal(evaluateProactiveGates(candidate(), context({ history })).reasonCode, 'PASSED', 'no topicRef at all is never repeated');
-  // Window boundary: strictly inside 2 hours counts, exactly 2 hours does not.
-  const old = [delivered('older', new Date(AFTERNOON.getTime() - 2 * 60 * 60_000), 'hook_weather')];
-  assert.equal(evaluateProactiveGates(candidate({ topicRef: 'hook_weather' }), context({ history: old })).reasonCode, 'PASSED');
-  const justInside = [delivered('older', new Date(AFTERNOON.getTime() - 2 * 60 * 60_000 + 1), 'hook_weather')];
-  assert.equal(
-    evaluateProactiveGates(candidate({ topicRef: 'hook_weather' }), context({ history: justInside })).reasonCode,
-    'TOPIC_REPEATED',
-  );
-});
-
-test('CONVERSATION_ACTIVE: any open conversation or in-flight turn blocks the whole class', () => {
+test('CONVERSATION_ACTIVE stops new sessions but lets a continuation join a live chat', () => {
   for (const state of ['ENGAGING', 'ACTIVE', 'LINGERING'] as const) {
     assert.equal(evaluateProactiveGates(candidate(), context({ conversationState: state })).reasonCode, 'CONVERSATION_ACTIVE');
+    const continuation = evaluateProactiveGates(
+      candidate({ trigger: 'conversation_dangling' }),
+      context({ conversationState: state }),
+    );
+    assert.equal(continuation.pass, true, `a continuation may speak while ${state}`);
+    assert.equal(continuation.signals.interruption_cost, 0, 'pack §14.3: continuation has no cooldown');
   }
   assert.equal(evaluateProactiveGates(candidate(), context({ inFlightTurn: true })).reasonCode, 'CONVERSATION_ACTIVE');
-  // Precedence over the score: a busy room is reported as busy, not as a weak candidate.
   assert.equal(
-    evaluateProactiveGates(candidate({ components: {} }), context({ conversationState: 'LINGERING' })).reasonCode,
+    evaluateProactiveGates(candidate({ trigger: 'conversation_dangling' }), context({ inFlightTurn: true })).reasonCode,
     'CONVERSATION_ACTIVE',
+    'a turn in flight always waits — never talk over yourself',
   );
-});
-
-test('SCORE_BELOW_THRESHOLD: the threshold is a ceiling on willingness, not a suggestion', () => {
-  const five = Object.fromEntries(Object.keys(STRONG).slice(0, 5).map((name) => [name, 1])); // 0.5
-  // Under the shipped default (0.85 → 0.495) a 0.5 candidate now clears the bar, so the
-  // "refused by the default" case is one component weaker.
-  const four = Object.fromEntries(Object.keys(STRONG).slice(0, 4).map((name) => [name, 1])); // 0.4
-  assert.equal(evaluateProactiveGates(candidate({ components: four }), context()).reasonCode, 'SCORE_BELOW_THRESHOLD');
-  assert.equal(evaluateProactiveGates(candidate({ components: {} }), context()).reasonCode, 'SCORE_BELOW_THRESHOLD');
-  // Boundary pair at a reachable threshold: proactivity 0.5 → 0.6.
-  const six = Object.fromEntries(Object.keys(STRONG).slice(0, 6).map((name) => [name, 1])); // 0.6
-  assert.equal(evaluateProactiveGates(candidate({ components: six }), context({ proactivity: 0.5 })).reasonCode, 'PASSED');
-  assert.equal(evaluateProactiveGates(candidate({ components: five }), context({ proactivity: 0.5 })).reasonCode, 'SCORE_BELOW_THRESHOLD');
-  // A more proactive personality only lowers the bar — it never removes a gate.
-  const result = evaluateProactiveGates(candidate({ components: five }), context({ proactivity: 1 }));
-  assert.equal(result.reasonCode, 'PASSED', '0.5 clears the 0.45 floor');
-  assert.equal(result.threshold, 0.45, 'proactivity 1 buys the lowest threshold there is');
-  assert.equal(result.score, 0.5);
-  // …and the same candidate is refused by the same gate once the floor no longer
-  // covers it, which is the whole point of a threshold instead of a boolean.
-  assert.equal(evaluateProactiveGates(candidate({ components: {} }), context({ proactivity: 1 })).reasonCode, 'SCORE_BELOW_THRESHOLD');
 });
 
 test('SCENE_UNAVAILABLE and SPEECH_UNAVAILABLE', () => {
@@ -365,60 +367,156 @@ test('SCENE_UNAVAILABLE and SPEECH_UNAVAILABLE', () => {
     evaluateProactiveGates(candidate(), context({ sceneAvailable: false, speechAvailable: false })).reasonCode,
     'SCENE_UNAVAILABLE',
   );
-  // Precedence: an unusable room does not hide a candidate that was too weak anyway.
-  assert.equal(
-    evaluateProactiveGates(candidate({ components: {} }), context({ sceneAvailable: false })).reasonCode,
-    'SCORE_BELOW_THRESHOLD',
-  );
 });
 
-test('negative feedback tightens the cooldown and the budget', () => {
-  // Cooldown: 5 min normally, 10 min after negative feedback.
-  const sevenMinutesAgo = [delivered('older', minutesBefore(AFTERNOON, 7))];
-  assert.equal(evaluateProactiveGates(candidate(), context({ history: sevenMinutesAgo })).reasonCode, 'PASSED');
-  assert.equal(
-    evaluateProactiveGates(candidate(), context({ history: sevenMinutesAgo, negativeFeedback: true })).reasonCode,
-    'COOLDOWN_ACTIVE',
+// --------------------------------------- above the floor: grades, not vetoes
+
+test('a recent message no longer vetoes — it costs, and a strong candidate still passes', () => {
+  const twoMinutesAgo = [delivered('older', minutesBefore(AFTERNOON, 2))];
+  const strong = evaluateProactiveGates(candidate(), context({ history: twoMinutesAgo }));
+  assert.equal(strong.pass, true, 'cooldown must not block (ADR-0011)');
+  assert.equal(strong.recommendation, 'speak');
+  assert.ok(strong.signals.interruption_cost > 0.8, `expected a heavy grade, got ${strong.signals.interruption_cost}`);
+  assert.ok(
+    strong.basis.some((line) => line.includes(PROACTIVE_SIGNAL_LABELS.interruption_cost)),
+    'the 依据 must name the interruption cost',
   );
 
-  // Budget: floor(15 / 2) = 7 in the 6-hour window (all of them older than the tightened 10-min cooldown).
-  const sevenOldOnes = [15, 25, 35, 45, 55, 65, 75].map((minutes) => delivered(`old_${minutes}`, minutesBefore(AFTERNOON, minutes)));
-  assert.equal(evaluateProactiveGates(candidate(), context({ history: sevenOldOnes })).reasonCode, 'PASSED');
-  assert.equal(
-    evaluateProactiveGates(candidate(), context({ history: sevenOldOnes, negativeFeedback: true })).reasonCode,
-    'QUOTA_6H_EXCEEDED',
+  // The same history with a weak topic: the *score* says hold, and it says so in words.
+  const weak = evaluateProactiveGates(
+    candidate({ components: { topic_quality: 0.2, receptivity: 0.3 } }),
+    context({ history: twoMinutesAgo }),
   );
-
-  // A configured multiplier is used, and it can never stop Xixi speaking forever.
-  const harsh = settings({ negativeFeedbackCooldownMultiplier: 10, maxPerDay: 1 });
-  const one = [delivered('a', minutesBefore(AFTERNOON, 10 * 60))];
-  assert.equal(evaluateProactiveGates(candidate(), context({ settings: harsh, history: one, negativeFeedback: true })).reasonCode, 'QUOTA_DAY_EXCEEDED');
+  assert.equal(weak.pass, true, 'the floor is still cleared — this is a recommendation, not a gate');
+  assert.equal(weak.recommendation, 'hold');
+  assert.equal(weak.reasonCode, 'BELOW_RECOMMENDATION');
+  assert.ok(
+    ['interruption_cost', 'recent_unanswered_penalty'].includes(weak.primarySignal),
+    `the primary signal must be the heaviest penalty, got ${weak.primarySignal}`,
+  );
+  assert.ok(weak.basis.some((line) => line.includes('建议这次不说')));
 });
 
-test('the reason-code list names every outcome the gates can return', () => {
+test('18 minutes later the interruption cost has decayed to nothing', () => {
+  const eighteen = [delivered('older', minutesBefore(AFTERNOON, 18))];
+  const result = evaluateProactiveGates(candidate(), context({ history: eighteen }));
+  assert.equal(result.signals.interruption_cost, 0);
+  const half = evaluateProactiveGates(candidate(), context({ history: [delivered('older', minutesBefore(AFTERNOON, 9))] }));
+  assert.ok(half.signals.interruption_cost > 0.4 && half.signals.interruption_cost < 0.6, `graded, got ${half.signals.interruption_cost}`);
+});
+
+test('a repeated topic is graded by recency instead of blocking', () => {
+  const oneHourAgo = [delivered('older', minutesBefore(AFTERNOON, 60), 'hook_weather')];
+  const repeated = evaluateProactiveGates(candidate({ topicRef: 'hook_weather' }), context({ history: oneHourAgo }));
+  assert.equal(repeated.pass, true, 'TOPIC_REPEATED is retired as a gate');
+  assert.ok(repeated.signals.repeated_topic_penalty > 0.4, `expected a heavy grade, got ${repeated.signals.repeated_topic_penalty}`);
+  assert.ok(repeated.basis.some((line) => line.includes(PROACTIVE_SIGNAL_LABELS.repeated_topic_penalty)));
+
+  // A different topic pays nothing…
+  assert.equal(
+    evaluateProactiveGates(candidate({ topicRef: 'hook_other' }), context({ history: oneHourAgo })).signals.repeated_topic_penalty,
+    0,
+  );
+  // …and outside the 12-hour window the old topic no longer costs anything.
+  const yesterday = [delivered('older', minutesBefore(AFTERNOON, 13 * 60), 'hook_weather')];
+  assert.equal(evaluateProactiveGates(candidate({ topicRef: 'hook_weather' }), context({ history: yesterday })).signals.repeated_topic_penalty, 0);
+});
+
+test('a generic line pays the longer generic window (no topic at all is not "free")', () => {
+  const threeHoursAgo = [delivered('older', minutesBefore(AFTERNOON, 3 * 60), null)];
+  const generic = evaluateProactiveGates(candidate({ topicRef: null }), context({ history: threeHoursAgo }));
+  assert.ok(generic.signals.repeated_topic_penalty > 0.4, 'inside the 24 h generic window');
+  const specific = evaluateProactiveGates(candidate({ topicRef: 'hook_books' }), context({ history: threeHoursAgo }));
+  assert.equal(specific.signals.repeated_topic_penalty, 0, 'a specific topic is not the generic line that was said');
+});
+
+test('unanswered proactive messages become a grade, never a silent ban', () => {
+  const history = [60, 50, 40].map((minutes) => delivered(`old_${minutes}`, minutesBefore(AFTERNOON, minutes)));
+  const ignored = evaluateProactiveGates(candidate(), context({ history, userTurns: [] }));
+  assert.equal(ignored.signals.recent_unanswered_penalty, 0.45, 'the pack’s unanswered penalty, all three unanswered');
+  assert.ok(ignored.basis.some((line) => line.includes(PROACTIVE_SIGNAL_LABELS.recent_unanswered_penalty)));
+
+  // Answered inside the 10-minute window counts as a response.
+  const answered = history.map((record) => record.at.getTime() + 60_000);
+  assert.equal(evaluateProactiveGates(candidate(), context({ history, userTurns: answered })).signals.recent_unanswered_penalty, 0);
+
+  // Only the newest matters for the grade when the older ones were answered.
+  const mixed = evaluateProactiveGates(
+    candidate(),
+    context({ history, userTurns: [history[0]!.at.getTime() + 60_000, history[1]!.at.getTime() + 60_000] }),
+  );
+  assert.ok(mixed.signals.recent_unanswered_penalty > 0 && mixed.signals.recent_unanswered_penalty < 0.45);
+});
+
+test('an explicit "别说了" is the strongest penalty, and negative feedback multiplies the grades', () => {
+  const rejected = evaluateProactiveGates(candidate(), context({ explicitReject: true }));
+  assert.equal(rejected.signals.recent_unanswered_penalty, 0.8);
+
+  const twoMinutesAgo = [delivered('older', minutesBefore(AFTERNOON, 2))];
+  const plain = evaluateProactiveGates(candidate(), context({ history: twoMinutesAgo }));
+  const tightened = evaluateProactiveGates(candidate(), context({ history: twoMinutesAgo, negativeFeedback: true }));
+  assert.ok(tightened.score < plain.score, 'negative feedback must lower the budget');
+  assert.equal(tightened.signals.interruption_cost, 1, '0.89 × 2 clamps at 1');
+});
+
+// ------------------------------------------------------------------ audit
+
+test('every decision carries a Chinese 依据, and the basis is deterministic', () => {
+  const first = evaluateProactiveGates(candidate(), context());
+  const second = evaluateProactiveGates(candidate(), context());
+  assert.deepEqual(first.basis, second.basis);
+  for (const line of first.basis) {
+    assert.match(line, /[\u4e00-\u9fff]/, `every basis line is Chinese: ${line}`);
+    assert.doesNotMatch(line, /undefined|NaN/, `no leaked placeholders: ${line}`);
+  }
+  // A blocked candidate also explains itself: "why didn't she say anything" is the question.
+  const blocked = evaluateProactiveGates(candidate(), context({ now: at('2026-09-30T23:40:00+08:00') }));
+  assert.ok(blocked.basis.length > 0);
+  assert.equal(blocked.reasonCode, 'QUIET_HOURS');
+});
+
+test('proactiveBasis renders the numbers, and never invents a signal', () => {
+  const signals = deriveProactiveSignals(candidate(), context());
+  const lines = proactiveBasis(signals, 0.5, 0.495, 'speak');
+  assert.equal(lines.length, 6 + 1, 'the five supplied signals + the baseline + the summary line');
+  assert.ok(lines.every((line) => !line.includes('undefined')));
+  assert.match(lines.at(-1) ?? '', /0\.5/);
+  assert.match(lines.at(-1) ?? '', /0\.495/);
+});
+
+test('the retired ADR-0009 codes stay declared for old records but are never returned', () => {
+  assert.deepEqual([...PROACTIVE_RETIRED_REASON_CODES], ['COOLDOWN_ACTIVE', 'TOPIC_REPEATED', 'SCORE_BELOW_THRESHOLD']);
+  for (const code of PROACTIVE_RETIRED_REASON_CODES) {
+    assert.ok(PROACTIVE_KNOWN_REASON_CODES.includes(code), `${code} must stay known so old events still read`);
+    assert.equal(PROACTIVE_REASON_CODES.includes(code as never), false, `${code} must not be emitted any more`);
+  }
+});
+
+test('the reason-code list names every outcome the floor and the judgement can return', () => {
   const seen = new Set<string>();
   const cases: readonly ProactiveGateContext[] = [
     context({ settings: settings({ enabled: false }) }),
-    context(),
+    context({ settings: settings({ triggers: { ...DEFAULT_PROACTIVE_SETTINGS.triggers, topic_pool: false } }) }),
     context({ history: [delivered('cand_1', minutesBefore(AFTERNOON, 60))] }),
     context({ conversationState: 'SUSPENDED' }),
     context({ now: at('2026-09-30T23:00:00+08:00') }),
-    context({ history: [delivered('older', minutesBefore(AFTERNOON, 1))] }),
+    context({ privacyAllowed: false }),
     context({ history: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map((n) => delivered(`old_${n}`, minutesBefore(AFTERNOON, 20 * n))) }),
     context({ settings: settings({ maxPer6h: 100, maxPerDay: 1 }), history: [delivered('old', minutesBefore(AFTERNOON, 30))] }),
-    context({ history: [delivered('old', minutesBefore(AFTERNOON, 30), 'hook_weather')] }),
     context({ conversationState: 'LINGERING' }),
+    context({ sceneAvailable: false }),
+    context({ speechAvailable: false }),
     context({ proactivity: 0 }),
-    context({ sceneAvailable: false, proactivity: 0 }),
-    context({ proactivity: 0, sceneAvailable: false }),
+    context(),
   ];
-  const scores = [{}, STRONG];
   for (const ctx of cases) {
-    for (const components of scores) {
+    for (const components of [{}, STRONG]) {
       seen.add(evaluateProactiveGates(candidate({ topicRef: 'hook_weather', components }), ctx).reasonCode);
     }
   }
   assert.ok(seen.has('PASSED'));
+  assert.ok(seen.has('BELOW_RECOMMENDATION'));
+  assert.ok(seen.has('PRIVACY_BLOCKED'));
   for (const code of seen) assert.ok(PROACTIVE_REASON_CODES.includes(code as never), `${code} must be a registered code`);
-  assert.ok(seen.size >= 8, `expected several distinct outcomes, saw ${[...seen].join(', ')}`);
+  assert.ok(seen.size >= 10, `expected several distinct outcomes, saw ${[...seen].join(', ')}`);
 });

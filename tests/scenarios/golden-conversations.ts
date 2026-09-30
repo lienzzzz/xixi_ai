@@ -38,7 +38,7 @@ export interface GoldenExpectations {
 export interface GoldenGateCase {
   readonly id: string;
   readonly description: string;
-  /** Candidate + context the gate function is called with. */
+  /** Candidate + context the gate function is called with (P5 social-budget signals). */
   readonly candidate: {
     readonly trigger: string;
     readonly components: Readonly<Record<string, number>>;
@@ -48,7 +48,15 @@ export interface GoldenGateCase {
   readonly deliveredMinutesAgo: number | null;
   /** Topic of that earlier delivery, for the topic-repeat window. */
   readonly deliveredTopicRef?: string | null;
+  /**
+   * What P5's two-layer decision must report. Hard-floor codes (QUIET_HOURS / TRIGGER_DISABLED / …)
+   * are unchanged; the ADR-0009 veto codes (COOLDOWN_ACTIVE / TOPIC_REPEATED / SCORE_BELOW_THRESHOLD)
+   * are retired — a recent message, a repeated topic or a weak score now shows up as
+   * `BELOW_RECOMMENDATION` (a *recommendation*, with the reason in `basis`) or as `PASSED`.
+   */
   readonly expectedReasonCode: string;
+  /** How the expected code should be read (kept next to the case, so the A/B report can print it). */
+  readonly expectationNote?: string;
 }
 
 export interface GoldenConversation {
@@ -152,30 +160,28 @@ export const GOLDEN_CONVERSATIONS: readonly GoldenConversation[] = Object.freeze
     gateCases: [
       {
         id: 'G07-specific-topic',
-        description: '有具体话题（上午去医院看老朋友）且分数够高时，门禁应当放行',
+        description: '有具体话题（上午去医院看老朋友）且社会预算够高时，应当放行',
         candidate: {
           trigger: 'future_hook_due',
           components: {
-            event_salience: 1,
-            social_value: 1,
-            memory_relevance: 1,
-            novelty: 1,
-            time_since_last_interaction: 1,
-            user_receptiveness: 1,
-            future_hook_bonus: 1,
-            interruption_risk: 0,
+            topic_quality: 1,
+            personal_relevance: 1,
+            freshness: 1,
+            receptivity: 1,
+            engagement: 1,
           },
           topicRef: '上午去医院看老朋友',
         },
         deliveredMinutesAgo: null,
         expectedReasonCode: 'PASSED',
+        expectationNote: 'P5：五路信号拉满 → 0.85 + 主动性基线 0.1275 > 建议线 0.495',
       },
     ],
     goodExample: '回来了。你上午去看的那个老朋友怎么样？',
     badExample: { text: '欢迎回家！今天过得怎么样呀？', detect: 'none', note: '泛泛的热情开场——词表抓不到，只能人工/评审判' },
     note:
       '只验证「门禁层允许带具体话题开口」；消息内容是否具体属 Phase 3/5 的内容生成，本任务未测。' +
-      '与 G12 同理：门禁语义若被 ADR-0011 改动，这条期望要一起重审。',
+      'ADR-0011（P5）改动后本条的信号名与期望已同步重审：期望仍是 PASSED，但分数现在来自社会预算。',
   },
   {
     id: 'G08',
@@ -221,48 +227,63 @@ export const GOLDEN_CONVERSATIONS: readonly GoldenConversation[] = Object.freeze
     kind: 'proactive-gate',
     gateCases: [
       {
-        id: 'G12-cooldown',
-        description: '刚主动聊过 → 冷却门禁挡住（不是「更热情」就能压过）',
+        id: 'G12-cooldown-graded',
+        description: '刚主动聊过（2 分钟）→ 打扰代价扣分；话题也一般，于是建议线以下（不再是冷却一票否决）',
         candidate: {
+          // A mediocre topic right after a message: the grade, not a veto, is what holds this back.
           trigger: 'topic_pool',
-          components: { event_salience: 1, novelty: 1, social_value: 1, user_receptiveness: 1, interruption_risk: 0 },
+          components: { topic_quality: 0.4, personal_relevance: 0.4, freshness: 0.5, receptivity: 0.5, engagement: 0.4 },
           topicRef: '电视里在放的节目',
         },
-        // pack 原文写的是「十分钟前」；本仓库出厂的 base_cooldown_min 只有 5 分钟，
-        // 所以用「2 分钟前」测同一条门禁。10 分钟在 5 分钟冷却下本来就不该被挡——
-        // 这个差异本身是 V0.1「话痨档」的事实，报告里会写明，不靠改数字掩盖。
         deliveredMinutesAgo: 2,
-        expectedReasonCode: 'COOLDOWN_ACTIVE',
+        expectedReasonCode: 'BELOW_RECOMMENDATION',
+        expectationNote: 'P5：COOLDOWN_ACTIVE 已退役；同一条候选在话题够好时是 PASSED（见下一条）',
       },
       {
-        id: 'G12-topic-repeated',
-        description: '十分钟前刚聊过同一个话题 → 主题重复窗口挡住（topic_repeat_window 2h）',
+        id: 'G12-cooldown-does-not-veto',
+        description: '同一个 2 分钟窗口里，换一个真正值得聊的话题 → 照旧可以开口（冷却不是一票否决）',
         candidate: {
           trigger: 'topic_pool',
-          components: { event_salience: 1, novelty: 1, social_value: 1, user_receptiveness: 1, interruption_risk: 0 },
+          components: { topic_quality: 1, personal_relevance: 1, freshness: 0.9, receptivity: 0.9, engagement: 0.8 },
+          topicRef: '他上午去医院看老朋友的事',
+        },
+        deliveredMinutesAgo: 2,
+        deliveredTopicRef: '电视里在放的节目',
+        expectedReasonCode: 'PASSED',
+        expectationNote: 'P5 的核心：打扰代价只是扣分项，强候选照样过线（ADR-0011）',
+      },
+      {
+        id: 'G12-topic-repeated-graded',
+        description: '十分钟前刚聊过同一个话题 → 话题重复惩罚扣分（不再是主题重复窗口一票否决）',
+        candidate: {
+          trigger: 'topic_pool',
+          components: { topic_quality: 0.5, personal_relevance: 0.5, freshness: 0.4, receptivity: 0.5, engagement: 0.4 },
           topicRef: '电视里在放的节目',
         },
         deliveredMinutesAgo: 10,
         deliveredTopicRef: '电视里在放的节目',
-        expectedReasonCode: 'TOPIC_REPEATED',
+        expectedReasonCode: 'BELOW_RECOMMENDATION',
+        expectationNote: 'P5：TOPIC_REPEATED 已退役；同话题惩罚以 basis 里的中文依据呈现',
       },
       {
         id: 'G12-no-topic-source',
         description: '随机闲聊触发源出厂关闭 → 没有合适话题时不允许为了主动而主动',
         candidate: {
           trigger: 'random_smalltalk',
-          components: { event_salience: 1, novelty: 1, social_value: 1, user_receptiveness: 1, interruption_risk: 0 },
+          components: { topic_quality: 0.3, personal_relevance: 0.4, freshness: 0.6, receptivity: 0.7, engagement: 0.6 },
           topicRef: null,
         },
         deliveredMinutesAgo: null,
         expectedReasonCode: 'TRIGGER_DISABLED',
+        expectationNote: '触发源开关是程序判定的硬底线，P5 未动它',
       },
     ],
     note:
-      '期望 SILENCE 的机械镜像：门禁必须挡住「刚聊过」与「没有话题来源」两种硬聊。' +
-      '注意：本用例断言的是 ADR-0009 时代的当前硬门禁实现；ADR-0011（2026-10-01）把主动决策改成' +
-      '「硬底线 + 模型读空气」，冷却/话题重复是否仍属硬底线要由 Phase 5 重新审定——改完后这两条期望必须重审，' +
-      '不要把它们当成永久契约。',
+      '期望 SILENCE 的机械镜像：门禁必须挡住「没有话题来源」这种硬聊。' +
+      'ADR-0011（P5, 2026-10-01）已按本文件原有的提醒重审过这两类期望：' +
+      '冷却与话题重复从「一票否决」改为「扣分信号」，因此 COOLDOWN_ACTIVE / TOPIC_REPEATED 不再出现，' +
+      '取而代之的是 BELOW_RECOMMENDATION（并附程序渲染的中文依据）或 PASSED；' +
+      '「没有话题来源」仍由触发源开关挡住，属硬底线。',
   },
 ]);
 

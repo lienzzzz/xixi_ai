@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "xixi.event.v1/proactive.decision",
   "title": "proactive.decision payload v1",
-  "description": "一次主动开口的判定记录（方案 §15、ADR-0009）：程序按硬门禁判定「现在该不该说」，并把 reason_code 与分值留下，使日志能回答「为什么今天西西没来找我说话」。只存 reason_code 与分数，不存用户原话、不存模型私有推理（铁律 5）。",
+  "description": "一次主动开口的判定记录（方案 §15、ADR-0009 → ADR-0011）：硬底线（静默时段/额度/隐私与同意）由程序判定，底线之上由模型读空气决定说不说；记录里只存 reason_code、分数与程序渲染的中文依据，不存用户原话、不存模型私有推理（铁律 5）。同一事件类型内新增的字段一律可选，旧事件（只有候选 id/trigger/speak/reason_code）仍必须校验通过。",
   "type": "object",
   "additionalProperties": false,
   "required": ["candidate_id", "trigger", "speak", "reason_code"],
@@ -16,6 +16,32 @@
     "threshold": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
     "topic_ref": { "type": ["string", "null"], "maxLength": 120 },
     "intent": { "type": ["string", "null"], "maxLength": 120 },
-    "delivered": { "type": ["boolean", "null"] }
+    "delivered": { "type": ["boolean", "null"] },
+    "initiative_kind": { "type": ["string", "null"], "maxLength": 60 },
+    "recommendation": { "type": ["string", "null"], "maxLength": 20 },
+    "primary_signal": { "type": ["string", "null"], "maxLength": 60 },
+    "signals": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "topic_quality": { "type": "number", "minimum": 0, "maximum": 1 },
+        "personal_relevance": { "type": "number", "minimum": 0, "maximum": 1 },
+        "freshness": { "type": "number", "minimum": 0, "maximum": 1 },
+        "receptivity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "engagement": { "type": "number", "minimum": 0, "maximum": 1 },
+        "base_proactivity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "interruption_cost": { "type": "number", "minimum": 0, "maximum": 1 },
+        "repeated_topic_penalty": { "type": "number", "minimum": 0, "maximum": 1 },
+        "recent_unanswered_penalty": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "basis": {
+      "type": ["array", "null"],
+      "maxItems": 12,
+      "items": { "type": "string", "minLength": 1, "maxLength": 160 }
+    },
+    "decided_by": { "type": ["string", "null"], "maxLength": 20 },
+    "model_reason_code": { "type": ["string", "null"], "maxLength": 40 },
+    "model_consulted": { "type": ["boolean", "null"] }
   }
 }

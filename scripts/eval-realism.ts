@@ -135,6 +135,12 @@ interface GateOutcome {
   readonly expected: string;
   readonly actual: string;
   readonly passed: boolean;
+  /** P5: what the deterministic social budget suggested, and which signal dominated it. */
+  readonly recommendation: string;
+  readonly primarySignal: string;
+  /** P5: the program-rendered 依据 for this case (numbers → words), for the report. */
+  readonly basis: readonly string[];
+  readonly expectationNote?: string | undefined;
 }
 
 interface SkippedEntry {
@@ -338,7 +344,12 @@ function runGateCase(golden: GoldenConversation, caseIndex: number): { outcome: 
     negativeFeedback: false,
     sceneAvailable: true,
     speechAvailable: true,
+    privacyAllowed: true,
     history,
+    // Nobody answered the earlier message in this fixture: the 未回应惩罚 applies as a grade
+    // (P5), and saying so explicitly keeps the case independent of the engine's defaults.
+    userTurns: [],
+    consultsToday: 0,
   };
   const result = evaluateProactiveGates(
     {
@@ -358,6 +369,10 @@ function runGateCase(golden: GoldenConversation, caseIndex: number): { outcome: 
       expected: gateCase.expectedReasonCode,
       actual: result.reasonCode,
       passed,
+      recommendation: result.recommendation,
+      primarySignal: result.primarySignal,
+      basis: result.basis,
+      ...(gateCase.expectationNote === undefined ? {} : { expectationNote: gateCase.expectationNote }),
     },
     violation: passed
       ? null
@@ -365,7 +380,7 @@ function runGateCase(golden: GoldenConversation, caseIndex: number): { outcome: 
           scenario: golden.id,
           turn: -1,
           check: `gate:${gateCase.id}`,
-          detail: `期望 ${gateCase.expectedReasonCode}，实际 ${result.reasonCode}（score ${result.score} vs 阈值 ${result.threshold}）`,
+          detail: `期望 ${gateCase.expectedReasonCode}，实际 ${result.reasonCode}（score ${result.score} vs 建议线 ${result.threshold}；建议 ${result.recommendation}，主因 ${result.primarySignal}；${result.basis.join('；')}）`,
         },
   };
 }

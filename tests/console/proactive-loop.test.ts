@@ -412,19 +412,27 @@ test('a blocked tick names the first gate that fired, in Chinese', async () => {
   const quietStore = openXixiStore({ dataDir: join(root, 'quiet') });
   try {
     const now = new Date(2026, 8, 30, 15, 0, 0);
-    // Only the weak 「长时间没人说话」 candidate is available (score 0.30 < threshold 0.54).
-    const loop = makeLoop({ store, now, present: null, lastUserTurnAt: new Date(2026, 8, 30, 14, 0, 0) });
-    const entry = await loop.tickOnce();
+    // P5: 「长时间没人说话」 is no longer a dead-end candidate (it used to score 0.30 < 0.51 and be
+    // reported as SCORE_BELOW_THRESHOLD). It is a *good* candidate now, so the block used here is the
+    // day budget — a hard floor — which is also what the page must explain.
+    const spent = makeLoop({
+      store,
+      now,
+      present: null,
+      lastUserTurnAt: new Date(2026, 8, 30, 14, 0, 0),
+      settings: parseProactiveSettings({ enabled: true, base_cooldown_min: 0, max_per_day: 0 }),
+    });
+    const entry = await spent.tickOnce();
     assert.ok(entry !== null);
     assert.equal(entry.speak, false);
-    assert.equal(entry.reasonCode, 'SCORE_BELOW_THRESHOLD', `got ${entry.reasonCode}`);
-    assert.equal(entry.reasonLabel, '分数没到阈值');
+    assert.equal(entry.reasonCode, 'QUOTA_DAY_EXCEEDED', `got ${entry.reasonCode}`);
+    assert.match(entry.reasonLabel, /当日额度/);
     assert.ok(entry.nextStep.length > 0, 'and the page can tell the user what to do');
     assert.equal(entry.segments.length, 0, 'nothing is spoken when blocked');
     assert.equal(entry.audio, null);
     const blocked = entry.gates.filter((row) => row.status === 'blocked');
     assert.equal(blocked.length, 1, 'exactly one gate is reported as blocking');
-    assert.equal(blocked[0]?.code, 'SCORE_BELOW_THRESHOLD');
+    assert.equal(blocked[0]?.code, 'QUOTA_DAY_EXCEEDED');
     assert.ok(entry.gates.filter((row) => row.status === 'skipped').length > 0, 'later gates are marked not-evaluated');
 
     // Quiet hours block even a strong candidate — the safety floor is untouched by the loop.
@@ -439,6 +447,15 @@ test('a blocked tick names the first gate that fired, in Chinese', async () => {
     assert.equal(quietEntry?.speak, false);
     assert.equal(quietEntry?.reasonCode, 'QUIET_HOURS');
     assert.match(quietEntry?.nextStep ?? '', /静默时段/);
+
+    // …and the retired ADR-0009 codes are not part of the gate table any more.
+    const codes = quietEntry?.gates.map((row) => row.code) ?? [];
+    for (const retired of ['COOLDOWN_ACTIVE', 'TOPIC_REPEATED', 'SCORE_BELOW_THRESHOLD']) {
+      assert.equal(codes.includes(retired as never), false, `${retired} must not be shown as a live gate`);
+    }
+    assert.ok(codes.includes('BELOW_RECOMMENDATION'), 'the judgement codes are shown instead');
+    assert.ok(codes.includes('MODEL_DECLINED'));
+    assert.ok(codes.includes('PRIVACY_BLOCKED'));
   } finally {
     store.close();
     quietStore.close();

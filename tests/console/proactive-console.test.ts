@@ -143,7 +143,7 @@ test('settings changed on the page are persisted, restored, and validated field 
     assert.equal(patched.settings.quietHours.endMinutes, before.settings.quietHours.endMinutes, 'a bad clock string keeps the current value');
     assert.equal(patched.settings.triggers.random_smalltalk, true);
     assert.ok(patched.rejected.some((row) => row.includes('quietEnd')), 'the page is told what was ignored');
-    assert.ok(patched.changes.some((row) => row.includes('冷却')), 'changes are described in Chinese for the audit trail');
+    assert.ok(patched.changes.some((row) => row.includes('打扰代价衰减')), 'changes are described in Chinese for the audit trail');
     assert.ok(patched.changes.some((row) => row.includes('静默时段')));
 
     const event = persistProactiveSettings(store, patched.settings, patched.changes);
@@ -176,7 +176,8 @@ test('the panel exposes the personality controls (proactivity / talkativeness / 
   assert.ok(html.includes(`id="${PROACTIVE_PANEL_IDS.proactivityNow}"`), 'and shows the value in effect');
   assert.match(html, /主动性总强度（人格 proactivity）/, 'labelled so nobody confuses it with the quota knobs');
   assert.match(html, /self_profile/, 'and says where it is written');
-  assert.match(html, /一道门禁都不会被跳过/, 'and that it cannot skip a gate');
+  assert.match(html, /硬底线一道都不会被跳过/, 'and that it cannot skip a hard floor gate');
+  assert.match(html, /模型也可以对建议说「不说」/, 'and that the model may decline a recommendation');
   // t74: the two talkativeness knobs use the same write + audit path.
   assert.ok(html.includes(`id="${PROACTIVE_PANEL_IDS.talkativeness}"`), 'the panel has 话痨程度');
   assert.ok(html.includes(`id="${PROACTIVE_PANEL_IDS.verbosity}"`), 'and 话的长度');
@@ -266,7 +267,9 @@ test('the panel markup and script expose every knob, the gate table and the segm
   for (const id of [PROACTIVE_PANEL_IDS.enabled, PROACTIVE_PANEL_IDS.cooldown, PROACTIVE_PANEL_IDS.per6h, PROACTIVE_PANEL_IDS.perDay, PROACTIVE_PANEL_IDS.quietStart, PROACTIVE_PANEL_IDS.quietEnd, PROACTIVE_PANEL_IDS.save, PROACTIVE_PANEL_IDS.off, PROACTIVE_PANEL_IDS.drill, PROACTIVE_PANEL_IDS.gates, PROACTIVE_PANEL_IDS.log, PROACTIVE_PANEL_IDS.audit]) {
     assert.ok(html.includes(`id="${id}"`), `panel is missing #${id}`);
   }
-  assert.match(html, /硬门禁由程序判定/, 'the panel must say the knobs cannot widen the gates');
+  assert.match(html, /硬底线由程序判定/, 'the panel must say the knobs cannot widen the hard floor');
+  assert.match(html, /由模型读空气决定说不说/, 'and that above the floor the model decides');
+  assert.match(html, /不是禁止/, 'and that the graded signals are not vetoes');
   assert.match(html, /立即生效/, 'the panel must say changes take effect immediately');
 
   const script = proactivePanelScript('/api/field');

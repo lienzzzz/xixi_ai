@@ -55,19 +55,32 @@ import { CliDshTransport } from '@xixi/brain-dsh';
 import {
   ConversationEngine,
   DEFAULT_PROACTIVITY,
+  deriveProactiveSignals,
+  initiativeKindForTrigger,
   isWithinQuietHours,
+  PROACTIVE_INITIATIVE_LABELS,
+  PROACTIVE_MODEL_REASON_CODES,
+  PROACTIVE_MODEL_REASON_LABELS,
   PROACTIVE_REASON_CODES,
+  PROACTIVE_SIGNALS,
+  PROACTIVE_SIGNAL_LABELS,
   PROACTIVE_TRIGGERS,
   ProactiveEngine,
   parseProactiveSettings,
   proactiveThreshold,
+  readProactiveConsultations,
   readProactiveHistory,
+  readUserTurnTimes,
   resolveReplyLimits,
   scoreProactiveCandidate,
   SILENCE_TOKEN,
   splitReplyIntoSegments,
   type ProactiveDelivery,
+  type ProactiveDecider,
+  type ProactiveModelInput,
+  type ProactiveModelReasonCode,
   type ProactiveReasonCode,
+  type ProactiveRetiredReasonCode,
   type ProactiveSettings,
   type ProactiveTrigger,
   type ConversationState,
@@ -1977,6 +1990,17 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       },
       log,
     }),
+    /**
+     * P5 读空气 (ADR-0011): above the hard floor the model decides whether to open its mouth.
+     * Only reached for candidates the social budget already recommends; the consultation is
+     * recorded (`model_consulted`) and charged to the daily budget.
+     */
+    decide: createModelDecider({
+      engine,
+      sessionId: () => session.sessionId,
+      available: !offline && client.hasKey,
+      log,
+    }),
     log,
   });
 
@@ -2760,22 +2784,32 @@ export const PROACTIVE_SETTINGS_SERVICE = 'proactive-settings';
 /** Shape version of the audit record's `detail` field. */
 const PROACTIVE_SETTINGS_AUDIT_VERSION = 1;
 
-/** Chinese label for every reason code, in the engine's fixed evaluation order. */
-export const PROACTIVE_GATE_LABELS: Readonly<Record<ProactiveReasonCode, string>> = Object.freeze({
+/**
+ * Chinese label for every reason code, in the engine's fixed evaluation order.
+ *
+ * The three retired ADR-0009 codes stay labelled on purpose: decisions already written to the
+ * log carry them, and a page that shows history must be able to explain an old row
+ * (ADR-0011: retiring a reason is not rewriting the log).
+ */
+export const PROACTIVE_GATE_LABELS: Readonly<Record<ProactiveReasonCode | ProactiveRetiredReasonCode, string>> = Object.freeze({
   DISABLED: '主动性总开关关闭',
   TRIGGER_DISABLED: '这个触发源关掉了',
   ALREADY_DELIVERED: '这条已经说过了（不重发）',
   DND_ACTIVE: '安静模式 / 今天安静点',
   QUIET_HOURS: '静默时段（安全底线，不可放宽）',
-  COOLDOWN_ACTIVE: '距上一条主动开口还没到冷却时间',
+  PRIVACY_BLOCKED: '隐私与同意（安全底线，不可放宽）',
   QUOTA_6H_EXCEEDED: '6 小时额度已用完',
-  QUOTA_DAY_EXCEEDED: '当日额度已用完',
-  TOPIC_REPEATED: '同一话题在抑制窗口内说过了',
+  QUOTA_DAY_EXCEEDED: '当日额度已用完（开口与问模型的次数一起算）',
   CONVERSATION_ACTIVE: '正在对话里（或还有一轮没结束）',
-  SCORE_BELOW_THRESHOLD: '分数没到阈值',
   SCENE_UNAVAILABLE: '场景不合适（媒体播放中 / 通话中）',
   SPEECH_UNAVAILABLE: '语音输出不可用',
+  BELOW_RECOMMENDATION: '社会预算建议这次不说（冷却/重复/未回应只是扣分，不是禁止）',
+  MODEL_DECLINED: '模型读空气：这次不说',
   PASSED: '全部通过：可以开口',
+  // 已停用（只为读旧记录保留标签）
+  COOLDOWN_ACTIVE: '[旧] 距上一条主动开口还没到冷却时间',
+  TOPIC_REPEATED: '[旧] 同一话题在抑制窗口内说过了',
+  SCORE_BELOW_THRESHOLD: '[旧] 分数没到阈值',
 });
 
 /** Chinese label for every trigger source (§16 priority order). */
@@ -2928,9 +2962,15 @@ export const PROACTIVE_PERSONALITY_FIELDS: readonly string[] = Object.freeze(['p
 export const PROACTIVE_PATCH_FIELDS: readonly string[] = Object.freeze([
   'enabled',
   'baseCooldownMinutes',
+  'continuationCooldownMinutes',
   'maxPer6h',
   'maxPerDay',
   'topicRepeatWindowHours',
+  'genericTopicCooldownHours',
+  'unansweredPenalty',
+  'explicitRejectPenalty',
+  'sameTopicPenalty',
+  'unansweredWindowMinutes',
   'negativeFeedbackCooldownMultiplier',
   'quietStart',
   'quietEnd',
@@ -3026,11 +3066,31 @@ export function applyProactiveSettingsPatch(current: ProactiveSettings, patch: R
   const settings = parseProactiveSettings(merged);
   const changes: string[] = [];
   if (settings.enabled !== current.enabled) changes.push(`主动开口：${current.enabled ? '开' : '关'} → ${settings.enabled ? '开' : '关'}`);
-  if (settings.baseCooldownMinutes !== current.baseCooldownMinutes) changes.push(`冷却：${current.baseCooldownMinutes} → ${settings.baseCooldownMinutes} 分钟`);
+  if (settings.baseCooldownMinutes !== current.baseCooldownMinutes) {
+    changes.push(`打扰代价衰减：${current.baseCooldownMinutes} → ${settings.baseCooldownMinutes} 分钟（不再是禁止窗口）`);
+  }
+  if (settings.continuationCooldownMinutes !== current.continuationCooldownMinutes) {
+    changes.push(`热聊中接话的代价窗口：${current.continuationCooldownMinutes} → ${settings.continuationCooldownMinutes} 分钟`);
+  }
   if (settings.maxPer6h !== current.maxPer6h) changes.push(`6 小时额度：${current.maxPer6h} → ${settings.maxPer6h}`);
   if (settings.maxPerDay !== current.maxPerDay) changes.push(`当日额度：${current.maxPerDay} → ${settings.maxPerDay}`);
   if (settings.topicRepeatWindowHours !== current.topicRepeatWindowHours) {
-    changes.push(`同主题抑制窗口：${current.topicRepeatWindowHours} → ${settings.topicRepeatWindowHours} 小时`);
+    changes.push(`同话题窗口：${current.topicRepeatWindowHours} → ${settings.topicRepeatWindowHours} 小时`);
+  }
+  if (settings.genericTopicCooldownHours !== current.genericTopicCooldownHours) {
+    changes.push(`泛泛话题窗口：${current.genericTopicCooldownHours} → ${settings.genericTopicCooldownHours} 小时`);
+  }
+  if (settings.unansweredPenalty !== current.unansweredPenalty) {
+    changes.push(`未回应惩罚：${current.unansweredPenalty} → ${settings.unansweredPenalty}`);
+  }
+  if (settings.explicitRejectPenalty !== current.explicitRejectPenalty) {
+    changes.push(`明确拒绝惩罚：${current.explicitRejectPenalty} → ${settings.explicitRejectPenalty}`);
+  }
+  if (settings.sameTopicPenalty !== current.sameTopicPenalty) {
+    changes.push(`同话题惩罚：${current.sameTopicPenalty} → ${settings.sameTopicPenalty}`);
+  }
+  if (settings.unansweredWindowMinutes !== current.unansweredWindowMinutes) {
+    changes.push(`未回应判定窗口：${current.unansweredWindowMinutes} → ${settings.unansweredWindowMinutes} 分钟`);
   }
   if (settings.negativeFeedbackCooldownMultiplier !== current.negativeFeedbackCooldownMultiplier) {
     changes.push(`负面反馈倍率：${current.negativeFeedbackCooldownMultiplier} → ${settings.negativeFeedbackCooldownMultiplier}`);
@@ -3148,22 +3208,32 @@ export interface ProactiveUsage {
   readonly cooldownRemainingMs: number;
   readonly in6h: number;
   readonly today: number;
+  /** How many times today the model was asked "说还是不说" (paid calls). */
+  readonly consultsToday: number;
+  /** The daily budget's real charge: `today + consultsToday` (ADR-0011 代价). */
+  readonly spentToday: number;
   readonly day: string;
 }
 
 /** Budget/cooldown usage, recomputed from the log (never cached — a restart must not lose it). */
 export function proactiveUsage(store: XixiStore, settings: ProactiveSettings, now: Date, offsetMinutes?: number): ProactiveUsage {
   const history = readProactiveHistory(store);
+  const consultations = readProactiveConsultations(store);
   const day = localDayOf(now, offsetMinutes);
   const last = history[history.length - 1];
   const cooldownMs = settings.baseCooldownMinutes * 60_000;
   const sinceLast = last === undefined ? Number.POSITIVE_INFINITY : now.getTime() - last.at.getTime();
+  const consultsToday = consultations.filter((consultedAt) => localDayOf(consultedAt, offsetMinutes) === day).length;
+  const today = history.filter((record) => localDayOf(record.at, offsetMinutes) === day).length;
   return {
     deliveries: history.length,
     lastDeliveryAt: last === undefined ? null : last.at.toISOString(),
     cooldownRemainingMs: last === undefined || cooldownMs === 0 ? 0 : Math.max(0, cooldownMs - sinceLast),
     in6h: history.filter((record) => now.getTime() - record.at.getTime() < 6 * 60 * 60_000).length,
-    today: history.filter((record) => localDayOf(record.at, offsetMinutes) === day).length,
+    today,
+    consultsToday,
+    /** What the daily budget actually charges: spoken messages + paid 读空气 consultations. */
+    spentToday: today + consultsToday,
     day,
   };
 }
@@ -3186,6 +3256,16 @@ export interface ProactiveDecisionRow {
   readonly reasonCode: string;
   readonly score: number;
   readonly threshold: number;
+  /** Which initiative the candidate belonged to (pack §14.1). */
+  readonly initiativeKind: string;
+  /** Who decided: the deterministic budget or the model reading the room. */
+  readonly decidedBy: string;
+  /** The model's own code when it was asked (an enum, never free text). */
+  readonly modelReasonCode: ProactiveModelReasonCode | null;
+  /** Whether this consideration paid for a model call. */
+  readonly modelConsulted: boolean;
+  /** Program-rendered Chinese 依据 (numbers → words), for the panel. */
+  readonly basis: readonly string[];
 }
 
 /** The last few considerations, straight from the log (this is the auditable trail). */
@@ -3195,6 +3275,7 @@ export function proactiveDecisionHistory(store: XixiStore, limit = 8): Proactive
     .slice(-limit)
     .map((event) => {
       const payload = event.payload as Record<string, unknown>;
+      const modelReasonCode = typeof payload['model_reason_code'] === 'string' ? payload['model_reason_code'] : null;
       return {
         at: event.timestamp,
         sequence: event.sequence,
@@ -3204,6 +3285,14 @@ export function proactiveDecisionHistory(store: XixiStore, limit = 8): Proactive
         reasonCode: typeof payload['reason_code'] === 'string' ? payload['reason_code'] : '?',
         score: typeof payload['score'] === 'number' ? payload['score'] : 0,
         threshold: typeof payload['threshold'] === 'number' ? payload['threshold'] : 0,
+        initiativeKind: typeof payload['initiative_kind'] === 'string' ? payload['initiative_kind'] : '?',
+        decidedBy: typeof payload['decided_by'] === 'string' ? payload['decided_by'] : '?',
+        modelReasonCode:
+          modelReasonCode !== null && modelReasonCode in PROACTIVE_MODEL_REASON_LABELS
+            ? (modelReasonCode as ProactiveModelReasonCode)
+            : null,
+        modelConsulted: payload['model_consulted'] === true,
+        basis: Array.isArray(payload['basis']) ? (payload['basis'] as string[]) : [],
       };
     });
 }
@@ -3225,19 +3314,16 @@ export const PROACTIVE_DRILL_LINES: Readonly<Record<ProactiveTrigger, string>> =
   random_smalltalk: '（随口一句）今天家里挺安静的。',
 });
 
-/** Score components that make a drill candidate pass the threshold; negative terms stay low. */
+/** Signals that make a drill candidate pass the recommendation bar; penalties stay low. */
 export const PROACTIVE_DRILL_COMPONENTS: Readonly<Record<string, number>> = Object.freeze({
-  event_salience: 1.0,
-  social_value: 0.9,
-  memory_relevance: 0.9,
-  novelty: 0.7,
-  time_since_last_interaction: 1.0,
-  user_receptiveness: 0.9,
-  future_hook_bonus: 0.8,
-  interruption_risk: 0.0,
-  recent_proactive_penalty: 0.0,
-  repetition_penalty: 0.0,
-  uncertainty_penalty: 0.0,
+  topic_quality: 0.9,
+  personal_relevance: 0.85,
+  freshness: 0.6,
+  receptivity: 0.8,
+  engagement: 0.7,
+  interruption_cost: 0.0,
+  repeated_topic_penalty: 0.0,
+  recent_unanswered_penalty: 0.0,
 });
 
 export interface ProactiveDrillRequest {
@@ -3256,6 +3342,13 @@ export interface ProactiveDrillResult {
   readonly candidateId: string;
   readonly score: number;
   readonly threshold: number;
+  /** What the deterministic social budget suggested (the model may still decline/go ahead). */
+  readonly recommendation: 'speak' | 'hold';
+  readonly primarySignalLabel: string;
+  /** Program-rendered Chinese 依据 for this decision (numbers → words). */
+  readonly basis: readonly string[];
+  readonly decidedBy: 'program' | 'model';
+  readonly modelConsulted: boolean;
   readonly gates: readonly ProactiveGateRow[];
   /** The spoken text when the gates let it through (null when blocked). */
   readonly text: string | null;
@@ -3275,9 +3368,10 @@ export interface ProactiveDrillResult {
 /**
  * Run one consideration through the **real** engine and return everything a page needs.
  *
- * "Real" matters: the score, the nine gates in their fixed order, the `proactive.decision`
- * audit row and the at-most-once delivery write all go through `ProactiveEngine.consider`.
- * The drill only supplies a candidate (trigger + §15.4 components) and the spoken text.
+ * "Real" matters: the signals, the hard floor in its fixed order, the 读空气 decision (when a
+ * `decide` seam is supplied), the `proactive.decision` audit row and the at-most-once delivery
+ * write all go through `ProactiveEngine.consider`. The drill only supplies a candidate
+ * (trigger + signals) and the spoken text.
  */
 export async function proactiveDrill(options: {
   readonly store: XixiStore;
@@ -3289,8 +3383,14 @@ export async function proactiveDrill(options: {
   readonly negativeFeedback?: boolean;
   readonly sceneAvailable?: boolean;
   readonly speechAvailable?: boolean;
+  readonly privacyAllowed?: boolean;
   readonly sessionId?: string | null;
   readonly replyLimits?: Readonly<Record<string, unknown>> | undefined;
+  /**
+   * The 读空气 seam (the console passes the model-backed one). Omitted in tests → the
+   * deterministic recommendation decides, and the drill stays hermetic and free.
+   */
+  readonly decide?: ProactiveDecider | undefined;
   /** Same TTS seam the resident loop uses — the drill must *speak*, not only print (t74). */
   readonly synthesize?: ((text: string) => Promise<Buffer>) | undefined;
   readonly request: ProactiveDrillRequest;
@@ -3315,6 +3415,7 @@ export async function proactiveDrill(options: {
     settings: options.settings,
     clock: () => options.now,
     offsetMinutes: options.offsetMinutes,
+    decide: options.decide,
   });
   let delivered: string | null = null;
   const outcome = await engine.consider({
@@ -3326,6 +3427,7 @@ export async function proactiveDrill(options: {
     negativeFeedback: options.negativeFeedback,
     sceneAvailable: options.sceneAvailable,
     speechAvailable: options.speechAvailable,
+    privacyAllowed: options.privacyAllowed,
     sessionId: options.sessionId ?? null,
     deliver: (delivery) => {
       delivered = PROACTIVE_DRILL_LINES[delivery.trigger];
@@ -3362,6 +3464,11 @@ export async function proactiveDrill(options: {
     candidateId,
     score: outcome.score,
     threshold: outcome.threshold,
+    recommendation: outcome.recommendation,
+    primarySignalLabel: PROACTIVE_SIGNAL_LABELS[outcome.primarySignal === 'score' ? 'topic_quality' : outcome.primarySignal],
+    basis: outcome.basis,
+    decidedBy: outcome.decidedBy,
+    modelConsulted: outcome.modelConsulted,
     gates: proactiveGateRows(outcome.reasonCode),
     text: delivered,
     segments,
@@ -3381,14 +3488,15 @@ const PROACTIVE_GATE_NEXT_STEPS: Readonly<Record<ProactiveReasonCode, string>> =
   ALREADY_DELIVERED: '这是同一条候选（candidate_id 相同），按「最多说一次」的规矩不再重发；换一个 id 再试。',
   DND_ACTIVE: '西西现在处在安静模式：点「新会话」或 /resume 恢复后再试。',
   QUIET_HOURS: '现在在静默时段内（安全底线，接口不允许放宽）。把静默时段改到自己不在家的时段再试，或等过了这个时段。',
-  COOLDOWN_ACTIVE: '还在冷却里：等冷却走完，或把冷却分钟数调小（0 表示不等）。',
+  PRIVACY_BLOCKED: '隐私与同意没给：这是安全底线，先去设置里明确允许，再试（模型与接口都不能越过它）。',
   QUOTA_6H_EXCEEDED: '6 小时额度用完了：等窗口滚动，或把 6 小时额度调大。',
-  QUOTA_DAY_EXCEEDED: '当日额度用完了：等明天，或把当日额度调大。',
-  TOPIC_REPEATED: '同一个话题刚说过：把同主题抑制窗口调小，或换一个 topic_ref。',
-  CONVERSATION_ACTIVE: '正在对话里：等这一轮结束（或 FSM 回到 IDLE）再试。',
-  SCORE_BELOW_THRESHOLD: '分数不够：提高人格里的 proactivity（阈值 = 0.45 + 0.30 × (1 − proactivity)），或换一个更有价值的事件。',
+  QUOTA_DAY_EXCEEDED: '当日额度用完了（真正开口 + 问过模型的次数一起算）：等明天，或把当日额度调大。',
+  CONVERSATION_ACTIVE: '正在对话里：等这一轮结束（或 FSM 回到 IDLE）再试；热聊中接话用 conversation_continuation 这一类候选，不受这条限制。',
   SCENE_UNAVAILABLE: '场景不合适：等媒体播完 / 通话结束再试。',
   SPEECH_UNAVAILABLE: '语音输出不可用：检查 TTS/扬声器，或先只看文字。',
+  BELOW_RECOMMENDATION:
+    '社会预算建议不说：冷却/话题重复/未回应都只是扣分项，不是禁止——把这几项调小、换一个更有价值的话题，或让模型读空气后决定（模型可以在建议开口时说不）。',
+  MODEL_DECLINED: '模型读了空气，这次选择不说：看上面的「依据」行；想让它更愿意开口，可以提高主动性或换一个更相关的话题。',
   PASSED: '已开口。',
 });
 
@@ -4344,16 +4452,14 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
         `${day}-presence`,
         pickOfflineLine('presence_arrived', context),
         `在场投影：present=true（${freshness.reason}；更新于 ${presence?.updatedAt ?? '—'}）`,
-        // A greeting right after someone walks in is a strong candidate on every axis — and the
-        // numbers are the §15.4 ones, not a thumb on the scale to sneak past the threshold.
+        // A greeting right after someone walks in is a strong candidate on every axis — and these are
+        // the P5 social-budget signals (pack §14.2), not a thumb on the scale to sneak past the bar.
         {
-          event_salience: 1,
-          social_value: 1,
-          novelty: 0.8,
-          memory_relevance: 0.6,
-          time_since_last_interaction: 1,
-          user_receptiveness: 0.9,
-          future_hook_bonus: 0.5,
+          topic_quality: 0.8,
+          personal_relevance: 0.9,
+          freshness: 1,
+          receptivity: 0.9,
+          engagement: 0.8,
         },
       ),
     );
@@ -4370,26 +4476,16 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
         `${day}-dangling-${Math.floor(minutes / 30)}`,
         line,
         `事件日志：上一条 user 轮次在 ${context.lastUserTurnAt?.toISOString() ?? '（这个库还没有轮次）'}`,
-        // t74: this used to sum to 0.30 — below the 0.45 floor, so 「对话悬着」 could *never*
-        // speak no matter how proactivity was tuned. The values below are the §15.4 ones read
-        // properly for this situation, not a thumb on the scale:
+        // t74: this used to sum to 0.30 — below the old 0.45 floor, so 「对话悬着」 could *never*
+        // speak no matter how proactivity was tuned. P5 reads the situation properly instead
+        // (checking in on someone after a long silence is high-quality and about them; nothing is
+        // fresh and the room has gone quiet, which is what the two low signals say):
         {
-          // An unfinished thread is a real event (方案 §16 lists it as a trigger source); 0.5
-          // would be something dramatic happening, which is not the case here.
-          event_salience: 0.7,
-          // Checking in on someone after a long silence is the highest-value thing a companion
-          // can do — this is what the trigger exists for.
-          social_value: 1,
-          // The line refers to what the user last said, which we have in the log.
-          memory_relevance: 0.8,
-          // Nothing new has happened, so novelty is genuinely low.
-          novelty: 0.3,
-          // By construction: the candidate is only built after PROACTIVE_DANGLING_AFTER_MINUTES.
-          time_since_last_interaction: 1,
-          // Nothing says they are busy (no DND, no in-flight turn) — the gates still check.
-          user_receptiveness: 0.8,
-          // An unfinished thread is usually an open hook ("那件事回头再说").
-          future_hook_bonus: 0.3,
+          topic_quality: 0.85,
+          personal_relevance: 0.8,
+          freshness: 0.4,
+          receptivity: 0.7,
+          engagement: 0.3,
         },
       ),
     );
@@ -4405,20 +4501,13 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
         hook.line,
         `时钟：本地时间 ${formatClockMinutes(minutes)} 命中固定钩子 ${formatClockMinutes(hook.minutes)}`,
         // t74: this used to sum to 0.32 — same dead-end as the dangling candidate. A hook that
-        // *we* promised to bring up is exactly what §15.4's `future_hook_bonus` is for:
+        // *we* promised to bring up is exactly what a strong topic + relevance is for:
         {
-          // A due hook is worth more than background noise; 0.9 = "this is why it is speaking".
-          event_salience: 0.9,
-          // The full bonus: this candidate exists because of a future hook.
-          future_hook_bonus: 1,
-          // It is a scheduled, expected moment, so addressing the user is appropriate.
-          social_value: 0.9,
-          // …and it was their own request, so they are receptive to hearing it.
-          user_receptiveness: 0.9,
-          // It refers back to something the user asked us to remember.
-          memory_relevance: 0.8,
-          // Some time has passed since the last interaction (the hook is a clock event).
-          time_since_last_interaction: 0.6,
+          topic_quality: 0.9,
+          personal_relevance: 0.9,
+          freshness: 0.7,
+          receptivity: 0.85,
+          engagement: 0.6,
         },
         hook.intent,
       ),
@@ -4437,15 +4526,13 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
         `你前面提到「${snippet}」，要不接着说两句？`,
         `事件日志：最近的用户轮次说过「${snippet}」`,
         // The topic *is* memory, and re-opening it with the person who mentioned it is valuable;
-        // salience is lower than a live event because nothing happened just now.
+        // quality is a little lower than a live event because nothing happened just now.
         {
-          memory_relevance: 1,
-          social_value: 0.9,
-          event_salience: 0.6,
-          novelty: 0.5,
-          time_since_last_interaction: 0.7,
-          user_receptiveness: 0.9,
-          future_hook_bonus: 0.4,
+          topic_quality: 0.8,
+          personal_relevance: 0.9,
+          freshness: 0.5,
+          receptivity: 0.8,
+          engagement: 0.7,
         },
       ),
     );
@@ -4463,17 +4550,14 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
         pickOfflineLine('random_smalltalk', context),
         '随机闲聊：没有具体事件，只是低概率自发说一句（面板可单独关）',
         {
-          // Nothing happened — that is the point of this source, so salience stays low.
-          event_salience: 0.6,
-          // Talking to family with no agenda is the highest social value there is…
-          social_value: 1,
-          // …and it is new (nothing has been said for a while).
-          novelty: 0.8,
-          // Usually a while since the last exchange, otherwise the gates would have blocked it.
-          time_since_last_interaction: 1,
-          // Low: no memory thread is being continued.
-          memory_relevance: 0.5,
-          user_receptiveness: 0.8,
+          // Nothing happened — that is the point of this source, so quality stays low…
+          topic_quality: 0.3,
+          // …and it is not about anything the household did either.
+          personal_relevance: 0.4,
+          // It *is* new, in the sense that nothing else is going on.
+          freshness: 0.6,
+          receptivity: 0.7,
+          engagement: 0.6,
         },
       ),
     );
@@ -4538,8 +4622,10 @@ export function triggerScoreCeiling(now: Date, recentTopic = '明天要去医院
     limit: 8,
   });
   for (const plan of rich) {
-    // `proactivity = 1.0` is the floor of the threshold curve: 0.45 + 0.30 × (1 − 1.0).
-    const score = scoreProactiveCandidate(plan.candidate.components);
+    // `proactivity = 1.0` is the floor of the threshold curve (0.45), and it also supplies the
+    // budget's `base_proactivity` term at its maximum — both halves of "could this trigger ever
+    // speak, at the most proactive setting there is".
+    const score = scoreProactiveCandidate({ ...plan.candidate.components, base_proactivity: 1 });
     const current = ceiling[plan.candidate.trigger];
     ceiling[plan.candidate.trigger] = current === null ? score : Math.max(current, score);
   }
@@ -4574,6 +4660,14 @@ export interface ProactiveLoopEntry {  readonly at: string;
   readonly nextStep: string;
   readonly score: number;
   readonly threshold: number;
+  /** What the social budget suggested (the model may have decided otherwise). */
+  readonly recommendation: 'speak' | 'hold';
+  /** The heaviest signal behind the decision, in Chinese (program-rendered). */
+  readonly primarySignalLabel: string;
+  /** The auditable 依据 lines: numbers from the program, never model prose (铁律 5). */
+  readonly basis: readonly string[];
+  readonly decidedBy: 'program' | 'model';
+  readonly modelConsulted: boolean;
   readonly gates: readonly ProactiveGateRow[];
   readonly text: string | null;
   readonly segments: readonly string[];
@@ -4641,6 +4735,13 @@ export interface ProactiveLoopOptions {
    * to speak"; it can never be what made the decision.
    */
   readonly compose?: ((input: ProactiveComposeInput) => Promise<ProactiveComposedContent>) | undefined;
+  /**
+   * P5 读空气 (ADR-0011): the model's "say it or not" seam. It is called **only** for candidates
+   * the social budget already recommends speaking about, and the call is charged to the daily
+   * budget (`model_consulted`). Absent → the deterministic recommendation decides, which is what
+   * keeps the offline tests hermetic and free.
+   */
+  readonly decide?: ProactiveDecider | undefined;
   readonly intervalMs?: number | undefined;
   readonly now?: (() => Date) | undefined;
   readonly log?: ((line: string) => void) | undefined;
@@ -4776,7 +4877,19 @@ export class ProactiveLoop {
      */
     let contentToolName: string | null = null;
     let contentNote: string | null = this.#options.compose === undefined ? '离线/无密钥：用固定短句兜底（内容不经过模型）。' : null;
-    const engine = new ProactiveEngine({ store: this.#options.store, settings, clock: () => now });
+    const engine = new ProactiveEngine({
+      store: this.#options.store,
+      settings,
+      clock: () => now,
+      /**
+       * P5 读空气 (ADR-0011): above the hard floor the **model** decides whether to speak.
+       * The seam is only reached for candidates the social budget already considers worth it
+       * (`recommendation === 'speak'`), so an obviously-bad moment costs nothing; each call that
+       * does happen is recorded as `model_consulted: true` and charged to the daily budget.
+       * No `decide` provider (offline/无密钥) → the deterministic recommendation decides.
+       */
+      decide: this.#options.decide,
+    });
     const outcome = await engine.consider({
       candidate: plan.candidate,
       at: now,
@@ -4885,6 +4998,11 @@ export class ProactiveLoop {
       nextStep: PROACTIVE_GATE_NEXT_STEPS[outcome.reasonCode],
       score: outcome.score,
       threshold: outcome.threshold,
+      recommendation: outcome.recommendation,
+      primarySignalLabel: PROACTIVE_SIGNAL_LABELS[outcome.primarySignal === 'score' ? 'topic_quality' : outcome.primarySignal],
+      basis: outcome.basis,
+      decidedBy: outcome.decidedBy,
+      modelConsulted: outcome.modelConsulted,
       gates: proactiveGateRows(outcome.reasonCode),
       text: delivered,
       segments,
@@ -5004,8 +5122,92 @@ export function createModelComposer(options: {
   };
 }
 
-/** Recent *user* utterances, newest first — the fact behind 「话题池」 (t74). */
-export function recentUserTopics(store: XixiStore, sessionId?: string | null, limit = 5): string[] {
+/**
+ * The 读空气 directive (pack §14.1 / ADR-0011 §决定 2).
+ *
+ * It carries the deterministic 依据 (the same lines the audit stores) and asks for **one JSON
+ * object** — the model's answer is a decision plus one code from the fixed allowlist, never prose
+ * (铁律 5).
+ */
+export function proactiveDecideDirective(input: ProactiveModelInput): string {
+  return [
+    '（这是「要不要主动开口」的判断，不是用户在说话；请只回一个 JSON 对象，不要解释、不要多余文字。）',
+    `触发源：${input.candidate.trigger}（${PROACTIVE_INITIATIVE_LABELS[input.initiativeKind]}）；意图：${input.candidate.intent ?? '—'}。`,
+    '确定性依据：',
+    ...input.basis.map((line) => `- ${line}`),
+    `程序建议：${input.recommendation === 'speak' ? '可以开口，但由你最终决定' : '建议这次不说'}。`,
+    '你要读空气：现在真的适合开口吗？对方像是在忙、在休息、刚说过不想聊，就选择不说。',
+    `只回：{"speak":true|false,"reason_code":"<${PROACTIVE_MODEL_REASON_CODES.join('|')}>"}`,
+  ].join('\n');
+}
+
+/**
+ * Parse the model's decision out of its text.
+ *
+ * Anything unusable returns `null` — the caller then falls back to the deterministic
+ * recommendation and records `unspecified`, so a chatty or broken answer can never be read as a
+ * hidden "yes".
+ */
+export function parseProactiveDecisionText(raw: string): ProactiveModelDecision | null {
+  const match = /\{[\s\S]*?\}/.exec(raw);
+  if (match === null) return null;
+  try {
+    const parsed = JSON.parse(match[0]) as Record<string, unknown>;
+    if (typeof parsed['speak'] !== 'boolean') return null;
+    const reason = parsed['reason_code'];
+    return { speak: parsed['speak'], reasonCode: typeof reason === 'string' ? reason : 'unspecified' };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The console's model-backed 读空气 seam.
+ *
+ * Real call, through the same prompt + adapter path a reply uses, and **only** for candidates the
+ * social budget recommends (the engine never asks otherwise). Without a key it answers with the
+ * recommendation itself, which keeps the offline console hermetic and free of API calls.
+ */
+export function createModelDecider(options: {
+  readonly engine: ConversationEngine;
+  readonly sessionId: () => string | null;
+  readonly available: boolean;
+  readonly timeoutMs?: number;
+  readonly log?: ((line: string) => void) | undefined;
+}): ProactiveDecider {
+  return async (input: ProactiveModelInput): Promise<ProactiveModelDecision> => {
+    if (!options.available) {
+      return { speak: input.recommendation === 'speak', reasonCode: input.recommendation === 'speak' ? 'good_moment' : 'not_worth_it' };
+    }
+    const sessionId = options.sessionId();
+    if (sessionId === null) return { speak: false, reasonCode: 'wrong_moment' };
+    const directive = proactiveDecideDirective(input);
+    const prompt = options.engine.buildPrompt({ sessionId, text: directive, addressed: true, at: input.now });
+    const stream = await options.engine.adapter.handleUserTurn({
+      sessionId,
+      text: directive,
+      prompt,
+      timeoutMs: options.timeoutMs ?? 20_000,
+    });
+    for await (const chunk of stream) void chunk;
+    const result = await stream.result;
+    const parsed = parseProactiveDecisionText(typeof result.text === 'string' ? result.text : '');
+    if (parsed === null) {
+      options.log?.(
+        `[proactive] 读空气：模型没给出可解析的 JSON（action=${result.action}）——按确定性建议「${
+          input.recommendation === 'speak' ? '开口' : '不说'
+        }」处理，审计里记 unspecified`,
+      );
+      return { speak: input.recommendation === 'speak', reasonCode: 'unspecified' };
+    }
+    options.log?.(
+      `[proactive] 读空气：模型选择${parsed.speak ? '开口' : '不说'}（${PROACTIVE_MODEL_REASON_LABELS[parsed.reasonCode as ProactiveModelReasonCode] ?? parsed.reasonCode}）`,
+    );
+    return parsed;
+  };
+}
+
+/** Recent *user* utterances, newest first — the fact behind 「话题池」 (t74). */export function recentUserTopics(store: XixiStore, sessionId?: string | null, limit = 5): string[] {
   const events = store.readEvents({
     type: 'conversation.turn',
     ...(sessionId === undefined || sessionId === null ? {} : { sessionId }),
@@ -5129,21 +5331,21 @@ export function proactivePanelHtml(): string {
   const id = PROACTIVE_PANEL_IDS;
   return `  <section class="card" id="${id.card}">
     <h2>主动性（主动开口的开关与强度）</h2>
-    <div class="muted">这一块决定「西西什么时候可以主动开口」。<b>九道硬门禁由程序判定</b>——这里的旋钮只改阈值与额度，放宽不了门禁本身（尤其是静默时段）。保存后<b>立即生效</b>，并入一条审计记录（重启后仍是这套值）。</div>
+    <div class="muted">这一块决定「西西什么时候可以主动开口」。分两层：<b>硬底线由程序判定</b>（静默时段、6 小时与当日额度、安静模式、隐私与同意）——这些旋钮放宽不了它们；底线之上<b>由模型读空气决定说不说</b>，下面这些分数只提供候选与依据（冷却、话题重复、未回应都是<b>扣分项，不是禁止</b>）。保存后<b>立即生效</b>，并入一条审计记录（重启后仍是这套值）。</div>
     <div style="margin:8px 0"><label><input type="checkbox" id="${id.enabled}" /> 允许西西主动开口</label> <span class="muted" id="${id.summary}">加载中…</span></div>
     <div class="px-grid">
-      <label>冷却（分钟）<input type="number" id="${id.cooldown}" min="0" max="1440" /></label>
+      <label>打扰代价衰减（分钟）<input type="number" id="${id.cooldown}" min="0" max="1440" /></label>
       <label>6 小时额度<input type="number" id="${id.per6h}" min="0" max="100" /></label>
       <label>当日额度<input type="number" id="${id.perDay}" min="0" max="100" /></label>
       <label>静默时段起<input type="text" id="${id.quietStart}" placeholder="22:30" /></label>
       <label>静默时段止<input type="text" id="${id.quietEnd}" placeholder="07:00" /></label>
-      <label>同主题抑制（小时）<input type="number" id="${id.topic}" min="0" max="720" /></label>
+      <label>同话题窗口（小时）<input type="number" id="${id.topic}" min="0" max="720" /></label>
       <label>负面反馈倍率<input type="number" id="${id.negative}" min="1" max="10" step="0.5" /></label>
       <label>主动性总强度（人格 proactivity）<input type="number" id="${id.proactivity}" min="0" max="1" step="0.05" /></label>
       <label>话痨程度（人格 talkativeness）<input type="number" id="${id.talkativeness}" min="0" max="1" step="0.05" /></label>
       <label>话的长度（人格 verbosity）<input type="number" id="${id.verbosity}" min="0" max="1" step="0.05" /></label>
     </div>
-    <div class="muted">上面三个是<b>人格</b>值（进 <code>self_profile</code>，留 <code>self_profile_history</code>）：主动性只把阈值改成 <code>0.45 + 0.30 × (1 − proactivity)</code>，<b>一道门禁都不会被跳过</b>；话痨/话长直接改提示词里的说话方式。当前生效值：主动性 <b id="${id.proactivityNow}">—</b>、话痨 <b id="${id.talkativenessNow}">—</b>、话长 <b id="${id.verbosityNow}">—</b></div>
+    <div class="muted">上面三个是<b>人格</b>值（进 <code>self_profile</code>，留 <code>self_profile_history</code>）：主动性只把<b>建议线</b>改成 <code>0.45 + 0.30 × (1 − proactivity)</code>，<b>硬底线一道都不会被跳过</b>，模型也可以对建议说「不说」；话痨/话长直接改提示词里的说话方式。当前生效值：主动性 <b id="${id.proactivityNow}">—</b>、话痨 <b id="${id.talkativenessNow}">—</b>、话长 <b id="${id.verbosityNow}">—</b></div>
     <div id="${id.triggers}" class="px-triggers"></div>
     <div style="margin:10px 0">
       <button id="${id.save}" class="primary">保存（立即生效并落库）</button>
