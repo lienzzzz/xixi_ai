@@ -182,8 +182,15 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
 
 两条经常被问到的推论（README 的快速开始就靠它们）：
 
-- **跨重启有效**：两种写入都落同一张 SQLite 表 `self_profile`，所以 `npm run chat -- --personality …`
-  的效果**不是命令行里的临时开关**——它写进库，进程重启、换入口（`chat` / `web` / `voice-turn`）都还在。
+- **同一入口下跨重启有效**：两种写入都落该入口自己的 SQLite 文件里的 `self_profile` 表，所以
+  `npm run chat -- --personality …` 的效果**不是命令行里的临时开关**——它写进库，同一个入口重启后还在。
+  **它不跨入口**：四个入口各自打开自己的库，`--personality` 只改它当时写的那一个
+  （`scripts/chat.ts` → `data/chat/`、`scripts/serve-chat.ts` → `data/web-chat/`、`scripts/voice-turn.ts` → `data/voice/`、
+  `scripts/field-test.ts` → `data/field-test/`；核对：`git grep -n "openXixiStore" -- scripts`）。
+  也就是说「在 chat 里改过人格，打开试用页也是新人格」**不成立**——要么在另一个入口再覆盖一次，
+  要么把 `config/xixi.example.yaml` 的基线改掉再让各入口 `seedSelfProfile` 补上（见 §5.3 `self_profile` 与本节上面的两张写入方式表）。
+  > 修正记录：这条推论原写作「换入口（chat / web / voice-turn）都还在」，是错的——四个入口用四个不同的数据库文件，
+  > 覆盖的可见范围止于写入它的那个入口。
 - **回基线要再覆盖一次**：没有「撤销」命令。`seedSelfProfile` 是 `DO NOTHING`（只补缺、绝不覆盖已有的行），
   所以想让某个属性回到 `config:base` 的基线值，必须**再用 `--personality` 显式写回那个值**；
   想查/回滚逐条变更则读 `self_profile_history`（每条覆盖都带 `before_value` 与 `source_type`）。

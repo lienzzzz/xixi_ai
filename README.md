@@ -37,12 +37,14 @@ Copy-Item .env.example .env                   # 填入 MIMO_API_KEY（.env 已�
 npm run field-test                            # 👉 一条命令的现场测试控制台：http://127.0.0.1:8792
                                               #    麦克风电平/噪声底 + 摄像头在场 + 每轮延迟与动作 + 设备验收引导
 npm run web                                   # 试用对话页：http://127.0.0.1:8791（含按住🎤语音输入）
-npm test                                      # 全部离线测试，不花 API 费用（2026-09-30 实测 139 项；
-                                              #   耗时以实跑为准、门禁目标 <25s，近期实测 21–39s 视负载而定）
+npm test                                      # 全部离线测试，不花 API 费用（2026-09-30 实测 180 项：
+                                              #   unit 124 + integration 30 + perception 11 + console 15；
+                                              #   耗时以实跑为准——空载约 14–16s、同机有并发约 18s，不设秒数目标）
 npm run chat                                  # 终端对话（直连 MiMo 实时路径）
 npm run chat -- --personality verbosity=0.1,talkativeness=0.2
                                               # ↑ 人格的**持久化行政覆盖**：写进 self_profile（含 self_profile_history），
-                                              #   重启后仍然生效；要回基线就再覆盖一次（没有「撤销」命令）。
+                                              #   重启后仍然生效；**但不跨入口**——`chat` / `web` / `voice-turn` / 现场测试
+                                              #   各用各自的 SQLite 文件。要回基线就再覆盖一次（没有「撤销」命令）。
                                               #   详见 docs/design/domain-model.md §6「人格属性与两种写入方式」
 npm run demo:m0:text                          # 离线单轮演示（FakeBrainAdapter）
 npm run voice:turn -- --wav tests/audio-fixtures/direct-question.wav   # 语音闭环
@@ -59,7 +61,7 @@ npm run eval:conversation:judge                # 对话质量评测（含评审�
 ```powershell
 npm run field-test                        # 打开控制台：页面按「麦克风 → 扬声器 → 摄像头」引导自检
 npm run field-test -- --offline           # 没有密钥也能看页面与跑设备自检（ASR/模型用替身）
-node scripts/field-test.ts --self-test    # 离线自检：隐私 / 多段语音 / 页面 / 报告，31 项，不碰硬件
+node scripts/field-test.ts --self-test    # 离线自检：隐私 / 多段语音 / 页面 / 报告，31 项（不碰硬件；项数以末行为准）
 node scripts/field-test.ts --acceptance   # 只跑一次真机验收，重写 docs/recon/field-test-report-<日期>.md
 ```
 
