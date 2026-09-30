@@ -305,20 +305,23 @@ compat: { thinkingFormat: deepseek, requiresReasoningContentOnAssistantMessages:
 
 **台账口径（把结论限定成事实，t114 的 F3）**：扫三个库的 `conversation.turn`（`data/chat`、`data/field-test`、`data/web-chat`），
 含具体值的 assistant 轮共 **4 条，全部伴随 `xixi_get_weather`**（10:04 / 11:12 / 13:02 / 15:05）；
-另有 **7 条**含具体值却 `tool_name=null` 的轮次（`data/chat` 6 条：07:57×2、08:16×4、08:17；`data/field-test` 1 条：11:12:54）。
-**这 7 条全部发生在修复（约 19:55）之前，不会被追溯修改**——台账是当时发生的事实记录，修的是「从现在起不再发生」。
+另有 **8 条**含具体值却 `tool_name=null` 的轮次（判据：含具体值**且** `tool_name=null` 的 assistant 轮，**三个库都要扫**——
+`data/chat` 6 条：07:57×2、08:16×4、08:17；`data/field-test` 1 条：11:12:54；**`data/web-chat` 1 条：10:09:40**）。
+**这 8 条全部发生在修复（约 19:55）之前，不会被追溯修改**——台账是当时发生的事实记录，修的是「从现在起不再发生」。
 **这些库里没有任何修复之后的轮次**，所以「修复之后零违规」只在 t111 自己的运行窗口（它用的是 `%TEMP%` 下的临时库）
 与离线探针上成立，**不能在仓库台账上证实**；「4 条全部伴随工具」说的也是那 4 条**修复前**的轮次（它们恰好都调用了工具）。
-复算命令（评审 t114 的脚本，扫 `data/chat` 与 `data/field-test` 两个库）：
+复算命令（评审 t114 的脚本；**它只扫两个库，复算时必须把 `data/web-chat` 也扫上**）：
 
 ```powershell
 node data/rev-tmp/t114-invariant.mjs   # 末几行给出每库「含具体值的轮次：伴随工具 N / 无工具 M」与 tool_name 分布
 ```
 
-它当前打印：`data/chat` 伴随工具 1 / 无工具 **6**；`data/field-test` 伴随工具 2 / 无工具 **1** —— 即上面那 7 条。
+它当前只扫 `data/chat` 与 `data/field-test`，打印「伴随工具 1 / 无工具 **6**」与「伴随工具 2 / 无工具 **1**」；
+**复算时三个库都要扫，否则会少一条无工具的（`data/web-chat` 10:09:40）和一条伴随工具的（`data/web-chat` 10:04）**——
+三个库一起扫的结果是「伴随工具 **4** / 无工具 **8**」，与上面两句逐字对应。
 等价的一次性查询是 `select timestamp, payload_json from events where event_type='conversation.turn'`
-（只取 `payload_json.role='assistant'`），再用同一个 `findUnbackedFactClaims()` 判 `payload_json.text`；
-`data/web-chat` 那一条（10:04，伴随 `xixi_get_weather`）不在该脚本的扫描范围内，所以「4 条伴随工具」要三个库一起数才成立。
+（只取 `payload_json.role='assistant'`），对 `data/chat`、`data/field-test`、`data/web-chat` **三个库各跑一次**，
+再用同一个 `findUnbackedFactClaims()` 判 `payload_json.text`，并用 `payload_json.tool_name` 判有没有工具调用。
 
 ## 2b. 评审与验证汇总（本轮）
 
