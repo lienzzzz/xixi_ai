@@ -192,9 +192,13 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
   现场测试控制台的库路径由 `createFieldServer` 的 `dataDir` / `presenceDataDir` 选项决定
   （自检与测试用它指向临时库；**目前没有 CLI 开关，`--help` 里也没有**，默认分别是 `data/field-test` 与 `data/`；
   **以上以当前实现为准**——若日后把这两个选项做成 CLI 开关，本节须同步改写）。
-  注意 `main()` 对未知参数**静默忽略**（只认 `--port` / `--offline` / `--no-tts` / `--dsh` / `--no-open` /
-  `--self-test` / `--acceptance` / `--help`；核对：`git grep -n "argv.includes\|valueOf(" -- scripts/field-test.ts`），
-  所以**别把不存在的开关写进操作说明**——要换库就直接挪目录，或在代码里传 `createFieldServer` 的选项。
+  核对（2026-09-30 实测，两条都可重跑）：`git grep -n -o -- "'--[a-z-]*'" -- scripts/field-test.ts` 只列出
+  `--help` / `--self-test` / `--acceptance` / `--port` / `--offline` / `--no-tts` / `--dsh` / `--no-open` 八个开关，
+  `valueOf()` 只用于 `--port`；`git grep -n -- "data-dir" -- scripts packages apps` **无命中**。
+  另外要区分两类「静默忽略」：`main()` 对**命令行未知参数**不校验（`--data-dir …` 会被直接忽略、照常启动），
+  而 t63 修的是**HTTP 请求体里的未知字段**（`applyProactiveSettingsPatch` 的白名单会给出具名中文拒绝）——
+  **API 侧已修，CLI 侧尚未**，别把两者混为一谈。
+  所以要换库就直接挪目录，或在代码里传 `createFieldServer` 的选项；**别把不存在的开关写进操作说明**。
   `voice-turn` 固定 `data/voice`。覆盖只改「哪个文件」，**不改变「不跨入口」这条结论**。
   也就是说「在 chat 里改过人格，打开试用页也是新人格」**不成立**——要么在另一个入口再覆盖一次，
   要么把 `config/xixi.example.yaml` 的基线改掉再让各入口 `seedSelfProfile` 补上（见 §5.3 `self_profile` 与本节上面的两张写入方式表）。
