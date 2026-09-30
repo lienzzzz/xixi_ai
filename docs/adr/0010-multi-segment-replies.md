@@ -44,13 +44,14 @@
 - 现状（订正 2026-09-30）：**引擎侧已有**分段上限与段间间隔——`ConversationEngine.respond` 在写完那条 assistant
   记录之后、`fsm.onReplyCompleted()` 之前逐段 await `RespondHooks.onSegment`（时序见
   [`conversation.md`](../design/conversation.md) §5 的 ⑨′ 步），间隔作为播放器参数随每段下发。
-  **语音侧仍未接线**：`scripts/` 的入口只传 `onTextChunk`，把整段交给它一次合成，所以真机上「一口气说完」
-  的现象还在，本 ADR 的语义目前只在引擎侧成立。
+  **播放侧仍未接线**：没有任何生产入口传 `onSegment`（见归属段的核对命令），TTS 仍是 `synthesize(turn.text)`
+  一次合成整段；分段器可以被界面层直接调用来做分段展示，但真机听到的还是一整段。
 - 当初的触发点（本轮实测）：单段长回复在真机上的表现是「一口气说完」，用户插不上话，也更容易被 `[静默]`
   兜底逻辑当成一整段处理。
 - 已发布契约必须保持不变：`conversation.turn.v1` / `conversation.decision.v1` 都是 `additionalProperties: false`，
   所以「多段」**不能**变成「多条轮次事件」，否则 `turn_index`、工作记忆与跟进窗口的语义都会被改掉（铁律 10 也要求新增而非就地改）。
-- 语音侧（ADR-0007/ADR-0008）已能按段合成与播放：间隔是播放器参数，不需要新的模型能力——这是把它做成程序契约的前提。
+- 当初的前提（订正 2026-09-30：**这条前提尚未兑现**）：语音侧（ADR-0007/ADR-0008）按段合成与播放只需要一个
+  播放器参数（段间间隔），不需要新的模型能力——这是把它做成程序契约的前提。实际接线见上一条。
 - 「更自然」的目标不能靠「多段」本身实现：段数没有上限时，一段回复可以被切成十几段，反而更像机器人在刷屏。
   因此上限定为 3 段，并要求 M8 的打断窗口始终存在。
 
@@ -64,9 +65,12 @@
 
 ## Consequences
 
-- M5 需要：一个确定性分段器（纯函数，可单测，覆盖 M1/M2/M4/M5 的边界）、播放器支持段间 `gapMs`、
-  以及「一轮只推进一次」的断言（M6/M7/M8）。
+- **已落地**（订正 2026-09-30）：一个确定性分段器（纯函数，覆盖 M1/M2/M4/M5 的边界）、`RespondHooks.onSegment`
+  的逐段播放（含段间 `gapMs`），以及「一轮只推进一次」的断言（M6/M7/M8）——见
+  `tests/unit/core/reply-segments.test.ts` 与 `tests/integration/conversation-engine.test.ts`。
+- **仍需**：把音频出口接到 `onSegment`——目前没有任何生产入口传它（见归属段的核对命令），TTS 仍整段合成。
 - **事件契约无需改动**：`conversation.turn` 与 `conversation.decision` 的形状不变，既有审计测试继续成立。
-- `config/xixi.example.yaml` 的 `reply` 段同样是**声明**：目前没有代码读取它（与 `proactive` 段处境相同），
-  实现时必须先接线并补测试，否则就是「配置承诺了不存在的行为」。
-- 打扰风险：3 段 × 60 字 ≈ 180 字是上限；超过就应改进内容组织，而不是继续加段。
+- `config/xixi.example.yaml` 的 `reply` 段已被读取：`packages/conversation/src/segments.ts` 的 `resolveReplyLimits()`
+  只在上限内夹紧，`ConversationEngine` 构造时读入；改本 ADR 的上限或默认值时必须同步改它，否则两边不一致。
+- 打扰风险：3 段 × 60 字 = 180 字是**能同时满足两个上限**的容量；更长的回复按第 3 条的例外处理（不丢字、尾部合并），
+  理想做法仍是改进内容组织，而不是继续加段。

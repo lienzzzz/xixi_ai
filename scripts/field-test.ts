@@ -2028,6 +2028,44 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
           json(response, 200, await readEndpoints(url.searchParams.get('force') === '1'));
           return;
         }
+        if (request.method === 'GET' && url.pathname === '/api/field/proactive') {
+          json(response, 200, proactivePayload());
+          return;
+        }
+        if (request.method === 'POST' && url.pathname === '/api/field/proactive/settings') {
+          const body = await readJsonBody(request);
+          const patched = applyProactiveSettingsPatch(proactiveSnapshot.settings, body);
+          if (patched.changes.length > 0) {
+            const event = persistProactiveSettings(store, patched.settings, patched.changes);
+            proactiveSnapshot = {
+              settings: patched.settings,
+              source: 'console',
+              updatedAt: event.timestamp,
+              changes: patched.changes,
+            };
+            log(`[proactive] 设置已更新（事件 #${event.sequence}）：${patched.changes.join('；')}`);
+          }
+          json(response, 200, { ok: true, changes: patched.changes, rejected: patched.rejected, state: proactivePayload() });
+          return;
+        }
+        if (request.method === 'POST' && url.pathname === '/api/field/proactive/drill') {
+          const body = await readJsonBody(request);
+          const now = new Date();
+          const drill = await proactiveDrill({
+            store,
+            settings: proactiveSnapshot.settings,
+            now,
+            conversationState: engine.state,
+            inFlightTurn: false,
+            proactivity: effectiveProactivity(store.selfProfile()),
+            sessionId: latestSessionId(),
+            replyLimits: config.reply,
+            request: body,
+          });
+          log(`[proactive] 演练 ${drill.trigger} → ${drill.reasonCode}（分数 ${drill.score}/${drill.threshold}${drill.speak ? `，分 ${drill.segments.length} 段` : ''}）`);
+          json(response, 200, { ok: true, drill, state: proactivePayload() });
+          return;
+        }
         if (request.method === 'POST' && url.pathname === '/api/field/acceptance') {
           if (acceptanceRunning) {
             json(response, 409, { ok: false, error: { code: 'BUSY', message: '设备自检正在跑，请等它结束', hint: '大约需要 10–20 秒（麦克风 3 秒 + 扬声器播放 + 摄像头取 15 帧）' } });
@@ -2831,6 +2869,212 @@ export function effectiveProactivity(profile: Readonly<Record<string, unknown>> 
   const value = profile?.['proactivity'];
   return typeof value === 'number' && Number.isFinite(value) ? value : DEFAULT_PROACTIVITY;
 }
+
+/** Element ids of the proactive card, shared by both pages (so the tests can assert them). */
+export const PROACTIVE_PANEL_IDS = Object.freeze({
+  card: 'px-card',
+  enabled: 'px-enabled',
+  cooldown: 'px-cooldown',
+  per6h: 'px-6h',
+  perDay: 'px-day',
+  quietStart: 'px-quiet-start',
+  quietEnd: 'px-quiet-end',
+  topic: 'px-topic',
+  negative: 'px-neg',
+  triggers: 'px-triggers',
+  save: 'px-save',
+  off: 'px-off',
+  drill: 'px-drill',
+  status: 'px-status',
+  result: 'px-result',
+  gates: 'px-gates',
+  log: 'px-log',
+  audit: 'px-audit',
+  summary: 'px-summary',
+});
+
+/**
+ * The proactive card, identical on both pages.
+ *
+ * The copy is deliberate: a user tuning "怎么更主动" must see that the gates are *not*
+ * part of the knob set. The gate table below the buttons is the answer to 「为什么这次没开口」.
+ */
+export function proactivePanelHtml(): string {
+  const id = PROACTIVE_PANEL_IDS;
+  return `  <section class="card" id="${id.card}">
+    <h2>主动性（主动开口的开关与强度）</h2>
+    <div class="muted">这一块决定「西西什么时候可以主动开口」。<b>九道硬门禁由程序判定</b>——这里的旋钮只改阈值与额度，放宽不了门禁本身（尤其是静默时段）。保存后<b>立即生效</b>，并入一条审计记录（重启后仍是这套值）。</div>
+    <div style="margin:8px 0"><label><input type="checkbox" id="${id.enabled}" /> 允许西西主动开口</label> <span class="muted" id="${id.summary}">加载中…</span></div>
+    <div class="px-grid">
+      <label>冷却（分钟）<input type="number" id="${id.cooldown}" min="0" max="1440" /></label>
+      <label>6 小时额度<input type="number" id="${id.per6h}" min="0" max="100" /></label>
+      <label>当日额度<input type="number" id="${id.perDay}" min="0" max="100" /></label>
+      <label>静默时段起<input type="text" id="${id.quietStart}" placeholder="22:30" /></label>
+      <label>静默时段止<input type="text" id="${id.quietEnd}" placeholder="07:00" /></label>
+      <label>同主题抑制（小时）<input type="number" id="${id.topic}" min="0" max="720" /></label>
+      <label>负面反馈倍率<input type="number" id="${id.negative}" min="1" max="10" step="0.5" /></label>
+    </div>
+    <div id="${id.triggers}" class="px-triggers"></div>
+    <div style="margin:10px 0">
+      <button id="${id.save}" class="primary">保存（立即生效并落库）</button>
+      <button id="${id.off}">一键关闭主动开口</button>
+      <button id="${id.drill}">试一次主动开口（演练）</button>
+      <span class="muted" id="${id.status}"></span>
+    </div>
+    <div id="${id.result}"></div>
+    <h3 style="margin:12px 0 4px; font-size:14px">每道门禁的判定（按引擎的固定顺序）</h3>
+    <div id="${id.gates}" class="muted">还没有判定记录。</div>
+    <h3 style="margin:12px 0 4px; font-size:14px">最近的考虑记录（来自事件日志，可审计）</h3>
+    <div id="${id.log}" class="muted">还没有考虑记录。</div>
+    <h3 style="margin:12px 0 4px; font-size:14px">设置变更审计</h3>
+    <div id="${id.audit}" class="muted">还没有变更记录。</div>
+  </section>
+`;
+}
+
+/**
+ * The proactive card's behaviour, shared by both pages.
+ *
+ * `apiBase` is `/api/field` on the console and `/api` on the trial page; the routes are the
+ * same. It is written as a plain script body (no modules) because both pages are single files
+ * with inline scripts.
+ */
+export function proactivePanelScript(apiBase: string): string {
+  const id = PROACTIVE_PANEL_IDS;
+  return `var PX = { base: ${JSON.stringify(apiBase)}, timers: [] };
+PX.ids = ${JSON.stringify(id)};
+function pxSet(name, value) { var node = document.getElementById(PX.ids[name]); if (node) node.value = value; }
+function pxVal(name) { var node = document.getElementById(PX.ids[name]); return node ? node.value : undefined; }
+function pxStatus(text, rejected) {
+  var node = document.getElementById(PX.ids.status);
+  if (!node) return;
+  node.textContent = text + (rejected && rejected.length ? '（已忽略：' + rejected.join('；') + '）' : '');
+}
+async function pxPost(path, body) {
+  var response = await fetch(PX.base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+  return await response.json();
+}
+function pxRender(state) {
+  var s = state.settings;
+  var box = document.getElementById(PX.ids.enabled);
+  if (box) box.checked = s.enabled === true;
+  pxSet('cooldown', s.baseCooldownMinutes); pxSet('per6h', s.maxPer6h); pxSet('perDay', s.maxPerDay);
+  pxSet('quietStart', state.quietHours.start); pxSet('quietEnd', state.quietHours.end);
+  pxSet('topic', s.topicRepeatWindowHours); pxSet('negative', s.negativeFeedbackCooldownMultiplier);
+  var summary = document.getElementById(PX.ids.summary);
+  if (summary) {
+    summary.textContent = (s.enabled ? '已开启' : '已关闭')
+      + '（来源：' + (state.source === 'console' ? '本页保存的值' : 'config/xixi.yaml') + '）'
+      + '｜阈值 ' + state.threshold + '（人格 proactivity=' + state.proactivity + '）'
+      + '｜静默 ' + state.quietHours.start + '–' + state.quietHours.end + (state.quietHours.activeNow ? '（现在就在静默里）' : '')
+      + '｜已开口 ' + state.usage.deliveries + ' 次（今日 ' + state.usage.today + '/' + s.maxPerDay + '，6 小时 ' + state.usage.in6h + '/' + s.maxPer6h + '）'
+      + (state.usage.cooldownRemainingMs > 0 ? '｜冷却还剩 ' + Math.round(state.usage.cooldownRemainingMs / 1000) + 's' : '');
+  }
+  var triggers = document.getElementById(PX.ids.triggers);
+  if (triggers) {
+    triggers.innerHTML = '<span class="muted">触发源（关了就不会因为这件事开口）：</span>' + state.triggerLabels.map(function (row) {
+      return '<label style="margin-right:10px"><input type="checkbox" data-trigger="' + row.trigger + '"' + (row.enabled ? ' checked' : '') + ' /> ' + row.label + '</label>';
+    }).join('');
+  }
+  var gates = document.getElementById(PX.ids.gates);
+  if (gates) {
+    var verdict = { passed: '通过', blocked: '阻塞 ←', skipped: '未评估' };
+    gates.innerHTML = '<table style="width:100%; font-size:12px"><tr><th align="left">门禁</th><th align="left">判定</th></tr>'
+      + state.gateOrder.map(function (row) {
+          var colour = row.status === 'blocked' ? '#ff9f9f' : row.status === 'passed' ? '#9fe0a8' : '#7c869a';
+          return '<tr><td>' + row.label + ' <span class="muted">(' + row.code + ')</span></td><td style="color:' + colour + '">' + verdict[row.status] + '</td></tr>';
+        }).join('')
+      + '</table>'
+      + (state.lastDecision ? '<div class="muted">上一次判定：' + state.lastDecision.reasonCode + '（分数 ' + state.lastDecision.score + ' / 阈值 ' + state.lastDecision.threshold + '，' + state.lastDecision.at + '）</div>' : '<div class="muted">还没有考虑记录（只有被考虑过的候选才会留痕；总开关关掉时按设计不记录）。</div>');
+  }
+  var log = document.getElementById(PX.ids.log);
+  if (log) {
+    log.innerHTML = state.decisions.length === 0 ? '还没有考虑记录。' : '<ul style="margin:4px 0; padding-left:18px">' + state.decisions.map(function (row) {
+      return '<li>' + row.at + '：' + row.trigger + ' → ' + (row.speak ? '开口' : '没开口') + '（' + row.reasonCode + '，分数 ' + row.score + '/' + row.threshold + '）</li>';
+    }).join('') + '</ul>';
+  }
+  var audit = document.getElementById(PX.ids.audit);
+  if (audit) {
+    audit.innerHTML = state.audit.length === 0 ? '还没有变更记录（当前值来自配置）。' : '<ul style="margin:4px 0; padding-left:18px">' + state.audit.slice(-5).reverse().map(function (row) {
+      return '<li>' + row.at + '：' + (row.changes.length ? row.changes.join('；') : '（无变化）') + '</li>';
+    }).join('') + '</ul>';
+  }
+}
+async function pxLoad() {
+  try { pxRender(await (await fetch(PX.base + '/proactive')).json()); }
+  catch (error) { pxStatus('读取主动性设置失败：' + error.message); }
+}
+async function pxSave(patch, note) {
+  var result = await pxPost('/proactive/settings', patch || pxPatch());
+  if (result.ok === false) { pxStatus('保存失败：' + result.error); return; }
+  pxRender(result.state);
+  pxStatus((note || '已保存') + (result.changes.length ? '：' + result.changes.join('；') : '（没有变化）'), result.rejected);
+}
+function pxPatch() {
+  var triggers = {};
+  var boxes = document.querySelectorAll('#' + PX.ids.triggers + ' input[data-trigger]');
+  for (var i = 0; i < boxes.length; i += 1) triggers[boxes[i].getAttribute('data-trigger')] = boxes[i].checked;
+  return {
+    enabled: document.getElementById(PX.ids.enabled).checked,
+    baseCooldownMinutes: Number(pxVal('cooldown')),
+    maxPer6h: Number(pxVal('per6h')),
+    maxPerDay: Number(pxVal('perDay')),
+    quietStart: pxVal('quietStart'),
+    quietEnd: pxVal('quietEnd'),
+    topicRepeatWindowHours: Number(pxVal('topic')),
+    negativeFeedbackCooldownMultiplier: Number(pxVal('negative')),
+    triggers: triggers,
+  };
+}
+/** Play the drill's reply the way the engine intends: one segment at a time, gapMs apart. */
+function pxPlaySegments(target, segments, gapMs, label) {
+  if (!target) return;
+  while (PX.timers.length) clearTimeout(PX.timers.pop());
+  if (!segments || segments.length === 0) { target.innerHTML = '<div class="muted">这次没有开口，所以没有内容。</div>'; return; }
+  target.innerHTML = '';
+  var index = 0;
+  var step = function () {
+    if (index >= segments.length) return;
+    var row = document.createElement('div');
+    row.style.margin = '6px 0';
+    row.innerHTML = '<span class="muted">' + label + ' 第 ' + (index + 1) + '/' + segments.length + ' 段</span><div>' + segments[index].replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }) + '</div>';
+    target.appendChild(row);
+    index += 1;
+    if (index < segments.length) PX.timers.push(setTimeout(step, gapMs));
+  };
+  step();
+}
+async function pxDrill() {
+  pxStatus('正在走九道门禁…');
+  var result = await pxPost('/proactive/drill', { trigger: (document.getElementById(PX.ids.drill) && document.getElementById(PX.ids.drill).dataset.trigger) || 'presence_arrived' });
+  if (result.ok === false) { pxStatus('演练失败：' + result.error); return; }
+  pxRender(result.state);
+  var drill = result.drill;
+  var target = document.getElementById(PX.ids.result);
+  if (drill.speak) {
+    pxStatus('通过：' + drill.reasonLabel + '（分数 ' + drill.score + ' ≥ 阈值 ' + drill.threshold + '，已写审计事件 #' + drill.eventSequence + '）');
+    pxPlaySegments(target, drill.segments, drill.gapMs, '主动开口');
+  } else {
+    pxStatus('没开口：' + drill.reasonLabel + '（' + drill.reasonCode + '）');
+    if (target) target.innerHTML = '<div class="muted">' + drill.nextStep + '</div>';
+  }
+}
+(function pxWire() {
+  var save = document.getElementById(PX.ids.save); if (save) save.addEventListener('click', function () { void pxSave(); });
+  var off = document.getElementById(PX.ids.off); if (off) off.addEventListener('click', function () { void pxSave({ enabled: false }, '已一键关闭主动开口'); });
+  var drill = document.getElementById(PX.ids.drill); if (drill) drill.addEventListener('click', function () { void pxDrill(); });
+  void pxLoad();
+})();
+`;
+}
+
+/** Small CSS the two pages share for the proactive card. */
+export const PROACTIVE_PANEL_CSS = `
+  .px-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px; font-size:12px; }
+  .px-grid label { display:flex; flex-direction:column; gap:4px; }
+  .px-triggers { font-size:12px; margin:8px 0; }
+  .px-triggers label { display:inline-flex; flex-direction:row; align-items:center; gap:4px; }
+`;
 
 export function buildFieldPage(boot: FieldBootstrap): string {
   const bootJson = JSON.stringify(boot).replace(/</g, '\\u003c');
