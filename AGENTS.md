@@ -81,7 +81,7 @@ $env:NODE_USE_ENV_PROXY = '1'   # Node 需要显式开启才读环境变量代�
 
 ```powershell
 npm test                 # 全部离线测试（unit/integration/perception/console），不花 API 费用
-                         #   项数与耗时**以实跑输出为准**（不写死：2026-09-30 实测 209 项、空载约 19s）
+                         #   项数与耗时**以实跑输出为准**（不写死；2026-09-30 实测点 223 项、空载约 20s）
                          #   关键路径曾是单文件 frontend.test.ts（多次 Python 冷启动）；
                          #   t47 **改的是 runner（scripts/verify-voice-noise.ts）的常驻 Python worker**，
                          #   该文件因此变快（它一行未改，实测约 10s）；如需回退可设 XIXI_VAD_ONESHOT=1

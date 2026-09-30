@@ -37,8 +37,8 @@ Copy-Item .env.example .env                   # 填入 MIMO_API_KEY（.env 已�
 npm run field-test                            # 👉 一条命令的现场测试控制台：http://127.0.0.1:8792
                                               #    麦克风电平/噪声底 + 摄像头在场 + 每轮延迟与动作 + 设备验收引导
 npm run web                                   # 试用对话页：http://127.0.0.1:8791（含按住🎤语音输入）
-npm test                                      # 全部离线测试，不花 API 费用（2026-09-30 实测 180 项：
-                                              #   unit 124 + integration 30 + perception 11 + console 15；
+npm test                                      # 全部离线测试，不花 API 费用（**项数以 `npm test` 末行为准**；
+                                              #   2026-09-30 实测点 223 项——unit 131 + integration 30 + perception 11 + console 51）
                                               #   耗时以实跑为准——空载约 14–16s、同机有并发约 18s，不设秒数目标）
 npm run chat                                  # 终端对话（直连 MiMo 实时路径）
 npm run chat -- --personality verbosity=0.1,talkativeness=0.2

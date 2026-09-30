@@ -2,13 +2,13 @@
 
 > 最后更新：2026-09-30
 > 权威来源：`tests/**`、`scripts/**`、`package.json` 的脚本；与代码不一致时以代码为准并立即修正本文
-> 当前状态：`npm test` → **全绿**（2026-09-30 实测 **209 项**：unit 124 + integration 30 + perception 11 + console 44；`tests/scenarios/` 是语料模块、`tests/replay/` 仍为空，都不产生用例），**不发起任何网络请求**。
+> 当前状态：`npm test` → **全绿**（**项数与文件数以实跑为准**；2026-09-30 实测点 **223 项、29 个 `*.test.ts`**＝unit 131 + integration 30 + perception 11 + console 51；`tests/scenarios/` 是语料模块、`tests/replay/` 仍为空，都不产生用例），**不发起任何网络请求**。
 > 壁钟：**以实跑为准**（默认门禁的目标是「可用于迭代」，**不写死秒数**，见 [`AGENTS.md` §7](../AGENTS.md)）——数字只当区间看：
 > 同日实测（`npm test` 五次）：空载 **13.6 / 13.9 / 15.9s**，同机有别的成员在跑 **18.2 / 18.6s**；另一次空载 wall **15.4s**、`ℹ duration_ms 14686`。
 > 关键路径**历史上（t47 之前）**是 `tests/unit/voice/frontend.test.ts` 的多次 Python + VAD 冷启动（单文件就要 ~21s，全量门禁因此在 27–39s 一带）；
 > **t47 的提速来自改 runner**（`scripts/verify-voice-noise.ts` 改用常驻 Python worker；`frontend.test.ts` 一行未改，只是调用变快了）——单文件 ~10s、全量 ~15s，回退开关是 `XIXI_VAD_ONESHOT=1` / `--no-vad-worker`（归属订正见 [`AGENTS.md` §9.9](../AGENTS.md)）。
 > 因此本文早先那句「空载也要 26–30s」「<25s 目标达不到」**已作废**，不要引用（数字与做法见 [`AGENTS.md` §9.9](../AGENTS.md)）。
-> 项数与耗时都会随开发变化（本文上一版写 139 项、再上一版写 180 项；此后陆续加测试，**控制台一层就从 1 个文件 15 项长到 4 个文件 44 项**，2026-09-30 实测已是 209 项）——**一切以 `npm test` 末行为准**：同一时刻别人在加用例，总数就会更高（测量当时工作区里没有他人未提交的测试），本文里的数字都标了实测日期与来源。
+> 项数与耗时都会随开发变化，**所以本文不拿它们当契约**：仅 2026-09-30 一天，同一份门禁就先后出现过 139 → 180 → 209 → 213 → 223 项（控制台一层也从 1 个文件长到 5 个）——**一切以 `npm test` 末行为准**。同一时刻别人在加用例，总数就会更高；本文引用的每个数字都标了实测日期与来源，`git grep` 一下就知道它是哪一次的快照。**改本文时不要再写死总数或文件数**，只留带日期的「实测点」。
 > 实测结论集中在 [`progress.md` §0](progress.md)：对话质量、语音闭环、打断与结构化输出都有单独脚本与证据。
 > 上游依据：《方案》§51（CI / Regression）、§52（Model Contract Testing）、§22.3（Event Replay）、§33（PoC 指标）。
 > 相关：[`architecture.md`](architecture.md)、[`event-contracts.md`](event-contracts.md)、[`ADR-0006`](adr/0006-runtime-and-dependency-choices.md)、[`ADR-0008`](adr/0008-realtime-path-direct-mimo.md)。
@@ -17,29 +17,32 @@
 
 | 层 | 目录 | 跑什么 | 是否联网 | 现在有什么 |
 |---|---|---|---|---|
-| 单元 | `tests/unit/` | 契约校验、领域持久化、transport 解析、会话 FSM、Prompt 组装、工具、语音前端、核心接线 | 否 | **16 个测试文件、124 项**（2026-09-30 实测；文件数用 `git ls-files "tests/unit/*.test.ts" "tests/unit/**/*.test.ts"` 可数出 16——**两条通配都要给**：只写 `tests/unit/**/*.test.ts` 会漏掉 `tests/unit/` 顶层的 7 个文件，只数出 9；项数用 `npm run test:unit`） |
-| 集成 | `tests/integration/` | BrainAdapter ↔ transport ↔ store、会话引擎、离线重启恢复、主动引擎门禁与重启不重发 | 否 | **4 个文件、30 项**（2026-09-30 实测 `npm run test:integration`） |
+| 单元 | `tests/unit/` | 契约校验、领域持久化、transport 解析、会话 FSM、Prompt 组装、工具、语音前端、核心接线 | 否 | **文件数与项数都以实跑为准**：文件数用 `git ls-files "tests/unit/*.test.ts" "tests/unit/**/*.test.ts"`（**两条通配都要给**：只写 `tests/unit/**/*.test.ts` 会漏掉直接放在 `tests/unit/` 下的那些文件），项数用 `npm run test:unit` 的末行 |
+| 集成 | `tests/integration/` | BrainAdapter ↔ transport ↔ store、会话引擎、离线重启恢复、主动引擎门禁与重启不重发 | 否 | **以实跑为准**：文件数 `git ls-files "tests/integration/*.test.ts"`，项数 `npm run test:integration` 末行 |
 | 场景 | `tests/scenarios/` | 对话语料（8 场景，数据驱动），由 `scripts/eval-conversation.ts` 执行 | 执行时联网 | `corpus.ts`（**不是**空目录，也不产生 `npm test` 用例：它是数据模块） |
 | 回放 | `tests/replay/` | 导出事件区间 → 重放 → 复现决策（§22.3） | 否 | **空**（属 M5） |
-| 控制台 | `tests/console/` | 现场测试控制台的隐私保留策略、多段语音规划、在场回退、报告与错误文案、主动开口面板与三栏页面（2026-09-30 实测 44 项） | 否 | `field-test-console.test.ts`（15 项）、`proactive-console.test.ts`（12 项）、`proactive-loop.test.ts`（14 项）、`three-column-console.test.ts`（3 项）；**已在 `npm test` 的 glob 里（t16 起）**，也可用 `npm run test:console` 单跑（项数以末行为准） |
-| 感知 | `tests/perception/` | 摄像头在场检测的 TS 契约 + 转发 Python 回归套件（合成场景，不需要真相机，11 项） | 否 | 需要带 cv2 的 venv（`.venvs/field-probe` 或 `.venvs/cv4`，缺了**直接失败**而不是跳过）；也可用 `npm run test:perception` 单跑 |
+| 控制台 | `tests/console/` | 现场测试控制台的隐私保留策略、多段语音规划、在场回退、报告与错误文案、主动开口面板、三栏页面、「看一眼」（项数以 `npm run test:console` 末行为准） | 否 | `field-test-console.test.ts`、`proactive-console.test.ts`、`proactive-loop.test.ts`、`three-column-console.test.ts`、`look-once-console.test.ts`；**已在 `npm test` 的 glob 里（t16 起）**，也可用 `npm run test:console` 单跑 |
+| 感知 | `tests/perception/` | 摄像头在场检测的 TS 契约 + 转发 Python 回归套件（合成场景，不需要真相机；项数以 `npm run test:perception` 末行为准） | 否 | 需要带 cv2 的 venv（`.venvs/field-probe` 或 `.venvs/cv4`，缺了**直接失败**而不是跳过）；也可用 `npm run test:perception` 单跑 |
 | 真实 API 验收 | `scripts/verify-*.ts`、`eval-conversation.ts`、`voice-*.ts` | 真实 MiMo 调用、语音闭环、打断 | **是** | 见下方「新增验证脚本」，**都不在 `npm test` 里** |
 | 真机设备验收 | `scripts/field-test.ts --acceptance` | 麦克风/扬声器/摄像头自检（pycaw + WASAPI 回环 + DSHOW） | 否 | 需要真机；结果写 `docs/recon/field-test-report-<日期>.md` |
 
 全部测试用 Node 内置 `node:test` + `node:assert/strict`，直接执行 `.ts`（无构建步骤，[ADR-0006](adr/0006-runtime-and-dependency-choices.md)）。
-进默认门禁的四层合计 **26 个 `*.test.ts`、209 项**（2026-09-30 实测：unit 124 + integration 30 + perception 11 + console 44；文件数：`git ls-files "tests/*/*.test.ts" "tests/**/*.test.ts"`；总数：`npm test` 末行）。
+进默认门禁的四层，**文件数与项数也都以实跑为准**（2026-09-30 实测点：29 个 `*.test.ts`、223 项＝unit 131 + integration 30 + perception 11 + console 51；文件数：`git ls-files "tests/*/*.test.ts" "tests/**/*.test.ts"`，总数：`npm test` 末行）。
 （两条通配同样都要给，理由见上表单元行：`**` 至少要求一层子目录，只给 `**` 会漏掉直接放在层目录下的文件。）
 模型相关测试遵守 §51：验证**结构与行为**（`action` 取值、`toolName` 是否被调用、字段是否落在范围内），
 不做字符串相等断言。
 
 ## 2. 每个测试文件覆盖什么
 
-### `tests/unit/smoke.test.ts`（1 项）
+> 小标题后面**故意不写项数**（一个文件的用例数随时会变，选题时的数字很快就会过期）：要看某个文件现在有几项，
+> 跑 `node --test <该文件>` 看末行。下面各节写的是**覆盖了什么行为**，那才是这一节的内容。
+
+### `tests/unit/smoke.test.ts`
 
 workspace 解析与 Node 原生类型擦除可用：能 `import { EVENT_SCHEMA, SCHEMA_VERSION } from '@xixi/contracts'`
 并断言 `'xixi.event.v1'` / `1`。它失败通常意味着 `npm install` 的 workspace 链接没建好。
 
-### `tests/unit/contracts.test.ts`（12 项）
+### `tests/unit/contracts.test.ts`
 
 | 用例 | 断言的核心行为 |
 |---|---|
@@ -56,7 +59,7 @@ workspace 解析与 Node 原生类型擦除可用：能 `import { EVENT_SCHEMA, 
 | `the validator fails closed on a keyword it cannot enforce` | `multipleOf` → `UNSUPPORTED_SCHEMA_KEYWORD` |
 | `registry, envelope enum and actor list stay in sync` | 注册表 / 信封 `event_type` 枚举 / `payloadVersion` / `ACTORS` 四者一致 |
 
-### `tests/unit/domain.test.ts`（10 项）
+### `tests/unit/domain.test.ts`
 
 迁移幂等（第二次打开不重复应用）、**改写已应用迁移即 `MIGRATION_CHECKSUM_MISMATCH`**、
 事件重复插入 `DUPLICATE_EVENT` 与按 `sequence` 顺序读回、
@@ -70,7 +73,7 @@ workspace 解析与 Node 原生类型擦除可用：能 `import { EVENT_SCHEMA, 
 
 临时库一律用 `mkdtempSync(join(tmpdir(), 'xixi-…'))`，不碰 `data/`。
 
-### `tests/unit/transport.test.ts`（5 项）
+### `tests/unit/transport.test.ts`
 
 `parseDshJsonLines` 对 `dsh --json` 的 NDJSON 解析：非 JSON 的诊断行**不会**变成事件
 （`raw.length === 5`）、`session` 事件给出 `sessionId`、`tool_call` 收集工具名与 `callId`、
@@ -81,7 +84,7 @@ workspace 解析与 Node 原生类型擦除可用：能 `import { EVENT_SCHEMA, 
 
 这是**纯离线**的：它不 spawn 真的 `dsh`，只解析样例字符串。真实 spawn 走 `verify:*`。
 
-### `tests/integration/brain-adapter.test.ts`（6 项）
+### `tests/integration/brain-adapter.test.ts`
 
 适配器与 store 的接线：第一轮 `resumeBrainSessionId === null`（不许假装恢复）、
 第一轮结束后映射落库（`store.brainSessionId(sess, 'dsh')`）、
@@ -93,7 +96,7 @@ transport 抛错 → `TRANSPORT_FAILED`、provider 返回失败 → `PROVIDER_FA
 用 `ScriptedDshTransport`（[`packages/brain-adapter/src/scripted.ts`](../packages/brain-adapter/src/scripted.ts)）
 当离线替身，它模仿 harness 的会话语义：第一轮铸造 id，之后沿用被 resume 的 id，并记录每个请求。
 
-### `tests/integration/restart-recovery.test.ts`（3 项）
+### `tests/integration/restart-recovery.test.ts`
 
 进程内模拟的两段式恢复：进程 1 建会话、种子人格、写用户轮次、跑一轮适配器并写助手轮次，然后 `close()`；
 进程 2 打开**同一个 SQLite 文件**，断言迁移未重跑、`resume()` 拿回同一会话/2 条轮次/人格、
@@ -103,7 +106,7 @@ harness 映射仍在，并把持久化的 harness 会话原样交给 transport�
 
 真正的跨进程版本是 `demo:m0:restart`（离线）与 `verify:m0`（真实模型），见 §5。
 
-### `tests/console/field-test-console.test.ts`（15 项）
+### `tests/console/field-test-console.test.ts`
 
 现场测试控制台里「不需要硬件就应该正确」的部分，全部纯离线：
 
@@ -129,13 +132,13 @@ harness 映射仍在，并把持久化的 harness 会话原样交给 transport�
 ## 3. 怎么跑
 
 ```powershell
-npm test                 # 全部离线测试（unit + integration + perception + console），2026-09-30 实测 209 项全绿（项数以末行为准）
-npm run test:unit        # 只跑 tests/unit/**
+npm test                 # 全部离线测试（unit + integration + perception + console）；项数以末行为准（2026-09-30 实测点 223 项全绿）
+npm run test:unit        # 只跑 tests/unit/**（项数看末行）
 npm run test:integration # 只跑 tests/integration/**
 npm run test:scenarios   # tests/scenarios/**（语料模块，当前没有 *.test.ts，输出 0 项）
 npm run test:replay      # tests/replay/**（目录仍为空）
-npm run test:perception  # 只跑 tests/perception/**（会转发 Python 感知回归套件，需带 cv2 的 venv）
-npm run test:console     # 只跑 tests/console/**（2026-09-30 实测 44 项，已在默认门禁里；项数以末行为准）
+npm run test:perception  # 只跑 tests/perception/**（会转发 Python 感知回归套件，需带 cv2 的 venv；项数看末行）
+npm run test:console     # 只跑 tests/console/**（已在默认门禁里；项数以末行为准）
 
 node --test "tests/console/**/*.test.ts"   # 等价的单目录跑法（也可用上面的 npm run test:console）
 node --test tests/unit/contracts.test.ts   # 单文件
@@ -251,14 +254,17 @@ manual audio hardware tests 三档；`AGENTS.md` 第 2 节也要求「联网验�
 
 ### 新增测试文件
 
-| 文件 | 项数 | 覆盖 |
-|---|---:|---|
-| `tests/unit/conversation-fsm.test.ts` | 8 | IDLE 需唤醒/直呼、已开会话可继续、静默容忍缩放跟进窗口、安静模式到期与解除 |
-| `tests/unit/prompt.test.ts` | 5 | 硬策略在场、人格→具体指令、同一人格前缀逐字节稳定、情境含时段/星期、sections 可寻址 |
-| `tests/unit/tools.test.ts` | 7 | 天气码中文、默认地点与显式地点、未知地点是类型化拒绝、预报缓存、参数封闭、只读约束 |
-| `tests/integration/conversation-engine.test.ts` | 15 | 未直呼不写入日志、多轮连续性与工作记忆、跨分片的 `[静默]` 兜底、安静模式、长停顿后需重新直呼；t41 追加多段回复的 5 项（段数与单段上限、`onSegment` 逐段播放、SILENCE 无段、部分失败仍结束该轮） |
-| `tests/unit/voice/frontend.test.ts` | 14 | 抗噪前端：转发 `services/voice-edge/tests/test_frontend.py` 的 39 项 DSP 单测（去直流/高通/噪声底/谱减法/参数推导/夹具生成），断言噪声夹具与 manifest 自洽、困难档不被删除、相似度评分定义，并**真的执行** `verify-voice-noise.ts` 的四条行为断言（离线管线结论与 exit code 一致、结构性失败 exit 1、空选择档不谎报边界、噪声档 `vadEndpointDelayMs` 非零且量级正确）。为控制门禁耗时，这些 shell-out 检查在同一个并发父测试里跑、并按参数复用进程（t28：该文件 15.9s、全量门禁 21.5s；**t47 之后**该文件约 9s、全量约 15s） |
-| `services/voice-edge/tests/test_frontend.py` | 39 | 纯函数离线单测（由上面那条转发执行，不单独出现在 `npm test` 的 glob 里） |
+> 下表是「这一批新增了哪些文件、各自覆盖什么」的快照，**项数一列故意不写当前值**（它随时会变）：要数字就跑
+> `node --test <该文件>` 看末行。
+
+| 文件 | 覆盖 |
+|---|---|
+| `tests/unit/conversation-fsm.test.ts` | IDLE 需唤醒/直呼、已开会话可继续、静默容忍缩放跟进窗口、安静模式到期与解除 |
+| `tests/unit/prompt.test.ts` | 硬策略在场、人格→具体指令、同一人格前缀逐字节稳定、情境含时段/星期、sections 可寻址 |
+| `tests/unit/tools.test.ts` | 天气码中文、默认地点与显式地点、未知地点是类型化拒绝、预报缓存、参数封闭、只读约束 |
+| `tests/integration/conversation-engine.test.ts` | 未直呼不写入日志、多轮连续性与工作记忆、跨分片的 `[静默]` 兜底、安静模式、长停顿后需重新直呼；t41 追加多段回复的 5 项（段数与单段上限、`onSegment` 逐段播放、SILENCE 无段、部分失败仍结束该轮） |
+| `tests/unit/voice/frontend.test.ts` | 抗噪前端：转发 `services/voice-edge/tests/test_frontend.py` 的 39 项 DSP 单测（去直流/高通/噪声底/谱减法/参数推导/夹具生成），断言噪声夹具与 manifest 自洽、困难档不被删除、相似度评分定义，并**真的执行** `verify-voice-noise.ts` 的四条行为断言（离线管线结论与 exit code 一致、结构性失败 exit 1、空选择档不谎报边界、噪声档 `vadEndpointDelayMs` 非零且量级正确）。为控制门禁耗时，这些 shell-out 检查在同一个并发父测试里跑、并按参数复用进程（t28：该文件 15.9s、全量门禁 21.5s；**t47 之后**该文件约 9s、全量约 15s） |
+| `services/voice-edge/tests/test_frontend.py` | 纯函数离线单测（**39 项是 2026-09-30 的一次实测点**；由上面那条转发执行，不单独出现在 `npm test` 的 glob 里） |
 
 ### 测量方法上的坑（踩过，写下来）
 
