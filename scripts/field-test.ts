@@ -4769,21 +4769,21 @@ const FIELD_TEST_USAGE = `西西 · 现场测试控制台 —— 用法
   npm run field-test -- --no-tts          关闭回复朗读
   npm run field-test -- --dsh             走 DSH Harness 路径（慢，实时对话不建议）
   npm run field-test -- --no-open         不自动打开浏览器（非交互终端本来就不会打开）
-  npm run field-test -- --data-dir data/whatever        换控制台自己的库（self_profile / 事件日志；默认 data/field-test）
-  npm run field-test -- --presence-data-dir data/whatever-presence
+  npm run field-test -- --data-dir data/field-test-alt  换控制台自己的库（self_profile / 事件日志；默认 data/field-test）
+  npm run field-test -- --presence-data-dir data/presence-alt
                                                         换在场状态投影读的库（默认 data，与感知边共用）
 
   node scripts/field-test.ts --self-test      离线自检：隐私 / 多段语音 / 页面 / 报告 / 设备口径，不碰麦克风、不联网
                                               exit 0 = 全过；有任何一项失败会 exit 1。
                                               项数会随回归断言增加（已经漂移过一次：24 → 31），所以这里
-                                              **不写死数字**——看它最后一行的「自检结果：N 项通过」。
+                                              不写死数字——看它最后一行的「自检结果：N 项通过」。
                                               它用独立临时目录跑（不碰你的库），所以 --data-dir / --presence-data-dir
                                               在这个模式下不生效（会明确提示，不静默忽略）。
   node scripts/field-test.ts --acceptance     真机设备验收（麦克风 → 扬声器 → 摄像头），逐项打印通过/失败与下一步，
                                               报告写入 docs/recon/field-test-report-<日期>.md；有失败项时 exit 1
   node scripts/field-test.ts --help           显示这份说明后退出（不启动服务、不占端口）
 
-  **不认识的参数会报错并以 exit 2 结束**（中文说明 + 可用参数列表），不会静默忽略。
+  不认识的参数会报错并以 exit 2 结束（中文说明 + 可用参数列表），不会静默忽略。
 
 页面里能看到：麦克风实时电平与噪声底（含校准门限）、摄像头在场状态（未接入时显示「未接入」而不是报错）、
 每轮的延迟分段（VAD / ASR / 首字 / 总时长）与最终动作（含 SILENCE 与拒绝原因）、以及设备验收引导。
@@ -4863,7 +4863,11 @@ export function parseFieldCliArgs(argv: readonly string[], env: Readonly<Record<
     if ((FIELD_CLI_VALUE_FLAGS as readonly string[]).includes(arg)) {
       const value = argv[index + 1];
       if (value === undefined || value.startsWith('-')) {
-        return { ok: false, error: { message: `${arg} 后面需要一个值。`, hint: `例如：node scripts/field-test.ts ${arg} ${arg === '--port' ? '8793' : 'data/whatever'}` } };
+        // Example values are deliberately neutral directories: `data/field-test-alt` cannot be
+        // mistaken for the default (`data/field-test`), and a reader never has to guess whether
+        // the suffix means something.
+        const example = arg === '--port' ? '8793' : arg === '--presence-data-dir' ? 'data/presence-alt' : 'data/field-test-alt';
+        return { ok: false, error: { message: `${arg} 后面需要一个值。`, hint: `例如：node scripts/field-test.ts ${arg} ${example}` } };
       }
       index += 1;
       if (arg === '--port') {

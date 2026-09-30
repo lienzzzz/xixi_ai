@@ -191,7 +191,7 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
   （`git grep -n "XIXI_CHAT_DATA_DIR\|XIXI_WEB_DATA_DIR" -- scripts`）；
   现场测试控制台的库路径由两个 CLI 开关决定：`--data-dir <目录>`（控制台自己的库：`self_profile` / 事件日志，
   默认 `data/field-test`）与 `--presence-data-dir <目录>`（在场状态，默认 `data`）。
-  例：`node scripts/field-test.ts --offline --no-open --data-dir data/field-test-70 --presence-data-dir data/presence-70`
+  例：`node scripts/field-test.ts --offline --no-open --data-dir data/field-test-alt --presence-data-dir data/presence-alt`
   （实测：库文件 `xixi.sqlite` 会落在指定目录里）。
   **不认识的参数会中文报错并以 exit 2 结束**（消息里列出全部可用参数），不再静默忽略。
   核对方式：`node scripts/field-test.ts --help`——**本节以它的实际输出为准**；若某个开关在 `--help` 里没有列出

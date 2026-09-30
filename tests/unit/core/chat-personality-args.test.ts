@@ -30,7 +30,9 @@ const CONFIG: XixiConfig = {
     asr: { provider: 'fake', model: 'fake-asr' },
     tts: { provider: 'fake', model: 'fake-tts' },
   },
-  personality: { base: { verbosity: 0.4, talkativeness: 0.45, silence_tolerance: 0.7 } },
+  // Mirrors the shipped `personality.base` (config/xixi.example.yaml): the「话痨」factory tier,
+  // both values inside prompt.ts's top band. Only the values below are overridden per test.
+  personality: { base: { verbosity: 0.7, talkativeness: 0.75, silence_tolerance: 0.7 } },
   proactive: {},
   memory: {},
   privacy: {},
@@ -136,9 +138,9 @@ test('the parsed override reaches the prompt the model actually sees', async () 
     // The low-verbosity directive only appears for the overridden value…
     assert.match(prompt.system, /回答尽量短：通常 1 句，最多 2 句。/);
     assert.doesNotMatch(prompt.system, /可以多说一点（3~5 句）/);
-    // …and the raw parameters carry the override, not the seeded 0.4.
+    // …and the raw parameters carry the override, not the seeded 0.7.
     assert.match(prompt.system, /verbosity=0\.1/);
-    assert.doesNotMatch(prompt.system, /verbosity=0\.4/);
+    assert.doesNotMatch(prompt.system, /verbosity=0\.7/);
     // silence_tolerance drives the follow-up window too, so the engine must show it.
     assert.equal(engine.silenceTolerance, 1);
     assert.equal(engine.lingerMs, 45_000);

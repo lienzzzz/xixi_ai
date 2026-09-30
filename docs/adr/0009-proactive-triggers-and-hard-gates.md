@@ -51,15 +51,23 @@
    `packages/conversation/src/proactive.ts` 的 `DEFAULT_PROACTIVITY` 必须与这个数一致（`0.7` 与 `0.70` 是同一个值）。
 5. **默认强度：更激进，但底线不动**（与 `config/xixi.example.yaml` 逐项一致）：
 
-   | 配置项 | 旧默认 | 新默认 | 说明 |
+   | 配置项 | M0 旧默认 | 出厂默认 | 说明 |
    |---|---|---|---|
-   | `base_cooldown_min` | 60（`cooldown_min`） | **25** | 两次主动之间的最短间隔（再乘负面反馈倍率） |
-   | `max_per_6h` | 2 | **4** | 6 小时滑动窗口上限 |
-   | `max_per_day` | 5 | **8** | 本地自然日上限 |
-   | `topic_repeat_window_h` | 无 | **12** | 同主题抑制窗口（§15.6 建议 24，本轮取更激进的 12） |
+   | `base_cooldown_min` | 60（`cooldown_min`） | **12** | 两次主动之间的最短间隔（再乘负面反馈倍率） |
+   | `max_per_6h` | 2 | **8** | 6 小时滑动窗口上限 |
+   | `max_per_day` | 5 | **20** | 本地自然日上限 |
+   | `topic_repeat_window_h` | 无 | **6** | 同主题抑制窗口（§15.6 建议 24；出厂取「话痨」档，只压 6 小时内的重复） |
    | `negative_feedback_cooldown_multiplier` | 无 | **2.0** | 最近一次主动被负面反馈后，冷却与额度按此倍率收紧 |
    | `quiet_hours` | 22:30–07:00 | **22:30–07:00（不变）** | **安全底线**：人格、模型、学习都不能放宽它 |
    | `triggers.*` | 无 | 见第 2 条（`random_smalltalk: false`） | 逐个触发源的开关，默认关掉纯寒暄 |
+
+   **订正 2026-09-30（第二次调整，方向：「更愿意开口」的出厂档）**：上表四行从首版的
+   25 / 4 / 8 / 12 改成 **12 / 8 / 20 / 6**，与本文件同一提交里的 `config/xixi.example.yaml` 逐项一致
+   （核对：`git grep -n "base_cooldown_min\|max_per_6h\|max_per_day\|topic_repeat_window_h" -- config`）。
+   `quiet_hours` 与负面反馈倍率**不动**——额度放宽不是放宽底线。
+   **一处尚未同步（已知，不属本次改动范围）**：代码里的兜底常量 `DEFAULT_PROACTIVE_SETTINGS`
+   （`packages/conversation/src/proactive.ts`，只在配置缺 `proactive` 段时生效）仍是首版的 25 / 4 / 8 / 12；
+   上表与示例配置是**出厂口径**。要让「缺段兜底」也等于这档，需要另开一次同步（并把该常量上方的注释一起改）。
 
 6. **审计**：候选与每次门禁判定都要能回答「为什么没说」。方向沿用铁律 5——只存 `reason_code` 与分值，
    不存模型私有推理（`ProactiveDecision.reasonCode` 已经是这个形状）。审计用**新的事件类型**
@@ -77,7 +85,9 @@
 - 现状（订正 2026-09-30）：**门禁与投递已落地**——`packages/conversation/src/proactive.ts` 按固定顺序判定九门禁
   （命中即返回首个 `reason_code`）、算分数与阈值、每次判定落一条 `proactive.decision`，并在**投递之前**先写
   `delivered: true`（崩溃丢一条、不重发一条；重启后靠同 `candidate_id` 的 `ALREADY_DELIVERED` 拦住重复投递）。
-  `config.proactive` 段已被读取（`parseProactiveSettings`；本 ADR 第 5 条的默认值与示例配置由测试钉住一致）。
+  `config.proactive` 段已被读取（`parseProactiveSettings`）。其中 `proactivity` 的出厂值与代码常量的一致性由测试钉住
+  （`tests/console/proactive-console.test.ts` 的 `engine default and config/xixi.example.yaml must agree`，即
+  `DEFAULT_PROACTIVITY`）；第 5 条那张表是**出厂配置**口径，代码兜底常量 `DEFAULT_PROACTIVE_SETTINGS` 的同步状态见该节订正说明。
   **仍未落地**：候选生成器（第 2 条的事实输入还没有生产者）与内容生成
   （`evaluateProactiveCandidate` 仍抛 `NOT_IMPLEMENTED(M5)`）。
 - 为什么现在就要定默认值：`proactive` 段已经在示例配置里存在且写着 `enabled: true`，
