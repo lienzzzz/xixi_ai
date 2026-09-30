@@ -183,9 +183,9 @@ test('the shipped example configuration loads and validates', () => {
   assert.equal(config.identity.name, '西西');
   assert.equal(config.models.llm.model, 'mimo-v2.6-flash');
   assert.equal(config.models.llm.thinking_realtime, false);
-  // The shipped default is 0.70 (ADR-0009 changed it from 0.55); it is what moves the
-  // proactive threshold from 0.585 down to 0.45 + 0.30 × 0.30 = 0.54.
-  assert.equal(config.personality.base.proactivity, 0.7);
+  // The shipped default is 0.85 (ADR-0009 raised it twice: 0.55 → 0.70 → 0.85); it is what moves
+  // the proactive threshold from 0.585 down to 0.45 + 0.30 × 0.15 = 0.495.
+  assert.equal(config.personality.base.proactivity, 0.85);
 });
 
 test('malformed configuration is refused with a named path', () => {

@@ -104,11 +104,11 @@ export const PROACTIVE_SCORE_WEIGHTS: Readonly<Record<string, number>> = Object.
 /**
  * The baseline from `config/xixi.example.yaml`; used when nothing is persisted.
  *
- * 0.70 (not the older 0.55): the household chose a more willing default in ADR-0009,
- * which moves the threshold from 0.585 down to `0.45 + 0.30 × (1 − 0.70) = 0.54`.
- * It only moves the bar — every hard gate still applies（铁律 3）。
+ * 0.85 (the household has raised this twice: 0.55 → 0.70 → 0.85), which moves the threshold from
+ * 0.585 down to `0.45 + 0.30 × (1 − 0.85) = 0.495`. It only moves the bar — every hard gate still
+ * applies（铁律 3）。A test asserts this constant and the shipped config agree.
  */
-export const DEFAULT_PROACTIVITY = 0.7;
+export const DEFAULT_PROACTIVITY = 0.85;
 
 /**
  * Score a candidate from its §15.4 components.
@@ -153,18 +153,19 @@ export interface ProactiveSettings {
 
 /**
  * Exactly the factory defaults declared in `config/xixi.example.yaml` and ADR-0009 §5:
- * 12 min cooldown / 8 per 6 h / 20 per day / 6 h topic window. It is only the fallback for a
- * config that has no `proactive` section at all, so it must stay numerically identical to the
- * shipped config — a test compares both against the same hand-written example object.
+ * 5 min cooldown / 15 per 6 h / 40 per day / 2 h topic window, quiet hours 23:30–07:30.
+ * It is only the fallback for a config that has no `proactive` section at all, so it must stay
+ * numerically identical to the shipped config — a test compares both against the same
+ * hand-written example object.
  */
 export const DEFAULT_PROACTIVE_SETTINGS: ProactiveSettings = Object.freeze({
   enabled: true,
-  baseCooldownMinutes: 12,
-  maxPer6h: 8,
-  maxPerDay: 20,
-  topicRepeatWindowHours: 6,
+  baseCooldownMinutes: 5,
+  maxPer6h: 15,
+  maxPerDay: 40,
+  topicRepeatWindowHours: 2,
   negativeFeedbackCooldownMultiplier: 2.0,
-  quietHours: Object.freeze({ startMinutes: 22 * 60 + 30, endMinutes: 7 * 60 }),
+  quietHours: Object.freeze({ startMinutes: 23 * 60 + 30, endMinutes: 7 * 60 + 30 }),
   triggers: Object.freeze({
     future_hook_due: true,
     presence_arrived: true,
@@ -212,7 +213,7 @@ export function parseProactiveSettings(source?: Readonly<Record<string, unknown>
   };
 }
 
-/** `"22:30"` → 1350. Anything else keeps `fallback` (documented default). */
+/** `"23:30"` → 1410. Anything else keeps `fallback` (documented default). */
 export function parseClockMinutes(value: unknown, fallback: number): number {
   if (typeof value !== 'string') return fallback;
   const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
@@ -225,7 +226,7 @@ export function parseClockMinutes(value: unknown, fallback: number): number {
 
 /**
  * `[start, end)` in local minutes, the window allowed to cross midnight
- * (22:30 → 07:00). `start === end` is an empty window, not a 24-hour one: the
+ * (23:30 → 07:30). `start === end` is an empty window, not a 24-hour one: the
  * safe reading of an ambiguous setting is "no quiet window configured", and the
  * quiet-hours *floor* is a separate, non-configurable concern.
  */

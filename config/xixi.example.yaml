@@ -22,7 +22,7 @@ xixi:
 
   personality:
     base:
-      proactivity: 0.70
+      proactivity: 0.85
       # 出厂默认取「话痨」档：只有 talkativeness ≥ 0.65 与 verbosity ≥ 0.66 才落进
       # packages/conversation/src/prompt.ts 的**顶档**区间（分别给出「可以自然地多聊一点…」与
       # 「可以多说一点（3~5 句）…」两条指令）。往回调这两个数，等于把出厂默认降档。
@@ -36,21 +36,22 @@ xixi:
       emotional_expressiveness: 0.45
 
   proactive:
-    # 主动行为（方案 §15、ADR-0009）。默认比 M0 更激进：更短冷却、更高额度。
-    # 安全底线不动：quiet_hours 是硬门禁，人格与模型都不能放宽它。
+    # 主动行为（方案 §15、ADR-0009）。出厂默认取「话痨」档：更短冷却、更高额度（见下面四个数）。
+    # 安全底线不动：quiet_hours 是硬门禁，人格与模型都不能放宽它——它只被缩短（23:30–07:30），
+    # 仍然是一个真实的静默窗口，不是空窗口。
     # 本段**已被代码读取**：`ProactiveEngine` 的默认构造路径会走
     # `parseProactiveSettings(config.proactive)`（packages/conversation/src/proactive.ts），
     # 现场测试控制台也用它来显示与改写门禁参数（scripts/field-test.ts）。
     # 也就是说改这里的数字会真的改变判定——不要只改代码里的常量。
     enabled: true
-    base_cooldown_min: 12          # 两次主动之间的最短间隔（再乘下面的倍率）
-    max_per_6h: 8                  # 6 小时滑动窗口上限
-    max_per_day: 20                # 本地自然日上限
-    topic_repeat_window_h: 6       # 同主题抑制窗口（§15.6 建议 24；出厂取「话痨」档，只压 6 小时内的重复）
+    base_cooldown_min: 5           # 两次主动之间的最短间隔（再乘下面的倍率）
+    max_per_6h: 15                 # 6 小时滑动窗口上限
+    max_per_day: 40                # 本地自然日上限
+    topic_repeat_window_h: 2       # 同主题抑制窗口（§15.6 建议 24；出厂取「话痨」档，只压 2 小时内的重复）
     negative_feedback_cooldown_multiplier: 2.0   # 最近一次主动被负面反馈后收紧
     quiet_hours:
-      start: "22:30"
-      end: "07:00"
+      start: "23:30"
+      end: "07:30"
     triggers:                      # 触发源开关（ADR-0009 第 2 条，按 §16 优先级）
       future_hook_due: true
       presence_arrived: true

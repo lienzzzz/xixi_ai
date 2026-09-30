@@ -41,33 +41,33 @@
    阈值：
 
    ```text
-   threshold = 0.45 + 0.30 × (1 - proactivity)      // proactivity=0.70（默认基线）→ 0.54
+   threshold = 0.45 + 0.30 × (1 - proactivity)      // proactivity=0.85（默认基线）→ 0.495
    ```
 
    即 `proactivity` 越高阈值越低（更愿意开口），但**永远不可能低于 0.45**——分数与阈值都夹在 `[0,1]` 内，
    「更激进」只体现在门禁参数（第 5 条），不体现在「跳过门禁」。
-   默认基线取 **0.70**（订正 2026-09-30：先前写 0.55 → 阈值 0.585），对应阈值
-   `0.45 + 0.30 × (1 − 0.70) = 0.45 + 0.30 × 0.30 = 0.54`；`config/xixi.example.yaml` 与
-   `packages/conversation/src/proactive.ts` 的 `DEFAULT_PROACTIVITY` 必须与这个数一致（`0.7` 与 `0.70` 是同一个值）。
+   默认基线取 **0.85**（订正 2026-09-30，第三次调整：0.55 → 0.70 → 0.85），对应阈值
+   `0.45 + 0.30 × (1 − 0.85) = 0.45 + 0.30 × 0.15 = 0.495`；`config/xixi.example.yaml` 与
+   `packages/conversation/src/proactive.ts` 的 `DEFAULT_PROACTIVITY` 必须与这个数一致（两者相等由测试钉住）。
 5. **默认强度：更激进，但底线不动**（与 `config/xixi.example.yaml` 逐项一致）：
 
    | 配置项 | M0 旧默认 | 出厂默认 | 说明 |
    |---|---|---|---|
-   | `base_cooldown_min` | 60（`cooldown_min`） | **12** | 两次主动之间的最短间隔（再乘负面反馈倍率） |
-   | `max_per_6h` | 2 | **8** | 6 小时滑动窗口上限 |
-   | `max_per_day` | 5 | **20** | 本地自然日上限 |
-   | `topic_repeat_window_h` | 无 | **6** | 同主题抑制窗口（§15.6 建议 24；出厂取「话痨」档，只压 6 小时内的重复） |
+   | `base_cooldown_min` | 60（`cooldown_min`） | **5** | 两次主动之间的最短间隔（再乘负面反馈倍率） |
+   | `max_per_6h` | 2 | **15** | 6 小时滑动窗口上限 |
+   | `max_per_day` | 5 | **40** | 本地自然日上限 |
+   | `topic_repeat_window_h` | 无 | **2** | 同主题抑制窗口（§15.6 建议 24；出厂取「话痨」档，只压 2 小时内的重复） |
    | `negative_feedback_cooldown_multiplier` | 无 | **2.0** | 最近一次主动被负面反馈后，冷却与额度按此倍率收紧 |
-   | `quiet_hours` | 22:30–07:00 | **22:30–07:00（不变）** | **安全底线**：人格、模型、学习都不能放宽它 |
+   | `quiet_hours` | 22:30–07:00 | **23:30–07:30** | **安全底线**：人格、模型、学习都不能放宽它。本轮只把它**缩短**（仍是一个真实的静默窗口，不是空窗口）；《方案》§2.3 的这条底线语义不变 |
    | `triggers.*` | 无 | 见第 2 条（`random_smalltalk: false`） | 逐个触发源的开关，默认关掉纯寒暄 |
 
-   **订正 2026-09-30（第二次调整，方向：「更愿意开口」的出厂档）**：上表四行从首版的
-   25 / 4 / 8 / 12 改成 **12 / 8 / 20 / 6**，与本文件同一提交里的 `config/xixi.example.yaml` 逐项一致
-   （核对：`git grep -n "base_cooldown_min\|max_per_6h\|max_per_day\|topic_repeat_window_h" -- config`）。
-   `quiet_hours` 与负面反馈倍率**不动**——额度放宽不是放宽底线。
-   **一处尚未同步（已知，不属本次改动范围）**：代码里的兜底常量 `DEFAULT_PROACTIVE_SETTINGS`
-   （`packages/conversation/src/proactive.ts`，只在配置缺 `proactive` 段时生效）仍是首版的 25 / 4 / 8 / 12；
-   上表与示例配置是**出厂口径**。要让「缺段兜底」也等于这档，需要另开一次同步（并把该常量上方的注释一起改）。
+   **订正 2026-09-30（第三次调整，方向仍是「更愿意开口」）**：上表四行从 12 / 8 / 20 / 6 再放宽到
+   **5 / 15 / 40 / 2**，`quiet_hours` 从 22:30–07:00 缩到 **23:30–07:30**，均与 `config/xixi.example.yaml`
+   逐项一致（核对：`git grep -n "base_cooldown_min\|max_per_6h\|max_per_day\|topic_repeat_window_h\|23:30" -- config`）。
+   负面反馈倍率**不动**——额度放宽不是放宽底线。
+   代码里的兜底常量 `DEFAULT_PROACTIVE_SETTINGS`（`packages/conversation/src/proactive.ts`，只在配置缺
+   `proactive` 段时生效）**已与上表同步为同一档**：两者相等由测试用手写示例对象钉住（t76 修掉了它一度
+   落后于示例配置的问题）。
 
 6. **审计**：候选与每次门禁判定都要能回答「为什么没说」。方向沿用铁律 5——只存 `reason_code` 与分值，
    不存模型私有推理（`ProactiveDecision.reasonCode` 已经是这个形状）。审计用**新的事件类型**
