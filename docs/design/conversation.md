@@ -227,6 +227,34 @@ HARD_POLICY（不可变硬策略，常量）
 
 注意 `HARD_POLICY` 与人格指令的关系：硬策略（像家里人、不提实现细节、不编造、没有合适的话可以不说、
 只能调自己的说话方式）**不可被任何人格值与任何用户反馈覆盖**（§2.4、§26.1），人格只能调「怎么说」。
+当前硬策略共 **7 条**，条数与实现核对：
+`git grep -c -E "^[0-9]+\. " -- packages/conversation/src/prompt.ts` 应输出 `7`（第 7 条是 t111 加的）。
+
+### 不许编造可核查的具体事实（t111，`HARD_POLICY` 第 7 条 + 程序层闸门）
+
+**提示词层（第 7 条）**：可核查的具体事实——天气、气温、降水概率、风力、空气质量、新闻、日程安排、
+别人说过的话——**只能来自工具结果**，或别人刚刚明确告诉你的信息；要说就得**先调用工具去查**，
+查到什么说什么；没查、查不到就直说「我不知道」/「我记不准」，**绝不许凭印象编造具体数值或具体结论**
+（例如「19 到 25 度」「明天有雨」「朋友说他周五来不了」）。**普通回复与主动开口共用同一份 `HARD_POLICY`**
+（普通回复走 `ConversationEngine.buildPrompt`；主动开口的 `createModelComposer` 也调同一个
+`engine.buildPrompt`，`git grep -n "engine.buildPrompt" -- scripts/field-test.ts`），所以这一条对两条路径同时生效。
+
+**程序层闸门（边界归程序，铁律 1/3）**：光靠提示词不够，`packages/conversation/src/engine.ts` 里还有一道确定性判据：
+
+| 位置 | 行为 |
+|---|---|
+| `findUnbackedFactClaims(text)` | 只认「只有查得到才知道」的具体值：带单位的温度（含 `19 到 25 度`、`零下 3 度`、`25℃`）、`降水概率/湿度/风力/空气质量/紫外线` 带数字、`天气预报/新闻/医生说/朋友说` 这类**归属声明**。**故意不拦**「今天有点冷，多穿点」这类家常话——判据窄是有意的，宽了会开始挡正常聊天。 |
+| `ConversationEngine.screenUnbackedFacts(text, toolName)` | 本轮 `toolName !== null`（真的调用过工具）→ 原样放行；否则命中就返回 `{ok:false, text: UNBACKED_FACT_REPLY}`。主动开口的投递接缝直接用这个方法，两条路径不会出现两套判据。 |
+| `ConversationEngine.respond()` | 把含该值的文本**扣住**（流式路径也不再交给 `onTextChunk`，所以不会进 TTS）、**不写**进 `conversation.turn`、不改工作记忆，改说 `UNBACKED_FACT_REPLY`；同时给调用方一条 `onNotice({code:'UNBACKED_FACT_CLAIM', detail:'未调用工具却给出可核查事实：…'})` 供审计。同一轮里真有 `tool` chunk → 句子照说。 |
+| 主动开口（`scripts/field-test.ts` 的 `createModelComposer`） | 未核实就把内容**换成该触发源的固定短句**（固定句本身没有数值），note 写明丢掉了什么；`toolName` 随内容带进投递接缝，写进 assistant 轮的 `tool_name`——所以「说了具体数值就必须有一次工具调用」能在**事件日志**里核对，而不只是在控制台自己的报告里。 |
+
+**代价（写清楚，别当成没发生）**：流式路径下含未核实具体值的句子会被扣到本轮结束再决定，
+这类句子的音频因此延后（分段路径本来就在结束时才播，不受影响）。
+
+**回归与实测**：`tests/unit/core/unbacked-fact-claims.test.ts`（判据、扣住/放行、分段路径、无工具即替换）、
+`tests/console/unbacked-facts-console.test.ts`（投递接缝换固定句、带工具则原样、`toolName` 传递）。
+真机实测（t111）：连续主动开口 + 天气提问共 7 条 assistant 轮，含具体值的 4 条**全部**伴随
+`xixi_get_weather` 工具调用，`tool=null` 的轮次不含任何具体值（违规 0）。
 
 ## 4. §55 沉默：`[静默]` 与三层防线
 
@@ -410,8 +438,8 @@ decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值�
 | 改动 | 必须同步的本文件小节 |
 |---|---|
 | `packages/conversation/src/fsm.ts`（状态、`DEFAULT_FSM_CONFIG`、判定或 `lingerMs` 算法） | §1（并同步 `tests/unit/conversation-fsm.test.ts`） |
-| `packages/conversation/src/prompt.ts`（§26 顺序、`HARD_POLICY`、阈值或指令文案、`sections`） | §2、§3、§4（并同步 `tests/unit/prompt.test.ts`） |
-| `packages/conversation/src/engine.ts`（编排步骤、沉默兜底、分段播放 `onSegment`、落库时机、时钟用法、`#advance` 读取即推进、decision 事件） | §1（状态读取即推进）、§4、§5、§7 |
+| `packages/conversation/src/prompt.ts`（§26 顺序、`HARD_POLICY` 的**条数与文案**、阈值或指令文案、`sections`） | §2、§3（含 §3 的「不许编造可核查的具体事实」）、§4（并同步 `tests/unit/prompt.test.ts`；条数核对：`git grep -c -E "^[0-9]+\. " -- packages/conversation/src/prompt.ts`） |
+| `packages/conversation/src/engine.ts`（编排步骤、沉默兜底、分段播放 `onSegment`、落库时机、时钟用法、`#advance` 读取即推进、decision 事件、`findUnbackedFactClaims` / `screenUnbackedFacts` / `UNBACKED_FACT_REPLY` / `onNotice`） | §1（状态读取即推进）、§3（未核实具体值闸门）、§4、§5、§7（并同步 `tests/unit/core/unbacked-fact-claims.test.ts`） |
 | `packages/conversation/src/segments.ts`（分段算法、`REPLY_LIMITS` 硬上限、`resolveReplyLimits` 的夹紧、`mergedOverflow`） | §7（并同步 `tests/unit/core/reply-segments.test.ts`） |
 | `packages/conversation/src/proactive.ts`（九个门禁、分数与阈值、`proactive.decision` 审计、投递顺序） | §6（并同步 [ADR-0009](../adr/0009-proactive-triggers-and-hard-gates.md) 与 [`security-and-privacy.md`](security-and-privacy.md) §6 的写入方清单） |
 | `packages/conversation/src/personality.ts`（`DEFAULT_SILENCE_TOLERANCE` 与取值优先级） | §1 |
