@@ -283,8 +283,14 @@ node scripts/verify-camera-presence.ts --help
 **有标记之后的两处订正**：
 
 1. 本节早先写「3 条 `present_confirmed` 是**合成场景**留下的（`motion_ratio` 0.043 / 0.047 / 0.126）」
-   ——那 3 行**没有** `mode=` 标记，**无法证实**。可证的说法是：它们的时间戳与 `--self-test` 那批
-   运行吻合，且数值落在合成场景的范围内，因此**可能是**合成场景留下的，**台账里没有标记能证明**。
+   ——那 3 行**没有** `mode=` 标记，**无法证实**。可证的说法只有一句：
+   **可能是**合成场景留下的，但**台账里没有标记能证明**，不要按数值猜它是哪一路。
+   这两句当时的「支撑」现在**都不可复现**，所以它们不再作为证据：
+   ① 那 3 行本身现在已经不在台账里（t109 复核时它已被清走或覆盖），**没有留存的时间戳**可以拿来说
+   「与 `--self-test` 那批吻合」——写「吻合」的时候手里就没有存证，属于记忆，不是证据；
+   ② 「数值落在合成场景的范围内」这句用错了一个常量：**每次开跑都会先写一条启动记录**（见 §5），
+   也就是**每一条 `present_confirmed` 前面都有一条对应的 `camera_started`**，所以「前面有启动记录」
+   对真实与合成两条路径**都成立**，它区分不了来源（这条类比是评审 t110 的 O1 指出来的）。
 2. 更早那次（t92）删除的 4 条里，`motion_ratio=0.148` / `0.0318` 这组数值**确实**来自合成场景：
    t109 实跑 `--self-test`，它自己的台账（`data/perception/self-test.sqlite`）里就写出了
    `mode=synthetic … frames=181 motion_ratio=0.0000 … reason=absent_confirmed` 与
@@ -305,14 +311,19 @@ t92 那次清理（把 4 条带 `motion_ratio=0.148` / `0.0318` 的行逐条删�
 复核命令（不需要 Python 之外的依赖；第二列就是 `mode=` 标记）：
 
 ```powershell
-E:\worker2\.venvs\cv4\Scripts\python.exe -c "import sqlite3,json;c=sqlite3.connect('data/perception/field-test.sqlite');rows=c.execute(\"select timestamp,payload_json from events where event_type='presence.changed' order by sequence\").fetchall();print('\n'.join(t+'  '+ (json.loads(p)['source_detail'] or '') for t,p in rows)))"
+E:\worker2\.venvs\cv4\Scripts\python.exe -c "import sqlite3,json;c=sqlite3.connect('data/perception/field-test.sqlite');rows=[(t,p) for (t,p) in c.execute('select event_type,payload_json from events order by sequence') if t=='presence.changed'];print('\n'.join(t+'  '+str((json.loads(p)['source_detail'] or '')[:110]) for t,p in rows))"
 ```
 
 要按来源统计（真实/合成各多少行）：
 
 ```powershell
-E:\worker2\.venvs\cv4\Scripts\python.exe -c "import sqlite3,json,collections;c=sqlite3.connect('data/perception/field-test.sqlite');m=collections.Counter();[m.update([next((x.split('=',1)[1] for x in (json.loads(p)['source_detail'] or '').split() if x.startswith('mode=')), 'NO-MARKER')]) for (p,) in c.execute(\"select payload_json from events where event_type='presence.changed'\")];print(dict(m))"
+E:\worker2\.venvs\cv4\Scripts\python.exe -c "import sqlite3,json,collections;c=sqlite3.connect('data/perception/field-test.sqlite');m=collections.Counter();[m.update([next((x.split('=',1)[1] for x in (json.loads(p)['source_detail'] or '').split() if x.startswith('mode=')), 'NO-MARKER')]) for (t,p) in c.execute('select event_type,payload_json from events') if t=='presence.changed'];print(dict(m))"
 ```
+
+> 这两条命令的写法是刻意的：**外层双引号、内层只用单引号，源码里不出现反斜杠转义的双引号**
+> （`\"`）。原因很实际——把它们粘进 PowerShell 时，`\"` 会被 PowerShell 抢先解析，命令直接报错；
+> 而 SQL 的字符串引号在双引号里本来就难写，所以改成「取全表、在循环里筛 `t=='presence.changed'`」。
+> 两条命令都实跑过：第一条打印带 `mode=` 的行，第二条输出 `{'camera': 3}`（当时台账）。
 
 如果要一条绝对干净的台账：删掉 `data/perception/field-test.sqlite` 再跑一次
 `node scripts/verify-camera-presence.ts --seconds 15`（`data/` 是 gitignore 的本机目录）。
