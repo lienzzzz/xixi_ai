@@ -1,26 +1,26 @@
 # 现场测试报告（设备验收）— 2026-09-30
 
-- 生成时间：2026-09-30T03:36:53.996Z
+- 生成时间：2026-09-30T03:38:06.776Z
 - 命令：`node scripts/field-test.ts --acceptance`
 - 机器：DESKTOP-JMLLAC2｜Node v24.21.0｜win32
 - 探测用 Python：`E:\worker2\.venvs\field-probe\Scripts\python.exe`（设备端点/麦克风/摄像头）、`E:\worker2\.venvs\voice-livekit\Scripts\python.exe`（声学回环）
-- **总体结论：未通过（FAIL，逐项见下）**
+- **总体结论：通过（PASS）**
 
 | 顺序 | 项目 | 结论 | 摘要 |
 |---|---|---|---|
-| 1 | 麦克风（说话能不能进来） | 通过 | 通过（有风险）：麦克风能录到声音，但噪声底 -31.52 dBFS 偏高，说话声只比它高几 dB 时识别会不稳 |
-| 2 | 扬声器（西西说话你能不能听到） | 失败 | 失败：麦克风没有明显听到播放声（相对差 9.91 dB < 10 dB），但程序确实渲染了音频（相关 0.89） |
+| 1 | 麦克风（说话能不能进来） | 通过 | 通过（有风险）：麦克风能录到声音，但噪声底 -34.85 dBFS 偏高，说话声只比它高几 dB 时识别会不稳 |
+| 2 | 扬声器（西西说话你能不能听到） | 通过 | 通过：麦克风听到的播放声比噪声底高 13.96 dB（相对判据 ≥10 dB） |
 | 3 | 摄像头（西西在不在场） | 通过 | 通过：摄像头能出清晰的画面；在场检测（M6）尚未接入，页面会显示「未接入」 |
 
 ## 1. 麦克风（说话能不能进来）
 
-**结论**：通过｜通过（有风险）：麦克风能录到声音，但噪声底 -31.52 dBFS 偏高，说话声只比它高几 dB 时识别会不稳
+**结论**：通过｜通过（有风险）：麦克风能录到声音，但噪声底 -34.85 dBFS 偏高，说话声只比它高几 dB 时识别会不稳
 
 | 检查项 | 结果 | 实测 |
 |---|---|---|
 | Windows 采集端点（默认麦克风） | 通过 | 设备「麦克风 (Realtek High Definition Audio)」：静音=false，音量=68% |
-| 录了 3 秒环境声 | 通过 | 设备「麦克风 (Realtek High Definition Au」：整段 RMS -29.03 dBFS，峰值 -16.94 dBFS（0 dBFS = 数字满量程，越接近 0 越响；−60 dBFS 以下说明几乎收不到声音） |
-| 噪声底（说话时要明显高于它） | 信息 | 噪声底 -31.52 dBFS（50ms 帧 RMS 的 p10）。高于 −40 dBFS 说明这台机器的底噪偏大（勘测实测 −30.86 dBFS），这是当前最大风险 |
+| 录了 3 秒环境声 | 通过 | 设备「麦克风 (Realtek High Definition Au」：整段 RMS -30.71 dBFS，峰值 -19.56 dBFS（0 dBFS = 数字满量程，越接近 0 越响；−60 dBFS 以下说明几乎收不到声音） |
+| 噪声底（说话时要明显高于它） | 信息 | 噪声底 -34.85 dBFS（50ms 帧 RMS 的 p10）。高于 −40 dBFS 说明这台机器的底噪偏大（勘测实测 −30.86 dBFS），这是当前最大风险 |
 
 **下一步动作**：扬声器自检；另外建议把麦克风采集增益从 +5.5 dB 降到 0 dB（实测 1:1 换回约 5.5 dB 噪声余量），或让麦克风离人近一点
 
@@ -50,10 +50,10 @@
     "rate": 44100,
     "seconds": 3,
     "unit": "dBFS",
-    "rmsDbfs": -29.03,
-    "noiseFloorDbfs": -31.52,
-    "p90FrameDbfs": -27.15,
-    "peakDbfs": -16.94,
+    "rmsDbfs": -30.71,
+    "noiseFloorDbfs": -34.85,
+    "p90FrameDbfs": -27.67,
+    "peakDbfs": -19.56,
     "frames": 60
   }
 }
@@ -63,16 +63,16 @@
 
 ## 2. 扬声器（西西说话你能不能听到）
 
-**结论**：失败｜失败：麦克风没有明显听到播放声（相对差 9.91 dB < 10 dB），但程序确实渲染了音频（相关 0.89）
+**结论**：通过｜通过：麦克风听到的播放声比噪声底高 13.96 dB（相对判据 ≥10 dB）
 
 | 检查项 | 结果 | 实测 |
 |---|---|---|
 | Windows 输出端点（默认扬声器） | 通过 | 设备「扬声器 (Realtek High Definition Audio)」：静音=false，音量=66%（勘测发现出厂就是静音，这正是上一轮验收失败的根因） |
 | ① 程序真的把音频送到了输出流（WASAPI loopback） | 信息 | 回采信号与播放信号的相关性 0.89（最佳对齐 279.2 ms；≥0.9 视为独立确认，勘测用单流采集时实测 0.9996）。注意：静音时这个数也是高的，它只能证明「程序渲染了」，不能证明「听到了」 |
 | 测试音频本身（播放增益 1.0） | 通过 | 播放信号峰值 -5.49 dBFS（夹具本身 −24.6 dBFS，增益 1.0 仍留 ~24 dB 余量，不会削顶；比 0.6 更接近真实 TTS 播放电平） |
-| ② 麦克风真的听到了（播放窗 − 前置静音窗，语音带 300–3400 Hz） | 失败 | 相对差 9.91 dB（均值 8.1 dB，估计器 inline-fallback；判据 ≥10 dB）。这是**相对**判据：勘测实测扬声器静音时绝对 RMS 反而更高（0.0505 vs 0.0486），绝对判据会假 PASS｜本轮复测 2 次（第一次 8.87 dB），取较好的一次 |
+| ② 麦克风真的听到了（播放窗 − 前置静音窗，语音带 300–3400 Hz） | 通过 | 相对差 13.96 dB（均值 7.35 dB，估计器 voice_edge.frontend；判据 ≥10 dB）。这是**相对**判据：勘测实测扬声器静音时绝对 RMS 反而更高（0.0505 vs 0.0486），绝对判据会假 PASS |
 
-**下一步动作**：两种失败要分开看：①「渲染失败」看相关性，②「听不到」看音量/距离。请先确认音量 ≥50%，扬声器没有被物理静音，麦克风离扬声器 0.3–1 m，然后重跑
+**下一步动作**：摄像头自检
 
 <details><summary>原始证据（JSON）</summary>
 
@@ -97,14 +97,14 @@
     "playbackClipSamples": 0,
     "prerollMs": 600,
     "playedMs": 2520,
-    "preRollSpeechBandDbfs": 20.53,
-    "playWindowMeanSpeechBandDbfs": 28.63,
-    "playWindowP95SpeechBandDbfs": 30.44,
-    "differentialMeanDb": 8.1,
-    "differentialP95Db": 9.91,
-    "micRmsDbfs": -28.88,
-    "bandEstimator": "inline-fallback",
-    "frontendError": "SyntaxError: invalid character '—' (U+2014) (frontend.py, line 620)",
+    "preRollSpeechBandDbfs": -47.76,
+    "playWindowMeanSpeechBandDbfs": -40.41,
+    "playWindowP95SpeechBandDbfs": -33.8,
+    "differentialMeanDb": 7.35,
+    "differentialP95Db": 13.96,
+    "micRmsDbfs": -31.01,
+    "bandEstimator": "voice_edge.frontend",
+    "frontendError": null,
     "loopbackCorrelation": 0.89,
     "loopbackBestLagMs": 279.2,
     "loopbackFrames": 188160,
@@ -112,13 +112,8 @@
   },
   "loopbackTrials": [
     {
-      "differentialP95Db": 8.87,
-      "differentialMeanDb": 7.48,
-      "loopbackCorrelation": 0.89
-    },
-    {
-      "differentialP95Db": 9.91,
-      "differentialMeanDb": 8.1,
+      "differentialP95Db": 13.96,
+      "differentialMeanDb": 7.35,
       "loopbackCorrelation": 0.89
     }
   ]
@@ -133,8 +128,8 @@
 
 | 检查项 | 结果 | 实测 |
 |---|---|---|
-| 能以 CAP_DSHOW 打开（本机唯一可用后端） | 通过 | 已打开：640×480 @ 28.1 fps（本轮采到 15 帧） |
-| 画面不是全黑/全灰（能看到东西） | 通过 | 亮度均值 129.1，标准差 39.5（标准差接近 0 = 画面一片死黑或死白；镜头盖、遮挡、强逆光都会这样） |
+| 能以 CAP_DSHOW 打开（本机唯一可用后端） | 通过 | 已打开：640×480 @ 28 fps（本轮采到 15 帧） |
+| 画面不是全黑/全灰（能看到东西） | 通过 | 亮度均值 128.7，标准差 39.4（标准差接近 0 = 画面一片死黑或死白；镜头盖、遮挡、强逆光都会这样） |
 | 在场检测（M6）投影是否接入 | 信息 | 摄像头能出图，但在场检测还没接入：world_state 里还没有 presence.home 这一行（摄像头还没看到过人）（这是「未接入」，不是故障） |
 
 **下一步动作**：等视觉任务（M6）接入后，页面会自动显示「有人/无人」；现在可以先用「按住说」跑一轮对话
@@ -150,10 +145,10 @@
     "width": 640,
     "height": 480,
     "frames": 15,
-    "fps": 28.1,
-    "lumaMean": 129.1,
-    "lumaStd": 39.5,
-    "uniqueLuma": 217,
+    "fps": 28,
+    "lumaMean": 128.7,
+    "lumaStd": 39.4,
+    "uniqueLuma": 211,
     "maxWidth": 1280,
     "maxHeight": 720
   },
@@ -167,7 +162,7 @@
     "stale": null,
     "ttlSeconds": null,
     "note": "world_state 里还没有 presence.home 这一行（摄像头还没看到过人）",
-    "checkedAt": "2026-09-30T03:36:53.992Z"
+    "checkedAt": "2026-09-30T03:38:06.772Z"
   }
 }
 ```

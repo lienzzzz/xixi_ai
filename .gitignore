@@ -11,3 +11,5 @@ data/
 dist/
 vendor/
 .agent-teams/
+__pycache__/
+*.pyc

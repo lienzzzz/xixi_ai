@@ -579,10 +579,8 @@ def calibrate_from_samples(samples: np.ndarray, sample_rate: int = 16_000, stop_
 
 
 @dataclass(frozen=True)
-
-
 class FrontendParams:
-    """
+    """Front-end knobs, all derived from a measurement (see `derive_frontend_params`)."""
 
     highpass_hz: float
     gate_threshold_dbfs: float
