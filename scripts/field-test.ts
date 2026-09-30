@@ -1887,6 +1887,28 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
 
   const engine = new ConversationEngine({ adapter: buildAdapter(), store, config, turnTimeoutMs: 90_000 });
   let session = store.latestSession() ?? store.createSession();
+
+  // -------------------------------------------------- proactive card state (t42)
+  // The engine is rebuilt per consideration with whatever is in the snapshot, so a saved knob
+  // takes effect on the very next drill (no restart, no cache to invalidate).
+  let proactiveSnapshot = restoreProactiveSettings(store, config.proactive as unknown as Record<string, unknown>);
+  if (proactiveSnapshot.source === 'console') {
+    log(`[proactive] 已从审计记录恢复设置（${proactiveSnapshot.updatedAt ?? '?'}）：${proactiveSnapshot.settings.enabled ? '允许主动开口' : '已关闭'}`);
+  }
+  function proactivePayload(): ProactiveConsoleState & { readonly ok: true } {
+    return {
+      ok: true,
+      ...proactiveConsoleState({
+        store,
+        settings: proactiveSnapshot.settings,
+        source: proactiveSnapshot.source,
+        updatedAt: proactiveSnapshot.updatedAt,
+        changes: proactiveSnapshot.changes,
+        now: new Date(),
+        proactivity: effectiveProactivity(store.selfProfile()),
+      }),
+    };
+  }
   const turns: ConsoleTurn[] = [];
   const startedAt = new Date().toISOString();
 
@@ -2033,7 +2055,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
           return;
         }
         if (request.method === 'POST' && url.pathname === '/api/field/proactive/settings') {
-          const body = await readJsonBody(request);
+          const body = (await readBody(request)) as Record<string, unknown>;
           const patched = applyProactiveSettingsPatch(proactiveSnapshot.settings, body);
           if (patched.changes.length > 0) {
             const event = persistProactiveSettings(store, patched.settings, patched.changes);
@@ -2049,16 +2071,15 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
           return;
         }
         if (request.method === 'POST' && url.pathname === '/api/field/proactive/drill') {
-          const body = await readJsonBody(request);
-          const now = new Date();
+          const body = (await readBody(request)) as Record<string, unknown>;
           const drill = await proactiveDrill({
             store,
             settings: proactiveSnapshot.settings,
-            now,
+            now: new Date(),
             conversationState: engine.state,
             inFlightTurn: false,
             proactivity: effectiveProactivity(store.selfProfile()),
-            sessionId: latestSessionId(),
+            sessionId: session.sessionId,
             replyLimits: config.reply,
             request: body,
           });
@@ -3124,6 +3145,7 @@ export function buildFieldPage(boot: FieldBootstrap): string {
   .err { border:1px solid #5c2222; background:#2a1414; color:#ffd7d7; padding:10px; border-radius:10px; margin-top:8px; white-space:pre-wrap; }
   details { margin-top:6px; }
   code { background:#1c2028; padding:1px 5px; border-radius:4px; font-size:12px; }
+${PROACTIVE_PANEL_CSS}
 </style></head>
 <body>
 <header>
@@ -3206,7 +3228,10 @@ export function buildFieldPage(boot: FieldBootstrap): string {
   <section class="card">
     <h2>最近几轮（动作 / 拒绝原因 / 延迟分段）</h2>
     <div id="turns" class="muted">还没有轮次。按住 🎤 说一句试试。</div>
+    <div class="muted" style="margin-top:6px">多段回复（ADR-0010）在这里显示为「第 i/N 段 · 段间 450ms」——每段是分开播的，不是一次说完；完整一条也会写进事件日志。</div>
   </section>
+
+${proactivePanelHtml()}
 
   <section class="card">
     <h2>隐私与保留策略</h2>
@@ -3227,6 +3252,8 @@ var BOOT = ${bootJson};
 var state = null;
 var micCtx = null, micAnalyser = null, micStream = null, micLevels = [], micTimer = null;
 var recorder = null;
+
+${proactivePanelScript('/api/field')}
 
 function el(id) { return document.getElementById(id); }
 function fmt(value, digits) {
