@@ -1,0 +1,14 @@
+{
+  "name": "@xixi/brain-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "BrainAdapter：唯一允许接触 Harness（当前为 DSH）的边界。其他服务只看到领域词汇。",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@xixi/contracts": "*",
+    "@xixi/domain": "*"
+  }
+}

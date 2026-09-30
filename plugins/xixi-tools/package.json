@@ -1,0 +1,25 @@
+{
+  "name": "dsh-xixi-tool",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "西西最小工具集（M0：xixi_get_current_time）。DSH 插件包，通过 bundle patch 挂载。",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "0.1.7-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "cordis.patch.yml"
+    }
+  }
+}

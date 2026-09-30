@@ -1,0 +1,166 @@
+# 西西 DSH profile 的 patch 层（由仓库持有，install-dsh-profile 脚本复制到 profile 目录）。
+#
+# 内容来源：docs/recon/dsh-integration-2026-09-29.md、docs/adr/0002、docs/adr/0007。
+#
+# 这里做三件事：
+#   1. 把 MiMo 接成 llm-pi-ai 的一个路由（含关闭思考所需的 reasoningEfforts）。
+#   2. 把系统提示词从「你是编码 Agent」改成西西的身份，并去掉 harness 自称。
+#   3. 按《方案》§27「最小权限插件集合」关掉 shell / 文件系统 / 子代理 / 工作流 /
+#      计划模式 / 技能 / 网页等与陪伴无关的能力（它们既污染提示词，也是越权面）。
+#
+# 关闭方式：`- id: <row>` + `disabled: true`。
+
+# ---------------------------------------------------------------- 模型路由
+
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      mimo:
+        displayName: MiMo (Xiaomi)
+        apiKeyEnv: MIMO_API_KEY
+        api: openai-completions
+        baseURL: https://api.xiaomimimo.com/v1
+        defaultContextWindow: 262144
+        defaultMaxTokens: 32768
+        defaultInput: [text]
+        # 实时对话默认关闭深度思考（方案 §46.1）。已实测：MiMo 服务端默认**开启**思考
+        # （reasoning_tokens > 0），只有显式关闭才会变成 0；且在小 max_completion_tokens
+        # 下开启思考会把内容全部吃掉（finish_reason=length 且 content 为空）。
+        reasoning: off
+        models:
+          - id: mimo-v2.6-flash
+            name: MiMo v2.6 Flash
+            contextWindow: 262144
+            maxTokens: 32768
+            input: [text]
+            # 必须有 reasoningEfforts，模型才会被认为「具备推理能力」，pi-ai 才会走
+            # thinkingFormat=deepseek 分支：未请求 effort 时下发 thinking:{type:"disabled"}。
+            # off 映射为服务端认识的 reasoning_effort:"none"（实测可把 reasoning_tokens 归零）；
+            # high 供后台反思使用（方案 §46.1 Level 3）。
+            reasoningEfforts:
+              off: 'none'
+              high: 'high'
+            compat:
+              thinkingFormat: deepseek
+              requiresReasoningContentOnAssistantMessages: true
+
+- id: agent-default-model
+  name: '@deepseek-ai/dsh-agent-default-model'
+  config:
+    provider: mimo
+    model: mimo-v2.6-flash
+
+# ------------------------------------------------------- 系统提示词：西西身份
+
+- id: system-prompt
+  name: '@deepseek-ai/dsh-system-prompt'
+  config:
+    # 默认会注入 "You are an AI agent powered by DeepSeek Harness."，对陪伴场景是错的。
+    includeHarnessIdentity: false
+    personaPrefix: |-
+      你在这次会话中扮演「西西」：一个长期住在家里、陪伴家人的存在。
+      说话像家里人：口语化、自然、简短，不用客服腔，也不用助手腔。
+      不要提及代码、仓库、文件、模型、提示词或你的实现细节；不要自称 AI 助手或语言模型。
+      不确定就说不确定，不要编造没发生过的事。
+      没有需要处理的事情时，不要列举自己能做什么，也不要主动找任务做。
+    personaSuffix: |-
+      对话发生在家庭场景中，不是软件开发场景。
+      当消息里给出「有效人格」参数时，在不违反上述原则的前提下按它调整说话方式。
+      你只能调整自己的说话方式，不能修改系统规则、权限或隐私设置。
+
+# ------------------------------------------- 最小权限：关掉与陪伴无关的能力
+
+# 工作区指令（会把仓库的 AGENTS.md 当上下文注入，对陪伴是噪声）
+- id: agent-instructions
+  disabled: true
+
+# 任意 shell / 文件系统访问（《方案》§27：禁止给陪伴 Agent 无限制 shell）
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: tool-fs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: fs-observation-policy
+  disabled: true
+- id: fs-sandbox
+  disabled: true
+- id: bash-sandbox
+  disabled: true
+- id: pwsh-sandbox
+  disabled: true
+- id: sandbox
+  disabled: true
+- id: sandbox-policy
+  disabled: true
+
+# 技能 / 子代理 / 工作流 / 计划 / 目标 / 待办：陪伴场景不需要
+- id: skill
+  disabled: true
+- id: skill-filesystem
+  disabled: true
+- id: skill-badge
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: subagent
+  disabled: true
+- id: subagent-spawn-in-process
+  disabled: true
+- id: subagent-fork-in-process
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: workflow-ptc
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: ptc-runtime
+  disabled: true
+- id: plan-mode
+  disabled: true
+- id: goal
+  disabled: true
+- id: goal-round-driver
+  disabled: true
+- id: command-goal
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-todo
+  disabled: true
+- id: tool-ralph
+  disabled: true
+- id: repeat-tool-reminder
+  disabled: true
+
+# 网页 / 联网（该密钥的联网搜索权限本来也不可用；外部内容是 untrusted，见 §53）
+- id: web
+  disabled: true
+- id: web-search-deepseek
+  disabled: true
+- id: web-fetch-http
+  disabled: true
+- id: tool-web
+  disabled: true
+- id: mcp-resources
+  disabled: true
+
+# 交互式问答 / 终端命令 / 插件管理：常驻陪伴进程不提供
+- id: user-questions
+  disabled: true
+- id: commands
+  disabled: true
+- id: command-feedback
+  disabled: true
+- id: tool-jobs
+  disabled: true

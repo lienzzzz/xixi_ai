@@ -1,0 +1,15 @@
+{
+  "name": "@xixi/conversation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "会话层：Conversation FSM（方案 §12）+ Prompt 组装（§26）+ 一轮对话的编排。",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@xixi/brain-adapter": "*",
+    "@xixi/contracts": "*",
+    "@xixi/domain": "*"
+  }
+}

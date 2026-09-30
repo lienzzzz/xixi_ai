@@ -1,0 +1,14 @@
+{
+  "name": "@xixi/domain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "西西领域层：事件日志、会话、人格基线的持久化与恢复。唯一写 SQLite 的包。",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@xixi/contracts": "*",
+    "js-yaml": "^5.4.2"
+  }
+}

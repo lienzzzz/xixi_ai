@@ -1,0 +1,10 @@
+{
+  "name": "@xixi/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "西西事件契约：envelope、事件类型注册表、schema 版本与校验。所有服务共用此包。",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

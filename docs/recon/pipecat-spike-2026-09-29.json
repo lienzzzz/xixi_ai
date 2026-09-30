@@ -1,0 +1,177 @@
+{
+  "stack": "pipecat",
+  "version": "1.12.0",
+  "python": "3.12.10",
+  "offlineDriveable": true,
+  "apisUsed": [
+    "pipecat.audio.vad.silero.SileroVADAnalyzer",
+    "pipecat.audio.vad.silero.SileroOnnxModel",
+    "pipecat.audio.vad.vad_analyzer.VADAnalyzer",
+    "pipecat.audio.vad.vad_analyzer.VADParams",
+    "pipecat.audio.vad.vad_analyzer.VADState",
+    "pipecat.audio.vad.vad_controller.VADController",
+    "pipecat.audio.volume.AudioVolumeTracker",
+    "pipecat.audio.utils.detect_speech_onset",
+    "pipecat.audio.utils.calculate_audio_volume",
+    "pipecat.audio.resamplers.soxr_resampler.SOXRAudioResampler",
+    "pipecat.audio.turn.base_turn_analyzer.BaseTurnAnalyzer",
+    "pipecat.audio.turn.base_turn_analyzer.EndOfTurnState",
+    "pipecat.audio.turn.smart_turn.base_smart_turn.BaseSmartTurn",
+    "pipecat.audio.turn.smart_turn.base_smart_turn.SmartTurnParams",
+    "pipecat.audio.turn.smart_turn.local_smart_turn_v3.LocalSmartTurnAnalyzerV3",
+    "pipecat.processors.audio.vad_processor.VADProcessor",
+    "pipecat.turns.user_turn_processor.UserTurnProcessor",
+    "pipecat.turns.user_turn_strategies.UserTurnStrategies",
+    "pipecat.turns.user_start.vad_user_turn_start_strategy.VADUserTurnStartStrategy",
+    "pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy.TurnAnalyzerUserTurnStopStrategy",
+    "pipecat.pipeline.pipeline.Pipeline",
+    "pipecat.pipeline.worker.PipelineWorker",
+    "pipecat.pipeline.worker.PipelineParams",
+    "pipecat.workers.runner.WorkerRunner",
+    "pipecat.tests.utils.QueuedFrameProcessor",
+    "pipecat.processors.frame_processor.FrameProcessor.broadcast_interruption",
+    "pipecat.frames.frames.InterruptionFrame",
+    "pipecat.frames.frames.VADUserStartedSpeakingFrame",
+    "pipecat.frames.frames.VADUserStoppedSpeakingFrame",
+    "pipecat.frames.frames.UserStartedSpeakingFrame",
+    "pipecat.frames.frames.UserStoppedSpeakingFrame",
+    "pipecat.frames.frames.UserSpeakingFrame",
+    "pipecat.frames.frames.BotStartedSpeakingFrame",
+    "pipecat.frames.frames.InputAudioRawFrame"
+  ],
+  "vad": {
+    "implementation": "Silero VAD, ONNX runtime, bundled model pipecat/audio/vad/data/silero_vad.onnx (2327524 bytes); wrapper classes SileroVADAnalyzer + SileroOnnxModel in pipecat/audio/vad/silero.py",
+    "requiredSampleRate": 16000,
+    "requiredFrameSize": 512,
+    "params": {
+      "confidence": 0.7,
+      "start_secs": 0.2,
+      "stop_secs": 0.2,
+      "min_volume": 0.6
+    },
+    "fixtures": [
+      {
+        "id": "direct-question",
+        "detected": true,
+        "speechStartMs": 864.0,
+        "endpointDelayMs": [
+          224.0,
+          224.0,
+          224.0
+        ],
+        "endpointDelayMedianMs": 224.0
+      },
+      {
+        "id": "followup-turn",
+        "detected": true,
+        "speechStartMs": 864.0,
+        "endpointDelayMs": [
+          160.0,
+          160.0,
+          160.0
+        ],
+        "endpointDelayMedianMs": 160.0
+      },
+      {
+        "id": "backchannel",
+        "detected": false,
+        "speechStartMs": null,
+        "endpointDelayMs": [
+          null,
+          null,
+          null
+        ],
+        "endpointDelayMedianMs": null
+      },
+      {
+        "id": "longer-turn",
+        "detected": true,
+        "speechStartMs": 544.0,
+        "endpointDelayMs": [
+          224.0,
+          224.0,
+          224.0
+        ],
+        "endpointDelayMedianMs": 224.0
+      },
+      {
+        "id": "tv-dialogue",
+        "detected": true,
+        "speechStartMs": 576.0,
+        "endpointDelayMs": [
+          224.0,
+          224.0,
+          224.0
+        ],
+        "endpointDelayMedianMs": 224.0
+      }
+    ]
+  },
+  "turnDetection": {
+    "available": true,
+    "mechanism": "Yes -- beyond VAD, pipecat 1.12.0 ships a full turn layer under pipecat/turns/ (strategies) and pipecat/audio/turn/ (analyzers). The offline/CPU one is LocalSmartTurnAnalyzerV3: a local ONNX smart-turn-v3.2 end-of-turn classifier (whisper log-mel features, 8 s window, sigmoid probability > 0.5 => COMPLETE), driven by TurnAnalyzerUserTurnStopStrategy. Analyzer interface: BaseTurnAnalyzer.append_audio(bytes, is_speech) + async analyze_end_of_turn() -> (EndOfTurnState, TurnMetricsData). Default strategies (UserTurnStrategies): start=[VADUserTurnStartStrategy, TranscriptionUserTurnStartStrategy], stop=[TurnAnalyzerUserTurnStopStrategy(LocalSmartTurnAnalyzerV3)].",
+    "model": {
+      "source": "E:\\worker2\\.venvs\\voice-pipecat\\Lib\\site-packages\\pipecat\\audio\\turn\\smart_turn\\data\\smart-turn-v3.2-cpu.onnx",
+      "bytes": 8679182,
+      "downloadRequired": false
+    },
+    "loadMs": 119.06,
+    "decisions": [
+      {
+        "id": "direct-question",
+        "latencyMs": 242.1,
+        "verdict": "COMPLETE"
+      },
+      {
+        "id": "followup-turn",
+        "latencyMs": 315.49,
+        "verdict": "COMPLETE"
+      },
+      {
+        "id": "backchannel",
+        "latencyMs": null,
+        "verdict": "not_invoked"
+      },
+      {
+        "id": "longer-turn",
+        "latencyMs": 247.78,
+        "verdict": "COMPLETE"
+      },
+      {
+        "id": "tv-dialogue",
+        "latencyMs": 258.96,
+        "verdict": "COMPLETE"
+      }
+    ]
+  },
+  "interruption": {
+    "mechanism": "FrameProcessor.broadcast_interruption() (pipecat/processors/frame_processor.py) broadcasts InterruptionFrame both upstream and downstream. The barge-in decision lives in UserTurnProcessor._on_user_turn_started (pipecat/turns/user_turn_processor.py:227): on a user-turn start it broadcasts UserStartedSpeakingFrame and, when UserTurnStartedParams.enable_interruptions is True (default), calls broadcast_interruption(). The VAD-level trigger is VADProcessor broadcasting VADUserStartedSpeakingFrame, which VADUserTurnStartStrategy turns into a turn start. Exact 1.12.0 frame names: InterruptionFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame, UserStartedSpeakingFrame, UserStoppedSpeakingFrame, UserSpeakingFrame, BotStartedSpeakingFrame, BotStoppedSpeakingFrame. BotInterruptionFrame and StartInterruptionFrame DO NOT EXIST in 1.12.0.",
+    "offlineDemonstrable": true,
+    "missing": "Nothing is missing for the frame-level mechanism: it was demonstrated with no audio device, no transport and no network, using pipecat/tests/utils.py's own Pipeline + PipelineWorker + WorkerRunner recipe and real fixture audio injected as InputAudioRawFrame. What could NOT be observed is the audible effect (actually cancelling TTS playback), because there is no output transport and no TTS service in the harness; bot-speaking state was simulated with BotStartedSpeakingFrame. Caveat: enable_interruptions defaults to True and is NOT gated on the bot speaking -- scenario A (bot idle) still broadcast 1 interruption. A real room/device is therefore not needed, but real playback cancellation is untested."
+  },
+  "performance": {
+    "importMs": 88.89,
+    "cpuProvider": "CPUExecutionProvider",
+    "peakRssMb": 117.6
+  },
+  "blockers": [
+    "backchannel.wav ('嗯。', 0.96 s / ~480 ms of speech energy) is NEVER detected as speech: max raw Silero confidence 0.5274, far below the confidence=0.7 default, and it stays undetected across every stop_secs (0.2-1.0) and min_volume (0.6/0.0) combination tested and at confidence=0.5. Consequence: the requirement 'backchannel must NOT be treated as an interruption' is met only because the backchannel is invisible to VAD -- the same utterance would also never reach ASR.",
+    "longer-turn.wav produces a mid-utterance false endpoint with default params: a SPEAKING->QUIET decision at 2080 ms, -1440 ms before the true end of speech, caused by a 352 ms intra-sentence pause. stop_secs must be raised to >=0.6 to prevent it.",
+    "smart-turn v3 does NOT fix that false endpoint: called on the truncated segment it returned COMPLETE with probability 0.6788, i.e. it agreed the sentence had ended. The model only sees audio up to the VAD stop, so it cannot recover a mid-sentence VAD stop.",
+    "turn detection cannot separate the television from the father: tv-dialogue.wav was judged COMPLETE at p=0.9228, indistinguishable from direct-question.wav (p=0.9557). Speaker/wake-word gating must be built outside pipecat's VAD+turn layer.",
+    "pipecat's only offline CPU end-of-turn analyzer on this machine is LocalSmartTurnAnalyzerV3. LocalSmartTurnAnalyzerV2 needs torch (absent), LocalCoreMLSmartTurnAnalyzer needs coremltools (absent, macOS-only), KrispVivaTurn needs the krisp_audio SDK plus an API key, HttpSmartTurnAnalyzer needs a network endpoint.",
+    "No device-based or audible verification was possible or attempted: pyaudio is absent so LocalAudioTransport cannot open an input/output stream. This does not affect any of the measurements above, all of which were driven through the library's own analyzer / processor primitives with no audio device.",
+    "In the barge-in pipeline the user turn's stop event never fired within the test window (turnStopped=0): the default stop path waits on TurnAnalyzerUserTurnStopStrategy plus an STT p99 budget, and no STT service was attached. Interruption timing is therefore measured at the broadcast_interruption() call, not at a completed turn.",
+    "No model download was needed and no network call was made: both ONNX models ship inside the installed wheel (silero_vad.onnx 2327524 bytes; smart-turn-v3.2-cpu.onnx 8679182 bytes).",
+    "First-ever import of onnxruntime in a cold OS file cache took 1746 ms vs 290-318 ms on warm repeated runs; treat ~1.0 s (not ~0.8 s) as the worst-case cold start to VAD-ready."
+  ],
+  "evidence": [
+    "& E:\\worker2\\.venvs\\voice-pipecat\\Scripts\\python.exe E:\\worker2\\.spike\\pipecat\\h_probe.py E:\\worker2\\.spike\\pipecat\\probe_run1.json   (run 3x: probe_run1..3.json)",
+    "& E:\\worker2\\.venvs\\voice-pipecat\\Scripts\\python.exe E:\\worker2\\.spike\\pipecat\\h_vad.py      -> vad_raw.json (+ vad_summary.json)",
+    "& E:\\worker2\\.venvs\\voice-pipecat\\Scripts\\python.exe E:\\worker2\\.spike\\pipecat\\h_turn.py     -> turn_raw.json (+ turn_summary.json)",
+    "& E:\\worker2\\.venvs\\voice-pipecat\\Scripts\\python.exe E:\\worker2\\.spike\\pipecat\\h_sweep.py    -> sweep_raw.json",
+    "& E:\\worker2\\.venvs\\voice-pipecat\\Scripts\\python.exe E:\\worker2\\.spike\\pipecat\\h_bargein.py  -> bargein_raw.json",
+    "& E:\\worker2\\.venvs\\voice-pipecat\\Scripts\\python.exe E:\\worker2\\.spike\\pipecat\\build_result.py -> RESULT.json",
+    "& E:\\worker2\\.venvs\\voice-pipecat\\Scripts\\python.exe -c import pipecat; print(pipecat.__version__)  -> 1.12.0"
+  ]
+}

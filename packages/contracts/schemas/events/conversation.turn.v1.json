@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "xixi.event.v1/conversation.turn",
+  "title": "conversation.turn payload v1",
+  "description": "一轮对话。action 采用《方案》第 55 节：沉默是合法的一等输出。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session_id", "turn_index", "role", "action", "text"],
+  "properties": {
+    "session_id": { "type": "string", "pattern": "^sess_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+    "turn_index": { "type": "integer", "minimum": 0 },
+    "role": { "type": "string", "enum": ["user", "assistant"] },
+    "action": { "type": "string", "enum": ["SPEAK", "BACKCHANNEL", "WAIT", "SILENCE", "TOOL"] },
+    "text": { "type": ["string", "null"], "maxLength": 8000 },
+    "tool_name": { "type": ["string", "null"], "maxLength": 120 }
+  }
+}

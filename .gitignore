@@ -1,0 +1,12 @@
+node_modules/
+data/
+.dsh/
+.scratch/
+.spike/
+.venvs/
+.env
+.env.local
+.env.*.local
+*.log
+dist/
+vendor/

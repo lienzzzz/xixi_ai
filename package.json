@@ -1,0 +1,39 @@
+{
+  "name": "xixi",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "西西（Xixi）：常驻环境陪伴智能体。M0 = DSH + MiMo 文本 Harness 最小纵向切片。",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "test": "node --test \"tests/unit/**/*.test.ts\" \"tests/integration/**/*.test.ts\" \"tests/scenarios/**/*.test.ts\" \"tests/replay/**/*.test.ts\"",
+    "test:unit": "node --test \"tests/unit/**/*.test.ts\"",
+    "test:integration": "node --test \"tests/integration/**/*.test.ts\"",
+    "test:scenarios": "node --test \"tests/scenarios/**/*.test.ts\"",
+    "test:replay": "node --test \"tests/replay/**/*.test.ts\"",
+    "install:profile": "node scripts/install-dsh-profile.ts",
+    "verify:m0": "node scripts/verify-m0.ts",
+    "demo:m0:text": "node scripts/demo-m0-text.ts",
+    "demo:m0:restart": "node scripts/demo-m0-restart.ts",
+    "verify:provider": "node scripts/verify-provider-route.ts",
+    "verify:structured-output": "node scripts/verify-structured-output.ts",
+    "eval:conversation": "node scripts/eval-conversation.ts",
+    "eval:conversation:judge": "node scripts/eval-conversation.ts --judge",
+    "voice:turn": "node scripts/voice-turn.ts",
+    "voice:bargein": "node scripts/voice-bargein.ts",
+    "chat": "node scripts/chat.ts",
+    "turns": "node scripts/show-turns.ts"
+  },
+  "dependencies": {
+    "js-yaml": "^5.4.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-tools": "0.1.7-rc.2"
+  }
+}

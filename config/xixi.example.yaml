@@ -1,0 +1,61 @@
+# 西西第一版配置（对应《方案》第 42 节）。
+# 复制为 config/xixi.yaml 后按需修改；config/xixi.yaml 不进入版本库。
+xixi:
+  identity:
+    name: 西西
+    language: zh-CN
+    timezone: Asia/Shanghai
+    # 家里常说的地点，可省略；省略时天气工具会先问用户是哪里。
+    place: 成都
+
+  models:
+    llm:
+      provider: mimo
+      model: mimo-v2.6-flash
+      thinking_realtime: false
+    asr:
+      provider: mimo
+      model: mimo-v2.5-asr
+    tts:
+      provider: mimo
+      model: mimo-v2.5-tts
+
+  personality:
+    base:
+      proactivity: 0.55
+      talkativeness: 0.45
+      verbosity: 0.40
+      curiosity: 0.40
+      warmth: 0.80
+      humor: 0.30
+      playfulness: 0.20
+      formality: 0.15
+      emotional_expressiveness: 0.45
+
+  proactive:
+    enabled: true
+    cooldown_min: 60
+    max_per_6h: 2
+    max_per_day: 5
+    quiet_hours:
+      start: "22:30"
+      end: "07:00"
+
+  memory:
+    raw_transcript_retention_days: 30
+    raw_audio_retention_days: 0
+    event_log_retention_days: 90
+    semantic_memory: true
+    future_hooks: true
+
+  privacy:
+    continuous_audio_cloud_upload: false
+    continuous_video_cloud_upload: false
+    store_raw_audio: false
+
+  features:
+    wake_word: false        # M1 先用按钮，M2 再启用
+    speaker_verification: false
+    camera_presence: false  # M6
+    home_assistant: false
+    frigate: false

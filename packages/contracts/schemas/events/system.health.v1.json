@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "xixi.event.v1/system.health",
+  "title": "system.health payload v1",
+  "description": "服务健康状态。用于《方案》第 21 节故障降级与第 22 节可观测性。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["service", "status", "detail"],
+  "properties": {
+    "service": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "status": { "type": "string", "enum": ["ok", "degraded", "down"] },
+    "detail": { "type": ["string", "null"], "maxLength": 500 }
+  }
+}

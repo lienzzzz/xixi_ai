@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "xixi.event.v1/presence.changed",
+  "title": "presence.changed payload v1",
+  "description": "有人/无人的状态变化。M0 只用它验证事件契约，不实现摄像头（M6）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["present", "source_detail"],
+  "properties": {
+    "present": { "type": "boolean" },
+    "source_detail": { "type": ["string", "null"], "maxLength": 200 }
+  }
+}

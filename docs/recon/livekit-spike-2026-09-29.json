@@ -1,0 +1,164 @@
+{
+  "stack": "livekit-agents",
+  "version": "1.8.3",
+  "python": "3.12.10",
+  "offlineDriveable": true,
+  "apisUsed": [
+    "livekit.plugins.silero.VAD",
+    "livekit.plugins.silero.vad.VADStream",
+    "livekit.plugins.silero.onnx_model.OnnxModel",
+    "livekit.rtc.AudioFrame",
+    "livekit.rtc.AudioResampler",
+    "livekit.plugins.turn_detector.multilingual._EUORunnerMultilingual",
+    "livekit.plugins.turn_detector.multilingual.MultilingualModel",
+    "livekit.agents.inference.TurnDetector",
+    "livekit.agents.inference.eot.transports._LocalTransport",
+    "livekit.local_inference.EOT",
+    "livekit.local_inference.VAD",
+    "livekit.agents.inference.AdaptiveInterruptionDetector",
+    "livekit.agents.voice.turn.InterruptionOptions"
+  ],
+  "vad": {
+    "implementation": "livekit.plugins.silero.VAD.load() (livekit-plugins-silero 1.8.3) wrapping resources/silero_vad.onnx, 2327524 bytes, bundled in the wheel - no download; driven through VADStream.push_frame()/VADEvent, no room and no JobContext",
+    "requiredSampleRate": 16000,
+    "requiredFrameSize": 512,
+    "params": {
+      "min_speech_duration": 0.05,
+      "min_silence_duration": 0.55,
+      "prefix_padding_duration": 0.5,
+      "max_buffered_speech": 60.0,
+      "activation_threshold": 0.5,
+      "deactivation_threshold": 0.35,
+      "sample_rate": 16000
+    },
+    "fixtures": [
+      {
+        "id": "backchannel",
+        "detected": true,
+        "speechStartMs": 73.0,
+        "endpointDelayMs": [
+          712.54,
+          712.54,
+          712.54
+        ],
+        "endpointDelayMedianMs": 712.54
+      },
+      {
+        "id": "direct-question",
+        "detected": true,
+        "speechStartMs": 133.92,
+        "endpointDelayMs": [
+          690.17,
+          690.17,
+          690.17
+        ],
+        "endpointDelayMedianMs": 690.17
+      },
+      {
+        "id": "followup-turn",
+        "detected": true,
+        "speechStartMs": 270.12,
+        "endpointDelayMs": [
+          718.62,
+          718.62,
+          718.62
+        ],
+        "endpointDelayMedianMs": 718.62
+      },
+      {
+        "id": "longer-turn",
+        "detected": true,
+        "speechStartMs": 56.21,
+        "endpointDelayMs": [
+          702.42,
+          702.42,
+          702.42
+        ],
+        "endpointDelayMedianMs": 702.42
+      },
+      {
+        "id": "tv-dialogue",
+        "detected": true,
+        "speechStartMs": 88.46,
+        "endpointDelayMs": [
+          724.04,
+          724.04,
+          724.04
+        ],
+        "endpointDelayMedianMs": 724.04
+      }
+    ]
+  },
+  "turnDetection": {
+    "available": true,
+    "mechanism": "TRANSCRIPT/context classifier, not audio: livekit-plugins-turn-detector 1.8.3 -> base._EUORunnerBase.run() -> onnx/model_q8.onnx; returns eou_probability for the last token of the chat template. Framework rule (voice/audio_recognition.py:1603): end_of_turn_probability < unlikely_threshold => turn NOT finished. Sanctioned class EOUModelBase/MultilingualModel requires get_job_context().inference_executor (RuntimeError 'no job context found' offline), so the runner _EUORunnerMultilingual was driven directly and no room/JobContext/audio device/network was used. Context passed for the reported decisions: [assistant('明天上午有点小雨...记得带伞。'), user(fixture text)]; the no-context variant [user(fixture text)] was also measured (see NOTES.md).",
+    "model": {
+      "name": "livekit/turn-detector @ revision v0.4.1-intl (commit 87e35fcb1e60a569bea70346191c4886ea92e281), int8 onnx/model_q8.onnx + BPE tokenizer + languages.json",
+      "source": "https://huggingface.co/livekit/turn-detector (direct, no proxy needed)",
+      "bytes": 412195151,
+      "downloadRequired": true
+    },
+    "requiresContext": true,
+    "loadMs": 6893.8,
+    "executionProvider": "CPUExecutionProvider",
+    "decisions": [
+      {
+        "id": "direct-question",
+        "latencyMs": 96.06,
+        "finished": true,
+        "probability": 0.859395
+      },
+      {
+        "id": "followup-turn",
+        "latencyMs": 100.488,
+        "finished": true,
+        "probability": 0.317428
+      },
+      {
+        "id": "backchannel",
+        "latencyMs": 85.619,
+        "finished": false,
+        "probability": 0.003671
+      },
+      {
+        "id": "longer-turn",
+        "latencyMs": 119.293,
+        "finished": true,
+        "probability": 0.338713
+      },
+      {
+        "id": "tv-dialogue",
+        "latencyMs": 94.406,
+        "finished": true,
+        "probability": 0.911898
+      }
+    ]
+  },
+  "interruption": {
+    "mechanism": "AgentSession/TurnHandlingOptions.interruption (livekit.agents.voice.turn.InterruptionOptions): enabled=True, mode='adaptive'|'vad', discard_audio_if_uninterruptible=True, min_duration=0.5s, min_words=0, resume_false_interruption=True, false_interruption_timeout=2.0s, backchannel_boundary=(1.0,1.0); endpointing via TurnHandlingOptions.endpointing (fixed: min_delay=0.3s,max_delay=2.5s,alpha=0.9). mode='vad' is local silero-VAD barge-in plus min_duration. mode='adaptive' uses livekit.agents.inference.AdaptiveInterruptionDetector: 25ms frames at 16kHz over a WebSocket to the LiveKit Cloud inference gateway (get_default_inference_url), threshold / min_interruption_duration=0.05s / max_audio_duration=3s / audio_prefix_duration=1.0s / detection_interval=0.1s / inference_timeout=0.7s.",
+    "offlineDemonstrable": false,
+    "missing": "AdaptiveInterruptionDetector.__init__ raises ValueError without LIVEKIT_INFERENCE_API_KEY + LIVEKIT_INFERENCE_API_SECRET, and its InterruptionWebSocketStream opens a WebSocket to the LiveKit Cloud inference gateway (get_default_inference_url) to score overlapping speech. There is no local/ONNX interruption model in livekit-agents 1.8.3 (livekit.local_inference only exports EOT and VAD). The non-adaptive path (interruption.mode='vad') is pure local VAD, but it lives inside AgentActivity, which only runs once AgentSession.start(room=...) has joined a room, so it cannot be exercised offline either. A synthetic-audio interruption demo therefore needs either (a) LiveKit Cloud credentials + network, or (b) a real/loopback room plus the AudioOutput path. Missing: credentials, gateway network access, and a room."
+  },
+  "performance": {
+    "importMs": 3799.6,
+    "cpuProvider": "onnxruntime 1.30.0 AzureExecutionProvider,CPUExecutionProvider -> CPUExecutionProvider selected by the library for both models",
+    "peakRssMb": 398.4
+  },
+  "blockers": [
+    "Adaptive interruption (mode='adaptive') could not be demonstrated offline: AdaptiveInterruptionDetector() raises ValueError('api_key is required ... LIVEKIT_API_KEY') and its stream opens a WebSocket to the LiveKit Cloud inference gateway. livekit-agents 1.8.3 ships no local/ONNX interruption model (livekit.local_inference exports only EOT and VAD), and we are not allowed to use API keys, so this measurement is blocked, not worked around. The non-adaptive barge-in path (mode='vad') is local but only runs inside AgentActivity after AgentSession.start(room=...) has joined a room, so it is blocked by the missing room.",
+    "The sanctioned turn-detector class cannot be constructed offline at all: MultilingualModel() raises RuntimeError('no job context found, are you running this code inside a job entrypoint?'). The reported numbers come from the underlying inference runner (_EUORunnerMultilingual.initialize()/run()), which is a private class - it is NOT the same object as the documented EOUModel API, and a later M1 implementation still needs the JobContext/inference-executor wiring (or the new livekit.agents.inference.TurnDetector) to use it in a real agent.",
+    "No ASR is installed in this venv, so the end-of-utterance plugin had to be fed the fixtures' known transcripts. Whether a real Chinese ASR would emit exactly those strings (punctuation, '嗯' vs '恩') is unmeasured, and the transcript is the only input this model sees.",
+    "True end of speech is a DSP estimate, not ground truth: no transcript-level alignment or hand-annotated boundary exists. Thresholds were varied 3 ways (4x/6x/10x noise floor) giving a +/-20-30 ms band on 4 fixtures, but tests/audio-fixtures/followup-turn.wav is truncated mid-speech (no trailing silence; last 5 ms RMS 236 vs noise floor 44), so its true end of speech is only known to +/-107 ms and its 718.62 ms endpoint delay carries that uncertainty.",
+    "The turn-detector verdict for the backchannel is context-sensitive and only 2 synthetic contexts were measured: '嗯。' scores 0.00878 >= threshold 0.0066 (finished=True, i.e. WRONG) with no preceding assistant turn, and 0.003671 < 0.0066 (finished=False, correct) after an assistant reply. The behaviour under a real multi-turn conversation, and the true false-positive rate in a TV-filled room, are unmeasured. The absolute margin is also tiny (0.0066 threshold), so this model's 'probability' must not be read as a calibrated probability.",
+    "Backchannel suppression and false-interruption recovery (backchannel_boundary, false_interruption_timeout) could not be exercised: they live in AgentActivity, which requires a started AgentSession with a room."
+  ],
+  "evidence": [
+    "& E:\\worker2\\.venvs\\voice-livekit\\Scripts\\python.exe E:\\worker2\\.spike\\livekit\\probe_env.py",
+    "& E:\\worker2\\.venvs\\voice-livekit\\Scripts\\python.exe E:\\worker2\\.spike\\livekit\\probe_envelope.py",
+    "& E:\\worker2\\.venvs\\voice-livekit\\Scripts\\python.exe E:\\worker2\\.spike\\livekit\\measure_vad.py 3",
+    "& E:\\worker2\\.venvs\\voice-livekit\\Scripts\\python.exe E:\\worker2\\.spike\\livekit\\measure_turn_detector.py 3",
+    "& E:\\worker2\\.venvs\\voice-livekit\\Scripts\\python.exe E:\\worker2\\.spike\\livekit\\measure_interruption.py",
+    "& E:\\worker2\\.venvs\\voice-livekit\\Scripts\\python.exe E:\\worker2\\.spike\\livekit\\measure_perf.py",
+    "& E:\\worker2\\.venvs\\voice-livekit\\Scripts\\python.exe E:\\worker2\\.spike\\livekit\\build_result.py"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@xixi/model-adapters",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "模型客户端：小米 MiMo 的对话/ASR/TTS 原始接口（不含任何 Harness 概念）。",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}
