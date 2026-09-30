@@ -16,16 +16,18 @@
 - **文本对话流畅**：多轮连贯、有人格、会主动沉默、能查真实天气；
 - **语音链路可用**：浏览器麦克风 → VAD → ASR → 对话 → TTS，打断判定实测 192ms；
 - **重启不忘事**：会话、轮次、人格都在 SQLite，两个独立进程验证过；
+- **摄像头在场检测可用（M6 最小版）**：帧差动 + YuNet 人脸确认，全在本机跑，状态写成 `presence.changed` 并投影到 `world_state`（带 TTL），离线测试 11 项在默认门禁里；
 - **Harness 可替换**：DSH 与直连 MiMo 两套实现共用 `BrainAdapter` 接口（实时走直连，见 ADR-0008）。
 
-未实现：唤醒词、长期记忆、主动问候、摄像头、模型驱动的人格学习（分别属 M2/M4/M5/M6/M3）。
+未实现：唤醒词、长期记忆、主动问候、模型驱动的人格学习（分别属 M2/M4/M5/M3）；摄像头在场检测的**「真人站在镜头前被检出」这一步尚未实测**（摄像头朝天，见 [`design/perception.md` §8.3](design/perception.md)）。
+⚠️ 现场设备验收结论已修正：扬声器按「能量比」口径只有 ~2.4 dB（<10 dB）→ **判 FAIL**（旧的 12.97 dB PASS 是帧级分位口径的乐观上界），见 [`recon/field-test-report-2026-09-30.md`](recon/field-test-report-2026-09-30.md) 顶部「口径变更说明」。
 
 ## 2. 五分钟自证（照抄即可）
 
 ```powershell
 cd E:\worker2
 npm install                    # workspace 链接 + js-yaml + dsh-tools（失败可挂代理 127.0.0.1:7890）
-npm test                       # 期望：全绿，约 3s，不联网（2026-09-30 实测 95 项）
+npm test                       # 期望：全绿，不联网（2026-09-30 实测 139 项；干净机器约 21s，负载重时 25–43s）
 npm run field-test             # 👉 现场测试控制台 http://127.0.0.1:8792：麦克风电平/噪声底 + 摄像头在场 + 每轮延迟与动作 + 设备自检
 npm run web                    # 试用对话页 http://127.0.0.1:8791，打字或按住🎤说话
 ```
@@ -54,15 +56,15 @@ npm run voice:bargein                # 0 次调用：打断判定延迟（纯本
 | 直连 MiMo 实时路径（流式 + 工具循环） | ✅ 完成 | `npm run chat` |
 | DSH Harness 路径（含 profile 与工具插件） | ✅ 完成（M0 验收） | `npm run verify:m0` / `npm run verify:provider` |
 | 语音输入（浏览器采集 → VAD → ASR → 对话 → TTS） | ✅ 完成 | 页面按住🎤；或 POST `/api/voice`。**多段语音全部使用**（不再只取第一段），整段录音不落盘（`docs/field-test-report` 见下） |
-| 现场测试控制台（一条命令 + 设备验收引导） | ✅ 完成 | `npm run field-test` → http://127.0.0.1:8792；离线自检 `node scripts/field-test.ts --self-test`（24 项） |
+| 现场测试控制台（一条命令 + 设备验收引导） | ✅ 完成 | `npm run field-test` → http://127.0.0.1:8792；离线自检 `node scripts/field-test.ts --self-test`（**31 项**，逐项数字随回归断言增加，以其末行为准） |
 | 语音闭环（文件驱动） | ✅ 完成 | `npm run voice:turn -- --wav tests/audio-fixtures/direct-question.wav`（输出里含 `segmentsUsed/droppedSegments`） |
 | 打断判定（离线） | ✅ 完成（判定层面） | `npm run voice:bargein`（192ms） |
-| 真实麦克风/扬声器/摄像头验收 | ✅ 通过（2026-09-30） | `node scripts/field-test.ts --acceptance`：麦/扬/摄三项全通过，报告 [`recon/field-test-report-2026-09-30.md`](recon/field-test-report-2026-09-30.md)；出厂静音已解除，扬声器判据改为相对差（≥10 dB） |
+| 真实麦克风/扬声器/摄像头验收 | ⚠️ 口径修正后扬声器判 FAIL（2026-09-30） | `node scripts/field-test.ts --acceptance`：麦克风/摄像头通过，**扬声器按「能量比」口径只比噪声底高 ~2.4 dB（<10 dB）→ FAIL**（旧报告按帧级分位写 12.97 dB PASS，是乐观上界）。见 [`recon/field-test-report-2026-09-30.md`](recon/field-test-report-2026-09-30.md) 顶部的「口径变更说明」；改善路径：音量 ≥50%、麦克风离扬声器 0.3–1 m、采集增益设 0 dB 后重跑 |
 | 扬声器真正静音的延迟（§33 P50<500ms） | ⛔ 未验收 | 需要设备 |
 | 唤醒词 / 搭话判定（§13 完整版） | ⛔ 未实现（M2） | — |
 | 长期记忆 / 纠正（§10） | ⛔ 未实现（M4） | — |
 | 主动问候（§15） | ⛔ 未实现（M5） | — |
-| 摄像头 presence（§M6） | ⛔ 未实现 | — |
+| 摄像头在场检测（§M6） | ✅ 最小可用（真人实测未做） | `npm run test:perception`（11 项，离线，含转发 Python 回归）；真机自检 `node scripts/verify-camera-presence.ts --seconds 15`；接口见 [`design/perception.md`](design/perception.md) §8.3（真人站镜头前那一步未完成） |
 | 模型驱动的人格学习（§7.4） | ⛔ 未实现（M3） | 目前只有管理员 `overrideSelfProfile` |
 | 类型检查（`tsc --noEmit`） | ⛔ 未接入 | Node 直接跑 `.ts`，类型错误只在运行时暴露 |
 | 事件回放（§22.3） | ⛔ 未实现（M5） | `tests/replay/` 为空 |
@@ -114,7 +116,7 @@ Pipecat 与 LiveKit 的 VAD/EOU 都无法区分电视与真人（电视 p=0.91~0
 ## 7. 动代码前的检查清单
 
 - [ ] 读过 `AGENTS.md` 的铁律（尤其：模型不能改规则/权限、主动行为必须过硬门禁、事件是唯一事实来源）
-- [ ] `npm test` 是绿的（2026-09-30 实测 95 项），知道哪些用例覆盖你要改的地方
+- [ ] `npm test` 是绿的（2026-09-30 实测 139 项；干净机器约 21s），知道哪些用例覆盖你要改的地方
 - [ ] 新行为**先写测试**（离线可跑），真实 API 验证放 `scripts/verify-*` / `eval-*`，不进 `npm test`
 - [ ] 不新增依赖，或新增时写清新 ADR 与理由
 - [ ] 改完按 [`README.md` §3 更新触发条件](README.md) 同步文档

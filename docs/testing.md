@@ -2,8 +2,10 @@
 
 > 最后更新：2026-09-30
 > 权威来源：`tests/**`、`scripts/**`、`package.json` 的脚本；与代码不一致时以代码为准并立即修正本文
-> 当前状态：`npm test` → **全绿**（2026-09-30 实测 **95 项**：unit 77 + integration 18；`tests/scenarios/` 是语料模块、`tests/replay/` 仍为空，都不产生用例），耗时约 3s，**不发起任何网络请求**。
-> 项数会随开发变化——以 `npm test` 的实际输出为准，本文里的数字都标了实测日期。
+> 当前状态：`npm test` → **全绿**（2026-09-30 实测 **139 项**：unit 94 + integration 19 + perception 11 + console 15；`tests/scenarios/` 是语料模块、`tests/replay/` 仍为空，都不产生用例），**不发起任何网络请求**。
+> 壁钟：干净机器上实测 **21.3 / 21.4 / 21.5s**（t28 连续三次；t28 把串行的 Python 检查改成并发 + 缩小夹具子集，从 53.3s 降下来），
+> 同机同时有别的重活时会退化到 **25–43s**（t29 期间实测 24.9 / 29.2 / 42.8s）——数字随负载浮动，别把它当性能门禁。
+> 项数与耗时都会随开发变化（写这份文档的十几分钟里就从 137 涨到 139：别人在加测试）——以 `npm test` 的实际输出为准，本文里的数字都标了实测日期与来源。
 > 实测结论集中在 [`progress.md` §0](progress.md)：对话质量、语音闭环、打断与结构化输出都有单独脚本与证据。
 > 上游依据：《方案》§51（CI / Regression）、§52（Model Contract Testing）、§22.3（Event Replay）、§33（PoC 指标）。
 > 相关：[`architecture.md`](architecture.md)、[`event-contracts.md`](event-contracts.md)、[`ADR-0006`](adr/0006-runtime-and-dependency-choices.md)、[`ADR-0008`](adr/0008-realtime-path-direct-mimo.md)。
@@ -12,11 +14,12 @@
 
 | 层 | 目录 | 跑什么 | 是否联网 | 现在有什么 |
 |---|---|---|---|---|
-| 单元 | `tests/unit/` | 契约校验、领域持久化、transport 解析、会话 FSM、Prompt 组装、工具、语音前端 | 否 | 12 个测试文件、77 项（2026-09-30 实测） |
-| 集成 | `tests/integration/` | BrainAdapter ↔ transport ↔ store、会话引擎、离线重启恢复 | 否 | 18 项（2026-09-30 实测） |
+| 单元 | `tests/unit/` | 契约校验、领域持久化、transport 解析、会话 FSM、Prompt 组装、工具、语音前端、核心接线 | 否 | 13 个测试文件、94 项（2026-09-30 实测） |
+| 集成 | `tests/integration/` | BrainAdapter ↔ transport ↔ store、会话引擎、离线重启恢复 | 否 | 19 项（2026-09-30 实测） |
 | 场景 | `tests/scenarios/` | 对话语料（8 场景，数据驱动），由 `scripts/eval-conversation.ts` 执行 | 执行时联网 | `corpus.ts`（**不是**空目录，也不产生 `npm test` 用例：它是数据模块） |
 | 回放 | `tests/replay/` | 导出事件区间 → 重放 → 复现决策（§22.3） | 否 | **空**（属 M5） |
-| 控制台 | `tests/console/` | 现场测试控制台的隐私保留策略、多段语音规划、在场回退、报告与错误文案（15 项） | 否 | `field-test-console.test.ts`；**不在 `npm test` 的 glob 里**，用 `node --test "tests/console/**/*.test.ts"` 跑 |
+| 控制台 | `tests/console/` | 现场测试控制台的隐私保留策略、多段语音规划、在场回退、报告与错误文案（15 项） | 否 | `field-test-console.test.ts`；**已在 `npm test` 的 glob 里（t16 起）**，也可用 `npm run test:console` 单跑 |
+| 感知 | `tests/perception/` | 摄像头在场检测的 TS 契约 + 转发 Python 回归套件（合成场景，不需要真相机，11 项） | 否 | 需要带 cv2 的 venv（`.venvs/field-probe` 或 `.venvs/cv4`，缺了**直接失败**而不是跳过）；也可用 `npm run test:perception` 单跑 |
 | 真实 API 验收 | `scripts/verify-*.ts`、`eval-conversation.ts`、`voice-*.ts` | 真实 MiMo 调用、语音闭环、打断 | **是** | 见下方「新增验证脚本」，**都不在 `npm test` 里** |
 | 真机设备验收 | `scripts/field-test.ts --acceptance` | 麦克风/扬声器/摄像头自检（pycaw + WASAPI 回环 + DSHOW） | 否 | 需要真机；结果写 `docs/recon/field-test-report-<日期>.md` |
 
@@ -121,14 +124,15 @@ harness 映射仍在，并把持久化的 harness 会话原样交给 transport�
 ## 3. 怎么跑
 
 ```powershell
-npm test                 # 全部离线测试（unit + integration），2026-09-30 实测 95 项全绿
+npm test                 # 全部离线测试（unit + integration + perception + console），2026-09-30 实测 139 项全绿
 npm run test:unit        # 只跑 tests/unit/**
 npm run test:integration # 只跑 tests/integration/**
 npm run test:scenarios   # tests/scenarios/**（语料模块，当前没有 *.test.ts，输出 0 项）
 npm run test:replay      # tests/replay/**（目录仍为空）
+npm run test:perception  # 只跑 tests/perception/**（会转发 Python 感知回归套件，需带 cv2 的 venv）
+npm run test:console     # 只跑 tests/console/**（15 项，已在默认门禁里）
 
-node --test "tests/console/**/*.test.ts"   # 现场测试控制台的 15 项（不在 npm test 的 glob 里）
-
+node --test "tests/console/**/*.test.ts"   # 等价的单目录跑法（也可用上面的 npm run test:console）
 node --test tests/unit/contracts.test.ts   # 单文件
 
 npm run demo:m0:text     # 离线单轮演示（FakeBrainAdapter，无需密钥）
@@ -137,14 +141,35 @@ npm run demo:m0:restart  # 离线两进程重启演示
 # 现场测试（一条命令启动控制台；页面里点「开始设备自检」）
 npm run field-test                          # http://127.0.0.1:8792，只监听本机
 npm run field-test -- --offline             # 没有密钥也能跑通 UI（ASR/模型用替身）
-node scripts/field-test.ts --self-test      # 离线自检：隐私/多段语音/页面/报告（不碰硬件）
+node scripts/field-test.ts --self-test      # 离线自检：隐私/多段语音/页面/报告，31 项（不碰硬件、不联网）
 node scripts/field-test.ts --acceptance     # 只跑一次真机设备验收，重写 docs/recon/field-test-report-<日期>.md
+# 注意：--self-test 的项数会随回归断言增加而变——以它最后一行的「自检结果：N 项通过」为准
+# （2026-09-30 实测 31 项；t4 交付时是 24 项，t6 的 F2/F6/F7 回归断言加进来后涨到 31）。
 ```
 
 `npm test` 的 glob 包含 `tests/scenarios/**` 与 `tests/replay/**`——这两个目录目前都不产生用例
 （前者是数据模块 `corpus.ts`，后者为空），所以以后往这两个目录加 `*.test.ts` 会被自动纳入全量测试，不需要改脚本。
-`tests/console/**` **不在** glob 里：现场测试控制台的测试要起 HTTP 服务与 Python VAD，故意与「秒级、无网络、无子进程」的
-`npm test` 分开跑（见 §1 表格最后两行）。
+`tests/console/**` 与 `tests/perception/**` **已在** glob 里（t16 起）——「测试写了就必须跑」是本项目的硬规矩，
+它们要起 HTTP 服务 / Python 进程，所以是门禁里较慢的一批：t28 用「缩小输入（单档 tier + 最小夹具子集）+ 并发执行」
+把它们从 53.3s 压到 21.5s（见文档头部实测数字），没有把任何断言移出门禁。
+
+### 3.1 怎么给 CLI / 试用页制造「超过跟进窗口的停顿」
+会话的跟进窗口 = `lingerMs` 30s × 人格 `silence_tolerance` 缩放（本机人格 0.7 → **36 s**，`npm run chat` 启动横幅会打印）。
+要触发「窗口过期 → 下一句被拒 / 被当作新会话直呼」这条路径，必须让**两轮之间的真实时间**超过它：
+
+- **管道一次性喂 stdin 不行**（最常见写法见下）：readline 会把一次性写入的多行立刻按行交给会话，两行背靠背执行。
+  本任务实测：`--fake` 离线路径两轮 `user` 事件时间戳只差 **4 ms**（整轮 0.3s 结束）；
+  真实路径实测 wall **16.9s**，两轮之间只有模型自己那一轮的时间（约 6s）——**都远小于 36s 窗口**，所以永远触发不到过期路径。
+  （t9 复核在真实路径上也观察到同向证据：壁钟 46s，而两条事件时间戳只差 6ms。）
+
+  ```powershell
+  "第一句`n第二句" | node scripts/chat.ts     # 两行一次性写进 stdin —— 造不出停顿
+  ```
+- **能真正造出停顿的两种做法**：
+  1. **交互式终端**：`npm run chat`，输入第一句后**什么都不输**，等 **> 36 s**，再输入第二句；
+  2. **试用页**：`npm run web`，两次请求（点击发送）之间等 **> 36 s**（页面每次点击就是一轮，等价路径）。
+- 用「会 sleep 的脚本往管道里写」也能造出停顿——那是**写入方**在等，不是 readline 的功劳；
+  判断依据始终是**两轮之间的真实间隔是否超过窗口**，而不是用了管道还是终端。
 
 ## 4. 会花真实 API 调用的检查（刻意排除在 `npm test` 之外）
 
@@ -215,11 +240,11 @@ manual audio hardware tests 三档；`AGENTS.md` 第 2 节也要求「联网验�
 
 | 文件 | 项数 | 覆盖 |
 |---|---:|---|
-| `tests/unit/conversation-fsm.test.ts` | 7 | IDLE 需唤醒/直呼、已开会话可继续、静默容忍缩放跟进窗口、安静模式到期与解除 |
+| `tests/unit/conversation-fsm.test.ts` | 8 | IDLE 需唤醒/直呼、已开会话可继续、静默容忍缩放跟进窗口、安静模式到期与解除 |
 | `tests/unit/prompt.test.ts` | 5 | 硬策略在场、人格→具体指令、同一人格前缀逐字节稳定、情境含时段/星期、sections 可寻址 |
 | `tests/unit/tools.test.ts` | 7 | 天气码中文、默认地点与显式地点、未知地点是类型化拒绝、预报缓存、参数封闭、只读约束 |
-| `tests/integration/conversation-engine.test.ts` | 8 | 未直呼不写入日志、多轮连续性与工作记忆、跨分片的 `[静默]` 兜底、安静模式、长停顿后需重新直呼 |
-| `tests/unit/voice/frontend.test.ts` | 7 | 抗噪前端：转发 `services/voice-edge/tests/test_frontend.py` 的 39 项 DSP 单测（去直流/高通/噪声底/谱减法/参数推导/夹具生成），再断言噪声夹具与 manifest 自洽、困难档不被删除、相似度评分定义、verify 脚本的失败规则 |
+| `tests/integration/conversation-engine.test.ts` | 10 | 未直呼不写入日志、多轮连续性与工作记忆、跨分片的 `[静默]` 兜底、安静模式、长停顿后需重新直呼 |
+| `tests/unit/voice/frontend.test.ts` | 14 | 抗噪前端：转发 `services/voice-edge/tests/test_frontend.py` 的 39 项 DSP 单测（去直流/高通/噪声底/谱减法/参数推导/夹具生成），断言噪声夹具与 manifest 自洽、困难档不被删除、相似度评分定义，并**真的执行** `verify-voice-noise.ts` 的四条行为断言（离线管线结论与 exit code 一致、结构性失败 exit 1、空选择档不谎报边界、噪声档 `vadEndpointDelayMs` 非零且量级正确）。为控制门禁耗时，这些 shell-out 检查在同一个并发父测试里跑、并按参数复用进程（t28：该文件 15.9s，全量门禁 21.5s） |
 | `services/voice-edge/tests/test_frontend.py` | 39 | 纯函数离线单测（由上面那条转发执行，不单独出现在 `npm test` 的 glob 里） |
 
 ### 测量方法上的坑（踩过，写下来）
@@ -244,6 +269,7 @@ manual audio hardware tests 三档；`AGENTS.md` 第 2 节也要求「联网验�
 | `POST /api/voice`（试用页的🎤） | ASR + 一轮 | 浏览器采集 → VAD 只取语音段 → ASR → 对话 → TTS；无语音时返回 `NO_SPEECH_DETECTED` 而不是假装听懂 |
 | `scripts/voice-device-check.ts` | ASR + 一轮 | 设备验收：对回环录音跑全链路并与原文比对字符级相似度（≥0.5 判 PASS） |
 | `node scripts/verify-voice-noise.ts` | 4 条干净 + 20 条噪声夹具 × 1 次 ASR（默认 5 档） | **噪声鲁棒性回归**：干净与噪声夹具分别跑前端→VAD→ASR，输出转写、字符级相似度、端点延迟、失败清单与成功边界；`--nr` 切去噪做 A/B，`--fake`/`--dry-run` 完全离线 |
+| `npm run voice:noise -- --fake` | **0**（离线桩，不联网、不花钱） | **离线管线校验，不是噪声鲁棒性判定**：ASR 被替换成确定性桩，所以**相似度判据与检出率在离线模式不适用，只作为观察记录**（报告里 `mode=offline-plumbing`、`quality.applies=false`、`criteria.transcriptSimilarity.applies=false`），只要管线跑通（≥1 条夹具 + 没有端点延迟类结构性问题）就**以 exit 0 结束**；要拿到**真实的噪声边界与判定**必须去掉 `--fake` 跑真实 ASR。失败判定本身没变：真实模式下任何一条夹具失败仍然 exit 1（结构性问题在离线模式下也仍然 exit 1） |
 | `python -m voice_edge.calibrate --seconds 5` | 0（只碰麦克风） | 噪声底校准：输出分带能量、噪声底与建议参数 JSON；`--list-devices` 列设备（WASAPI 优先） |
 | `python -m voice_edge.make_noise_fixtures --force` | 0 | 用实测环境噪声重建 `tests/audio-fixtures/noisy/` 与 `manifest.json`（5 夹具 × 6 档 SNR） |
 | `python -m voice_edge.loopback <wav> <out.wav>` | 0 | 扬声器播放 + 麦克风录回；相对判据（语音带抬升 ≥10 dB 或相关 ≥0.3）+ Core Audio 静音状态；`verdict` 不是 `ok` 时说明是「静音端点」「音量不足」还是「没渲染」 |
