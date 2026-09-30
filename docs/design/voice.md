@@ -154,20 +154,22 @@ VAD 参数本身：`stop_secs` 保持 ADR-0007 的 0.6（句内 352 ms 停顿的
 
 #### （4）高通对 VAD 判定几乎没影响 —— 这是必须写下来的实测结果
 
-用「同一文件、只改 `--highpass-hz`」跑 `voice_edge.segment`（60 Hz vs 120 Hz 相差 ≤1 帧 32 ms；
-下表是 120 Hz 与关闭前端对比，`--raw`）：
+用「同一文件、只改 `--highpass-hz`」跑 `voice_edge.segment`。下表**每一行是一支夹具**，
+`前端` 列是高通档（`关` = `--raw`，或 60 / 120 Hz）；60 Hz 与 120 Hz 的差 ≤1 帧（32 ms）。
+数字逐格来自 `data/voice/frontend-vad-grid.json`（每行有 `highpassHz` 字段，可逐格复核）：
 
-| 夹具 | 前端 | 段数 | VAD 起点 | 端点延迟 | 打断判定 |
+| 夹具（行） | 前端：高通档（列） | 段数 | VAD 起点 | 端点延迟 | 打断判定 |
 |---|---|---|---|---|---|
 | `direct-question.wav`（干净） | 关 | 1 | 320 ms | 600 ms | 128 ms |
-| 同上 | 120 Hz | 1 | 320 ms | 600 ms | 128 ms |
-| `direct-question-snr6db` | 关 | 1 | 448 ms | 1056 ms | 0 ms |
-| 同上 | 120 Hz | 1 | 448 ms | 1056 ms | 0 ms |
-| `longer-turn-snr0db` | 关 | 1 | 672 ms | — | — |
-| 同上 | 120 Hz | 1 | **384 ms** | — | — |
+| `direct-question.wav`（干净） | 120 Hz | 1 | 320 ms | 600 ms | 128 ms |
+| `direct-question-snr6db.wav` | 关 | 1 | 448 ms | 1056 ms | 0 ms |
+| `direct-question-snr6db.wav` | 120 Hz | 1 | 448 ms | 1056 ms | 0 ms |
+| `longer-turn-snr0db.wav` | 关 | 1 | 672 ms | — | — |
+| `longer-turn-snr0db.wav` | 120 Hz | 1 | **384 ms** | — | — |
 
-（同一天同一批夹具的两种设置，逐个夹具对比；60 Hz 与 120 Hz 之间的差 ≤1 帧。原始 JSON：
-`data/voice/frontend-vad-grid.json`，每行有 `highpassHz` 字段。）
+（复核用原始格值：`direct-question.wav` 在 关/60/120 三档都是 `start 320 / endDelay 600 / barge 128`；
+`direct-question-snr6db.wav` 三档都是 `448 / 1056 / 0`；`longer-turn-snr0db.wav` 是 关 672、60 Hz 672、
+120 Hz 384。60 Hz 一列未列进上表，因为它与「关」逐格相同。）
 
 即：**宽带噪声降了 5.3 dB，VAD 的段数/起点/端点基本不变**（个别 0–288 ms 的方向性改善）。
 原因合理：Silero 自己就忽略 <100 Hz 的能量；高通真正的价值在能量门限（第（3）条）与
@@ -216,36 +218,50 @@ recon 实测「夹具电平（−24.6 dBFS）下麦克风只比噪声底高 0.8�
 
 `node scripts/verify-voice-noise.ts`（干净 + 噪声夹具 → 前端 → VAD → **真实 MiMo ASR**）
 输出每条夹具的转写、字符级相似度、端点延迟、VAD 起点延迟与失败清单，退出码反映成败。
-2026-09-30 实测（`data/voice/verify-voice-noise.json`，`backchannel` 不计入：Silero 本来就看不见「嗯。」，§2）：
 
-| SNR 档 | 检出 | 平均字符相似度 | 平均端点延迟 | 平均起点延迟(vs 干净) | 判定 |
+**两张表的出处不同，别混引**（这是 t7 评审 F1 的修正）：
+- **相似度 / 检出 / 判定**来自真实 ASR 运行 `data/voice/verify-voice-noise.json`；
+- **端点延迟 / VAD 起点延迟**来自 VAD 网格 `data/voice/frontend-vad-grid.json` 的 **120 Hz 行**。
+  `verify-voice-noise.json` 的 `tiers[].meanEndPointDelayMs` 实测是 **0 / 0 / 0 / −16 / −96 / null**
+  （检测窗被截到干净语音结束点，所以恒 ≤0，**不能**用来引用端点延迟；这正是 F2 修掉的结构问题）。
+  下表的端点延迟列因此写成**逐条值（最大）**，而不是均值。
+
+2026-09-30 实测（相似度列：`data/voice/verify-voice-noise.json`；端点/起点列：`frontend-vad-grid.json` 120 Hz 行。
+`backchannel` 不计入：Silero 本来就看不见「嗯。」，§2）：
+
+| SNR 档 | 检出 | 平均字符相似度 | 端点延迟逐条值（最大） | VAD 起点延迟逐条值 | 判定 |
 |---|---|---|---|---|---|
-| 干净 | 4/4 | 0.800 | 0 ms（窗口截断，见下） | 0 ms | PASS |
-| 18 dB | 4/4 | 0.841 | 640 ms | −72 ms | PASS |
-| 6 dB | 4/4 | 0.841 | 1472 ms | −56 ms | PASS |
-| **3 dB** | **4/4** | **0.805** | 640 ms | −40 ms | **PASS** |
-| 0 dB | 4/4 | 0.491 | −96 ms | 344 ms | FAIL（2 条相似度 <0.6） |
-| −6 dB | 0/4 | — | — | — | FAIL（全部漏检） |
+| 干净 | 4/4 | 0.800 | 0 ms（4 条都是 0） | 0 ms | PASS |
+| 18 dB | 4/4 | 0.841 | 640 ms（4 条皆 640 → 最大 640） | −72 ms | PASS |
+| 6 dB | 4/4 | 0.841 | 1056 / 1376 / 1472 / 1088 → **最大 1472**（4 条均值 1248） | −56 ms | PASS |
+| **3 dB** | **4/4** | **0.805** | **仅 1 条有效：1088**（其余 3 条 `endpointDelayMs = null`，不是 640） | −40 ms | **PASS** |
+| 0 dB | 4/4 | 0.491 | 0 条有效（全部 null） | 344 ms | FAIL（2 条相似度 <0.6） |
+| −6 dB | 0/4 | — | 0 条有效（全部漏检） | — | FAIL（全部漏检） |
 
 逐条失败样本（保留原样，不删）：0 dB 档 `followup-turn` →「嗯。」（相似度 0）、`tv-dialogue` →「怎么了？」（0.286）；
 −6 dB 档 4 条全部 `NO_SPEECH_DETECTED`。
-（0 dB 档的「平均端点延迟 −96 ms」是因为检测窗被截在干净语音结束点，不是真的提前；噪声下的端点
-是**变晚**的，见下面第三条约定与 §1.1（4）的 1056–1472 ms。）
+（`endpointDelayMs = null` 表示该条没走到「端点延迟可算」的条件，不是 0 ms；0 dB 与 −6 dB 档在
+`verify-voice-noise.json` 里的 `−96 / null` 是**另一个口径**（检测窗截断），不要与本列混用。）
 
 **可复现的成功边界（写死）**：
 
-> **SNR_inband ≥ 3 dB 时，4 条中文夹具全部检出，平均字符相似度 0.805（≥0.6），端点延迟 640 ms（≤1500 ms 上限）。
-> 0 dB 时仍能全部检出但转写质量掉到 0.491（个别夹具只吐出一个语气词）；−6 dB 完全不可用。**
+> **SNR_inband ≥ 3 dB 时，4 条中文夹具全部检出，平均字符相似度 0.805（≥0.6）。
+> 端点延迟不是这个边界的判据**（3 dB 档只有 1 条能算出端点延迟，值 1088 ms；见上表的逐条值列）。
+> 0 dB 时仍能全部检出但转写质量掉到 0.491（个别夹具只吐出一个语气词）；−6 dB 完全不可用。
 
-（脚本自动写进 `report.boundary.lowestPassingTierDb` 与 `report.boundary.claim`，本节数字与之逐字一致。）
+（`report.boundary.claim` 由脚本自动写入，它只声明「相似度 + 无漏检 + 无超长端点」三件事，
+不声明端点延迟的具体数值；本节不把 `lowestPassingTierDb` 与端点延迟数字绑在一起。）
 
 边界值取自 `report.boundary.lowestPassingTierDb`（脚本自动算），不是手写的。
-两个已知的测量约定：
+三个已知的测量约定：
 - **困难样本不删**：`tests/audio-fixtures/noisy/` 里的 0 dB 与 −6 dB 档全部保留
   （`tests/unit/voice/frontend.test.ts` 有一条测试专门守住「最低 SNR 档必须仍在盘上」）。
-- **端点延迟在噪声下会被高估**：噪声让 Silero 晚 500–900 ms 才判「说完」（6 dB 档 1472 ms vs 干净 600 ms）。
-  相似度用的是「VAD 起点 → 干净版的语音结束点」这一段，所以这个延迟不会伤到转写，
-  但**真实对话的响应延迟在噪声下会明显变差**，这是 §6 的未验收项之一。
+- **端点延迟在噪声下会变晚，而且逐条差异大**：6 dB 档逐条 1056/1376/1472/1088 ms（干净 600 ms），
+  3 dB 档只有 1 条可算（1088 ms）；0 dB 与 −6 dB 档一条都算不出。所以任何「本档端点延迟 = 某个均值」
+  的写法都不成立，本文件一律给逐条值（最大）。
+- **端点延迟的口径（F2 修正后）**：判据用的 `vadEndpointDelayMs = speech.endMs − cleanEndMs`（**不截断**），
+  与 ASR 切片用的 `detectedEnd = min(speech.endMs, cleanEndMs)`（截断，保证只上传语音段）分开。
+  修好之前 `endpointDelayMs` 恒 ≤0，`ENDPOINT_DELAY > 1500 ms` 这条判据结构上不可达。
 - `0 dB` 档的 `tv-dialogue` 转写为「嗯。」而相似度 0：这是 ASR 在极低 SNR 下的事实输出，保留原样。
 
 #### （7）实时链路优先 WASAPI（沿用 recon 结论）
@@ -376,8 +392,10 @@ LiveKit 全套导入 3799.6 ms、峰值 RSS 398.4 MB、turn detector 权重 **41
 - **真实麦克风的噪声底尚未在本轮重新标定**：§1.1 的数字来自 t1 勘测的 `data/recon/ambient-5s.wav`（+5.5 dB 采集增益）。
   现场测试前应跑一次 `python -m voice_edge.calibrate --seconds 5`（并把采集增益调到 0 dB），
   否则门限与采集增益建议可能对不上当前设备状态。
-- **噪声条件下的端点延迟变差**：6 dB SNR 时平均端点延迟 1472 ms（干净 600 ms），
-  端到端响应会明显拖长；`endpointDelayMs` 在 `scripts/verify-voice-noise.ts` 里有逐条记录。
+- **噪声条件下的端点延迟变差**：6 dB SNR 档逐条 1056/1376/1472/1088 ms（最大 1472，干净 600 ms），
+  3 dB 档只有 1 条可算（1088 ms），0 dB 与 −6 dB 档一条都算不出；端到端响应会明显拖长。
+  `endpointDelayMs`（截断口径，供 ASR 切片）与 `vadEndpointDelayMs`（不截断口径，供判据）在
+  `scripts/verify-voice-noise.ts` 里逐条记录；端点延迟不是成功边界的判据（§1.1（6））。
 - **噪声下的打断判定不可靠**（§4）：0 dB 档 `followup-turn` 根本没有 VAD 事件。
 
 ## 维护规则

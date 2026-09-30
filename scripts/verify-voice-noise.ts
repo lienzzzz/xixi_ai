@@ -129,7 +129,15 @@ interface ClipResult {
   readonly segments: number;
   readonly speechStartMs: number | null;
   readonly speechEndMs: number | null;
+  /** Truncated at the clean speech end: this is the span that gets uploaded to the ASR (§20.1). */
   readonly endpointDelayMs: number | null;
+  /**
+   * The VAD's own end minus the clean speech end, **not** truncated. `endpointDelayMs` is
+   * clamped by `min(speech.endMs, cleanEndMs)` for the ASR slice, which made it ≤ 0 by
+   * construction and left the `ENDPOINT_DELAY > max` criterion structurally unreachable
+   * (t7 review F2). The criterion now uses this field; the slice still uses the clamped one.
+   */
+  readonly vadEndpointDelayMs: number | null;
   readonly bargeInDecisionMs: number | null;
   readonly rawSpeechStartMs: number | null;
   readonly vadStartLatencyVsCleanMs: number | null;
@@ -267,8 +275,14 @@ async function measure(args: {
   const endpointDelayMs = speech === null || detectedEnd === null || args.cleanEndMs === null
     ? null
     : Math.round(detectedEnd - args.cleanEndMs);
-  if (endpointDelayMs !== null && endpointDelayMs > maxEndpointDelayMs) {
-    failures.push(`ENDPOINT_DELAY>${maxEndpointDelayMs}ms(${endpointDelayMs})`);
+  // The untruncated VAD end (t7 review F2). `detectedEnd` is clamped to the clean speech end so
+  // the ASR slice never includes the noise reference tail; measuring the criterion against that
+  // clamped value guaranteed `<= 0` and made `ENDPOINT_DELAY` unreachable.
+  const vadEndpointDelayMs = speech === null || args.cleanEndMs === null
+    ? null
+    : Math.round(speech.endMs - args.cleanEndMs);
+  if (vadEndpointDelayMs !== null && vadEndpointDelayMs > maxEndpointDelayMs) {
+    failures.push(`ENDPOINT_DELAY>${maxEndpointDelayMs}ms(${vadEndpointDelayMs})`);
   }
 
   // Optional A/B: the same clip with noise reduction disabled, no extra ASR call unless the
@@ -298,6 +312,7 @@ async function measure(args: {
     speechStartMs: speech === null ? null : speech.startMs,
     speechEndMs: detectedEnd,
     endpointDelayMs,
+    vadEndpointDelayMs,
     bargeInDecisionMs: segmentation.bargeInDecisionMs,
     rawSpeechStartMs: segmentation.rawEnergyStartMs,
     vadStartLatencyVsCleanMs:
@@ -373,7 +388,14 @@ interface TierSummary {
   similarityMean: number | null;
   similarityMin: number | null;
   similarityMax: number | null;
+  /**
+   * Truncated delay (≤ 0 by construction, kept for continuity). Do **not** quote this as "the
+   * tier's endpoint delay" — it is the ASR-slice clamp, not the VAD's end (t7 review F1/F2).
+   */
   meanEndPointDelayMs: number | null;
+  /** The real one: mean of `vadEndpointDelayMs`, the value the ENDPOINT_DELAY criterion uses. */
+  meanVadEndpointDelayMs: number | null;
+  maxVadEndpointDelayMs: number | null;
   meanVadStartLatencyMs: number | null;
   similarityMeanNoNr: number | null;
   failures: number;
@@ -411,6 +433,8 @@ const summaries: TierSummary[] = tierNames.map((tier) => {
     similarityMin: minimum(similarities),
     similarityMax: maximum(similarities),
     meanEndPointDelayMs: mean(rows.map((row) => row.endpointDelayMs)),
+    meanVadEndpointDelayMs: mean(rows.map((row) => row.vadEndpointDelayMs)),
+    maxVadEndpointDelayMs: maximum(rows.map((row) => row.vadEndpointDelayMs)),
     meanVadStartLatencyMs: mean(rows.map((row) => row.vadStartLatencyVsCleanMs)),
     similarityMeanNoNr: mean(rows.map((row) => row.similarityNoNr)),
     failures,

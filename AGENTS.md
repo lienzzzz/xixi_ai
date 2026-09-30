@@ -79,7 +79,7 @@ $env:NODE_USE_ENV_PROXY = '1'   # Node 需要显式开启才读环境变量代�
 ## 7. 常用命令
 
 ```powershell
-npm test                 # 全部离线测试（unit/integration/perception/console），不花 API 费用；当前 120 项，约 12s
+npm test                 # 全部离线测试（unit/integration/perception/console），不花 API 费用；当前 133 项
 npm run test:perception  # 只跑摄像头在场与 WorldState 投影
 npm run test:console     # 只跑现场测试控制台
 npm run install:profile  # 幂等：把仓库内的西西 DSH profile 装进 .dsh/
@@ -140,3 +140,9 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    而不是让成员回滚质量或绕过门禁。收尾任务的回报必须写明「原任务失败的归因」与「本次只做补正/核实」。
 6. **验收命令必须是改完之后真实存在的命令**；需要新脚本时，把它写进 deliverables，否则 `verify` 无法执行。
 7. **每次提交前先跑 `npm test` 与 `npm run check:docs`，并把实测结果写进提交信息**——本轮出现过提交信息声称「全绿」而实际 1 项失败的情况（因为把成员在途的半成品一起提交了）。
+8. **不要用 PowerShell 做批量文本替换/往返读写**：本轮实测它会把 UTF-8 中文写坏（出现 `U+FFFD` 替换字符，直接毁掉源文件）。
+   要批量改文本请用编辑工具，或 Python 显式 `encoding='utf-8'` 读写；改完 `git diff --stat` 自检异常体积。
+9. **默认门禁必须保持快（目标 <25s）**：重的端到端断言要**缩小输入**（单档 tier、最小夹具子集）来提速，
+   **不许靠删断言或把测试挪出默认门禁**来换速度——「测试写了就必须跑」是本项目已经踩过坑的原则。
+10. **全量测试结果要在成员在途编辑窗口之外判读**：本轮多次出现「红 1 项」实为他人半成品（失败用例名每次不同、stash 后仍失败即可判定）。
+   声明「全绿」时必须带**修订号**与实测输出，否则视为未验证。

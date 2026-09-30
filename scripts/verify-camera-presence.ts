@@ -12,16 +12,19 @@
  *   4. 脚本把事件按 `event_id` 去重、重建信封并用 `validateEvent()` 校验一遍，
  *      再读回 `world_state` 投影，打印帧率 / 抓帧耗时 / 检测耗时 / 状态。
  *
- * 退出码：0 = 通过；2 = 没有可用摄像头（明确失败，不是静默跳过）；3 = 缺模型；1 = 其它失败。
- * `--require-event` 时，一次都没产生 presence 事件也判失败（给「人真的站在镜头前」的实测用）。
+ * 两个库，别写混（`--db` 可显式覆盖，覆盖时会打印警告）：
+ *   * 真实摄像头 → `data/perception/field-test.sqlite`（现场测试台账）；
+ *   * `--self-test` → `data/perception/self-test.sqlite`（合成帧的**自检库**，默认单独一个文件），
+ *     这样合成事件不会混进「真实摄像头」的台账里；旧版曾把自检帧写进 field-test 库，
+ *     那批遗留事件在 `docs/design/perception.md` §8.2 里点名说明。
  *
- * 相机朝向天花板、画面里没有人时，正常结果是「0 个事件」——那也是一种正确结果，
- * 所以默认**不**因为 0 事件而失败，只在 `--require-event` 下失败。真人实测属于用户自测步骤，
- * 见 `docs/design/perception.md`。
+ * 退出码：0 = 通过；2 = 没有可用摄像头（明确失败，不是静默跳过）；3 = 缺模型；1 = 其它失败
+ * （含未知参数）。`--require-transition`（别名 `--require-event`）时，一次真实状态转换都没有
+ * 也判失败（给「人真的站在镜头前」的实测用）。
  *
- * 用法：
- *   node scripts/verify-camera-presence.ts --seconds 20
- *   node scripts/verify-camera-presence.ts --seconds 40 --require-event   # 人要站在镜头前
+ * 相机朝向天花板、画面里没有人时，正常结果是「0 次转换」——那也是一种正确结果，
+ * 所以默认**不**因为 0 转换而失败，只在 `--require-transition` 下失败。真人实测属于用户自测步骤，
+ * 见 `docs/design/perception.md` §8.3。
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
@@ -35,24 +38,118 @@ import { REPO_ROOT, printEvidence } from './lib/harness.ts';
 const PERCEPTION_DIR = join(REPO_ROOT, 'services', 'perception-edge');
 /**
  * Dedicated database for field tests, so a run of this script can never interfere with the
- * chat database (`data/xixi.sqlite`) that `npm run chat` uses. Override with `--db`.
+ * chat database (`data/xixi.sqlite`) that `npm run chat` uses.
  */
 const DEFAULT_DB = join(REPO_ROOT, 'data', 'perception', 'field-test.sqlite');
+/**
+ * Self-test writes to its own ledger. The frames are synthetic, so their events are not
+ * evidence about the room; keeping them in a separate file means "which database holds the
+ * real camera's history" is answerable by looking at the file name, not by reading payloads.
+ */
+const SELF_TEST_DB = join(REPO_ROOT, 'data', 'perception', 'self-test.sqlite');
 const PROBE = 'import cv2, numpy; print(cv2.__version__)';
 
 const args = process.argv.slice(2);
-function argValue(name: string, fallback: string): string {
-  const index = args.indexOf(name);
-  return index >= 0 && args[index + 1] !== undefined ? (args[index + 1] as string) : fallback;
-}
-function hasFlag(name: string): boolean {
-  return args.includes(name);
+
+/** The usage text is shared by `--help`, unknown-argument errors and the option table. */
+const USAGE = `摄像头在场检测验收（M6）
+
+用法：
+  node scripts/verify-camera-presence.ts [选项]
+
+选项（全部可选；不接受列表外的参数）：
+  --seconds <n>                 用真实摄像头跑多少秒（默认 20）
+  --db <path>                   事件日志路径（默认 data/perception/field-test.sqlite；
+                                自检模式默认 data/perception/self-test.sqlite）
+  --camera-index <n>            摄像头索引（默认 0）
+  --self-test                   不打开摄像头：用生成的「脸 + 移动」帧跑通检测→事件→投影的写库路径
+  --scenario <name>             --self-test 的场景名（默认 long-occlusion）
+  --require-transition          至少有 1 次真实状态转换才算通过（一般人站在镜头前时用）
+  --require-event               同 --require-transition（旧名，保留兼容）
+  --min-fps <n>                 真实摄像头路径的处理帧率门槛（默认 20）
+  --help                        打印本用法后退出（不打开摄像头、不写库）
+
+退出码：0 通过；1 失败（含未知参数）；2 没有可用摄像头；3 缺少模型或解释器。
+
+例：
+  node scripts/verify-camera-presence.ts --seconds 15
+  node scripts/verify-camera-presence.ts --self-test
+  node scripts/verify-camera-presence.ts --seconds 40 --require-transition`;
+
+/** Every accepted option. Anything else is refused loudly instead of being ignored. */
+const OPTIONS_WITH_VALUE = new Set([
+  '--seconds',
+  '--db',
+  '--camera-index',
+  '--scenario',
+  '--min-fps',
+]);
+const FLAGS = new Set(['--self-test', '--require-transition', '--require-event', '--help']);
+
+function parseArgs(argv: string[]): { values: Map<string, string>; flags: Set<string> } {
+  const values = new Map<string, string>();
+  const flags = new Set<string>();
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index] as string;
+    if (FLAGS.has(token)) {
+      flags.add(token);
+      continue;
+    }
+    if (OPTIONS_WITH_VALUE.has(token)) {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith('--')) {
+        console.error(`参数错误：${token} 需要一个值。\n\n${USAGE}`);
+        process.exit(1);
+      }
+      values.set(token, value);
+      index += 1;
+      continue;
+    }
+    // An unknown argument used to be ignored silently, which turned a typo into a run with
+    // default settings — the worst outcome, because it looks like it worked.
+    const hint = token.startsWith('-') && !token.startsWith('--') ? '\n（选项要用两个短横线，例如 --seconds）' : '';
+    console.error(`参数错误：无法识别的参数「${token}」。${hint}\n\n${USAGE}`);
+    process.exit(1);
+  }
+  return { values, flags };
 }
 
+const parsed = parseArgs(args);
+if (parsed.flags.has('--help')) {
+  // Print and leave: no camera is opened, no database is written.
+  console.log(USAGE);
+  process.exit(0);
+}
+
+function argValue(name: string, fallback: string): string {
+  return parsed.values.get(name) ?? fallback;
+}
+function hasFlag(name: string): boolean {
+  return parsed.flags.has(name);
+}
+
+const selfTest = hasFlag('--self-test');
 const seconds = Number(argValue('--seconds', '20'));
-const dbPath = argValue('--db', DEFAULT_DB);
+/** Explicit `--db` always wins; otherwise the mode picks its own ledger (see the header). */
+const explicitDb = parsed.values.get('--db');
+const dbPath = explicitDb ?? (selfTest ? SELF_TEST_DB : DEFAULT_DB);
 const requireTransition = hasFlag('--require-event') || hasFlag('--require-transition');
 const qualityFloorFps = Number(argValue('--min-fps', '20'));
+
+if (!Number.isFinite(seconds) || seconds <= 0) {
+  console.error(`参数错误：--seconds 需要正数，收到「${argValue('--seconds', '')}」。\n\n${USAGE}`);
+  process.exit(1);
+}
+if (!Number.isFinite(qualityFloorFps) || qualityFloorFps <= 0) {
+  console.error(`参数错误：--min-fps 需要正数，收到「${argValue('--min-fps', '')}」。\n\n${USAGE}`);
+  process.exit(1);
+}
+if (explicitDb !== undefined && selfTest) {
+  console.error(
+    `注意：你显式指定了 --db ${explicitDb}，所以自检的合成事件会写进这个库，而不是默认的自检库 ${SELF_TEST_DB}。\n` +
+      '      合成事件不是关于房间的证据；要么去掉 --db 让它单独落库，要么在消费时忽略这次运行写入的记录。',
+  );
+}
 
 /** Same search order as tests/perception/camera-presence.test.ts: never guess silently. */
 function pythonCandidates(): string[] {
@@ -144,14 +241,14 @@ if (hasFlag('--self-test')) {
   // No real person is needed (and no real person is present): play the generated
   // "person walks through the frame" scene through the *same* detect → emit → DB path.
   // This is explicitly NOT the real-face acceptance — that one needs a human and is
-  // documented as a user step in docs/design/perception.md.
+  // documented as a user step in docs/design/perception.md §8.3.
   pythonArgs.push('--source', 'synthetic', '--scenario', argValue('--scenario', 'long-occlusion'), '--frames', '2000');
 }
 
 console.log(
   hasFlag('--self-test')
-    ? '自检模式：用生成帧（不是真人）跑通检测→事件→投影的写库路径'
-    : `用真实摄像头跑 ${seconds} s：${python} -m perception_edge.run（摄像头 DSHOW，画面不出本机）`,
+    ? `自检模式：用生成帧（不是真人）跑通检测→事件→投影的写库路径；写入自检库 ${dbPath}`
+    : `用真实摄像头跑 ${seconds} s：${python} -m perception_edge.run（摄像头 DSHOW，画面不出本机）；写入台账 ${dbPath}`,
 );
 const frames: FrameRecord[] = [];
 let summary: SummaryRecord | null = null;
@@ -250,7 +347,7 @@ const startupEvents = eventList.filter((event) =>
 const transitions = eventList.filter((event) => !startupEvents.includes(event));
 const fps = summary?.fps_processed ?? 0;
 const framesProcessed = summary?.frames ?? frames.length;
-const syntheticRun = hasFlag('--self-test');
+const syntheticRun = selfTest;
 const problems: string[] = [...contractProblems];
 if (!syntheticRun && summary !== null && summary.camera !== null && framesProcessed > 0) {
   // The camera read loop is the ceiling; the detector must not be the bottleneck.
@@ -271,6 +368,11 @@ if (requireTransition && transitions.length === 0) {
 
 const payload = {
   db: dbFile,
+  db_choice: explicitDb !== undefined ? 'explicit --db' : selfTest ? 'self-test ledger (synthetic frames)' : 'field-test ledger (real camera)',
+  db_note: selfTest
+    ? `自检帧是合成的：本运行写入 ${explicitDb === undefined ? '专用自检库 data/perception/self-test.sqlite' : `显式指定的库 ${dbFile}`}，` +
+      '它的 presence 事件不是关于房间的证据，消费方不要把自检库当成现场台账。'
+    : '真实摄像头台账：每条 presence.changed 都来自本机摄像头的一帧。',
   seconds,
   mode: syntheticRun ? 'self-test (generated frames, not a real person)' : 'real camera',
   python,
@@ -313,15 +415,19 @@ if (problems.length > 0) {
 if (eventList.length === 0 || transitions.length === 0) {
   console.log(
     `\n摄像头在场检测验收 PASS（${eventList.length} 条状态记录，0 次真实转换，且没有任何问题）。\n` +
+      (syntheticRun
+        ? `自检写入的是${explicitDb === undefined ? '专用自检库' : '你显式指定的库'}：${dbFile}\n`
+        : '') +
       '注意：当前摄像头画面里没有人，所以「0 次转换」是正确结果，不是遗漏。\n' +
       '要验收「人在镜头前能被检出」，二选一：\n' +
-      '  node scripts/verify-camera-presence.ts --self-test        # 用生成的「人脸 + 移动」帧跑同一条写库路径\n' +
+      '  node scripts/verify-camera-presence.ts --self-test        # 用生成的「脸 + 移动」帧跑同一条写库路径（写入自检库）\n' +
       '  node scripts/verify-camera-presence.ts --seconds 40 --require-transition   # 让真人站到镜头前',
   );
 } else {
   console.log(
     `\n摄像头在场检测验收 PASS：${transitions.length} 次状态转换（${transitions
       .map((event) => ((event.payload as { present: boolean }).present ? '有人' : '无人'))
-      .join(' → ')}）；最终投影 ${String(projection?.value)}（stale=${String(projection?.stale)}）`,
+      .join(' → ')}）；最终投影 ${String(projection?.value)}（stale=${String(projection?.stale)}）；'` +
+      `写入 ${dbFile}`,
   );
 }
