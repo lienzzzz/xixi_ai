@@ -166,10 +166,12 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    **不许靠删断言或把测试挪出默认门禁**来换速度——「测试写了就必须跑」是本项目已经踩过坑的原则。
    **不写死秒数**（曾写 `<25s`，一度不可达）：耗时以实跑为准。
    关键路径曾是 `tests/unit/voice/frontend.test.ts` 的多次 Python 冷启动（每次 2.5–3.4s）；
-   **t47 已用常驻 Python worker 解决**（该文件约 21s → 约 7s，全量约 15–18s），
-   回退开关是 `XIXI_VAD_ONESHOT=1` 或 `--no-vad-worker`。
+   **t47 改的是 runner（`scripts/verify-voice-noise.ts`）——它改用常驻 Python worker，该文件因此变快**
+   （不是文件本身被优化：`frontend.test.ts` 一行未改，它只是调用变快了的 runner；t43 实测该文件约 10s，
+   全量约 20–26s，回退开关是 `XIXI_VAD_ONESHOT=1` 或 `--no-vad-worker`）。
    **可复用的经验**：进程启动成本高时，把「每个用例起一个进程」改成「一个常驻 worker + 真实 CLI 入口 + 内存捕获 stdout」，
    并用一次性路径做对照实验证明结果等价——这比砍断言或改测试强度划算得多。
+   **注意别把间接提速写成文件被优化**（t43 的 F1 就是抓这个）。
 10. **全量测试结果要在成员在途编辑窗口之外判读**：本轮多次出现「红 1 项」实为他人半成品（失败用例名每次不同、stash 后仍失败即可判定）。
    声明「全绿」时必须带**修订号**与实测输出，否则视为未验证。
    **瞬态红灯有三个来源，判读前先查 `git diff HEAD` 是否为空**：
