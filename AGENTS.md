@@ -79,7 +79,7 @@ $env:NODE_USE_ENV_PROXY = '1'   # Node 需要显式开启才读环境变量代�
 ## 7. 常用命令
 
 ```powershell
-npm test                 # 全部离线测试（unit/integration/perception/console），不花 API 费用；当前 133 项
+npm test                 # 全部离线测试（unit/integration/perception/console），不花 API 费用；当前 137 项，约 21s
 npm run test:perception  # 只跑摄像头在场与 WorldState 投影
 npm run test:console     # 只跑现场测试控制台
 npm run install:profile  # 幂等：把仓库内的西西 DSH profile 装进 .dsh/
@@ -154,3 +154,6 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    **因此 captain 派单时把验收清单编号写进任务 description**，成员按同一编号回报，不要靠猜或去读团队状态文件。
 13. **优先「核实后不认同」而不是盲从**：t23 面对评审「表头写反了」的判断，逐格复核后确认没反，于是不改数字、只把表头改成无歧义写法并附原始格值——
    这比盲改更有价值。评审也会错，关键是**谁给出可核对的证据**。
+14. **任务 description 里提到的产物文件名必须与 `inScope`/`deliverables` 逐字一致**。
+   反例：t13 的 description 写 `docs/review/residual-fix-review-2026-09-30.md`，而它的 inScope 是 `docs/review/residual-fix-t12-review-2026-09-30.md`——
+   成员只能按契约落地并回头问 captain，白费一轮沟通。**一个任务只用一个文件名**，不要出现近似名。
