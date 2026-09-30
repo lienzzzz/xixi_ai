@@ -10,14 +10,18 @@
  * 用法：node scripts/serve-chat.ts [--port 8791] [--no-tts]
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { spawn } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { MimoBrainAdapter, defaultTools } from '@xixi/brain-adapter';
+import { DshBrainAdapter, MimoBrainAdapter, defaultTools, type BrainAdapter } from '@xixi/brain-adapter';
+import { CliDshTransport } from '@xixi/brain-dsh';
 import { ConversationEngine } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
 import { openXixiStore } from '@xixi/domain';
 
-import { REPO_ROOT, loadConfig, readDotEnv } from './lib/harness.ts';
+import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
+import { readWav, sliceWav } from './lib/wav.ts';
 import { toOffsetIso } from '@xixi/contracts';
 
 for (const [key, value] of Object.entries(readDotEnv())) {
@@ -28,29 +32,147 @@ const args = process.argv.slice(2);
 const portArg = args.indexOf('--port');
 const PORT = Number(portArg >= 0 && args[portArg + 1] !== undefined ? args[portArg + 1] : (process.env.XIXI_WEB_PORT ?? 8791));
 const TTS_ENABLED = !args.includes('--no-tts');
+/** `--dsh` runs the same page through the DSH harness instead of the direct path (slower). */
+const USE_DSH = args.includes('--dsh');
+const PYTHON = process.env.XIXI_PYTHON ?? join(REPO_ROOT, '.venvs', 'voice-pipecat', 'Scripts', 'python.exe');
+const VOICE_DIR = join(REPO_ROOT, 'data', 'voice-web');
 
 const config = loadConfig();
 const client = new MimoClient();
 const store = openXixiStore({ dataDir: join(REPO_ROOT, 'data', 'web-chat') });
 store.seedSelfProfile(config.personality.base);
-const engine = new ConversationEngine({
-  adapter: new MimoBrainAdapter({
-    client,
-    maxCompletionTokens: 400,
-    tools: defaultTools({ defaultPlace: config.identity.place ?? '' }),
-    timezone: config.identity.timezone,
-    onToolCall: (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
-  }),
-  store,
-  config,
-  turnTimeoutMs: 60_000,
-});
+
+function buildAdapter(): BrainAdapter {
+  if (!USE_DSH) {
+    return new MimoBrainAdapter({
+      client,
+      maxCompletionTokens: 400,
+      tools: defaultTools({ defaultPlace: config.identity.place ?? '' }),
+      timezone: config.identity.timezone,
+      onToolCall: (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
+    });
+  }
+  return new DshBrainAdapter({
+    transport: new CliDshTransport({
+      dshHome: DSH_HOME,
+      profile: DSH_PROFILE,
+      cwd: REPO_ROOT,
+      env: harnessEnv(),
+      timeoutMs: 240_000,
+      onDiagnostic: (line) => console.log(`[dsh] ${line}`),
+    }),
+    store,
+  });
+}
+
+const engine = new ConversationEngine({ adapter: buildAdapter(), store, config, turnTimeoutMs: 90_000 });
 
 let session = store.latestSession() ?? store.createSession();
 
 interface TurnBody {
   readonly text?: string;
   readonly speak?: boolean;
+  /** Base64 WAV captured by the browser (16-bit PCM). */
+  readonly audioBase64?: string;
+}
+
+/** Run the VAD segmenter over a WAV and return its JSON result. */
+function runVad(wavPath: string): Promise<{ segments: { startMs: number; endMs: number }[]; bargeInDecisionMs: number | null; timings?: { processMs: number } }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(PYTHON, ['-m', 'voice_edge.segment', wavPath], {
+      cwd: join(REPO_ROOT, 'services', 'voice-edge'),
+      windowsHide: true,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (data: string) => {
+      stdout += data;
+    });
+    child.stderr.on('data', (data: string) => {
+      stderr += data;
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      // Exit 2 means "no speech found", which is a result rather than a failure.
+      if (code === 0 || code === 2) {
+        try {
+          resolve(JSON.parse(stdout));
+        } catch (cause) {
+          reject(new Error(`VAD 输出无法解析：${cause instanceof Error ? cause.message : String(cause)}`));
+        }
+      } else {
+        reject(new Error(`VAD 失败（exit ${code}）：${stderr.slice(-300)}`));
+      }
+    });
+  });
+}
+
+/**
+ * Voice turn: browser capture → VAD (only the speech span) → ASR → conversation → TTS.
+ *
+ * The browser captures because the Python `sounddevice` path on this machine
+ * delivered no speech-band signal (docs/recon/device-acceptance-2026-09-30.md);
+ * the browser brings its own device selection, echo cancellation and noise
+ * suppression, which is a genuinely different audio front end.
+ */
+async function handleVoice(body: TurnBody, response: ServerResponse): Promise<void> {
+  if (typeof body.audioBase64 !== 'string' || body.audioBase64.length === 0) throw new Error('没有收到音频');
+  mkdirSync(VOICE_DIR, { recursive: true });
+  const stamp = Date.now();
+  const rawPath = join(VOICE_DIR, `capture-${stamp}.wav`);
+  writeFileSync(rawPath, Buffer.from(body.audioBase64, 'base64'));
+
+  const vadStarted = Date.now();
+  const vad = await runVad(rawPath);
+  const vadMs = Date.now() - vadStarted;
+  const speech = vad.segments[0];
+  if (speech === undefined) {
+    json(response, 200, {
+      accepted: false,
+      reason: 'NO_SPEECH_DETECTED',
+      transcript: null,
+      reply: null,
+      action: 'SILENCE',
+      state: engine.state,
+      vadMs,
+      latencyMs: vadMs,
+      firstTokenMs: null,
+      audio: null,
+      note: '麦克风里没有检测到语音（音量过低、被静音，或设备选错）',
+    });
+    return;
+  }
+
+  // Only the speech span reaches the model (§20.1).
+  const speechPath = join(VOICE_DIR, `speech-${stamp}.wav`);
+  writeFileSync(speechPath, sliceWav(readWav(rawPath), speech.startMs, speech.endMs));
+
+  const asrStarted = Date.now();
+  const transcript = (await client.transcribe(readWav(speechPath))).text;
+  const asrMs = Date.now() - asrStarted;
+
+  const turn = await engine.respond({ sessionId: session.sessionId, text: transcript, addressed: engine.state === 'IDLE' });
+  let audio: string | null = null;
+  if (TTS_ENABLED && body.speak !== false && turn.action === 'SPEAK' && turn.text !== null) {
+    audio = (await client.synthesize(turn.text)).toString('base64');
+  }
+  json(response, 200, {
+    accepted: turn.accepted,
+    reason: turn.reason,
+    transcript,
+    reply: turn.text,
+    action: turn.action,
+    state: turn.state,
+    latencyMs: turn.latencyMs,
+    firstTokenMs: turn.firstTokenMs,
+    model: turn.model,
+    audio,
+    speech: { startMs: speech.startMs, endMs: speech.endMs },
+    vadMs,
+    asrMs,
+  });
 }
 
 function json(response: ServerResponse, status: number, payload: unknown): void {
@@ -117,12 +239,17 @@ const server = createServer((request, response) => {
           state: engine.state,
           personality: store.selfProfile(),
           identity: config.identity,
+          adapter: engine.adapter.describe(),
           recent,
         });
         return;
       }
       if (request.method === 'POST' && url.pathname === '/api/turn') {
         await handleTurn(await readBody(request), response);
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/voice') {
+        await handleVoice(await readBody(request), response);
         return;
       }
       if (request.method === 'POST' && url.pathname === '/api/quiet') {
@@ -182,10 +309,11 @@ const PAGE = `<!doctype html>
 <div id="log"></div>
 <footer>
   <form id="form">
-    <input type="text" id="input" placeholder="直接说话即可（第一句视为叫醒西西）" autocomplete="off" />
+    <input type="text" id="input" placeholder="直接打字，或按住右边的麦克风说话" autocomplete="off" />
     <button class="primary" type="submit">发送</button>
+    <button type="button" id="mic" title="按住说话，松开结束">🎤 按住说</button>
   </form>
-  <div class="hint">首字延迟与状态会显示在每条消息下方。回复音频由浏览器直接播放，不经过本机声卡配置。</div>
+  <div class="hint" id="hint">打字或按麦克风说话（第一句视为叫醒西西）。语音只上传检测到的语音段；回复由浏览器播放。</div>
 </footer>
 <script>
 const log = document.getElementById('log');
@@ -193,6 +321,110 @@ const banner = document.getElementById('banner');
 const input = document.getElementById('input');
 const speakBox = document.getElementById('speak');
 const form = document.getElementById('form');
+const micButton = document.getElementById('mic');
+const hint = document.getElementById('hint');
+
+function setBanner(state) {
+  banner.textContent = '会话 ' + state.sessionId.slice(5, 13) + ' · ' + state.turnCount + ' 轮 · ' + state.state
+    + ' · ' + (state.adapter ? state.adapter.provider : '?')
+    + ' · 地点 ' + (state.identity.place ?? '未设置');
+}
+
+/** Float32 samples → 16-bit PCM WAV (mono). */
+function encodeWav(samples, sampleRate) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const writeText = (offset, text) => { for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i)); };
+  writeText(0, 'RIFF'); view.setUint32(4, 36 + samples.length * 2, true); writeText(8, 'WAVE');
+  writeText(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  writeText(36, 'data'); view.setUint32(40, samples.length * 2, true);
+  let offset = 44;
+  for (let i = 0; i < samples.length; i += 1, offset += 2) {
+    const clamped = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
+  }
+  return new Uint8Array(buffer);
+}
+
+function toBase64(bytes) {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  return btoa(binary);
+}
+
+let recorder = null;
+async function startRecording() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  const context = new AudioContext();
+  await context.resume();
+  const source = context.createMediaStreamSource(stream);
+  const processor = context.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  processor.onaudioprocess = (event) => { chunks.push(new Float32Array(event.inputBuffer.getChannelData(0))); };
+  source.connect(processor);
+  processor.connect(context.destination);
+  recorder = { stream, context, source, processor, chunks, sampleRate: context.sampleRate, startedAt: Date.now() };
+  micButton.textContent = '⏺ 松开发送';
+  hint.textContent = '正在录音…（松开按钮结束）';
+}
+
+async function stopRecording() {
+  if (!recorder) return;
+  const current = recorder;
+  recorder = null;
+  micButton.textContent = '🎤 按住说';
+  current.processor.disconnect();
+  current.source.disconnect();
+  current.stream.getTracks().forEach((track) => track.stop());
+  await current.context.close();
+
+  const total = current.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const seconds = total / current.sampleRate;
+  if (seconds < 0.3) { hint.textContent = '太短了，按住多说一会儿。'; return; }
+
+  const merged = new Float32Array(total);
+  let offset = 0;
+  for (const chunk of current.chunks) { merged.set(chunk, offset); offset += chunk.length; }
+
+  hint.textContent = '录音 ' + seconds.toFixed(1) + 's，正在识别…';
+  const pending = add('xixi', '…');
+  try {
+    const response = await fetch('/api/voice', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ audioBase64: toBase64(encodeWav(merged, current.sampleRate)), speak: speakBox.checked }),
+    });
+    const data = await response.json();
+    pending.parentElement.remove();
+    if (data.reason === 'NO_SPEECH_DETECTED') {
+      add('xixi silent', '（没有听清：麦克风里没检测到语音）', data.note ?? '');
+    } else {
+      if (data.transcript) add('user', data.transcript);
+      const meta = (data.accepted ? data.action : '未接受(' + data.reason + ')')
+        + ' · 录音 ' + (data.vadMs + data.asrMs) + 'ms 处理' + ' · ' + data.latencyMs + 'ms'
+        + (data.firstTokenMs == null ? '' : ' · 首字' + data.firstTokenMs + 'ms') + ' · ' + data.state;
+      if (data.action === 'SILENCE' || !data.accepted) add('xixi silent', '（西西选择沉默）', meta);
+      else add('xixi', data.reply ?? '', meta);
+      if (data.audio) new Audio('data:audio/wav;base64,' + data.audio).play().catch(() => {});
+    }
+    setBanner(await (await fetch('/api/state')).json());
+    hint.textContent = '说完松开即发送。回复可朗读（右上角开关）。';
+  } catch (error) {
+    pending.parentElement.remove();
+    add('xixi', '语音出错：' + error.message);
+    hint.textContent = '语音出错：' + error.message;
+  }
+}
+
+micButton.addEventListener('pointerdown', async (event) => {
+  event.preventDefault();
+  try { await startRecording(); } catch (error) { hint.textContent = '无法访问麦克风：' + error.message; }
+});
+micButton.addEventListener('pointerup', (event) => { event.preventDefault(); stopRecording(); });
+micButton.addEventListener('pointerleave', () => { if (recorder) stopRecording(); });
 
 function add(role, text, meta) {
   const row = document.createElement('div');
@@ -211,8 +443,7 @@ function add(role, text, meta) {
 
 async function refresh() {
   const state = await (await fetch('/api/state')).json();
-  banner.textContent = '会话 ' + state.sessionId.slice(5, 13) + ' · ' + state.turnCount + ' 轮 · ' + state.state
-    + ' · 地点 ' + (state.identity.place ?? '未设置');
+  setBanner(state);
   log.innerHTML = '';
   for (const turn of state.recent) {
     if (turn.role === 'user') add('user', turn.text ?? '');
@@ -243,8 +474,7 @@ form.addEventListener('submit', async (event) => {
     if (data.action === 'SILENCE' || !data.accepted) add('xixi silent', data.accepted ? '（西西选择沉默）' : '（这句不是对西西说的）', meta);
     else add('xixi', data.reply ?? '', meta);
     if (data.audio) { const audio = new Audio('data:audio/wav;base64,' + data.audio); audio.play().catch(() => {}); }
-    const state = await (await fetch('/api/state')).json();
-    banner.textContent = '会话 ' + state.sessionId.slice(5, 13) + ' · ' + state.turnCount + ' 轮 · ' + state.state;
+    setBanner(await (await fetch('/api/state')).json());
   } catch (error) {
     pending.parentElement.remove();
     add('xixi', '出错了：' + error.message);
@@ -271,6 +501,10 @@ input.focus();
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`西西试用页面： http://127.0.0.1:${PORT}`);
-  console.log(`会话 ${session.sessionId}｜身份 ${config.identity.name}｜地点 ${config.identity.place ?? '未设置'}｜朗读回复 ${TTS_ENABLED ? '开' : '关'}`);
-  console.log('按 Ctrl+C 结束。');
+  console.log(
+    `大脑 ${USE_DSH ? 'DSH Harness（每轮启动 profile，较慢）' : '直连 MiMo（实时路径）'}` +
+      `｜身份 ${config.identity.name}｜地点 ${config.identity.place ?? '未设置'}｜朗读回复 ${TTS_ENABLED ? '开' : '关'}`,
+  );
+  console.log(`会话 ${session.sessionId}`);
+  console.log('语音输入：页面按住🎤说话（浏览器采集，只上传检测到的语音段）。按 Ctrl+C 结束。');
 });
