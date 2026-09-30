@@ -1,0 +1,44 @@
+西西（fake / fake-1）已就绪。
+会话 sess_8cedb544-e086-4915-a528-b3a8d35e75db，已有 0 轮；人格 {"curiosity":0.4,"emotional_expressiveness":0.45,"formality":0.15,"humor":0.3,"playfulness":0.2,"proactivity":0.85,"talkativeness":0.75,"verbosity":0.7,"warmth":0.8}
+跟进窗口 36000ms（由人格 silence_tolerance=0.7 缩放）；IDLE 时直接说话即为叫醒，会话开了就按继续处理。输入 /exit 结束。
+
+
+西西：模拟回复：西西，在吗？
+[SPEAK 13ms 首字4ms state=LINGERING linger=36000ms 人格=0.7]
+
+
+西西：模拟回复：今天下午我想去镇上办点事，顺便看看老李家。
+[SPEAK 9ms 首字2ms state=LINGERING linger=36000ms 人格=0.7]
+
+
+西西：模拟回复：明天天气怎么样？
+[SPEAK 10ms 首字4ms state=LINGERING linger=36000ms 人格=0.7]
+
+
+西西：模拟回复：你说，人老了是不是就爱回忆从前？
+[SPEAK 10ms 首字3ms state=LINGERING linger=36000ms 人格=0.7]
+
+
+西西：模拟回复：我记得你说过会记住我说的事，那你还记得我爱吃什么吗？
+[SPEAK 10ms 首字3ms state=LINGERING linger=36000ms 人格=0.7]
+
+
+西西：模拟回复：有点累了，不太想说话。
+[SPEAK 7ms 首字4ms state=LINGERING linger=36000ms 人格=0.7]
+
+
+西西：模拟回复：算了还是说说吧，你觉得我该养只猫吗？
+[SPEAK 4ms 首字2ms state=LINGERING linger=36000ms 人格=0.7]
+
+
+西西：模拟回复：你今天心情怎么样？
+[SPEAK 4ms 首字1ms state=LINGERING linger=36000ms 人格=0.7]
+
+
+西西：模拟回复：帮我记住，下周三要去医院复查。
+[SPEAK 4ms 首字1ms state=LINGERING linger=36000ms 人格=0.7]
+
+
+西西：模拟回复：好，那我先睡了，晚安。
+[SPEAK 5ms 首字1ms state=LINGERING linger=36000ms 人格=0.7]
+

@@ -1,0 +1,14 @@
+    ✔ the runner reports an offline pipeline result and its exit code agrees with it (7697.8535ms)
+    ✔ a structural failure fails the run and the report records the failure code (10225.4649ms)
+    ✔ the noisy tier records a real (untruncated) VAD endpoint delay (t23 regression) (10206.9218ms)
+    ✔ a tier that selects no clips is reported as no boundary, not as a pass for that tier (7660.3733ms)
+  ✔ the voice-noise runner behaves correctly in offline mode (behaviour, real process) (10245.6871ms)
+✔ offline voice checks that shell out to Python (run concurrently) (10336.9184ms)
+ℹ tests 245
+ℹ suites 0
+ℹ pass 245
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 19870.3004

@@ -1,0 +1,62 @@
+输入文件：docs\benchmarks\v01\raw-voice-batchA.txt、docs\benchmarks\v01\raw-voice-batchB.txt、docs\benchmarks\v01\raw-voice-batchC.txt、docs\benchmarks\v01\raw-voice-batchD.txt
+  docs\benchmarks\v01\raw-voice-batchA.txt：adapter=mimo-direct/live，5 轮
+  docs\benchmarks\v01\raw-voice-batchB.txt：adapter=mimo-direct/live，5 轮
+  docs\benchmarks\v01\raw-voice-batchC.txt：adapter=mimo-direct/live，5 轮
+  docs\benchmarks\v01\raw-voice-batchD.txt：adapter=mimo-direct/live，5 轮
+轮数 n = 20
+
+| 指标 | n | P50 | P90 | 最小 | 最大 | 逐轮值 |
+|---|---:|---:|---:|---:|---:|---|
+| ① VAD end → ASR final (asrMs) | 16 | 569 | 695 | 314 | 755 | 658 / 434 / 578 / 430 / 未测 / 686 / 349 / 656 / 579 / 未测 / 704 / 686 / 555 / 314 / 未测 / 755 / 553 / 560 / 516 / 未测 |
+| ② ASR final → 首 token (llmFirstChunkMs) | 16 | 2629 | 4892 | 1150 | 11190 | 2256 / 2455 / 1734 / 1150 / 未测 / 4307 / 11190 / 3545 / 2964 / 未测 / 3178 / 1250 / 3834 / 5477 / 未测 / 2082 / 2803 / 1384 / 1488 / 未测 |
+| ③ 首 token → 首个音频 (ttsMs，V0.1 非流式) | 16 | 2285.5 | 4791.5 | 1002 | 10771 | 1991 / 1244 / 1868 / 5567 / 未测 / 1808 / 1002 / 10771 / 4016 / 未测 / 3533 / 1164 / 1619 / 2580 / 未测 / 3675 / 1351 / 2619 / 3877 / 未测 |
+| ④ 首个可听总延迟 (e2eToFirstReplyAudioMs) | 16 | 6816 | 10952 | 3612 | 15484 | 5505 / 4645 / 4692 / 7627 / 未测 / 7401 / 13053 / 15484 / 8039 / 未测 / 8015 / 3612 / 6520 / 8851 / 未测 / 7112 / 5219 / 5075 / 6361 / 未测 |
+| 参考：VAD 端点保持 (speech.endpointDelayMs) | 16 | 512 | 600 | 480 | 600 | 600 / 512 / 512 / 480 / 未测 / 600 / 512 / 512 / 480 / 未测 / 600 / 512 / 512 / 480 / 未测 / 600 / 512 / 512 / 480 / 未测 |
+| 参考：VAD 进程耗时 (vadProcessMs) | 16 | 91.7 | 154.6 | 51.6 | 216 | 68.7 / 66.1 / 113.3 / 51.6 / 未测 / 69.6 / 70.1 / 156.1 / 63.8 / 未测 / 131.6 / 216 / 125.7 / 61.6 / 未测 / 153 / 122.9 / 131 / 61.1 / 未测 |
+| 参考：整轮回复生成 (llmTotalMs) | 16 | 3293.5 | 7158.5 | 1531 | 11485 | 3189 / 2780 / 2571 / 1933 / 未测 / 4627 / 11485 / 7330 / 3398 / 未测 / 3552 / 1531 / 4480 / 5784 / 未测 / 2448 / 6987 / 2144 / 1771 / 未测 |
+
+逐轮明细：
+- tests/audio-fixtures/direct-question.wav | action=SPEAK | endpoint=600ms | asr=658ms | ttft=2256ms | tts=1991ms | e2e=5505ms
+- tests/audio-fixtures/followup-turn.wav | action=SPEAK | endpoint=512ms | asr=434ms | ttft=2455ms | tts=1244ms | e2e=4645ms
+- tests/audio-fixtures/longer-turn.wav | action=SPEAK | endpoint=512ms | asr=578ms | ttft=1734ms | tts=1868ms | e2e=4692ms
+- tests/audio-fixtures/tv-dialogue.wav | action=SPEAK | endpoint=480ms | asr=430ms | ttft=1150ms | tts=5567ms | e2e=7627ms
+- tests/audio-fixtures/backchannel.wav | action=SILENCE | endpoint=未测ms | asr=未测ms | ttft=未测ms | tts=未测ms | e2e=未测ms
+- tests/audio-fixtures/direct-question.wav | action=SPEAK | endpoint=600ms | asr=686ms | ttft=4307ms | tts=1808ms | e2e=7401ms
+- tests/audio-fixtures/followup-turn.wav | action=SPEAK | endpoint=512ms | asr=349ms | ttft=11190ms | tts=1002ms | e2e=13053ms
+- tests/audio-fixtures/longer-turn.wav | action=SPEAK | endpoint=512ms | asr=656ms | ttft=3545ms | tts=10771ms | e2e=15484ms
+- tests/audio-fixtures/tv-dialogue.wav | action=SPEAK | endpoint=480ms | asr=579ms | ttft=2964ms | tts=4016ms | e2e=8039ms
+- tests/audio-fixtures/backchannel.wav | action=SILENCE | endpoint=未测ms | asr=未测ms | ttft=未测ms | tts=未测ms | e2e=未测ms
+- tests/audio-fixtures/direct-question.wav | action=SPEAK | endpoint=600ms | asr=704ms | ttft=3178ms | tts=3533ms | e2e=8015ms
+- tests/audio-fixtures/followup-turn.wav | action=SPEAK | endpoint=512ms | asr=686ms | ttft=1250ms | tts=1164ms | e2e=3612ms
+- tests/audio-fixtures/longer-turn.wav | action=SPEAK | endpoint=512ms | asr=555ms | ttft=3834ms | tts=1619ms | e2e=6520ms
+- tests/audio-fixtures/tv-dialogue.wav | action=SPEAK | endpoint=480ms | asr=314ms | ttft=5477ms | tts=2580ms | e2e=8851ms
+- tests/audio-fixtures/backchannel.wav | action=SILENCE | endpoint=未测ms | asr=未测ms | ttft=未测ms | tts=未测ms | e2e=未测ms
+- tests/audio-fixtures/direct-question.wav | action=SPEAK | endpoint=600ms | asr=755ms | ttft=2082ms | tts=3675ms | e2e=7112ms
+- tests/audio-fixtures/followup-turn.wav | action=SPEAK | endpoint=512ms | asr=553ms | ttft=2803ms | tts=1351ms | e2e=5219ms
+- tests/audio-fixtures/longer-turn.wav | action=SPEAK | endpoint=512ms | asr=560ms | ttft=1384ms | tts=2619ms | e2e=5075ms
+- tests/audio-fixtures/tv-dialogue.wav | action=SPEAK | endpoint=480ms | asr=516ms | ttft=1488ms | tts=3877ms | e2e=6361ms
+- tests/audio-fixtures/backchannel.wav | action=SILENCE | endpoint=未测ms | asr=未测ms | ttft=未测ms | tts=未测ms | e2e=未测ms
+
+ASR 转写与夹具原文的字符相似度（期望值来自 docs\benchmarks\v01\expected-fixture-texts.json）：
+| 夹具 | 转写 | 原文 | 相似度 |
+|---|---|---|---:|
+| direct-question.wav | 明天天气怎么样？ | 西西，明天天气怎么样？ | 0.778 |
+| followup-turn.wav | 有个事想问你。 | 对了，还有个事想问你。 | 0.667 |
+| longer-turn.wav | 今天下午去镇上办点事，可能要到晚上才回来。 | 我明天下午去镇上办点事，可能要到晚上才回来。 | 0.900 |
+| tv-dialogue.wav | 今天天气怎么样？ | 明天天气怎么样？ | 0.857 |
+| backchannel.wav | 未测 | 嗯。 | 未测 |
+| direct-question.wav | 明天天气怎么样？ | 西西，明天天气怎么样？ | 0.778 |
+| followup-turn.wav | 有个事想问你。 | 对了，还有个事想问你。 | 0.667 |
+| longer-turn.wav | 今天下午去镇上办点事，可能要到晚上才回来。 | 我明天下午去镇上办点事，可能要到晚上才回来。 | 0.900 |
+| tv-dialogue.wav | 今天天气怎么样？ | 明天天气怎么样？ | 0.857 |
+| backchannel.wav | 未测 | 嗯。 | 未测 |
+| direct-question.wav | 明天天气怎么样？ | 西西，明天天气怎么样？ | 0.778 |
+| followup-turn.wav | 有个事想问你。 | 对了，还有个事想问你。 | 0.667 |
+| longer-turn.wav | 今天下午去镇上办点事，可能要到晚上才回来。 | 我明天下午去镇上办点事，可能要到晚上才回来。 | 0.900 |
+| tv-dialogue.wav | 今天天气怎么样？ | 明天天气怎么样？ | 0.857 |
+| backchannel.wav | 未测 | 嗯。 | 未测 |
+| direct-question.wav | 明天天气怎么样？ | 西西，明天天气怎么样？ | 0.778 |
+| followup-turn.wav | 有个事想问你。 | 对了，还有个事想问你。 | 0.667 |
+| longer-turn.wav | 今天下午去镇上办点事，可能要到晚上才回来。 | 我明天下午去镇上办点事，可能要到晚上才回来。 | 0.900 |
+| tv-dialogue.wav | 今天天气怎么样？ | 明天天气怎么样？ | 0.857 |
+| backchannel.wav | 未测 | 嗯。 | 未测 |

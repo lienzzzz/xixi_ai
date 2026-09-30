@@ -1,0 +1,53 @@
+$ npm test   # 本地时间 23:43（+08:00，落在 quiet_hours 23:30-07:30 内）
+ℹ tests 245
+ℹ suites 0
+ℹ pass 243
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 15056.2871
+
+失败明细（原文）：
+✖ failing tests:
+
+test at tests\console\proactive-console.test.ts:285:1
+✖ the console serves the proactive card, its state, and obeys the switch over HTTP (328.3534ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'QUIET_HOURS'
+  - 'PASSED'
+  
+      at TestContext.<anonymous> (file:///E:/worker2/tests/console/proactive-console.test.ts:334:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'QUIET_HOURS',
+    expected: 'PASSED',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests\console\proactive-console.test.ts:382:1
+✖ the trial page shows segments in order, labels the source, and carries the same knobs (1037.4514ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'QUIET_HOURS'
+  - 'PASSED'
+  
+      at TestContext.<anonymous> (file:///E:/worker2/tests/console/proactive-console.test.ts:411:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'QUIET_HOURS',
+    expected: 'PASSED',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+

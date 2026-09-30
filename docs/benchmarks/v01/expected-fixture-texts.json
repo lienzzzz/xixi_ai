@@ -1,0 +1,8 @@
+{
+  "note": "夹具 WAV 里说的那句话，抄自 scripts/make-audio-fixtures.ts 的 FIXTURES 表（2026-09-30 抄录）。只用于 V0.1 基线的 ASR 相似度复算；源头改动后请重新抄录。",
+  "direct-question.wav": "西西，明天天气怎么样？",
+  "followup-turn.wav": "对了，还有个事想问你。",
+  "backchannel.wav": "嗯。",
+  "longer-turn.wav": "我明天下午去镇上办点事，可能要到晚上才回来。",
+  "tv-dialogue.wav": "明天天气怎么样？"
+}

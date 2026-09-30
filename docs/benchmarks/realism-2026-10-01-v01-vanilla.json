@@ -1,0 +1,209 @@
+{
+  "label": "v01-vanilla",
+  "date": "2026-10-01",
+  "revision": "882f745",
+  "treeDirty": [
+    "?? scripts/eval-realism.ts",
+    "?? scripts/lib/realism-metrics.ts",
+    "?? tests/scenarios/golden-conversations.ts"
+  ],
+  "productionDirty": [],
+  "adapter": "mimo-direct",
+  "model": "mimo-v2.6-flash",
+  "corpus": "golden",
+  "qualityChecks": true,
+  "rounds": [
+    {
+      "scenario": "G01",
+      "index": 0,
+      "user": "今天去镇上，人真多。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "今天镇上大致晴朗，9到20度，不下雨，出门挺合适的。就是人多，买东西排队估计得等一会儿，你要是买大件或者要拎回来的，别赶在上午那阵挤。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 10085,
+      "firstTokenMs": 1053
+    },
+    {
+      "scenario": "G02",
+      "index": 0,
+      "user": "今天事情都办完了。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "都凌晨一点了，今天的事能收个尾挺好的。忙完就赶紧歇着吧，别再刷手机了，明天10月1号，假期第一天，睡个好觉。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 2962,
+      "firstTokenMs": 1374
+    },
+    {
+      "scenario": "G04",
+      "index": 0,
+      "user": "国债和定期存款有啥区别？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "都算是稳稳当当放钱的地方，不过国债是国家跟你借钱，定期是银行跟你借钱。国债一般要比定期的利息高一点，而且提前支取的时候利息损失通常没定期那么狠。另外国债大多有固定发行的日子，像凭证式、电子式、记账式这些，得赶上时候买；定期随时去银行或者手机上就能存。你要是闲钱三五年不用，我觉得国债挺合适的，要是怕中途要用钱，定期就更灵活些。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 5870,
+      "firstTokenMs": 1875
+    },
+    {
+      "scenario": "G05",
+      "index": 0,
+      "user": "嗯。",
+      "action": "SILENCE",
+      "accepted": true,
+      "reply": null,
+      "model": "mimo-v2.6-flash",
+      "totalMs": 1610,
+      "firstTokenMs": 1387
+    },
+    {
+      "scenario": "G06",
+      "index": 0,
+      "user": "你今天话有点多。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "哎，被你说着了，我这就收着点。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 1788,
+      "firstTokenMs": 1244
+    },
+    {
+      "scenario": "G09",
+      "index": 0,
+      "user": "明天下雨不？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "明天成都是阴天，不下雨，降水概率才 12%，气温 19 到 24 度，挺舒服的。你要出门的话不用带伞，不过都凌晨一点了，早点睡呀。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 8627,
+      "firstTokenMs": 7520
+    },
+    {
+      "scenario": "G11",
+      "index": 0,
+      "user": "我今天碰到老张了。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "哎，这么晚了才碰到老张呀？是在哪儿遇上的，他还是老样子吗？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 2497,
+      "firstTokenMs": 1505
+    },
+    {
+      "scenario": "G11",
+      "index": 1,
+      "user": "他儿子也回来了。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "那可真巧，父子俩都见着了。老张是不是挺高兴的？他儿子这趟回来待多久啊，家里这下热闹了吧。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 5361,
+      "firstTokenMs": 4001
+    }
+  ],
+  "gates": [
+    {
+      "golden": "G07",
+      "caseId": "G07-specific-topic",
+      "description": "有具体话题（上午去医院看老朋友）且分数够高时，门禁应当放行",
+      "expected": "PASSED",
+      "actual": "PASSED",
+      "passed": true
+    },
+    {
+      "golden": "G12",
+      "caseId": "G12-cooldown",
+      "description": "刚主动聊过 → 冷却门禁挡住（不是「更热情」就能压过）",
+      "expected": "COOLDOWN_ACTIVE",
+      "actual": "COOLDOWN_ACTIVE",
+      "passed": true
+    },
+    {
+      "golden": "G12",
+      "caseId": "G12-topic-repeated",
+      "description": "十分钟前刚聊过同一个话题 → 主题重复窗口挡住（topic_repeat_window 2h）",
+      "expected": "TOPIC_REPEATED",
+      "actual": "TOPIC_REPEATED",
+      "passed": true
+    },
+    {
+      "golden": "G12",
+      "caseId": "G12-no-topic-source",
+      "description": "随机闲聊触发源出厂关闭 → 没有合适话题时不允许为了主动而主动",
+      "expected": "TRIGGER_DISABLED",
+      "actual": "TRIGGER_DISABLED",
+      "passed": true
+    }
+  ],
+  "skipped": [
+    {
+      "id": "G03",
+      "title": "OpenThread（跨天 follow-up）",
+      "reason": "需要 OpenThreadStore + TopicEngine（pack Phase 3）与跨天的主动决策；本仓库当前没有 open thread 存储，ProactiveEngine 的 candidate 由调用方构造，无法端到端跑「Day1 记下 → Day2 回来追问」"
+    },
+    {
+      "id": "G06(部分)",
+      "title": "用户反馈调整自身",
+      "reason": "只跑第一轮（接受反馈）；「后续回复长度和追问率真实降低」需要 M3 的 feedback 学习回路，未实现，属未测"
+    },
+    {
+      "id": "G08",
+      "title": "新闻 Agent",
+      "reason": "news 工具与插件系统（pack Phase 6/7）未实现，工具不存在就无法评测「先听哪个」这种多话题接话"
+    },
+    {
+      "id": "G10",
+      "title": "打断",
+      "reason": "要求 TTS 立即停 + 不补完上一段：需要真实播放/打断链路（pack Phase 8/§33），离线夹具测不了「扬声器真的停了」"
+    }
+  ],
+  "violations": [],
+  "metrics": {
+    "turns": 8,
+    "accepted": 8,
+    "rejected": 0,
+    "spokenTurns": 7,
+    "silenceTurns": 1,
+    "silenceRate": 0.125,
+    "questionTurns": 2,
+    "questionRate": 0.286,
+    "questionEndingTurns": 1,
+    "questionEndingRate": 0.143,
+    "chars": [
+      67,
+      54,
+      163,
+      15,
+      60,
+      29,
+      44
+    ],
+    "charsP50": 54,
+    "charsMax": 163,
+    "length": {
+      "counts": {
+        "半句(<=15)": 1,
+        "短句(16-40)": 1,
+        "中句(41-90)": 4,
+        "长解释(>=91)": 1
+      },
+      "shares": {
+        "半句(<=15)": 0.143,
+        "短句(16-40)": 0.143,
+        "中句(41-90)": 0.571,
+        "长解释(>=91)": 0.143
+      },
+      "dominantShare": 0.571,
+      "dominantBucket": "中句(41-90)"
+    },
+    "bannedTemplateTurns": 0,
+    "bannedTemplateRate": 0,
+    "bannedTemplateHits": [],
+    "repeatedPhrases": [],
+    "repeatedPhraseRate": 0,
+    "longestSameStructureRun": 2,
+    "alarms": [],
+    "questionBand": "below"
+  }
+}

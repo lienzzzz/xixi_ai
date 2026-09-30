@@ -1,0 +1,177 @@
+
+=== 语音闭环（夹具音频 → VAD → ASR → 对话 → TTS） ===
+{
+  "adapter": {
+    "provider": "mimo-direct",
+    "model": "mimo-v2.6-flash",
+    "transport": "https-api",
+    "mode": "live"
+  },
+  "sessionId": "sess_ce9ec31f-f522-4865-be2d-c7f86e0f3be2",
+  "turns": [
+    {
+      "wav": "tests/audio-fixtures/direct-question.wav",
+      "speech": {
+        "startMs": 320,
+        "endMs": 2520,
+        "endpointDelayMs": 600
+      },
+      "segments": [
+        {
+          "startMs": 320,
+          "endMs": 2520,
+          "durationMs": 2200
+        }
+      ],
+      "segmentsTotal": 1,
+      "segmentsUsed": 1,
+      "droppedSegments": [],
+      "transcript": "明天天气怎么样？",
+      "reply": "<tool_call><function=get_weather><parameter=city>上海</parameter><parameter=date>tomorrow</parameter></function></tool_call>",
+      "action": "SPEAK",
+      "accepted": true,
+      "reason": "ACCEPTED_WAKE_OR_DIRECT",
+      "replyWav": "E:\\worker2\\data\\voice\\reply-1.wav",
+      "timings": {
+        "sourceDurationMs": 2520,
+        "vadMs": 2529,
+        "vadProcessMs": 131.6,
+        "vadModelLoadMs": 379.2,
+        "asrMs": 704,
+        "llmFirstChunkMs": 3178,
+        "llmTotalMs": 3552,
+        "ttsMs": 3533,
+        "e2eSpeechEndToFirstChunkMs": 4482,
+        "e2eToFirstReplyAudioMs": 8015
+      }
+    },
+    {
+      "wav": "tests/audio-fixtures/followup-turn.wav",
+      "speech": {
+        "startMs": 960,
+        "endMs": 2272,
+        "endpointDelayMs": 512
+      },
+      "segments": [
+        {
+          "startMs": 960,
+          "endMs": 2272,
+          "durationMs": 1312
+        }
+      ],
+      "segmentsTotal": 1,
+      "segmentsUsed": 1,
+      "droppedSegments": [],
+      "transcript": "有个事想问你。",
+      "reply": "嗯，你说吧，我在听。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reason": "ACCEPTED_CONTINUATION",
+      "replyWav": "E:\\worker2\\data\\voice\\reply-2.wav",
+      "timings": {
+        "sourceDurationMs": 2360,
+        "vadMs": 4400,
+        "vadProcessMs": 216,
+        "vadModelLoadMs": 563.3,
+        "asrMs": 686,
+        "llmFirstChunkMs": 1250,
+        "llmTotalMs": 1531,
+        "ttsMs": 1164,
+        "e2eSpeechEndToFirstChunkMs": 2448,
+        "e2eToFirstReplyAudioMs": 3612
+      }
+    },
+    {
+      "wav": "tests/audio-fixtures/longer-turn.wav",
+      "speech": {
+        "startMs": 320,
+        "endMs": 4032,
+        "endpointDelayMs": 512
+      },
+      "segments": [
+        {
+          "startMs": 320,
+          "endMs": 4032,
+          "durationMs": 3712
+        }
+      ],
+      "segmentsTotal": 1,
+      "segmentsUsed": 1,
+      "droppedSegments": [],
+      "transcript": "今天下午去镇上办点事，可能要到晚上才回来。",
+      "reply": "都快半夜了，事儿办完了没？到家了就赶紧睡吧。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reason": "ACCEPTED_CONTINUATION",
+      "replyWav": "E:\\worker2\\data\\voice\\reply-3.wav",
+      "timings": {
+        "sourceDurationMs": 4120,
+        "vadMs": 1730,
+        "vadProcessMs": 125.7,
+        "vadModelLoadMs": 221.2,
+        "asrMs": 555,
+        "llmFirstChunkMs": 3834,
+        "llmTotalMs": 4480,
+        "ttsMs": 1619,
+        "e2eSpeechEndToFirstChunkMs": 4901,
+        "e2eToFirstReplyAudioMs": 6520
+      }
+    },
+    {
+      "wav": "tests/audio-fixtures/tv-dialogue.wav",
+      "speech": {
+        "startMs": 256,
+        "endMs": 1760,
+        "endpointDelayMs": 480
+      },
+      "segments": [
+        {
+          "startMs": 256,
+          "endMs": 1760,
+          "durationMs": 1504
+        }
+      ],
+      "segmentsTotal": 1,
+      "segmentsUsed": 1,
+      "droppedSegments": [],
+      "transcript": "今天天气怎么样？",
+      "reply": "<tool_call><function=get_weather><parameter=city>上海</parameter><parameter=date>today</parameter></function></tool_call>",
+      "action": "SPEAK",
+      "accepted": true,
+      "reason": "ACCEPTED_CONTINUATION",
+      "replyWav": "E:\\worker2\\data\\voice\\reply-4.wav",
+      "timings": {
+        "sourceDurationMs": 1880,
+        "vadMs": 1517,
+        "vadProcessMs": 61.6,
+        "vadModelLoadMs": 230.2,
+        "asrMs": 314,
+        "llmFirstChunkMs": 5477,
+        "llmTotalMs": 5784,
+        "ttsMs": 2580,
+        "e2eSpeechEndToFirstChunkMs": 6271,
+        "e2eToFirstReplyAudioMs": 8851
+      }
+    },
+    {
+      "wav": "tests/audio-fixtures/backchannel.wav",
+      "speech": null,
+      "segments": [],
+      "segmentsTotal": 0,
+      "segmentsUsed": 0,
+      "droppedSegments": [],
+      "transcript": null,
+      "reply": null,
+      "action": "SILENCE",
+      "accepted": false,
+      "reason": "NO_SPEECH_DETECTED",
+      "replyWav": null,
+      "timings": {
+        "vadMs": 1597,
+        "sourceDurationMs": 1720
+      }
+    }
+  ],
+  "stitchedReplyWav": "E:\\worker2\\data\\voice\\voice-replies.wav",
+  "note": "e2e 估算含 VAD 端点延迟；每段文件的 segmentsTotal/segmentsUsed/droppedSegments 说明是否丢弃了语音段（不再静默丢弃）；真实麦克风与扬声器验收见 docs/recon/field-test-report-<日期>.md（§33 的 P50 < 500ms 打断目标不在本次证据内）"
+}

@@ -1,0 +1,37 @@
+$env:TZ='UTC'; npm test   # 诊断：Node 本地时间 15:44（+08:00 的 23:44），落在 quiet_hours 之外
+ℹ tests 245
+ℹ suites 0
+ℹ pass 244
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 15090.0711
+
+失败明细（原文）：
+✖ failing tests:
+
+test at tests\perception\world-state-projection.test.ts:98:1
+✖ a reading older than its TTL is stale, not "now" (58.901ms)
+  AssertionError [ERR_ASSERTION]: staleAfter = updated_at + ttl
+  + actual - expected
+  
+  + '2026-09-30T02:01:00.000+00:00'
+  - '2026-09-30T10:01:00.000+08:00'
+                ^
+  
+      at TestContext.<anonymous> (file:///E:/worker2/tests/perception/world-state-projection.test.ts:106:12)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: '2026-09-30T02:01:00.000+00:00',
+    expected: '2026-09-30T10:01:00.000+08:00',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+

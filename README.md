@@ -1,5 +1,7 @@
 # 西西（Xixi）
 
+> 仓库：[github.com/lienzzzz/xixi_ai](https://github.com/lienzzzz/xixi_ai)
+
 长期常驻家庭环境的陪伴智能体。**它不是带摄像头的聊天机器人**：**可替换**的是模型 / ASR / TTS / 摄像头 / Harness，
 **不可替换**的是长期状态与行为策略（WorldState、Memory、FutureHook、SelfModel、RelationshipModel、
 RoutineModel、Proactive policy、Conversation state）。

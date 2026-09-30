@@ -1,0 +1,85 @@
+$env:TZ='UTC'; npm run test:console   # 诊断用（Node 本地时间 15:44，落在 quiet_hours 之外）
+EXIT=0
+
+node.exe : npm notice run xixi@0.1.0 test:console
+At line:1 char:1
++ & "D:\nodejs/node.exe" "C:\Users\zz\AppData\Roaming\npm/node_modules/ ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (npm notice run xixi@0.1.0 test:console:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+npm notice run node --test "tests/console/**/*.test.ts"
+✔ the console names the three ways a camera fails to deliver a picture (t103) (14.9657ms)
+✔ the page carries the block, the three steps and the probe command (t103) (19.0011ms)
+✔ with a broken camera the API never reports 「没人」, and with a working one it does (t103) (319.9984ms)
+✔ the shipped config means "keep no raw audio at all" (§20.1) (3.7377ms)
+✔ an explicit opt-in keeps only speech segments, with a retention window (0.6531ms)
+✔ pruning removes legacy whole recordings and honours an explicit retention window (29.4249ms)
+✔ every VAD segment is used; anything left out is reported with a reason (0.8512ms)
+✔ the audio sent to ASR contains every used segment, never the dropped ones (4.0917ms)
+✔ missing calibration is reported as uncalibrated, not guessed (16.4721ms)
+✔ presence is a state, never an exception: projection, events, not-integrated, error (2.0351ms)
+✔ actions and rejection reasons are explained in Chinese (0.7583ms)
+✔ the report is self-contained: per-item verdicts, evidence and reproduction (1.9008ms)
+✔ the page is Chinese, self-describing and carries the boot state (7.7619ms)
+✔ voice requests fail with Chinese next steps, not stack traces (3.9218ms)
+✔ a missing Python or probe binary is a readable error, not a crash (21.4451ms)
+✔ the offline probe double reproduces the muted-speaker false-PASS case (0.8821ms)
+✔ a silent recording is a 16-bit PCM WAV the VAD can reject (23.4283ms)
+✔ the server binds 127.0.0.1 only and reports its real port on an ephemeral bind (302.1111ms)
+✔ the frame handed to the brain is the newest one, JPEG, and never wider than the cap (t88) (6.6607ms)
+✔ an upload is recorded with time/size/trigger and no image bytes (t88) (71.1851ms)
+✔ the autonomy switch is off by default and survives a restart (t88) (89.8979ms)
+✔ 「看一眼」 sends exactly one image, speaks, logs the turn and refuses with Chinese reasons (t88) (399.5518ms)
+✔ offline and DSH modes refuse to look instead of pretending (t88) (180.2994ms)
+✔ a silent answer is reported as such, not as a successful description (t88) (135.9497ms)
+✔ the page offers the button, the notice and the default-off switch (t88) (5.7975ms)
+✔ a fresh projection produces the arrival candidate (t98) (10.9408ms)
+✔ the 52-minute-old projection from the bug report produces nothing (t98) (2.1219ms)
+✔ the projection’s own stale flag wins even when the timestamp looks recent (t98) (0.5787ms)
+✔ the TTL boundary is inclusive, one millisecond past it is not (t98) (1.4277ms)
+✔ without a timestamp (or with an unreadable one) nothing is proven (t98) (1.1046ms)
+✔ a reader that passes no TTL gets the domain default, not “trust forever” (t98) (0.6873ms)
+✔ present=false never produces the arrival candidate, fresh or not (t98) (0.7428ms)
+✔ the loop refuses to greet an empty room, and says why (t98) (347.4197ms)
+✔ the same loop does greet a fresh arrival (t98) (262.1185ms)
+✔ a reply longer than one segment is planned as N pieces with the documented pause (7.2439ms)
+✔ the gate table marks passed / blocked / skipped from the single reason code (2.2296ms)
+✔ every gate of a drill is a row, and a blocked drill explains the next step (109.939ms)
+✔ settings changed on the page are persisted, restored, and validated field by field (96.3074ms)
+✔ the panel exposes the personality controls (proactivity / talkativeness / verbosity) (1.5206ms)
+✔ a patch that changes proactivity writes self_profile and moves the threshold (93.3957ms)
+✔ unknown patch fields are reported in Chinese instead of being dropped (85.3178ms)
+✔ the panel markup and script expose every knob, the gate table and the segment player (0.8967ms)
+✔ the console serves the proactive card, its state, and obeys the switch over HTTP (368.2175ms)
+✔ the trial page shows segments in order, labels the source, and carries the same knobs (726.5862ms)
+✔ the terminal prints a reply segment by segment, with the real pause (835.0158ms)
+✔ the console feeds the card the same proactivity the engine will use (2.1492ms)
+✔ every trigger the panel lists can really reach the threshold floor (t74) (8.1073ms)
+✔ content is composed from inside the delivery seam, i.e. only after the gates pass (t74) (327.7342ms)
+✔ two consecutive messages never repeat the same sentence (t74) (86.824ms)
+✔ the two chit-chat sources are fact-based and can be switched off (t74) (2.5182ms)
+✔ the drill button speaks too, through the same TTS seam (t74) (164.8261ms)
+✔ the loop starts off, and the panel says so (0.9409ms)
+✔ candidates come from facts, and only from facts (1.3964ms)
+✔ a tick speaks when the gates allow it, and reports the auditable path (83.0149ms)
+✔ a blocked tick names the first gate that fired, in Chinese (150.5182ms)
+✔ with the switch off nothing is considered, and with no key the missing audio is explained (88.8794ms)
+✔ the interval is bounded, and the loop can be started and stopped (252.1171ms)
+✔ lastUserTurnAt reads the fact from the log, and only user turns count (33.7422ms)
+✔ the trial page runs the same loop, and a spoken message lands in its conversation log (641.1907ms)
+✔ the console serves the loop over HTTP, off by default, with a readable action error (113.9841ms)
+✔ the page is three columns: sensors, config, conversation (t78) (21.5114ms)
+✔ the camera preview keeps the picture in memory and drops old frames (t78) (7.2163ms)
+✔ 「启用」 starts both halves and considers once immediately; 停用 stops them (t78) (342.9938ms)
+✔ a proactive line with a number the model never looked up is replaced before it is spoken (20.3972ms)
+✔ the same sentence is spoken when the model did call the weather tool (14.8716ms)
+✔ an ordinary line with no lookup-only specifics passes through untouched (15.3975ms)
+ℹ tests 66
+ℹ suites 0
+ℹ pass 66
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 7831.8666

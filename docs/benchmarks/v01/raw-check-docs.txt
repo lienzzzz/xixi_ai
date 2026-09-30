@@ -1,0 +1,12 @@
+node.exe : npm notice run xixi@0.1.0 check:docs
+At line:1 char:1
++ & "D:\nodejs/node.exe" "C:\Users\zz\AppData\Roaming\npm/node_modules/ ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (npm notice run xixi@0.1.0 check:docs:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+npm notice run node scripts/check-docs.ts
+检查了 81 份 markdown
+  失效链接 0｜不存在的文件引用 0｜缺少新鲜度标记 0
+
+check:docs OK：链接、文件引用与新鲜度标记都一致

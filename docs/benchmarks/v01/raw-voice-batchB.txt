@@ -1,0 +1,177 @@
+
+=== 语音闭环（夹具音频 → VAD → ASR → 对话 → TTS） ===
+{
+  "adapter": {
+    "provider": "mimo-direct",
+    "model": "mimo-v2.6-flash",
+    "transport": "https-api",
+    "mode": "live"
+  },
+  "sessionId": "sess_ce9ec31f-f522-4865-be2d-c7f86e0f3be2",
+  "turns": [
+    {
+      "wav": "tests/audio-fixtures/direct-question.wav",
+      "speech": {
+        "startMs": 320,
+        "endMs": 2520,
+        "endpointDelayMs": 600
+      },
+      "segments": [
+        {
+          "startMs": 320,
+          "endMs": 2520,
+          "durationMs": 2200
+        }
+      ],
+      "segmentsTotal": 1,
+      "segmentsUsed": 1,
+      "droppedSegments": [],
+      "transcript": "明天天气怎么样？",
+      "reply": "<tool_call><function=get_weather><parameter=date>tomorrow</parameter><parameter=city>上海</parameter></function></tool_call>",
+      "action": "SPEAK",
+      "accepted": true,
+      "reason": "ACCEPTED_WAKE_OR_DIRECT",
+      "replyWav": "E:\\worker2\\data\\voice\\reply-1.wav",
+      "timings": {
+        "sourceDurationMs": 2520,
+        "vadMs": 1303,
+        "vadProcessMs": 69.6,
+        "vadModelLoadMs": 200,
+        "asrMs": 686,
+        "llmFirstChunkMs": 4307,
+        "llmTotalMs": 4627,
+        "ttsMs": 1808,
+        "e2eSpeechEndToFirstChunkMs": 5593,
+        "e2eToFirstReplyAudioMs": 7401
+      }
+    },
+    {
+      "wav": "tests/audio-fixtures/followup-turn.wav",
+      "speech": {
+        "startMs": 960,
+        "endMs": 2272,
+        "endpointDelayMs": 512
+      },
+      "segments": [
+        {
+          "startMs": 960,
+          "endMs": 2272,
+          "durationMs": 1312
+        }
+      ],
+      "segmentsTotal": 1,
+      "segmentsUsed": 1,
+      "droppedSegments": [],
+      "transcript": "有个事想问你。",
+      "reply": "嗯，你说，我听着呢。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reason": "ACCEPTED_CONTINUATION",
+      "replyWav": "E:\\worker2\\data\\voice\\reply-2.wav",
+      "timings": {
+        "sourceDurationMs": 2360,
+        "vadMs": 1270,
+        "vadProcessMs": 70.1,
+        "vadModelLoadMs": 206,
+        "asrMs": 349,
+        "llmFirstChunkMs": 11190,
+        "llmTotalMs": 11485,
+        "ttsMs": 1002,
+        "e2eSpeechEndToFirstChunkMs": 12051,
+        "e2eToFirstReplyAudioMs": 13053
+      }
+    },
+    {
+      "wav": "tests/audio-fixtures/longer-turn.wav",
+      "speech": {
+        "startMs": 320,
+        "endMs": 4032,
+        "endpointDelayMs": 512
+      },
+      "segments": [
+        {
+          "startMs": 320,
+          "endMs": 4032,
+          "durationMs": 3712
+        }
+      ],
+      "segmentsTotal": 1,
+      "segmentsUsed": 1,
+      "droppedSegments": [],
+      "transcript": "今天下午去镇上办点事，可能要到晚上才回来。",
+      "reply": "The user is repeating their earlier message about going to town this afternoon and not being back until evening. But it's currently 23:30 at night - late night. So they're probably already back, or... wait, they said \"今天下午去镇上办点事，可能要到晚上才回来\" - this was the first message of the conversation. Now they're saying it again at 23:30.\n\nHmm, this could be a repeated message, or maybe they're just chatting. Since it's already 23:30 (late night), if they went in the afternoon and said they'd be back by evening, they should be home by now. I should respond naturally as a family member would - maybe noting it's already late and asking if they got back okay.都这么晚了，还没到家？到家了就早点歇着。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reason": "ACCEPTED_CONTINUATION",
+      "replyWav": "E:\\worker2\\data\\voice\\reply-3.wav",
+      "timings": {
+        "sourceDurationMs": 4120,
+        "vadMs": 2058,
+        "vadProcessMs": 156.1,
+        "vadModelLoadMs": 251.2,
+        "asrMs": 656,
+        "llmFirstChunkMs": 3545,
+        "llmTotalMs": 7330,
+        "ttsMs": 10771,
+        "e2eSpeechEndToFirstChunkMs": 4713,
+        "e2eToFirstReplyAudioMs": 15484
+      }
+    },
+    {
+      "wav": "tests/audio-fixtures/tv-dialogue.wav",
+      "speech": {
+        "startMs": 256,
+        "endMs": 1760,
+        "endpointDelayMs": 480
+      },
+      "segments": [
+        {
+          "startMs": 256,
+          "endMs": 1760,
+          "durationMs": 1504
+        }
+      ],
+      "segmentsTotal": 1,
+      "segmentsUsed": 1,
+      "droppedSegments": [],
+      "transcript": "今天天气怎么样？",
+      "reply": "<tool_call><function=get_weather><parameter=city>上海</parameter><parameter=date>today</parameter></function></tool_call>",
+      "action": "SPEAK",
+      "accepted": true,
+      "reason": "ACCEPTED_CONTINUATION",
+      "replyWav": "E:\\worker2\\data\\voice\\reply-4.wav",
+      "timings": {
+        "sourceDurationMs": 1880,
+        "vadMs": 1798,
+        "vadProcessMs": 63.8,
+        "vadModelLoadMs": 255.4,
+        "asrMs": 579,
+        "llmFirstChunkMs": 2964,
+        "llmTotalMs": 3398,
+        "ttsMs": 4016,
+        "e2eSpeechEndToFirstChunkMs": 4023,
+        "e2eToFirstReplyAudioMs": 8039
+      }
+    },
+    {
+      "wav": "tests/audio-fixtures/backchannel.wav",
+      "speech": null,
+      "segments": [],
+      "segmentsTotal": 0,
+      "segmentsUsed": 0,
+      "droppedSegments": [],
+      "transcript": null,
+      "reply": null,
+      "action": "SILENCE",
+      "accepted": false,
+      "reason": "NO_SPEECH_DETECTED",
+      "replyWav": null,
+      "timings": {
+        "vadMs": 2411,
+        "sourceDurationMs": 1720
+      }
+    }
+  ],
+  "stitchedReplyWav": "E:\\worker2\\data\\voice\\voice-replies.wav",
+  "note": "e2e 估算含 VAD 端点延迟；每段文件的 segmentsTotal/segmentsUsed/droppedSegments 说明是否丢弃了语音段（不再静默丢弃）；真实麦克风与扬声器验收见 docs/recon/field-test-report-<日期>.md（§33 的 P50 < 500ms 打断目标不在本次证据内）"
+}

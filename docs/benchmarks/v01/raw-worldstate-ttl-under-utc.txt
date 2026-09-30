@@ -1,0 +1,44 @@
+$env:TZ='UTC'; node --test tests/perception/world-state-projection.test.ts
+EXIT=1
+
+✔ 002_world_state is a new, additive migration (53.2502ms)
+✔ a presence transition writes one event and one projection row (25.0163ms)
+✖ a reading older than its TTL is stale, not "now" (21.004ms)
+✔ the event log stays the history while the projection keeps only the current value (21.3714ms)
+✔ the projection is derived data: it can be rebuilt from the log alone (45.1032ms)
+✔ presence cannot be written without its event (one transaction, no second writer) (20.3111ms)
+✔ invalid projection writes fail loudly instead of storing nonsense (16.9426ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 6
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 456.5039
+
+✖ failing tests:
+
+test at tests\perception\world-state-projection.test.ts:98:1
+✖ a reading older than its TTL is stale, not "now" (21.004ms)
+  AssertionError [ERR_ASSERTION]: staleAfter = updated_at + ttl
+  + actual - expected
+  
+  + '2026-09-30T02:01:00.000+00:00'
+  - '2026-09-30T10:01:00.000+08:00'
+                ^
+  
+      at TestContext.<anonymous> (file:///E:/worker2/tests/perception/world-state-projection.test.ts:106:12)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: '2026-09-30T02:01:00.000+00:00',
+    expected: '2026-09-30T10:01:00.000+08:00',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

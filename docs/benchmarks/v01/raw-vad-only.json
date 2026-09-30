@@ -1,0 +1,7 @@
+[
+  { "file": "direct-question.wav", "segments": 1, "endpointDelayMs": 600.0, "processMs": 68.2, "loadMs": 279.2, "frontendMs": 78.56 },
+  { "file": "followup-turn.wav", "segments": 1, "endpointDelayMs": 512.0, "processMs": 118.0, "loadMs": 333.5, "frontendMs": 84.97 },
+  { "file": "longer-turn.wav", "segments": 1, "endpointDelayMs": 512.0, "processMs": 154.2, "loadMs": 201.5, "frontendMs": 116.21 },
+  { "file": "tv-dialogue.wav", "segments": 1, "endpointDelayMs": 480.0, "processMs": 55.6, "loadMs": 217.8, "frontendMs": 55.01 },
+  { "file": "backchannel.wav", "segments": 0, "endpointDelayMs": null, "processMs": 48.7, "loadMs": 317.3, "frontendMs": 67.98 }
+]
