@@ -354,12 +354,13 @@ decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值�
 ## 6. 尚未落地的部分（对话层相关）
 
 本表是**缺口清单**：某一行已有代码时，写清楚**哪一半落地了、缺的在哪一半**（t41 之后「主动开口」与
-「多段回复」都不再是「无代码」，但也都还不能在真机上直接看到效果）。
+「多段回复」都不再是「无代码」；订正 2026-09-30：两者也都已经能在真机上看见——控制台能自己开口、`npm run chat`
+里能逐段说话，见下面两行的「已落地 / 已接的」部分）。
 
 | 能力 | 现状 |
 |---|---|
 | 唤醒词与搭话判定（§13 完整版） | §13 的 **POC 判定规则已实现**（`shouldAcceptTurn`，见 §1）；**唤醒词检测本身无代码**——`addressed` 由 UI 按钮/语料给出（M2） |
-| 主动开口（§15） | **程序侧已落地（t41），内容侧还没有**：`packages/conversation/src/proactive.ts` 的 `ProactiveEngine` 逐条过硬门禁（[ADR-0009](../adr/0009-proactive-triggers-and-hard-gates.md) 的九条）、每次判定落一条 `proactive.decision` 审计、投递「先记后播」（重启不重发同一条），`config` 的 `proactive` 段也已被读取。**缺口**：没有候选生成器、没有常驻的考虑循环调用方（`ProactiveEngine` 目前只有测试在调用），模型侧 `evaluateProactiveCandidate` 仍抛 `NOT_IMPLEMENTED(M5)`——即「该不该说」已由程序判定，「说什么」尚未接线 |
+| 主动开口（§15） | **程序侧已落地（t41）**：`packages/conversation/src/proactive.ts` 的 `ProactiveEngine` 逐条过硬门禁（[ADR-0009](../adr/0009-proactive-triggers-and-hard-gates.md) 的九条）、每次判定落一条 `proactive.decision` 审计、投递「先记后播」（重启不重发同一条），`config` 的 `proactive` 段也已被读取。**候选生成与调用方也已落地**（订正 2026-09-30）：候选由 `scripts/field-test.ts` 的 `buildProactiveCandidates()` 按触发源产出（`routine_expected` 仍无事实源，该函数**不**产出它）；两个**按需**调用方走的是同一条 `ProactiveEngine.consider`——控制台的**演练**（内容取固定演练句 `PROACTIVE_DRILL_LINES`）与**常驻考虑循环**（`ProactiveLoop` 类定义在 `scripts/field-test.ts`，控制台 `scripts/field-test.ts` 与试用页 `scripts/serve-chat.ts` **各有一个实例**；默认关闭，由页面「启用」/`live.start` 打开，内容经 `createModelComposer` 走与回复同一条 prompt + adapter 路径，离线回退 `PROACTIVE_OFFLINE_LINES`）。**仍缺**：模型侧的候选内容评估——三个适配器的 `evaluateProactiveCandidate` 都仍抛 `NOT_IMPLEMENTED(M5)`，「该不该说」仍由程序门禁决定；也没有**无人值守**的常驻守护进程——循环只随控制台/试用页进程存活，页面进程一退就停。核对：`git grep -n "\.consider(" -- scripts packages`（只有演练与循环两个调用点）、`git grep -n "new ProactiveLoop" -- scripts`（两个实例） |
 | 多段回复（一轮说 1~3 段） | **引擎侧已落地（t41）**：`packages/conversation/src/segments.ts` 的确定性分段器 + `RespondHooks.onSegment` 逐段播放 + §5 的 ⑨′ 步，`config` 的 `reply` 段已被读取；契约与可测条款见 §7 与 [ADR-0010](../adr/0010-multi-segment-replies.md)。**已接的**：`scripts/chat.ts`（订正 2026-09-30）传 `onSegment`，终端里逐段打印、段间真等 `gapMs`。**未接的**：音频出口——试用页 `scripts/serve-chat.ts` 与 `scripts/voice-turn.ts` 仍只传 `onTextChunk` 并用 `synthesize(turn.text)` 一次合成整段，所以扬声器里目前仍是单段合成（核对：`git grep -n "onSegment" -- scripts packages`，生产入口只命中 `scripts/chat.ts`） |
 | 长期记忆与关系（§10/§18） | 工作记忆只有 `recentTurns(limit 8)`；长期记忆属 M4 |
 | 回溯打断时的语义截断 | 只有 VAD 判定层面的离线测量（`scripts/voice-bargein.ts`） |
