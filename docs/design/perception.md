@@ -121,8 +121,19 @@ payload `{present, source_detail}`，`additionalProperties: false`），所以�
 - `source`：`perception.laptop_camera`（生产者名字）
 - `confidence`：见 §3.3
 - `payload.source_detail`：一行证据摘要（≤200 字符），例如
-  `state=present frames=16 motion_ratio=0.0318 faces=1 gate=motion+face reason=present_confirmed`
+  `mode=camera state=present frames=16 motion_ratio=0.0318 faces=1 gate=motion+face reason=present_confirmed`
 - `timestamp`：`YYYY-MM-DDTHH:MM:SS.mmm±HH:MM` 本地墙上时间（契约拒绝 `Z`，见 [`domain-model.md`](domain-model.md) §2）
+
+**`source_detail` 的第一段是来源标记 `mode=`（t109）**，取值只有两个：
+
+| 标记 | 含义 |
+|---|---|
+| `mode=camera` | 这一行的帧来自**真实摄像头**（`--source camera`，默认） |
+| `mode=synthetic` | 这一行的帧来自**代码生成的场景**（`--source synthetic` / `--self-test`），**不是**关于房间的证据 |
+
+启动记录与状态转换记录**都带**这个标记。这样台账自带来源，读的人不用靠猜——在这条落地之前，
+一行 `present_confirmed` 无论来自真机还是合成场景长得完全一样。**旧行没有这个标记**（字段里搜不到
+`mode=`），那类行只能写「无法证明来自哪一路」，不要反过来给它安一个来源。
 
 Python 侧不能「以为自己对」：`perception_edge/contracts.py` 用**磁盘上的同一份 schema 文件**
 校验自己构造的事件（实现了契约实际用到的那一小撮 JSON Schema 关键字，遇到没实现的关键字直接报错），
@@ -262,27 +273,50 @@ node scripts/verify-camera-presence.ts --help
 
 **台账现状（写这一段时的测量，会随时间变化——以复核命令的输出为准）**：
 `data/perception/field-test.sqlite` 是一本**本机台账**（`data/` 在 `.gitignore` 里），每次真机运行
-都会往里追加，所以这里只能记「写这一句时看到的数」，不能当成长期事实。当时（t100 复核）实查
-`presence.changed` 共 **9 条 = 6 条 `reason=camera_started` + 3 条 `reason=present_confirmed`**：
-6 条启动记录来自真实摄像头的空场景运行，3 条 `present_confirmed` 是**合成场景**（`--self-test`）
-在驱动还交得出画面的那段时间留下的（`motion_ratio` 0.043 / 0.047 / 0.126，`faces=0`）——
-它们**不是**关于房间的证据。判读这本台账时请按 `source_detail` 里的 `reason` 分类，不要按条数下结论。
+都会往里追加，所以这里只能记「写这一句时看到的数」，不能当成长期事实。
 
-更早的补正（t92）曾把 4 条**合成事件**（早期版本 `--self-test` 还写这个库：2 条
-`reason=present_confirmed` 的 `motion_ratio=0.148` / `0.0318`（无人脸证据）+ 1 条
-`reason=absent_confirmed`，时间戳 `2026-09-30T12:04:1x`）**逐条删除**，并按「最后一条事件 → 投影」
-重建了 `world_state`，让日志与投影重新一致。那次清理是对的，但它只清到「当时的最后一条」——
-之后的新运行照样会写进来，所以现在又有了 3 条合成记录。要一条干净台账就照下面做。
+**怎么判来源（t109 起可证）**：每行 `source_detail` 的第一段是 `mode=`——`mode=camera` 来自真实
+摄像头，`mode=synthetic` 来自代码生成的场景（见 §5）。所以「这行是不是合成的」现在**有标记可查**，
+不用靠 `motion_ratio` 反推。**旧行没有标记**：在字段里搜不到 `mode=` 的行，只能说
+「这行的来源在台账里没有标记能证明」，不要按数值猜它是哪一路。
 
-复核命令（不需要 Python 之外的依赖）：
+**有标记之后的两处订正**：
+
+1. 本节早先写「3 条 `present_confirmed` 是**合成场景**留下的（`motion_ratio` 0.043 / 0.047 / 0.126）」
+   ——那 3 行**没有** `mode=` 标记，**无法证实**。可证的说法是：它们的时间戳与 `--self-test` 那批
+   运行吻合，且数值落在合成场景的范围内，因此**可能是**合成场景留下的，**台账里没有标记能证明**。
+2. 更早那次（t92）删除的 4 条里，`motion_ratio=0.148` / `0.0318` 这组数值**确实**来自合成场景：
+   t109 实跑 `--self-test`，它自己的台账（`data/perception/self-test.sqlite`）里就写出了
+   `mode=synthetic … frames=181 motion_ratio=0.0000 … reason=absent_confirmed` 与
+   `mode=synthetic … frames=286 motion_ratio=0.0318 … reason=present_confirmed`——`0.0318` 与
+   `frames=286` 逐字吻合。所以那一组可以按实测写（**但当时那 4 行本身同样没有标记**，只是现在有了
+   可复现的出处）。
+
+t92 那次清理（把 4 条带 `motion_ratio=0.148` / `0.0318` 的行逐条删除，并按「最后一条事件 → 投影」
+重建 `world_state`）本身是对的；它只清到「当时的最后一条」——之后的新运行照样会写进来。
+要一条干净台账就照下面做。
+
+**验收脚本也会自报来源**：`node scripts/verify-camera-presence.ts` 的输出里有 `source_modes`
+（`expected` / `from_events` / `unmarked_events`）——`expected` 是这次跑的模式（`camera` 或
+`synthetic`），`from_events` 是从事件里读出来的标记，`unmarked_events` 是没有标记的行数。
+实测：`--self-test` → `expected=synthetic`、`from_events=["synthetic"]`、`unmarked_events=0`；
+真机 `--seconds 2` → `expected=camera`、`from_events=["camera"]`、`unmarked_events=0`。
+
+复核命令（不需要 Python 之外的依赖；第二列就是 `mode=` 标记）：
 
 ```powershell
-E:\worker2\.venvs\cv4\Scripts\python.exe -c "import sqlite3,json;c=sqlite3.connect('data/perception/field-test.sqlite');print(c.execute(\"select timestamp,payload_json from events where event_type='presence.changed' order by sequence\").fetchall())"
+E:\worker2\.venvs\cv4\Scripts\python.exe -c "import sqlite3,json;c=sqlite3.connect('data/perception/field-test.sqlite');rows=c.execute(\"select timestamp,payload_json from events where event_type='presence.changed' order by sequence\").fetchall();print('\n'.join(t+'  '+ (json.loads(p)['source_detail'] or '') for t,p in rows)))"
+```
+
+要按来源统计（真实/合成各多少行）：
+
+```powershell
+E:\worker2\.venvs\cv4\Scripts\python.exe -c "import sqlite3,json,collections;c=sqlite3.connect('data/perception/field-test.sqlite');m=collections.Counter();[m.update([next((x.split('=',1)[1] for x in (json.loads(p)['source_detail'] or '').split() if x.startswith('mode=')), 'NO-MARKER')]) for (p,) in c.execute(\"select payload_json from events where event_type='presence.changed'\")];print(dict(m))"
 ```
 
 如果要一条绝对干净的台账：删掉 `data/perception/field-test.sqlite` 再跑一次
 `node scripts/verify-camera-presence.ts --seconds 15`（`data/` 是 gitignore 的本机目录）。
-合成帧以后一律进 `data/perception/self-test.sqlite`，不会再混进这个库。
+合成帧一律进 `data/perception/self-test.sqlite`（`--self-test` 的默认库），不会再混进这个库。
 
 ### 8.4 打不开摄像头时：数秒内退出 + 一句中文原因（t89 实测）
 

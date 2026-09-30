@@ -242,6 +242,12 @@ def run(
         scenario = cfg.scenario or "person-arrives-moves-leaves"
         source = SyntheticFrameSource(synthetic_scenario(scenario)).frames()
 
+    # t109: every event this run writes carries where its frames came from, so a reader of the
+    # ledger can tell "a real camera frame" from "a frame our synthetic scene drew" without
+    # guessing. Before this, a `present_confirmed` row written by `--self-test` looked exactly like
+    # one written by the real device, and a doc sentence had to claim which it was.
+    frame_mode = "synthetic" if (frames is not None or cfg.source == "synthetic") else "camera"
+
     # Announce the starting state once, so the WorldState projection exists from the first
     # second instead of being absent (a reader then always sees a value + updated_at + TTL).
     #
@@ -253,8 +259,8 @@ def run(
         present=debouncer.state == PRESENT,
         confidence=0.85,
         source_detail=(
-            f"state={debouncer.state} startup frames=0 motion_ratio=0.0000 faces=0 "
-            f"gate=motion+face reason=camera_started"
+            f"mode={frame_mode} state={debouncer.state} startup frames=0 motion_ratio=0.0000 "
+            f"faces=0 gate=motion+face reason=camera_started"
         ),
         timestamp=local_timestamp(),
     )
@@ -280,7 +286,11 @@ def run(
                 emitter.emit_presence(
                     present=decision.state == PRESENT,
                     confidence=decision.confidence,
-                    source_detail=decision.source_detail,
+                    # t109: carry the frame source on the transition too, not only on the startup
+                    # row — the transition is the row that looks identical for a real arrival and a
+                    # synthetic one. Prepended, and measured at ~11 chars, so the contract's
+                    # 200-character `source_detail` cap is nowhere near.
+                    source_detail=f"mode={frame_mode} {decision.source_detail}",
                 )
                 events += 1
                 # Semantic analysis stays a stub: it must never be called automatically.

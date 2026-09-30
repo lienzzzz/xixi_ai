@@ -689,6 +689,24 @@ const payload = {
     present: (event.payload as { present: boolean }).present,
     confidence: event.confidence,
   })),
+  /**
+   * t109: where the rows in this run came from, read from the `mode=` marker the child now writes
+   * into `source_detail`. Reported so a reader of this output never has to guess whether a
+   * `present_confirmed` row was produced by real frames or by generated ones.
+   */
+  source_modes: {
+    expected: syntheticRun ? 'synthetic' : 'camera',
+    from_events: [
+      ...new Set(
+        eventList
+          .map((event) => /(?:^|\s)mode=(\w+)/.exec(String((event.payload as { source_detail?: string | null }).source_detail ?? ''))?.[1])
+          .filter((value): value is string => value !== undefined),
+      ),
+    ],
+    unmarked_events: eventList.filter(
+      (event) => !/(?:^|\s)mode=\w+/.test(String((event.payload as { source_detail?: string | null }).source_detail ?? '')),
+    ).length,
+  },
   world_state: projection,
   privacy: summary?.privacy ?? null,
   semantic_analysis: summary?.semantic_analysis ?? null,
