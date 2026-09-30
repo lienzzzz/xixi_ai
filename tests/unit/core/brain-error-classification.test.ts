@@ -13,6 +13,14 @@ import { MimoClient, ModelError } from '@xixi/model-adapters';
  * credential") is not a rate limit ("back off and retry") and neither is a
  * provider fault. Before this test, every `ModelError` except TIMEOUT became
  * `PROVIDER_FAILED`, so that distinction was lost at the adapter seam.
+ * （已修复：t5 给 `BrainError` 加了 `AUTH`/`RATE_LIMIT`/`QUOTA`/`BAD_REQUEST` 与 `originalCode`；
+ * 本文件就是那次修复的回归测试。上面这段是历史，不是现状。）
+ *
+ * A missing-key case must control its own premise (本用例必须自己控制无密钥前提):
+ * `MimoClient` resolves the key as `options.apiKey ?? process.env.MIMO_API_KEY`, so a
+ * test that just omits `apiKey` passes only on a machine whose environment has no key
+ * (t15 评审在带占位密钥的环境里实测到 2 项失败，就是这两条)。`apiKey: undefined` 也不能用——
+ * `undefined` 正是触发回落的值。正确做法是显式传空字符串并断言 `hasKey === false`。
  */
 function clientAnswering(status: number, body: unknown = {}): MimoClient {
   const fetchImpl = (async () => ({
@@ -81,12 +89,16 @@ test('a missing key arrives as MISSING_KEY before any request is attempted', asy
   // `.env` was told the network was broken. The classification is decided before
   // any I/O now, so the local configuration fault keeps its own class (§21.1) and
   // nothing is sent upstream.
+  // （已修复：t12 把 `#headers()` 提到 fetch 的 try 之前。上面的叙述是历史；本用例现在防的是回归。）
   let attempted = 0;
   const fetchImpl = (async () => {
     attempted += 1;
-    return { ok: true, status: 200, json: async () => ({}) } as unknown as typeof fetch;
+    return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
   }) as unknown as typeof fetch;
-  const client = new MimoClient({ fetchImpl });
+  // `apiKey: ''` — not `undefined`: only nullish values fall back to
+  // `process.env.MIMO_API_KEY`, so the empty string pins "no key" on any machine.
+  const client = new MimoClient({ apiKey: '', fetchImpl });
+  assert.equal(client.hasKey, false, 'the no-key premise must hold regardless of process.env');
 
   await assert.rejects(
     () => client.chat({ model: 'mimo-v2.6-flash', messages: [{ role: 'user', content: '你好' }] }),
@@ -95,7 +107,7 @@ test('a missing key arrives as MISSING_KEY before any request is attempted', asy
   assert.equal(attempted, 0, 'a missing key must be refused locally, not sent upstream');
 
   // …and the adapter translates what it is handed, so the class survives the seam.
-  const adapter = new MimoBrainAdapter({ client: new MimoClient({ fetchImpl }), stream: false });
+  const adapter = new MimoBrainAdapter({ client: new MimoClient({ apiKey: '', fetchImpl }), stream: false });
   await assert.rejects(
     () => adapter.handleUserTurn({ sessionId: 'sess_00000000-0000-4000-8000-000000000000', text: '你好' }),
     (error: unknown) =>

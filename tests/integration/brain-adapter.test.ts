@@ -16,6 +16,14 @@ import { openXixiStore, type XixiStore } from '@xixi/domain';
  * forgot to fill `.env` was told the network was broken. The classification is
  * now decided before any I/O, so the two diagnoses stay apart (§21.1) and the
  * request is never attempted.
+ * （已修复：t12 把 `#headers()` 提到 fetch 的 try 之前；t14 把断言改成钉住已修复行为。下面的用例仍然有效，它防的是回归。）
+ *
+ * This case must control its own premise (本用例必须自己控制无密钥前提):
+ * `MimoClient` resolves the key as `options.apiKey ?? process.env.MIMO_API_KEY`, so
+ * omitting `apiKey` makes the test pass only on a machine whose environment has no
+ * key. Passing `apiKey: undefined` does NOT help — `undefined` is exactly what
+ * triggers the fallback — so the key is pinned to `''` (an empty string is not
+ * nullish, so no fallback happens) and `hasKey === false` is asserted below.
  */
 test('a missing API key fails as MISSING_KEY before any request is attempted', async () => {
   let attempted = 0;
@@ -23,7 +31,8 @@ test('a missing API key fails as MISSING_KEY before any request is attempted', a
     attempted += 1;
     return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
   }) as unknown as typeof fetch;
-  const client = new MimoClient({ fetchImpl });
+  const client = new MimoClient({ apiKey: '', fetchImpl });
+  assert.equal(client.hasKey, false, 'the no-key premise must hold regardless of process.env');
 
   await assert.rejects(
     () => client.chat({ model: 'mimo-v2.6-flash', messages: [{ role: 'user', content: '你好' }] }),
