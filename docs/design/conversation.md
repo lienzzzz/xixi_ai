@@ -347,11 +347,37 @@ decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值�
 | 能力 | 现状 |
 |---|---|
 | 唤醒词与搭话判定（§13 完整版） | 无代码；`addressed` 由 UI 按钮/语料给出（M2） |
-| 主动开口（§15） | 无代码；`evaluateProactiveCandidate` 抛 `NOT_IMPLEMENTED(M5)` |
+| 主动开口（§15） | 无代码；`evaluateProactiveCandidate` 抛 `NOT_IMPLEMENTED(M5)`。**契约已定**：触发源与九个硬门禁见 [ADR-0009](../adr/0009-proactive-triggers-and-hard-gates.md)（门禁由程序判定、模型不可绕过；`config` 的 `proactive` 默认值已按该 ADR 改成更激进的一档，但 `quiet_hours` 底线不动） |
+| 多段回复（一轮说 1~3 段） | **无代码**：`respond()` 目前把整段回复一次性交给 `onTextChunk`，语音侧按单段合成。契约与可测条款见 §7 与 [ADR-0010](../adr/0010-multi-segment-replies.md) |
 | 长期记忆与关系（§10/§18） | 工作记忆只有 `recentTurns(limit 8)`；长期记忆属 M4 |
 | 回溯打断时的语义截断 | 只有 VAD 判定层面的离线测量（`scripts/voice-bargein.ts`） |
 | 提示词与延迟进事件日志 | 刻意不存（铁律 5 的方向：只存事实与 `reason_code`）；接受判定已按同一原则落 `conversation.decision` |
 | 多轮工具调用与强制工具 | `tool_choice` 只能 `auto`，模型可拒绝调用；适配器上限 2 轮 |
+
+## 7. 多段回复：语义与上限（契约，M5 实现）
+
+**本节是契约，不是现状**：当前实现是单段（一轮回复一次性交给 TTS）。落地时按
+[ADR-0010](../adr/0010-multi-segment-replies.md) 实现，并逐条加断言。
+
+语义：一次用户轮次最多 **3 段**依次说出（段间留自然停顿），但**仍然只是「一轮」**——
+`conversation.turn` 只写一条 assistant 记录（`action: SPEAK`，`text` 为完整文本）、
+`conversation.decision` 只写一条、FSM **只推进一次**。
+
+| # | 条款 | 判据（可测） |
+|---|---|---|
+| M1 | 段数 | `1 <= segments.length <= 3`；多余内容合并进第 3 段 |
+| M2 | 单段长度 | 每段去掉首尾空白后 `1..60` 个汉字；超长在句末标点处继续切 |
+| M3 | 段间间隔 | `gapMs ∈ [250, 1200]`，默认 **450**（从上一段播放结束起算） |
+| M4 | 拼接不变式 | `segments.join('') === normalize(modelText)`（只去段间换行与多余空白，不增删字） |
+| M5 | 切分位置 | 只在句末标点（`。！？…`）后切；**[静默] 永不切开**（§4 的沉默判定必须整段进行） |
+| M6 | 状态机只推进一次 | 一轮内 `onUserTurn` 1 次、`onReplyCompleted` 1 次；对应 1 条 user + 1 条 assistant `conversation.turn`、1 条 `conversation.decision` |
+| M7 | 跟进窗口起点 | `LINGERING` 从**最后一段**播完起算，`lingerMs` 同样从该时刻算 |
+| M8 | 播段期间可打断 | 播第 1..n-1 段时保持 `ACTIVE`，不进入 `LINGERING` |
+| M9 | 部分失败 | 某段 TTS 失败 → 停止后续段、结束该轮；事件日志仍只有一条 assistant 记录；实际播了几段属运行期信息，**不进事件** |
+
+硬上限不可突破（人格与模型都不能越过）：段数 ≤ 3、单段 ≤ 60 汉字、间隔 ≤ 1200ms；
+`config/xixi.example.yaml` 的 `reply` 段只能在上限内收紧（默认 `max_segments: 3` / `segment_max_chars: 60` / `gap_ms: 450`，
+该段目前**无人读取**）。切分由**程序**做（确定性纯函数），模型只负责内容。
 
 ## 维护规则
 
@@ -368,4 +394,6 @@ decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值�
 | `packages/domain/src/personality.ts` 属性或 `config` 基线值 | §3（指令映射依赖具体属性名与阈值） |
 | 新增事件类型（如 `conversation.decision`） | §5（并同步 [`event-contracts.md`](../event-contracts.md)、[`domain-model.md`](domain-model.md) 的事件表） |
 | 新增会话状态 | §1 |
-| 唤醒词 / 主动开口落地 | §6 与 [`../architecture.md`](../architecture.md) §7 |
+| 唤醒词 / 主动开口落地 | §6 与 [`../architecture.md`](../architecture.md) §7，并同步 [ADR-0009](../adr/0009-proactive-triggers-and-hard-gates.md) |
+| 主动门禁参数（冷却/额度/静默时段/触发源开关）变化 | §6 与 [ADR-0009](../adr/0009-proactive-triggers-and-hard-gates.md)（示例配置的 `proactive` 段必须与 ADR 一致） |
+| 回复分段上限或段间间隔变化 | §7 与 [ADR-0010](../adr/0010-multi-segment-replies.md)（示例配置的 `reply` 段必须在上限内） |

@@ -33,13 +33,32 @@ xixi:
       emotional_expressiveness: 0.45
 
   proactive:
+    # 主动行为（方案 §15、ADR-0009）。默认比 M0 更激进：更短冷却、更高额度。
+    # 安全底线不动：quiet_hours 是硬门禁，人格与模型都不能放宽它。
+    # 注意：本段目前仍是「声明」——还没有代码读取（实现时先接线并补门禁单测）。
     enabled: true
-    cooldown_min: 60
-    max_per_6h: 2
-    max_per_day: 5
+    base_cooldown_min: 25          # 两次主动之间的最短间隔（再乘下面的倍率）
+    max_per_6h: 4                  # 6 小时滑动窗口上限
+    max_per_day: 8                 # 本地自然日上限
+    topic_repeat_window_h: 12      # 同主题抑制窗口（§15.6 建议 24，这里更激进）
+    negative_feedback_cooldown_multiplier: 2.0   # 最近一次主动被负面反馈后收紧
     quiet_hours:
       start: "22:30"
       end: "07:00"
+    triggers:                      # 触发源开关（ADR-0009 第 2 条，按 §16 优先级）
+      future_hook_due: true
+      presence_arrived: true
+      conversation_dangling: true
+      routine_expected: true
+      topic_pool: true
+      random_smalltalk: false      # §16：没有合适的话题就不要为了主动而主动
+
+  # 多段回复（ADR-0010）。一轮最多 3 段；这里只能在上限内收紧，不能突破。
+  # 同样尚未被代码读取。
+  reply:
+    max_segments: 3                # 硬上限 3
+    segment_max_chars: 60          # 硬上限 60（汉字）
+    gap_ms: 450                    # 段间停顿，允许范围 [250, 1200]
 
   memory:
     raw_transcript_retention_days: 30

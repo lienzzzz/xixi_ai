@@ -55,6 +55,12 @@ export const EVENT_TYPES: readonly EventTypeDefinition[] = Object.freeze([
     '一轮的接受判定：为什么这句话被接受/被拒绝（只存 reason_code、状态与分值，不存用户原话与模型推理）。',
     'events/conversation.decision.v1.json',
   ),
+  define(
+    'proactive.decision',
+    1,
+    '一次主动开口的判定记录：程序按硬门禁判定该不该说，只存 reason_code 与分值（ADR-0009）。',
+    'events/proactive.decision.v1.json',
+  ),
   define('system.health', 1, '服务健康状态；用于故障降级与可观测性。', 'events/system.health.v1.json'),
 ]);
 

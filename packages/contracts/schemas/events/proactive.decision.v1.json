@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "xixi.event.v1/proactive.decision",
+  "title": "proactive.decision payload v1",
+  "description": "一次主动开口的判定记录（方案 §15、ADR-0009）：程序按硬门禁判定「现在该不该说」，并把 reason_code 与分值留下，使日志能回答「为什么今天西西没来找我说话」。只存 reason_code 与分数，不存用户原话、不存模型私有推理（铁律 5）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["candidate_id", "trigger", "speak", "reason_code"],
+  "properties": {
+    "session_id": { "type": ["string", "null"], "maxLength": 60 },
+    "candidate_id": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "trigger": { "type": "string", "minLength": 1, "maxLength": 60 },
+    "speak": { "type": "boolean" },
+    "reason_code": { "type": "string", "minLength": 1, "maxLength": 60 },
+    "score": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+    "threshold": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+    "topic_ref": { "type": ["string", "null"], "maxLength": 120 },
+    "intent": { "type": ["string", "null"], "maxLength": 120 },
+    "delivered": { "type": ["boolean", "null"] }
+  }
+}
