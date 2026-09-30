@@ -24,11 +24,10 @@ import {
   PROACTIVE_PANEL_CSS,
   SEGMENT_TTS_NOTE,
   XIXI_DB_ENTRIES,
-  applyProactiveSettingsPatch,
+  applyAndPersistProactivePatch,
   databaseNoteHtml,
   effectiveProactivity,
   handleVoiceTurn,
-  persistProactiveSettings,
   proactiveConsoleState,
   proactiveDrill,
   proactivePanelHtml,
@@ -267,13 +266,26 @@ const server = createServer((request, response) => {
       }
       if (request.method === 'POST' && url.pathname === '/api/proactive/settings') {
         const body = (await readBody(request)) as Record<string, unknown>;
-        const patched = applyProactiveSettingsPatch(proactiveSnapshot.settings, body);
-        if (patched.changes.length > 0) {
-          const event = persistProactiveSettings(store, patched.settings, patched.changes);
-          proactiveSnapshot = { settings: patched.settings, source: 'console', updatedAt: event.timestamp, changes: patched.changes };
-          console.log(`[proactive] 设置已更新（事件 #${event.sequence}）：${patched.changes.join('；')}`);
+        // Shared with the field-test console (t63): engine settings + the personality write
+        // (proactivity → self_profile) + one audit row, in that order.
+        const applied = applyAndPersistProactivePatch({
+          store,
+          settings: proactiveSnapshot.settings,
+          patch: body,
+          proactivityBefore: effectiveProactivity(store.selfProfile()),
+          log: (line) => console.log(line),
+        });
+        if (applied.changes.length > 0) {
+          proactiveSnapshot = { settings: applied.settings, source: 'console', updatedAt: applied.auditAt ?? proactiveSnapshot.updatedAt, changes: applied.changes };
         }
-        json(response, 200, { ok: true, changes: patched.changes, rejected: patched.rejected, state: proactivePayload() });
+        json(response, 200, {
+          ok: true,
+          changes: applied.changes,
+          rejected: applied.rejected,
+          proactivity: applied.proactivity,
+          auditSequence: applied.auditSequence,
+          state: proactivePayload(),
+        });
         return;
       }
       if (request.method === 'POST' && url.pathname === '/api/proactive/drill') {

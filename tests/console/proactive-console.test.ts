@@ -23,6 +23,7 @@ import { DEFAULT_PROACTIVITY, parseProactiveSettings, proactiveThreshold } from 
 import { REPO_ROOT, loadConfig } from '../../scripts/lib/harness.ts';
 import {
   PROACTIVE_PANEL_IDS,
+  applyAndPersistProactivePatch,
   applyProactiveSettingsPatch,
   createFakeProbeRunner,
   createFieldServer,
@@ -152,12 +153,94 @@ test('settings changed on the page are persisted, restored, and validated field 
 
     const noop = applyProactiveSettingsPatch(after.settings, { baseCooldownMinutes: 5 });
     assert.equal(noop.changes.length, 0, 'saving the same value writes nothing');
+    assert.equal(noop.rejected.length, 0, 'a no-op is not a rejection either');
 
     const state = proactiveConsoleState({ store, settings: after.settings, source: after.source, updatedAt: after.updatedAt, changes: after.changes, now: new Date(), proactivity: 0.6 });
     assert.equal(state.audit.length, 1);
     assert.equal(state.triggerLabels.length, 6);
     assert.equal(state.threshold, proactiveThreshold(0.6));
     assert.equal(state.quietHours.start, '21:15');
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+  }
+});
+
+test('the panel exposes the proactivity control and explains what it does', () => {
+  const html = proactivePanelHtml();
+  assert.ok(html.includes(`id="${PROACTIVE_PANEL_IDS.proactivity}"`), 'the panel has the 主动性总强度 control');
+  assert.ok(html.includes(`id="${PROACTIVE_PANEL_IDS.proactivityNow}"`), 'and shows the value in effect');
+  assert.match(html, /主动性总强度（人格 proactivity）/, 'labelled so nobody confuses it with the quota knobs');
+  assert.match(html, /self_profile/, 'and says where it is written');
+  assert.match(html, /一道门禁都不会被跳过/, 'and that it cannot skip a gate');
+  const script = proactivePanelScript('/api/field');
+  assert.match(script, /patch\.proactivity = Number\(raw\)/, 'the page sends proactivity');
+  assert.match(script, /String\(raw\)\.trim\(\) !== ''/, 'and never sends an empty box as 0');
+});
+
+test('a patch that changes proactivity writes self_profile and moves the threshold', () => {
+  const root = tempDir('xixi-t63-proactivity-');
+  const store = openXixiStore({ dataDir: root });
+  try {
+    const config = loadConfig();
+    // The acceptance's scenario: an entry whose stored persona still says 0.55 (seeded before
+    // the default moved), i.e. threshold 0.585 today.
+    store.seedSelfProfile({ ...config.personality.base, proactivity: 0.55 });
+    const before = effectiveProactivity(store.selfProfile());
+    assert.equal(before, 0.55);
+    assert.equal(proactiveThreshold(before), 0.585, 'the 旧库 state');
+    const snapshot = restoreProactiveSettings(store, config.proactive as unknown as Record<string, unknown>);
+
+    const applied = applyAndPersistProactivePatch({
+      store,
+      settings: snapshot.settings,
+      patch: { proactivity: 0.7 },
+      proactivityBefore: before,
+    });
+    assert.equal(applied.rejected.length, 0, 'proactivity is a known field now');
+    assert.ok(applied.changes.some((row) => row.includes('主动性总强度')), `changes: ${JSON.stringify(applied.changes)}`);
+    assert.deepEqual(applied.proactivity, { before, after: 0.7 });
+    assert.ok(applied.auditSequence !== null, 'the change left an audit row');
+
+    // Written to the personality table (and its history), not just returned to the caller.
+    assert.equal(store.selfProfile().proactivity, 0.7);
+    const history = store.selfProfileHistory?.('proactivity') ?? [];
+    assert.ok(
+      history.some((row: { sourceType?: string }) => row.sourceType === 'console:proactivity'),
+      'the override is attributed in self_profile_history',
+    );
+
+    // ...and the entry's threshold is the documented function of that value.
+    const state = proactiveConsoleState({ store, settings: applied.settings, source: 'console', updatedAt: applied.auditAt, changes: applied.changes, now: new Date(), proactivity: effectiveProactivity(store.selfProfile()) });
+    assert.equal(state.proactivity, 0.7);
+    assert.equal(state.threshold, 0.54, '0.45 + 0.30 × (1 − 0.70)');
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+  }
+});
+
+test('unknown patch fields are reported in Chinese instead of being dropped', () => {
+  const root = tempDir('xixi-t63-unknown-');
+  const store = openXixiStore({ dataDir: root });
+  try {
+    const config = loadConfig();
+    const snapshot = restoreProactiveSettings(store, config.proactive as unknown as Record<string, unknown>);
+    const applied = applyAndPersistProactivePatch({
+      store,
+      settings: snapshot.settings,
+      patch: { max_per_day: 3, proactivityy: 0.7, quietStart: '21:30' },
+      proactivityBefore: 0.55,
+    });
+    assert.equal(applied.changes.length, 1, 'only the known field changed');
+    assert.equal(applied.rejected.length, 2, `both unknown keys are reported: ${JSON.stringify(applied.rejected)}`);
+    for (const row of applied.rejected) {
+      assert.match(row, /不是这个接口认识的字段/, 'the rejection is explained in Chinese');
+      assert.match(row, /已忽略/, 'and says what happened to it');
+    }
+    assert.ok(applied.rejected.some((row) => row.includes('max_per_day')), 'a snake_case typo is named');
+    assert.ok(applied.rejected.some((row) => row.includes('proactivityy')), 'so is a misspelled proactivity');
+    assert.equal(store.selfProfile().proactivity, undefined, 'a rejected proactivity writes nothing');
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
@@ -246,6 +329,27 @@ test('the console serves the proactive card, its state, and obeys the switch ove
     assert.equal(saved.state.settings.enabled, false, 'the change is applied immediately (state comes back with the new value)');
     assert.equal(saved.state.audit.length, 1, 'and it is written to the audit trail');
     assert.equal(saved.state.source, 'console');
+
+    // t63: the 主动性总强度 control. A fresh store starts at the config default (0.70 → 0.54);
+    // moving it away and back must show up in `changes` and move the threshold each time.
+    const lowered = await post('/api/field/proactive/settings', { proactivity: 0.55 });
+    assert.equal(lowered.rejected.length, 0, 'proactivity is a known field');
+    assert.ok(lowered.changes.some((row: string) => row.includes('主动性总强度')), `changes: ${JSON.stringify(lowered.changes)}`);
+    assert.equal(lowered.state.proactivity, 0.55);
+    assert.equal(lowered.state.threshold, 0.585, '0.45 + 0.30 × (1 − 0.55)');
+
+    const raised = await post('/api/field/proactive/settings', { proactivity: 0.7 });
+    assert.equal(raised.rejected.length, 0);
+    assert.deepEqual(raised.proactivity, { before: 0.55, after: 0.7 });
+    assert.equal(raised.state.proactivity, 0.7);
+    assert.equal(raised.state.threshold, 0.54, '调到 0.70 后 threshold 必须是 0.54');
+
+    // t63: an unknown key must come back as a Chinese rejection, not as silence.
+    const typo = await post('/api/field/proactive/settings', { max_per_day: 3 });
+    assert.equal(typo.changes.length, 0, 'nothing understood, nothing changed');
+    assert.equal(typo.rejected.length, 1, `an unknown field must be reported: ${JSON.stringify(typo.rejected)}`);
+    assert.match(String(typo.rejected[0]), /不是这个接口认识的字段/);
+    assert.match(String(typo.rejected[0]), /max_per_day/);
 
     const afterOff = await post('/api/field/proactive/drill', { trigger: 'presence_arrived' });
     assert.equal(afterOff.drill.reasonCode, 'DISABLED', '一键关闭后确实不再主动开口');
@@ -338,6 +442,16 @@ test('the trial page shows segments in order, labels the source, and carries the
     const blocked = await post('/api/proactive/drill', { trigger: 'presence_arrived' });
     assert.equal(blocked.drill.reasonCode, 'DISABLED');
     assert.equal(blocked.drill.speak, false);
+
+    // t63 on the trial page too: the proactivity control must do the same thing here.
+    const tweaked = await post('/api/proactive/settings', { proactivity: 0.55 });
+    assert.ok(tweaked.changes.some((row: string) => row.includes('主动性总强度')), `changes: ${JSON.stringify(tweaked.changes)}`);
+    assert.equal(tweaked.state.threshold, 0.585);
+    const back = await post('/api/proactive/settings', { proactivity: 0.7 });
+    assert.equal(back.state.threshold, 0.54);
+    const unknown = await post('/api/proactive/settings', { quiet_hours: { start: '22:00' } });
+    assert.equal(unknown.changes.length, 0);
+    assert.equal(unknown.rejected.length, 1, `nested objects are not a shortcut: ${JSON.stringify(unknown.rejected)}`);
   } finally {
     child.kill();
     rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });

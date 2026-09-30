@@ -2068,18 +2068,29 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
         }
         if (request.method === 'POST' && url.pathname === '/api/field/proactive/settings') {
           const body = (await readBody(request)) as Record<string, unknown>;
-          const patched = applyProactiveSettingsPatch(proactiveSnapshot.settings, body);
-          if (patched.changes.length > 0) {
-            const event = persistProactiveSettings(store, patched.settings, patched.changes);
+          const applied = applyAndPersistProactivePatch({
+            store,
+            settings: proactiveSnapshot.settings,
+            patch: body,
+            proactivityBefore: effectiveProactivity(store.selfProfile()),
+            log,
+          });
+          if (applied.changes.length > 0) {
             proactiveSnapshot = {
-              settings: patched.settings,
+              settings: applied.settings,
               source: 'console',
-              updatedAt: event.timestamp,
-              changes: patched.changes,
+              updatedAt: applied.auditAt ?? proactiveSnapshot.updatedAt,
+              changes: applied.changes,
             };
-            log(`[proactive] 设置已更新（事件 #${event.sequence}）：${patched.changes.join('；')}`);
           }
-          json(response, 200, { ok: true, changes: patched.changes, rejected: patched.rejected, state: proactivePayload() });
+          json(response, 200, {
+            ok: true,
+            changes: applied.changes,
+            rejected: applied.rejected,
+            proactivity: applied.proactivity,
+            auditSequence: applied.auditSequence,
+            state: proactivePayload(),
+          });
           return;
         }
         if (request.method === 'POST' && url.pathname === '/api/field/proactive/drill') {
@@ -2489,7 +2500,29 @@ export interface ProactiveSettingsPatchResult {
   readonly changes: readonly string[];
   /** Fields the page sent that were ignored, with the reason. */
   readonly rejected: readonly string[];
+  /**
+   * The new 「主动性总强度」 (personality `proactivity`) when the patch asked for one.
+   *
+   * It is *not* part of `ProactiveSettings`: proactivity is a personality property that lives in
+   * `self_profile` (ADR-0009 §4 — it moves the score threshold and nothing else), so the caller
+   * writes it through `overrideSelfProfile` while the gate/knob settings go to the audit record.
+   */
+  readonly proactivity: number | null;
 }
+
+/** The fields `applyProactiveSettingsPatch` understands; anything else is reported, never dropped. */
+export const PROACTIVE_PATCH_FIELDS: readonly string[] = Object.freeze([
+  'enabled',
+  'baseCooldownMinutes',
+  'maxPer6h',
+  'maxPerDay',
+  'topicRepeatWindowHours',
+  'negativeFeedbackCooldownMultiplier',
+  'quietStart',
+  'quietEnd',
+  'triggers',
+  'proactivity',
+]);
 
 /**
  * Apply a page patch to the current settings.
@@ -2498,10 +2531,33 @@ export interface ProactiveSettingsPatchResult {
  * never produce a settings object the engine would not have accepted: out-of-range numbers
  * and malformed clock strings fall back to the *current* value, and the page is told which
  * fields were rejected instead of silently getting a different number than it typed.
+ *
+ * Unknown keys are rejected too (t63): the first version dropped them, so a caller that sent
+ * `proactivity` — or a typo like `max_per_day` — got `changes: []` **and** `rejected: []`, which
+ * reads as "saved, nothing to do". A settings API that silently ignores what it does not
+ * understand is indistinguishable from a broken one.
  */
 export function applyProactiveSettingsPatch(current: ProactiveSettings, patch: Readonly<Record<string, unknown>>): ProactiveSettingsPatchResult {
   const rejected: string[] = [];
   const merged = proactiveSettingsToConfig(current) as Record<string, unknown>;
+
+  for (const key of Object.keys(patch)) {
+    if (!PROACTIVE_PATCH_FIELDS.includes(key)) {
+      rejected.push(`「${key}」不是这个接口认识的字段，已忽略（可用字段：${PROACTIVE_PATCH_FIELDS.join('、')}）`);
+    }
+  }
+
+  // 「主动性总强度」 is a personality value, not an engine setting: validate 0..1 here and let
+  // the caller write it to `self_profile` (with its own history row).
+  let proactivity: number | null = null;
+  if (patch['proactivity'] !== undefined) {
+    const parsed = typeof patch['proactivity'] === 'number' ? patch['proactivity'] : Number(String(patch['proactivity']).trim());
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+      rejected.push(`proactivity：要在 0 到 1 之间（当前 ${current === undefined ? '?' : ''}数值不合法），已忽略`);
+    } else {
+      proactivity = parsed;
+    }
+  }
 
   if (patch['enabled'] !== undefined) merged['enabled'] = patch['enabled'] === true || patch['enabled'] === 'true';
   for (const [field, key] of [
@@ -2569,7 +2625,59 @@ export function applyProactiveSettingsPatch(current: ProactiveSettings, patch: R
       changes.push(`${PROACTIVE_TRIGGER_LABELS[trigger]}：${current.triggers[trigger] ? '开' : '关'} → ${settings.triggers[trigger] ? '开' : '关'}`);
     }
   }
-  return { settings, changes, rejected };
+  return { settings, changes, rejected, proactivity };
+}
+
+/** The change line for a personality write, kept out of `changes` only when nothing moved. */
+export function proactivityChangeLine(before: number, after: number): string {
+  return `主动性总强度（人格 proactivity）：${before} → ${after}（写入 self_profile，来源 console:proactivity）`;
+}
+
+export interface ProactivePatchApplication {
+  readonly settings: ProactiveSettings;
+  readonly changes: readonly string[];
+  readonly rejected: readonly string[];
+  /** The personality write, when the patch asked for one that actually moved the value. */
+  readonly proactivity: { readonly before: number; readonly after: number } | null;
+  /** Sequence of the `system.health` audit row, or `null` when nothing changed. */
+  readonly auditSequence: number | null;
+  /** Timestamp of that audit row (what the page shows as 「上次保存」), or `null`. */
+  readonly auditAt: string | null;
+}
+
+/**
+ * Apply one patch end-to-end: engine settings + the personality value, then one audit row.
+ *
+ * Both pages call this, so "调完就生效、还留了痕迹" is one code path (t63). The personality
+ * write goes through `overrideSelfProfile`, which is the project's **administrative override**
+ * seam: it upserts `self_profile` *and* appends a `self_profile_history` row, so the change is
+ * both live and auditable — while the engine knobs land in the `system.health` audit record
+ * that `restoreProactiveSettings` reads back on the next start.
+ */
+export function applyAndPersistProactivePatch(options: {
+  readonly store: XixiStore;
+  readonly settings: ProactiveSettings;
+  readonly patch: Readonly<Record<string, unknown>>;
+  readonly proactivityBefore: number;
+  readonly log?: ((line: string) => void) | undefined;
+}): ProactivePatchApplication {
+  const patched = applyProactiveSettingsPatch(options.settings, options.patch);
+  const changes = [...patched.changes];
+  let proactivity: { before: number; after: number } | null = null;
+  if (patched.proactivity !== null && patched.proactivity !== options.proactivityBefore) {
+    options.store.overrideSelfProfile({ proactivity: patched.proactivity }, 'console:proactivity');
+    proactivity = { before: options.proactivityBefore, after: patched.proactivity };
+    changes.push(proactivityChangeLine(proactivity.before, proactivity.after));
+  }
+  let auditSequence: number | null = null;
+  let auditAt: string | null = null;
+  if (changes.length > 0) {
+    const event = persistProactiveSettings(options.store, patched.settings, changes);
+    auditSequence = event.sequence;
+    auditAt = event.timestamp;
+    options.log?.(`[proactive] 设置已更新（事件 #${event.sequence}）：${changes.join('；')}`);
+  }
+  return { settings: patched.settings, changes, rejected: patched.rejected, proactivity, auditSequence, auditAt };
 }
 
 export interface ProactiveGateRow {
@@ -2982,6 +3090,8 @@ export function databaseNoteHtml(currentDir: string): string {
   quietEnd: 'px-quiet-end',
   topic: 'px-topic',
   negative: 'px-neg',
+  proactivity: 'px-proactivity',
+  proactivityNow: 'px-proactivity-now',
   triggers: 'px-triggers',
   save: 'px-save',
   off: 'px-off',
@@ -3014,7 +3124,9 @@ export function proactivePanelHtml(): string {
       <label>静默时段止<input type="text" id="${id.quietEnd}" placeholder="07:00" /></label>
       <label>同主题抑制（小时）<input type="number" id="${id.topic}" min="0" max="720" /></label>
       <label>负面反馈倍率<input type="number" id="${id.negative}" min="1" max="10" step="0.5" /></label>
+      <label>主动性总强度（人格 proactivity）<input type="number" id="${id.proactivity}" min="0" max="1" step="0.05" /></label>
     </div>
+    <div class="muted">「主动性总强度」写的是<b>人格</b> <code>proactivity</code>（进 <code>self_profile</code>，留一条 <code>self_profile_history</code>）：它只把阈值改成 <code>0.45 + 0.30 × (1 − proactivity)</code>，<b>一道门禁都不会被跳过</b>。当前生效值：<b id="${id.proactivityNow}">—</b></div>
     <div id="${id.triggers}" class="px-triggers"></div>
     <div style="margin:10px 0">
       <button id="${id.save}" class="primary">保存（立即生效并落库）</button>
@@ -3062,6 +3174,9 @@ function pxRender(state) {
   pxSet('cooldown', s.baseCooldownMinutes); pxSet('per6h', s.maxPer6h); pxSet('perDay', s.maxPerDay);
   pxSet('quietStart', state.quietHours.start); pxSet('quietEnd', state.quietHours.end);
   pxSet('topic', s.topicRepeatWindowHours); pxSet('negative', s.negativeFeedbackCooldownMultiplier);
+  pxSet('proactivity', state.proactivity);
+  var proactivityNow = document.getElementById(PX.ids.proactivityNow);
+  if (proactivityNow) proactivityNow.textContent = String(state.proactivity);
   var summary = document.getElementById(PX.ids.summary);
   if (summary) {
     summary.textContent = (s.enabled ? '已开启' : '已关闭')
@@ -3115,7 +3230,7 @@ function pxPatch() {
   var triggers = {};
   var boxes = document.querySelectorAll('#' + PX.ids.triggers + ' input[data-trigger]');
   for (var i = 0; i < boxes.length; i += 1) triggers[boxes[i].getAttribute('data-trigger')] = boxes[i].checked;
-  return {
+  var patch = {
     enabled: document.getElementById(PX.ids.enabled).checked,
     baseCooldownMinutes: Number(pxVal('cooldown')),
     maxPer6h: Number(pxVal('per6h')),
@@ -3126,6 +3241,11 @@ function pxPatch() {
     negativeFeedbackCooldownMultiplier: Number(pxVal('negative')),
     triggers: triggers,
   };
+  // Only send proactivity when the box really holds a number: an empty box must not be read as
+  // 0 (which would silently make 西西 maximally willing to speak).
+  var raw = pxVal('proactivity');
+  if (raw !== undefined && String(raw).trim() !== '' && isFinite(Number(raw))) patch.proactivity = Number(raw);
+  return patch;
 }
 /** Play the drill's reply the way the engine intends: one segment at a time, gapMs apart. */
 function pxPlaySegments(target, segments, gapMs, label) {

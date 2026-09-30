@@ -56,6 +56,10 @@ function minutesBefore(base: Date, minutes: number): Date {
 
 function open(dir: string): XixiStore {
   const store = openXixiStore({ dbPath: join(dir, 'xixi.sqlite'), clock: () => new Date(T0) });
+  // 0.55 is an **explicit input, not the shipped default** (that is 0.70 since ADR-0009).
+  // Pinning 0.55 here deliberately keeps this suite's threshold at 0.585, so the 0.585
+  // assertions below are correct as written — do not "fix" them with a search-and-replace
+  // when the default moves again (the default's own value is covered by the unit tests).
   store.seedSelfProfile({ proactivity: 0.55 });
   return store;
 }
@@ -99,7 +103,7 @@ test('an accepted candidate is delivered once, and the audit explains why it spo
     assert.equal(outcome.delivered, true);
     assert.equal(outcome.reasonCode, 'PASSED');
     assert.equal(outcome.score, 0.7);
-    assert.equal(outcome.threshold, 0.585, 'proactivity 0.55 → 0.585, computed by the program');
+    assert.equal(outcome.threshold, 0.585, 'explicit proactivity 0.55 → 0.585: an input, not the default 0.70');
     assert.equal(spy.log.length, 1, 'the model seam is called exactly once');
     assert.deepEqual(spy.log[0], {
       candidateId: 'cand_1',
