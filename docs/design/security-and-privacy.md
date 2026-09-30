@@ -3,6 +3,7 @@
 > 最后更新：2026-09-30
 > 权威来源：`packages/contracts/src/envelope.ts` + `schemas/events/{conversation.turn,conversation.decision,presence.changed}.v1.json`、`packages/domain/src/{store,migrations/001_initial.sql,config}.ts`、`packages/brain-adapter/src/{tools,mimo,dsh,errors}.ts`、`packages/model-adapters/src/{mimo,weather,errors}.ts`、`packages/conversation/src/engine.ts`、`apps/brain-dsh/profile/cordis.patch.yml`、`plugins/xixi-tools/index.js`、`services/perception-edge/**`、`scripts/verify-camera-presence.ts`、`scripts/lib/harness.ts`、`scripts/serve-chat.ts`、`tests/unit/core/brain-error-classification.test.ts`、`.gitignore`、`AGENTS.md` §1/§5、[progress.md](../progress.md) §2.2/§2.6/§2.10、[perception.md](perception.md)、方案 §19/§20/§41.7/§53
 > 若与代码不一致，以代码为准，并请立即修正本文件
+> 引用代码位置的方式：**文件名 + 函数名/测试名 + 一条可复现的 grep 命令**，不写行号——行号随任何一次编辑失效（15 处行号引用曾在数小时内漂移 13 处），见 `AGENTS.md` §9.18
 
 本文是「方案条款 → 代码位置 → 已实现 / 仅设计」的逐条映射。**没有实现的安全项在 §5 集中列出**，不要把它们当已完成。
 
@@ -57,9 +58,9 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
 | 方案要求 | 现状 |
 |---|---|
 | 内存 ring buffer | **未实现**：没有常驻音频缓冲（`services/voice-edge` 里没有环形缓冲/常开采集代码；浏览器「按住🎤」一次采集一段，`segment.py` 按文件读入） |
-| 非触发片段不落盘 | ✅ **已实现**（默认策略下连整段录音都不落 `data/`）：VAD 是独立 Python 进程、需要文件输入，所以整段录音只写进**系统临时目录**（`scripts/field-test.ts:673` 的 `mkdtempSync(tmpdir()/xixi-vad-)`）供读一次，**不进 `data/`**；现场测试控制台自测里有一条断言「隐私策略：整段录音不落盘」（`field-test.ts:2892`）。**历史**：这条以前是反着的（旧 `/api/voice` 先把整段写进 `data/voice-web/capture-*.wav` 再做 VAD，无语音时也已经落盘），两个入口改用共享核心后修掉（见 `scripts/serve-chat.ts:102-109` 的说明） |
+| 非触发片段不落盘 | ✅ **已实现**（默认策略下连整段录音都不落 `data/`）：VAD 是独立 Python 进程、需要文件输入，所以整段录音只写进**系统临时目录**（`scripts/field-test.ts` 的 `handleVoiceTurn` 里用 `mkdtempSync(tmpdir()/xixi-vad-)` 建临时目录，核对：`grep -n "xixi-vad-" scripts/field-test.ts`）供读一次，**不进 `data/`**；现场测试控制台自测 `runSelfTest` 里有一条断言「隐私策略：整段录音不落盘」（核对：`grep -n "整段录音不落盘" scripts/field-test.ts`）。**历史**：这条以前是反着的（旧 `/api/voice` 先把整段写进 `data/voice-web/capture-*.wav` 再做 VAD，无语音时也已经落盘），两个入口改用共享核心后修掉（见 `scripts/serve-chat.ts` 的 `handleVoice` 上方那段「why not inline any more」的注释，核对：`grep -n "handleVoice" scripts/serve-chat.ts`） |
 | 被识别为对话的短音频可暂存用于 ASR | ✅ 但**默认不保留**：`keepSpeechSegments = privacy.store_raw_audio && memory.raw_audio_retention_days > 0`——默认（`store_raw_audio: false`、保留 0 天）语音段也不写盘，ASR 直接用内存里的音频 |
-| 调试模式可配置保留 N 天 | ✅ **已实现**（不再是「配置项无人读取」）：`scripts/field-test.ts` 的 `retentionPolicy(config)` 读 `privacy.store_raw_audio` + `memory.raw_audio_retention_days`，`pruneVoiceDir()` 在**启动时清理过期文件**；两个入口都在用（`scripts/serve-chat.ts:49/52` 清理并打印 `[privacy] 按保留策略清理 …`；现场测试控制台在启动与每轮前清理，`field-test.ts:775/1805`）。开启后只写 VAD 检出的语音段到 `data/voice-web/`，保留 N 天 |
+| 调试模式可配置保留 N 天 | ✅ **已实现**（不再是「配置项无人读取」）：`scripts/field-test.ts` 的 `retentionPolicy(config)` 读 `privacy.store_raw_audio` + `memory.raw_audio_retention_days`，`pruneVoiceDir()` 在**启动时清理过期文件**；两个入口都在用（`scripts/serve-chat.ts` 顶层的启动期清理：`retentionPolicy(config)` + `pruneVoiceDir(VOICE_DIR, policy)`，随后打印 `[privacy] 按保留策略清理 …`；现场测试控制台在 `createFieldServer` 启动时与 `handleVoiceTurn` 每轮结束前各清理一次，核对：`grep -n "pruneVoiceDir" scripts/field-test.ts scripts/serve-chat.ts`）。开启后只写 VAD 检出的语音段到 `data/voice-web/`，保留 N 天 |
 | 正式运行不长期保存原始环境音 | ✅ **默认成立**（不落盘、不保留）；开启保留时是**按天数粗粒度**清理 + 手工删目录，**没有针对单条记录的删除接口**（细粒度删除仍属 M4 的记忆管理） |
 
 **唯一硬约束是「不进版本库」**：`data/` 与 `.env` 都在 `.gitignore`（`.gitignore` 含 `data/`、`.dsh/`、`.venvs/`、`.env`、`.env.local`）。
@@ -124,7 +125,7 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
 2. **声纹**：不用于高风险认证——目前根本没有声纹；方案 §19.3 的另一半（「用于降低电视误触 / 个性化」）也还是 M2 的活。
 3. **L4 工具**：门锁 / 支付 / 紧急呼叫一律不做（铁律 7）。
 4. **L2/L3 工具与其确认策略**：未实现（没有提醒、消息、日历）。
-5. **音频/对话保留期与删除接口**：未实现（配置项存在但无人读取）。
+5. **保留期与删除接口**（该项只**部分**实现）：**音频**保留期 ✅ 已实现（`privacy.store_raw_audio` + `memory.raw_audio_retention_days` 被 `retentionPolicy()` 读取，见 §20.1）；**对话（transcript）**保留期与**针对单条记录/单条对话的删除接口**仍未实现（`memory.raw_transcript_retention_days` 至今没有任何读取方，见 §20.3）。
 6. **独立日志 redact 层**：未实现（靠不打印）。
 7. **§53 的显式不可信内容标签**：未实现。
 8. **出网白名单**：未实现。
@@ -136,20 +137,22 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
 
 ## 6. §41.7 / §55 审计：`reason_code` 与分数
 
-- **事件是唯一事实来源**（ADR-0003）。`appendEvent` 的调用点一共 **4 处**（2026-09-30 用 `grep -n "appendEvent("` 核对；`store.ts:267` 是定义行，不算调用点）：
+- **事件是唯一事实来源**（ADR-0003）。调用点数量**以实测为准、不写死**：核对命令 `grep -n "appendEvent(" packages`（当前 5 处；`packages/domain/src/store.ts` 里 `appendEvent(event: EventEnvelope)` 那一行是**定义**，不算调用点）：
 
-  | 位置 | 函数 | 事件 |
+  | 文件 | 函数 | 事件 |
   |---|---|---|
-  | `packages/domain/src/store.ts:333` | `recordHealth` | `system.health` |
-  | `packages/domain/src/store.ts:443` | `recordTurn` | `conversation.turn` |
-  | `packages/domain/src/store.ts:778` | `recordPresenceChanged` | `presence.changed`（**与 `world_state` 投影同一事务**，M6 感知边） |
-  | `packages/conversation/src/engine.ts:206` | `#recordDecision` | `conversation.decision`（t5 新增） |
+  | `packages/domain/src/store.ts` | `recordHealth` | `system.health` |
+  | `packages/domain/src/store.ts` | `recordTurn` | `conversation.turn` |
+  | `packages/domain/src/store.ts` | `recordPresenceChanged` | `presence.changed`（**与 `world_state` 投影同一事务**，M6 感知边） |
+  | `packages/conversation/src/engine.ts` | `ConversationEngine.#recordDecision` | `conversation.decision`（t5 新增） |
+  | `packages/conversation/src/proactive.ts` | `ProactiveEngine.#record` | `proactive.decision`（主动开口的判定记录；只存 `reason_code` 与分值） |
 
   还有一条**不经过 `appendEvent`** 的写入路径：感知边进程用 Python 直接 SQL 写同一个库
   （`services/perception-edge/perception_edge/emitter.py`，`INSERT INTO events` 与 `world_state` 同一事务；
-  `scripts/verify-camera-presence.ts` 会把这些事件再用 `buildEvent()` 重建校验）。
+  `scripts/verify-camera-presence.ts` 把这些事件**手工重建信封对象之后**用 `validateEvent()` 校验一遍，
+  核对：`grep -n "validateEvent(" scripts/verify-camera-presence.ts`）。
   **`createSession` 不写事件；`seedSelfProfile` / `overrideSelfProfile` 只写 `self_profile` 与 `self_profile_history`，同样不写事件。**
-  所以「每条状态变更都进事件表」目前对**对话轮次、接受判定、健康状态与在场状态**成立。
+  所以「每条状态变更都进事件表」目前对**对话轮次、接受判定、健康状态、在场状态与主动开口判定**成立。
 - **被拒绝的轮次有记录**：`ConversationEngine.respond` 在 `accepted === false` 时**不**调用 `recordTurn`
   （所以它不会变成对话历史，也不会进入工作记忆），但会先追加一条 `conversation.decision`，
   因此在事件日志里可以查到「这句话为什么没被接受」。
@@ -197,11 +200,15 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
     （不在闭集里的码则留在 `detail`）。
 - **为什么重要**：`curl` 不通与「忘配 `.env`」在过去都显示成网络类失败，会把人引向错误的排查方向；
   分类保真后这几类是分开的，§21.1 的降级也才有依据去区分「换密钥 / 退避重试 / 供应商故障」。
-- **离线覆盖**（无需新增测试，口径已被钉住）：`tests/unit/core/brain-error-classification.test.ts`——
-  第 78 行那条断言「缺密钥 → `ModelError('MISSING_KEY')`，且经适配器后 `code = TRANSPORT_FAILED`、
-  `originalCode = MISSING_KEY`、`detail` 含 `MISSING_KEY`、fetch 未被调用」，第 38 行按 HTTP 状态逐类断言
-  `code` + `originalCode`，第 110 行断言 DSH 侧原始码进 `originalCode`；
-  `tests/integration/brain-adapter.test.ts` 第 20 行在集成层复核同一件事（含 `attempted === 0`）。
+- **离线覆盖**（无需新增测试，口径已被钉住；按**测试名**引用，不写行号）：
+  `tests/unit/core/brain-error-classification.test.ts` 的三条用例——
+  `a missing key arrives as MISSING_KEY before any request is attempted`（缺密钥 → `ModelError('MISSING_KEY')`，
+  且经适配器后 `code = TRANSPORT_FAILED`、`originalCode = MISSING_KEY`、`detail` 含 `MISSING_KEY`、fetch 未被调用）、
+  `HTTP status classes survive the adapter seam instead of collapsing into PROVIDER_FAILED`（按 HTTP 状态逐类断言
+  `code` + `originalCode`）、`the DSH path keeps the harness error code in originalCode`（DSH 侧原始码进 `originalCode`）；
+  `tests/integration/brain-adapter.test.ts` 的 `a missing API key fails as MISSING_KEY before any request is attempted`
+  在集成层复核同一件事（含 `attempted === 0`）。核对命令：
+  `grep -n "^test(" tests/unit/core/brain-error-classification.test.ts tests/integration/brain-adapter.test.ts`。
 
 ## 维护规则
 

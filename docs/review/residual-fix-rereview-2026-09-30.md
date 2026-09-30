@@ -21,7 +21,7 @@
 | 1 明确 verdict + findings（含文件与行号） | **满足** | pass；无 finding，3 条观测（带文件与符号位置）见 §5 |
 | 2 F1 独立复核：带占位密钥跑改过的文件与全量，全部通过；**并读代码确认用例自己控制前提** | **真正满足** | 带占位密钥：两个文件 **11/11**、全量 **180/180 / 0 skipped / exit 0**；不带密钥：两个文件 **11/11**。代码侧：三处构造都 `apiKey: ''` + `assert.equal(client.hasKey, false, …)`；`MimoClient` 的解析是 `options.apiKey ?? process.env.MIMO_API_KEY`（`packages/model-adapters/src/mimo.ts` 的构造函数）与 `get hasKey()`（`this.#apiKey !== undefined && this.#apiKey.length > 0`）。**注意**：验收文本里的「保存与恢复」在本实现中不存在——因为用例**完全没有改 `process.env`**，没有需要恢复的东西；这比「改了再恢复」更干净，我按「自控前提」这一**意图**判定通过（§2 详述） |
 | 3 F2 独立复核：两处历史注释的「已修复」锚点已加上，且历史信息未被删除 | **真正满足** | 锚点实际有 **3 处**（多于要求的 2 处）：单测文件头（注明 t5 修复 + 「上面这段是历史，不是现状」）、单测缺密钥用例注释（注明 t12 修复）、集成测试用例 doc（注明 t12 修复 + t14 改断言）。`git show 540d1d7` 的 diff 里**没有任何历史叙述被删**（4 个删除行全是机械替换） |
-| 4 同类隐患复核：抽查至少两处其他环境依赖断言 | **满足（我独立抽查 4 处）** | ① `tests/unit/core/plugin-tools.test.ts` 里那段是**显式赋值 + `finally` 恢复**（`previous`/`previousRoot` 先存后还原，`undefined` 时 `delete`），属自控前提，无需改；② `tests/unit/core/dead-code-truthfulness.test.ts` 的 `MimoClient` 构造显式传 `apiKey: 'test-key'`；③ `tests/perception/camera-presence.test.ts` 读 `XIXI_PERCEPTION_PYTHON` 只是**候选路径的优先项**，后面还有 `.venvs` 目录发现兜底，不构成环境相关的通过/失败；④ `tests/unit/voice/frontend.test.ts` 依赖 `.venvs` 的 Python 与 `process.env`——t35 已如实标为**范围外并上报**。全仓 `tests/` 里 `new MimoClient(` 共 5 处，**全部**显式给 key（`'test-key'` 或 `''`） |
+| 4 同类隐患复核：抽查至少两处其他环境依赖断言 | **满足（我独立抽查 4 处）** | ① `tests/unit/core/plugin-tools.test.ts` 里那段是**显式赋值 + `finally` 恢复**（`previous`/`previousRoot` 先存后还原，`undefined` 时 `delete`），属自控前提，无需改；② `tests/unit/core/dead-code-truthfulness.test.ts` 的 `MimoClient` 构造显式传 `apiKey: 'test-key'`；③ `tests/perception/camera-presence.test.ts` 读 `XIXI_PERCEPTION_PYTHON` 只是**候选路径的优先项**，后面还有 `.venvs` 目录发现兜底，不构成环境相关的通过/失败；④ `tests/unit/voice/frontend.test.ts` 依赖 `.venvs` 的 Python 与 `process.env`——t35 已如实标为**范围外并上报**。全仓 `tests/` 里 `new MimoClient(` 共 6 处，**全部**显式给 key（`'test-key'` 或 `''`） |
 | 5 自己跑一次 npm test 与 check:docs 并贴结果；结论落本文件 | **真正满足** | `npm test`（带占位密钥）→ **180 / 180 / 0 fail / 0 skipped，exit 0**；`npm run check:docs` → **47 份 markdown、0 问题、exit 0**；命令与原始输出见 §6 |
 
 **范围纪律**：t35 只改了它声明的 2 个文件（`git show 540d1d7 --stat`：`tests/integration/brain-adapter.test.ts` 与 `tests/unit/core/brain-error-classification.test.ts`，+25/−4），未动实现代码、未动其他目录；我本轮只新增本文件。
@@ -58,7 +58,7 @@
 | `tests/unit/core/dead-code-truthfulness.test.ts` 的 `new MimoClient({` | 显式 `apiKey: 'test-key'`，与 `process.env` 无关 |
 | `tests/perception/camera-presence.test.ts` 的 `pythonCandidates()` | `XIXI_PERCEPTION_PYTHON` 只是**优先候选**，后面按 `.venvs` 目录名排序兜底；无「环境决定成败」的风险（t35 也这么标注） |
 | `tests/unit/voice/frontend.test.ts` | 依赖 `.venvs` 的 Python 与 `process.env`（属**其他成员目录**）——t35 如实标为范围外并上报，符合派单纪律 |
-| 全仓 `tests/` 的 `new MimoClient(`（我 grep 了 5 处） | 全部显式传 key：`'test-key'` 或 `''`——没有第四个「省略 apiKey 靠环境」的用例 |
+| 全仓 `tests/` 的 `new MimoClient(`（我 grep 到 **6 处**：单测 4、集成 1、`dead-code-truthfulness` 1） | 全部显式传 key：`'test-key'` 或 `''`——没有「省略 apiKey 靠环境」的用例 |
 
 ## 5. 观测（不改变 verdict）
 
