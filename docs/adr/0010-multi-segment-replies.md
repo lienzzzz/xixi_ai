@@ -2,7 +2,12 @@
 
 - 状态：已接受（2026-09-30）
 - 相关：方案 §12 / §33 / §46.1 / §55、[ADR-0008](0008-realtime-path-direct-mimo.md)、[docs/design/conversation.md](../design/conversation.md)、`config/xixi.example.yaml`
-- 归属：**M5**（本 ADR 定义语义与上限；当前实现是**单段**：`ConversationEngine.respond` 把整段回复交给 `RespondHooks.onTextChunk` 逐块流出，TTS 拿到的是同一次回复）
+- 归属：**M5**（本 ADR 定义语义与上限；**引擎侧已按它落地**——订正 2026-09-30：`packages/conversation/src/segments.ts`
+  的确定性分段器、`RespondHooks.onSegment` 的逐段播放、以及 `ConversationEngine.respond` 在最后一段播完后才进
+  `LINGERING` 的时序；M1–M9 都有断言。**播放侧尚未接线**：没有任何生产入口传 `onSegment`
+  （核对：`git grep -n "onSegment" -- scripts services apps plugins`，订正时无命中），TTS 仍按整段文本合成
+  （`synthesize(turn.text)`），所以真机上听到的还是一整段。分段器是导出的纯函数，界面层可以直接调用它做
+  「分几段、段间多少 ms」的展示，但那不等于播放已经分段。）
 
 ## Decision
 
@@ -27,13 +32,22 @@
    | M9 | 部分失败 | 任一段 TTS 失败 → 停止后续段并结束该轮；**事件日志仍然只有一条** assistant 记录（日志是对话级、不是音频级）。实际播了几段属运行期信息，**不进事件**——不为调试信息改已发布 schema |
 3. **上限不可被突破**：段数 ≤ 3、单段 ≤ 60 汉字、间隔 ≤ 1200ms 是**硬上限**，人格参数与模型输出都不能越过；
    `config/xixi.example.yaml` 的 `reply` 段只允许在上限内收紧（默认 `max_segments: 3` / `segment_max_chars: 60` / `gap_ms: 450`）。
+   **唯一例外是数学上的**：段数 ≤ 3 与单段 ≤ 60 汉字在「回复超过 3 × 60 = 180 字」时不可兼得，此时实现取
+   「不丢字」（M4 优先）——尾部合并进第 3 段、允许该段超长，并把 `SegmentedReply.mergedOverflow` 置为 `true`
+   让调用方看得见（`packages/conversation/src/segments.ts` 的文件头有同一句说明；两组边界断言见
+   `tests/unit/core/reply-segments.test.ts`）。能装进 180 字的回复，每一段都在 60 字以内。
 4. **谁切分**：切分由**程序**做（确定性纯函数：按句末标点 + 上限切分），模型只负责内容；
    模型不能指定段数与间隔——它无法感知 TTS 播放时长，也无法保证可复现（与 ADR-0009 同一条理由）。
 
 ## Context
 
-- 现状（本轮实测）：`respond()` 把整段文本逐块交给 `onTextChunk`，语音侧一次合成整段；没有任何分段上限或段间间隔概念。
-  单段长回复在真机上的表现是「一口气说完」，用户插不上话，也更容易被 `[静默]` 兜底逻辑当成一整段处理。
+- 现状（订正 2026-09-30）：**引擎侧已有**分段上限与段间间隔——`ConversationEngine.respond` 在写完那条 assistant
+  记录之后、`fsm.onReplyCompleted()` 之前逐段 await `RespondHooks.onSegment`（时序见
+  [`conversation.md`](../design/conversation.md) §5 的 ⑨′ 步），间隔作为播放器参数随每段下发。
+  **语音侧仍未接线**：`scripts/` 的入口只传 `onTextChunk`，把整段交给它一次合成，所以真机上「一口气说完」
+  的现象还在，本 ADR 的语义目前只在引擎侧成立。
+- 当初的触发点（本轮实测）：单段长回复在真机上的表现是「一口气说完」，用户插不上话，也更容易被 `[静默]`
+  兜底逻辑当成一整段处理。
 - 已发布契约必须保持不变：`conversation.turn.v1` / `conversation.decision.v1` 都是 `additionalProperties: false`，
   所以「多段」**不能**变成「多条轮次事件」，否则 `turn_index`、工作记忆与跟进窗口的语义都会被改掉（铁律 10 也要求新增而非就地改）。
 - 语音侧（ADR-0007/ADR-0008）已能按段合成与播放：间隔是播放器参数，不需要新的模型能力——这是把它做成程序契约的前提。

@@ -137,6 +137,10 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    反例：t2 的条款要求「复用共享评分定义 / 登记新入口」，对应 `scripts/lib/similarity.ts`、`docs/testing.md` 未列入 → 判 failed。
 2. **契约校验只核对成员「声明」的 changedPaths**：未声明的越界编辑**不会**被自动拦截（t4 的 `package.json`、`scripts/voice-turn.ts` 就是这样绕过的）。
    因此唯一防线是：成员**如实披露** inScope 外的改动 + 评审**逐条复核**这些披露。
+   **披露的固定格式（t45 的写法已被验证有效，请照抄）**：① 改了哪个文件（完整路径）；
+   ② 为什么必须改（对应哪条验收或哪个事实）；③ 为什么没有回滚（例如改动已被 captain 的周期提交收进去）；
+   ④ 请谁单独核对这一处。**正例**：t45 用这套格式披露了 `docs/design/domain-model.md` 的两条推论，
+   评审据此复核出其中一句与事实相反（四个入口各用不同数据库，覆盖不跨入口）——**格式对了，错误才抓得住**。
 3. **多任务不要声明同一路径**：并发写同一文件会互相覆盖（`docs/progress.md`、`tests/`、`package.json` 都踩过）。
    约定：进度文档由集成任务**单写**，其他成员把可直接粘贴的段落写进**完成回报**；测试按子目录分（`tests/unit/voice/`、`tests/unit/core/`、`tests/perception/`、`tests/console/`）。
 4. **队长所有的文件成员不得直接改**：`AGENTS.md`、`xixi_ai_companion_project_plan.md`、`.agent-teams/`（后者已 gitignore）。成员提出建议，由 captain 落笔。

@@ -59,18 +59,24 @@
    | `triggers.*` | 无 | 见第 2 条（`random_smalltalk: false`） | 逐个触发源的开关，默认关掉纯寒暄 |
 
 6. **审计**：候选与每次门禁判定都要能回答「为什么没说」。方向沿用铁律 5——只存 `reason_code` 与分值，
-   不存模型私有推理（`ProactiveDecision.reasonCode` 已经是这个形状）。**M5 需要新的事件类型**
-   （暂称 `proactive.decision`），按版本规则新增 `v1` schema 文件并升 `SCHEMA_VERSION`，
-   不得给已发布的事件类型就地加字段（铁律 10）。
+   不存模型私有推理（`ProactiveDecision.reasonCode` 已经是这个形状）。审计用**新的事件类型**
+   `proactive.decision`（已实现，v1）：按版本规则**新增一个 v1 schema 文件**，并在 `EVENT_TYPES`
+   注册表与信封 `event_type` 枚举里同步登记。
+   **新增类型不需要升 `SCHEMA_VERSION`**：`schema_version` 与 `payloadVersion` 都保持 **1**——只有
+   **改已发布 payload 的形状**才升版（铁律 10：「新增」与「就地改」是两件事）。同样不得给已发布的事件类型
+   就地加字段。（订正 2026-09-30：原文写「并升 `SCHEMA_VERSION`」，实现按上面的规则做，只有 payload 形状变更才升。）
 
 ## Context
 
 - 方案 §2.3 列出的硬门禁（静默时间 / DND / 冷却 / 当日额度 / 重复话题 / 对话冲突 / 置信度 / 高打扰场景）
   与 §15.3 的十条是同一件事的两种粒度；本 ADR 把它们合并成第 3 条的九行表，每行给出**判定输入**与**边界条件**，
   这样每个门禁都能写一条边界单测（临界值两侧各一例）。
-- 现状：`evaluateProactiveCandidate` 抛 `NOT_IMPLEMENTED(M5)`；`config.proactive` 段被 `parseXixiConfig`
-  解析成 `Record<string, unknown>` 后**无人读取**（`packages/domain/src/config.ts` 只保证它是一个 mapping）。
-  也就是说本 ADR 定的默认值今天只是**声明**，实现时必须先接线并补门禁单测。
+- 现状（订正 2026-09-30）：**门禁与投递已落地**——`packages/conversation/src/proactive.ts` 按固定顺序判定九门禁
+  （命中即返回首个 `reason_code`）、算分数与阈值、每次判定落一条 `proactive.decision`，并在**投递之前**先写
+  `delivered: true`（崩溃丢一条、不重发一条；重启后靠同 `candidate_id` 的 `ALREADY_DELIVERED` 拦住重复投递）。
+  `config.proactive` 段已被读取（`parseProactiveSettings`；本 ADR 第 5 条的默认值与示例配置由测试钉住一致）。
+  **仍未落地**：候选生成器（第 2 条的事实输入还没有生产者）与内容生成
+  （`evaluateProactiveCandidate` 仍抛 `NOT_IMPLEMENTED(M5)`）。
 - 为什么现在就要定默认值：`proactive` 段已经在示例配置里存在且写着 `enabled: true`，
   不把「多激进」写清，实现者只能自己发明参数——这正是「配置承诺了不存在的行为」的老问题。
 
@@ -91,11 +97,17 @@
 - **只调 `SelfModel.proactivity`，不加额度与冷却**：人格一高就会唠叨；额度与冷却是「不打扰」的兜底，不是可选项。
 - **把门禁做在模型输出之后（post-filter）**：浪费一次调用，且模型已经基于「我要说话」生成了内容。
 - **本轮就把 ProactiveEngine 实现掉**：违反铁律 11（不实现多个里程碑）；本任务只产出契约与默认值。
+  （订正 2026-09-30：后续单独一轮已把**程序侧**实现掉——门禁、分数与阈值、审计与投递，见归属段；
+  本条只记录当时为什么没做。）
 
 ## Consequences
 
-- M5 需要新增：候选生成器（按第 2 条的事实输入）、九门禁判定、分数与阈值计算、以及新的事件类型。
-  每个门禁至少一条边界单测（临界值两侧），并有一条「门禁命中时**不调用模型**」的断言。
-- 示例配置的 `proactive` 段变成**有契约的声明**：ADR 与配置必须同步改，否则 `check:docs` 之外还会有人读错。
+- **已落地**（2026-09-30 订正）：九门禁判定、分数与阈值计算、`proactive.decision` 事件类型，以及每个门禁的
+  边界单测（临界值两侧各一例）与「门禁命中时**不调用模型**」的断言——见 `tests/unit/core/proactive-gates.test.ts`
+  与 `tests/integration/proactive-engine.test.ts`（含重启不重发的断言）。
+- **仍需新增**：候选生成器（按第 2 条的事实输入）、考虑循环的常驻调用方，以及模型侧的内容生成。
+- 示例配置的 `proactive` 段已从「没人读的声明」变成**被读取的配置**（`parseProactiveSettings`）；
+  改本 ADR 第 5 条的参数时必须同步改 `config/xixi.example.yaml`，否则两边会不一致。
 - 「更激进」的代价是更频繁的打扰；兜底是 6 小时/当日额度与负面反馈倍率，以及不动 `quiet_hours` 这条底线。
-- 主动行为落地后，`docs/design/conversation.md` §6 的「主动开口（§15）无代码」一行要改；本 ADR 是那一步的依据。
+- `docs/design/conversation.md` §6 的「主动开口（§15）无代码」一行已按落地情况改写（程序侧已落地、内容侧未落地）；
+  本 ADR 是那次实现的依据。

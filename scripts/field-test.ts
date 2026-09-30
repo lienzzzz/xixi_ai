@@ -2577,7 +2577,7 @@ export function proactiveDecisionHistory(store: XixiStore, limit = 8): Proactive
  */
 export const PROACTIVE_DRILL_LINES: Readonly<Record<ProactiveTrigger, string>> = Object.freeze({
   future_hook_due: '你上周提过这两天要去复诊，别忘了带医保卡。要不要我到时候再提醒你一次？',
-  presence_arrived: '哎，你回来啦。今天外面挺冷的，我看你外套都没穿厚。要不要先喝口热水？我把你要问的天气也一起记下来了。',
+  presence_arrived: '哎，你回来啦。今天外面挺冷的，我看你外套都没穿厚。要不要先喝口热水？对了，我把你要问的天气也一起记下来了，明天出门记得带伞。',
   conversation_dangling: '刚才你说到一半的那件事，后来怎么样了？我记着呢，不用怕我不记得。',
   routine_expected: '这个点你通常在厨房忙，我就问一句：需要我帮你看着时间吗？',
   topic_pool: '你前两天说想找的那本书，我还记着；要不要我念一下当时你说的话？',
@@ -2586,17 +2586,17 @@ export const PROACTIVE_DRILL_LINES: Readonly<Record<ProactiveTrigger, string>> =
 
 /** Score components that make a drill candidate pass the threshold; negative terms stay low. */
 export const PROACTIVE_DRILL_COMPONENTS: Readonly<Record<string, number>> = Object.freeze({
-  event_salience: 0.9,
-  social_value: 0.8,
-  memory_relevance: 0.7,
-  novelty: 0.6,
-  time_since_last_interaction: 0.9,
-  user_receptiveness: 0.7,
-  future_hook_bonus: 0.5,
-  interruption_risk: 0.1,
-  recent_proactive_penalty: 0.1,
+  event_salience: 1.0,
+  social_value: 0.9,
+  memory_relevance: 0.9,
+  novelty: 0.7,
+  time_since_last_interaction: 1.0,
+  user_receptiveness: 0.9,
+  future_hook_bonus: 0.8,
+  interruption_risk: 0.0,
+  recent_proactive_penalty: 0.0,
   repetition_penalty: 0.0,
-  uncertainty_penalty: 0.1,
+  uncertainty_penalty: 0.0,
 });
 
 export interface ProactiveDrillRequest {
@@ -2634,7 +2634,7 @@ export interface ProactiveDrillResult {
  * audit row and the at-most-once delivery write all go through `ProactiveEngine.consider`.
  * The drill only supplies a candidate (trigger + §15.4 components) and the spoken text.
  */
-export function proactiveDrill(options: {
+export async function proactiveDrill(options: {
   readonly store: XixiStore;
   readonly settings: ProactiveSettings;
   readonly now: Date;
@@ -2648,7 +2648,7 @@ export function proactiveDrill(options: {
   readonly replyLimits?: Readonly<Record<string, unknown>> | undefined;
   readonly request: ProactiveDrillRequest;
   readonly offsetMinutes?: number;
-}): ProactiveDrillResult {
+}): Promise<ProactiveDrillResult> {
   const trigger: ProactiveTrigger = PROACTIVE_TRIGGERS.includes(options.request.trigger as ProactiveTrigger)
     ? (options.request.trigger as ProactiveTrigger)
     : 'presence_arrived';
@@ -2670,7 +2670,7 @@ export function proactiveDrill(options: {
     offsetMinutes: options.offsetMinutes,
   });
   let delivered: string | null = null;
-  const outcome = engine.consider({
+  const outcome = await engine.consider({
     candidate: { candidateId, trigger, components, topicRef, intent: 'drill' },
     at: options.now,
     conversationState: options.conversationState,
@@ -2699,7 +2699,7 @@ export function proactiveDrill(options: {
     text: delivered,
     segments: split?.segments ?? [],
     gapMs: split?.gapMs ?? 0,
-    eventSequence: outcome.event === null ? null : outcome.event.sequence,
+    eventSequence: outcome.event?.sequence ?? null,
     usage: proactiveUsage(options.store, options.settings, options.now, options.offsetMinutes),
     nextStep: PROACTIVE_GATE_NEXT_STEPS[outcome.reasonCode],
   };
