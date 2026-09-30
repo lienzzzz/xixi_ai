@@ -1,0 +1,155 @@
+/**
+ * Device acceptance (真实麦克风与扬声器验收).
+ *
+ * Uses a loopback recording (speaker → air → microphone) instead of a clean
+ * fixture, so it exercises everything a fixture cannot: the playback path, the
+ * capture path, room noise/reverb, and resampling. Then it runs the real
+ * pipeline on that recording — VAD → ASR → conversation — and compares the
+ * transcription with the text that was spoken.
+ *
+ * Usage:
+ *   python -m voice_edge.loopback tests/audio-fixtures/direct-question.wav data/voice/loopback.wav
+ *   node scripts/voice-device-check.ts --wav data/voice/loopback.wav --expect "西西，明天天气怎么样？"
+ */
+import { spawn } from 'node:child_process';
+import { join } from 'node:path';
+
+import { MimoBrainAdapter, defaultTools } from '@xixi/brain-adapter';
+import { ConversationEngine } from '@xixi/conversation';
+import { MimoClient } from '@xixi/model-adapters';
+import { openXixiStore } from '@xixi/domain';
+
+import { REPO_ROOT, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
+import { readWav, sliceWav } from './lib/wav.ts';
+
+for (const [key, value] of Object.entries(readDotEnv())) {
+  if (process.env[key] === undefined) process.env[key] = value;
+}
+
+const PYTHON = process.env.XIXI_PYTHON ?? join(REPO_ROOT, '.venvs', 'voice-pipecat', 'Scripts', 'python.exe');
+/** Acoustic capture is imperfect; this is a floor for "the pipeline works through the air". */
+const MIN_SIMILARITY = 0.5;
+
+const args = process.argv.slice(2);
+function argValue(name: string, fallback: string): string {
+  const index = args.indexOf(name);
+  return index >= 0 && args[index + 1] !== undefined ? (args[index + 1] as string) : fallback;
+}
+
+const wavPath = argValue('--wav', join(REPO_ROOT, 'data', 'voice', 'loopback.wav'));
+const expected = argValue('--expect', '西西，明天天气怎么样？');
+
+interface Segmentation {
+  segments: { startMs: number; endMs: number; endpointDelayMs: number | null }[];
+  energyStartMs: number | null;
+  bargeInDecisionMs: number | null;
+  timings?: { loadMs: number; processMs: number };
+}
+
+function runPython(pythonArgs: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(PYTHON, pythonArgs, { cwd: join(REPO_ROOT, 'services', 'voice-edge'), windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (data: string) => {
+      stdout += data;
+    });
+    child.stderr.on('data', (data: string) => {
+      stderr += data;
+    });
+    child.on('error', reject);
+    child.on('close', (code) => (code === 0 || code === 2 ? resolve(stdout) : reject(new Error(`VAD failed (${code}): ${stderr.slice(-300)}`))));
+  });
+}
+
+/** Character-level similarity after removing punctuation and spaces. */
+function similarity(a: string, b: string): number {
+  const clean = (text: string): string => text.replace(/[\s，。！？、,.!?：:"'`]/g, '');
+  const left = clean(a);
+  const right = clean(b);
+  if (left.length === 0 && right.length === 0) return 1;
+  const distance = levenshtein(left, right);
+  return Number((1 - distance / Math.max(left.length, right.length, 1)).toFixed(3));
+}
+
+function levenshtein(a: string, b: string): number {
+  const rows = Array.from({ length: a.length + 1 }, (_, index) => index);
+  for (let j = 1; j <= b.length; j += 1) {
+    let diagonal = rows[0] as number;
+    rows[0] = j;
+    for (let i = 1; i <= a.length; i += 1) {
+      const previous = rows[i] as number;
+      rows[i] = Math.min(
+        (rows[i] as number) + 1,
+        (rows[i - 1] as number) + 1,
+        diagonal + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+      diagonal = previous;
+    }
+  }
+  return rows[a.length] as number;
+}
+
+const segmentation = JSON.parse(await runPython(['-m', 'voice_edge.segment', wavPath])) as Segmentation;
+const speech = segmentation.segments[0];
+if (speech === undefined) {
+  printEvidence('设备验收', { wav: wavPath, result: 'FAILED', reason: 'VAD 在录音里没有检测到语音' });
+  console.error('设备验收 FAILED：录音里没有可用的语音段（麦克风静音、音量过低或设备选错？）');
+  process.exit(1);
+}
+
+const client = new MimoClient();
+const speechBuffer = sliceWav(readWav(wavPath), speech.startMs, speech.endMs);
+const asrStarted = Date.now();
+const transcription = await client.transcribe(speechBuffer);
+const asrMs = Date.now() - asrStarted;
+const score = similarity(transcription.text, expected);
+
+// Then run a real conversation turn from that acoustic input, to prove the whole
+// loop — not just ASR — works on recorded audio.
+const config = loadConfig();
+const store = openXixiStore({ dataDir: join(REPO_ROOT, 'data', 'voice-device') });
+store.seedSelfProfile(config.personality.base);
+const session = store.createSession();
+const engine = new ConversationEngine({
+  adapter: new MimoBrainAdapter({
+    client,
+    maxCompletionTokens: 400,
+    tools: defaultTools({ defaultPlace: config.identity.place ?? '' }),
+    timezone: config.identity.timezone,
+  }),
+  store,
+  config,
+  turnTimeoutMs: 60_000,
+});
+const turn = await engine.respond({ sessionId: session.sessionId, text: transcription.text, addressed: true });
+let replyWav: string | null = null;
+if (turn.action === 'SPEAK' && turn.text !== null) {
+  const audio = await client.synthesize(turn.text);
+  replyWav = join(REPO_ROOT, 'data', 'voice', 'device-reply.wav');
+  const { writeFileSync } = await import('node:fs');
+  writeFileSync(replyWav, audio);
+}
+store.close();
+
+const ok = score >= MIN_SIMILARITY;
+printEvidence('设备验收（扬声器 → 空气 → 麦克风 → VAD → ASR → 对话 → TTS）', {
+  recording: wavPath,
+  expected,
+  transcription: transcription.text,
+  similarity: score,
+  threshold: MIN_SIMILARITY,
+  asrMs,
+  vad: { startMs: segmentation.segments[0]?.startMs, endMs: segmentation.segments[0]?.endMs, endpointDelayMs: segmentation.segments[0]?.endpointDelayMs, bargeInDecisionMs: segmentation.bargeInDecisionMs, processMs: segmentation.timings?.processMs },
+  conversation: { action: turn.action, text: turn.text, latencyMs: turn.latencyMs, toolName: turn.toolName },
+  replyWav,
+  verdict: ok ? 'PASS' : 'FAIL',
+});
+
+if (!ok) {
+  console.error(`设备验收 FAILED：转写与原文相似度 ${score} < ${MIN_SIMILARITY}（转写：「${transcription.text}」）`);
+  process.exit(1);
+}
+console.log(`\n设备验收 PASS：录音转写相似度 ${score}；对话回复「${turn.text ?? '(沉默)'}」；回复音频 ${replyWav ?? '(无)'}`);
