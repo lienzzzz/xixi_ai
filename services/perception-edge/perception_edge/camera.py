@@ -38,17 +38,34 @@ class CameraConfig:
     #: How long `open()` may keep skipping blank frames while hunting for a usable first frame
     #: (t99). Must stay small: it is spent on top of `open_timeout_s` in the failure path.
     blank_frame_timeout_s: float = 1.5
+    #: t106: when True (the default), a first frame that is still *blank* after the skip window is a
+    #: failure — the camera never actually produced a picture, and accepting it would let the
+    #: detector report "nobody is present" from frames that carry no information at all.
+    #: The diagnostic (`--probe-frames`) sets this False because observing blank frames is exactly
+    #: what it is for.
+    require_usable_first_frame: bool = True
 
 
 #: A frame is treated as *blank* (the driver handed us a constant buffer) only when both hold: the
 #: brightest pixel is at or below `BLANK_MAX_LUMA` **and** the spread is below `BLANK_MAX_STD`.
 #:
-#: Justification, measured (`data/recon/t99-formats.json`, `t99-first-frame.json`):
-#:   * real picture delivered first in a session: max 84, mean 14-31, std 13.4, 77 grey levels;
-#:   * blank frames this driver emits afterwards: max 0-1, std exactly 0.00;
-#:   * a dark-but-real frame sits in between and is noisy (a covered lens still has sensor noise),
-#:     which the strict std bound keeps usable — a dim room must be reported as "nobody there", not
-#:     turned into a camera failure.
+#: Where the numbers come from (measured: `data/recon/t99-formats.json`, `t99-first-frame.json`):
+#:   * a real picture delivered first in a session: max 84, mean 14-31, std 13.4, 77 grey levels;
+#:   * the blank frames this driver emits afterwards: max 0-1, std exactly 0.00;
+#:   * MJPG keeps "streaming" but flat at mean 1.0 / max 1, so `max <= 4` covers the observed cases
+#:     with margin, while a dark-but-real frame (covered lens, dark room) has noise and stays far
+#:     above the bound.
+#:
+#: The upper bound is a **chosen** cutoff, and its failure mode is a false negative: a driver that
+#: returns a constant *above* 4 (say a flat 5) would be taken for a picture, the detector would run
+#: on it and report `present=false`. Two things keep that acceptable:
+#:   * the second condition means only *exactly constant* frames are blank (real sensor noise is
+#:     never constant), so raising the bound does not admit noise — it only reclassifies flat
+#:     buffers;
+#:   * a false negative is observable rather than silent: `--probe-frames` prints max/std per frame,
+#:     and the acceptance output carries `movement_evidence` (all-zero motion), so a stream flat at 5
+#:     can still be caught by a human. If it ever happens, raise `BLANK_MAX_LUMA` — it is a tunable,
+#:     not a law of nature.
 BLANK_MAX_LUMA = 4
 BLANK_MAX_STD = 0.05
 
@@ -168,13 +185,17 @@ class FrameGrabber:
 
         frame = None
         first_started = time.perf_counter()
-        # t99: a *blank* frame is one the driver filled with a constant value. Measured on this
+        # t99/t106: a *blank* frame is one the driver filled with a constant value. Measured on this
         # machine: the first frame of a session is a normal picture and every frame after it arrives
         # as an exact zero (YUY2) or a flat 1.0 (MJPG); a covered lens or a truly dark room instead
         # yields noise (std > 1, max > 5). So "constant and almost black" is a delivery fault, not a
-        # dark room — skipping such frames at open time is what turns a black first frame into a real
-        # one, and it is bounded so a device that only ever returns blanks fails loudly instead of
-        # hanging.
+        # dark room.
+        #
+        # The skip window is a *time budget for finding a usable frame*, not a deadline after which a
+        # blank frame becomes acceptable: once it expires the next readable frame is the result, and
+        # if that one is still blank we raise (see below). Accepting it would mean the detector runs
+        # on frames with no picture and reports `present=false`, which is indistinguishable from a
+        # genuinely empty room — the exact confusion t99 was about.
         blank_frames = 0
         warmup_deadline = first_started + max(0.0, self.config.blank_frame_timeout_s)
         attempts = 0
@@ -187,16 +208,19 @@ class FrameGrabber:
                 if attempts >= max(1, self.config.warmup_frames) or time.perf_counter() >= warmup_deadline:
                     break
                 continue
-            if is_blank_frame(candidate) and time.perf_counter() < warmup_deadline:
+            if self.config.require_usable_first_frame and is_blank_frame(candidate):
                 blank_frames += 1
+                if time.perf_counter() >= warmup_deadline:
+                    break  # no usable frame within the budget; `frame` stays None -> raise
                 continue
             frame = candidate
             break
-        if frame is None:
+        if frame is None or (self.config.require_usable_first_frame and is_blank_frame(frame)):
             capture.release()
             raise CameraUnavailable(
-                "摄像头已打开，但读不到可用的第一帧：驱动连续回传空帧（全 0 或单色）。"
-                "先用 python -m perception_edge.run --probe-frames 10 看逐帧亮度。"
+                "摄像头已打开，但拿不到可用的画面：驱动连续回传空帧（全 0 或单色）。"
+                "先用 python -m perception_edge.run --probe-frames 10 看逐帧亮度；"
+                "如果确认全是空帧，就按「别的程序占用 / 拔插或重启 / 镜头遮挡」依次排查。"
             )
 
         self.stats.open_ms = (first_started - started) * 1000.0

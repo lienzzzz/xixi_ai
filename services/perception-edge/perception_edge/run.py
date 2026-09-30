@@ -461,6 +461,10 @@ def probe_camera_frames(count: int, cfg: RunConfig) -> int:
             warmup_frames=1,
             open_timeout_s=cfg.camera_open_timeout,
             blank_frame_timeout_s=cfg.camera_blank_timeout,
+            # t106: the whole point of this mode is to *observe* blank frames, so it must not refuse
+            # to start when the stream is blank. The production path keeps the strict default, where
+            # a first frame that is still blank means "no picture" and raises.
+            require_usable_first_frame=False,
         )
     )
     grabber.open()
@@ -533,7 +537,11 @@ def probe_camera_frames(count: int, cfg: RunConfig) -> int:
     }
     print(json.dumps(summary, ensure_ascii=False), flush=True)
     print(f"结论：{verdict}\n建议：{advice}", file=sys.stderr)
-    return 0
+    # t106: a scripted self-check (the console, a reviewer, a Makefile) needs to tell "usable" from
+    # "not usable" *without* parsing JSON, so the exit code carries it: 0 when at least one frame
+    # carried a picture, 2 when the driver produced nothing usable (the same code the detection path
+    # uses for "camera unavailable").
+    return 0 if usable else 2
 
 
 def _silence_opencv_logging() -> bool:
