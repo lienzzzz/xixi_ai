@@ -31,6 +31,14 @@ export interface XixiConfig {
     readonly base: Record<string, number>;
   };
   readonly proactive: Record<string, unknown>;
+  /**
+   * Multi-segment reply limits (ADR-0010). Optional on purpose: a configuration
+   * written before the section existed must keep loading, and the conversation
+   * engine falls back to the hard defaults. Unusable values are tolerated here as
+   * well — the limits are a tuning knob, and `resolveReplyLimits` clamps whatever
+   * it is given, so a typo tightens or widens nothing beyond the ADR ceilings.
+   */
+  readonly reply?: Record<string, unknown>;
   readonly memory: Record<string, unknown>;
   readonly privacy: Record<string, unknown>;
   readonly features: Record<string, unknown>;
@@ -44,6 +52,17 @@ function section(document: Record<string, unknown>, key: string, file: string): 
   const value = document[key];
   if (value === undefined) fail(`missing section "${key}"`, file);
   if (typeof value !== 'object' || value === null || Array.isArray(value)) fail(`section "${key}" must be a mapping`, file);
+  return value as Record<string, unknown>;
+}
+
+/**
+ * A section whose absence (or unusable shape) is not fatal: the caller has a
+ * documented default. Used for tuning sections such as `reply` — the only
+ * required sections are the ones a conversation cannot start without.
+ */
+function optionalSection(document: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const value = document[key];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   return value as Record<string, unknown>;
 }
 
@@ -115,6 +134,7 @@ export function parseXixiConfig(source: string, file = '<inline>'): XixiConfig {
     },
     personality: { base: { ...base } as Record<string, number> },
     proactive: section(xixi, 'proactive', file),
+    reply: optionalSection(xixi, 'reply'),
     memory: section(xixi, 'memory', file),
     privacy: section(xixi, 'privacy', file),
     features: section(xixi, 'features', file),

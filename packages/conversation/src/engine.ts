@@ -12,7 +12,7 @@ import {
 } from './fsm.ts';
 import { PromptAssembler, SILENCE_TOKEN, worldStateLite, type AssembledPrompt, type PromptTurn } from './prompt.ts';
 import { DEFAULT_SILENCE_TOLERANCE } from './personality.ts';
-import { resolveReplyLimits, splitReplyIntoSegments, type ReplySegmentOptions } from './segments.ts';
+import { REPLY_LIMITS, resolveReplyLimits, splitReplyIntoSegments, type ReplySegmentOptions, type SegmentedReply } from './segments.ts';
 
 export interface ConversationEngineOptions {
   readonly adapter: BrainAdapter;
@@ -332,6 +332,8 @@ export class ConversationEngine {
         state: acceptance.state,
         action: 'SILENCE',
         text: null,
+        segments: [],
+        segmentGapMs: this.#replyLimits.gapMs ?? REPLY_LIMITS.defaultGapMs,
         provider: this.#adapter.provider,
         model: this.#adapter.describe().model,
         latencyMs: 0,
@@ -365,6 +367,12 @@ export class ConversationEngine {
     let turnProvider = this.#adapter.provider;
     let turnModel = this.#adapter.describe().model;
     let firstChunkAt: number | null = null;
+    // Supplying `onSegment` selects segmented playback, and the two audio seams
+    // are mutually exclusive (see `RespondHooks`): otherwise this reply would be
+    // spoken once by the delta consumer and once by the segment player.
+    const playSegments = hooks.onSegment !== undefined;
+    /** How the accepted reply is spoken; computed once, from the final text. */
+    let replySplit: SegmentedReply | null = null;
     try {
       const stream = await this.#adapter.handleUserTurn({
         sessionId: input.sessionId,
@@ -376,7 +384,9 @@ export class ConversationEngine {
       // The silence token can arrive split across deltas ("[" + "静默" + "]"), so a
       // per-chunk check is not enough. Text is held back only while it could still
       // become the token; anything that diverges is flushed immediately, which
-      // keeps normal replies streaming at full speed.
+      // keeps normal replies streaming at full speed. The holding still happens
+      // when the caller plays segments — the token must be detected exactly the
+      // same way — only the handoff is skipped.
       let held = '';
       let suppressed = false;
       for await (const chunk of stream) {
@@ -392,10 +402,10 @@ export class ConversationEngine {
           }
           continue;
         }
-        await hooks.onTextChunk?.(held);
+        if (!playSegments) await hooks.onTextChunk?.(held);
         held = '';
       }
-      if (!suppressed && held.length > 0) await hooks.onTextChunk?.(held);
+      if (!playSegments && !suppressed && held.length > 0) await hooks.onTextChunk?.(held);
       const result = await stream.result;
 
       // §55 is an engine-level rule, not an adapter's promise: whatever the adapter
@@ -414,6 +424,25 @@ export class ConversationEngine {
         text: turnText,
         toolName: silent ? null : result.toolName,
       });
+
+      // ADR-0010 M6/M7: one turn stays one turn. Splitting here — after the single
+      // assistant record, before `onReplyCompleted` — is what keeps the FSM
+      // advancing exactly once, and reading the clock after the last segment is
+      // what starts the follow-up window from the end of the *last* one. While the
+      // segments are being played the state is still ACTIVE (M8), so the user can
+      // cut in.
+      replySplit = turnText === null ? null : splitReplyIntoSegments(turnText, this.#replyLimits);
+      if (replySplit !== null) {
+        const lastIndex = replySplit.segments.length - 1;
+        for (const [index, segment] of replySplit.segments.entries()) {
+          await hooks.onSegment?.({
+            index,
+            text: segment,
+            total: replySplit.segments.length,
+            gapMsAfter: index === lastIndex ? null : replySplit.gapMs,
+          });
+        }
+      }
       const finishedAt = this.#clock();
       this.#fsm.onReplyCompleted(finishedAt.getTime());
     } finally {
@@ -428,6 +457,11 @@ export class ConversationEngine {
       state: this.#fsm.state,
       action: turnAction,
       text: turnText,
+      // `replySplit` is set even if a hook threw (the split is computed before
+      // playback), so a failed playback still reports how the reply was meant to
+      // be spoken; a SILENCE turn has no segments.
+      segments: replySplit?.segments ?? [],
+      segmentGapMs: replySplit?.gapMs ?? this.#replyLimits.gapMs ?? REPLY_LIMITS.defaultGapMs,
       provider: turnProvider,
       model: turnModel,
       latencyMs: Date.now() - startedAt,

@@ -8,6 +8,7 @@ export {
   ConversationEngine,
   type ConversationEngineOptions,
   type ConversationTurn,
+  type ReplySegmentPlayback,
   type RespondHooks,
   type RespondInput,
 } from './engine.ts';
@@ -33,3 +34,39 @@ export {
   type WorldStateLite,
 } from './prompt.ts';
 export { DEFAULT_SILENCE_TOLERANCE } from './personality.ts';
+export {
+  normalizeReplyText,
+  REPLY_LIMITS,
+  resolveReplyLimits,
+  splitReplyIntoSegments,
+  type ReplySegmentOptions,
+  type SegmentedReply,
+} from './segments.ts';
+export {
+  DEFAULT_PROACTIVE_SETTINGS,
+  DEFAULT_PROACTIVITY,
+  evaluateProactiveGates,
+  isWithinQuietHours,
+  localDayOf,
+  localMinutesOf,
+  parseClockMinutes,
+  parseProactiveSettings,
+  PROACTIVE_REASON_CODES,
+  PROACTIVE_SCORE_WEIGHTS,
+  PROACTIVE_TRIGGERS,
+  ProactiveEngine,
+  proactiveThreshold,
+  readProactiveHistory,
+  scoreProactiveCandidate,
+  type ProactiveCandidate,
+  type ProactiveConsiderInput,
+  type ProactiveDelivery,
+  type ProactiveDeliveryRecord,
+  type ProactiveEngineOptions,
+  type ProactiveGateContext,
+  type ProactiveGateResult,
+  type ProactiveOutcome,
+  type ProactiveReasonCode,
+  type ProactiveSettings,
+  type ProactiveTrigger,
+} from './proactive.ts';
