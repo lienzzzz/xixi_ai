@@ -1819,6 +1819,11 @@ export interface ConsoleTurn {
   readonly segmentsUsed: number;
   readonly droppedSegments: readonly DroppedSegment[];
   readonly privacyNote: string;
+  /** ADR-0010: how the reply is spoken (1..3 pieces), and the pause between them. */
+  readonly replySegments?: readonly string[];
+  readonly replyGapMs?: number;
+  /** `回应你` for a turn, `主动开口` for a proactive message. */
+  readonly source?: string;
 }
 
 export interface FieldServerOptions {
@@ -1852,7 +1857,8 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   const reportDir = options.reportDir ?? REPORT_DIR;
   const config = loadConfig();
   const client = new MimoClient();
-  const store = openXixiStore({ dataDir: options.dataDir ?? join(REPO_ROOT, 'data', 'field-test') });
+  const dataDir = options.dataDir ?? join(REPO_ROOT, 'data', 'field-test');
+  const store = openXixiStore({ dataDir });
   store.seedSelfProfile(config.personality.base);
   const policy = retentionPolicy(config);
   const pruned = options.autoPrune === false ? { dir: voiceDir, removed: [], kept: 0, bytesFreed: 0 } : pruneVoiceDir(voiceDir, policy);
@@ -2012,6 +2018,8 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       identity: config.identity,
       personality: store.selfProfile(),
       privacy: { policy, pruned, voiceDir },
+      database: { path: dataDir, entries: XIXI_DB_ENTRIES, note: '四个入口各用不同的库；在别处设的人格与历史不会带到这里' },
+      segmentPlayback: { textSegmented: true, ttsSegmented: false, note: SEGMENT_TTS_NOTE },
       model: { configured: client.hasKey, offline },
       calibration,
       presence,
@@ -2028,9 +2036,13 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
         if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
           const address = server.address();
           const port = typeof address === 'object' && address !== null ? address.port : options.port;
-          const boot = { listen: `127.0.0.1:${port}`, offline, ttsEnabled, modelConfigured: client.hasKey, calibration, policy };
+          const boot = { listen: `127.0.0.1:${port}`, offline, ttsEnabled, modelConfigured: client.hasKey, calibration, policy, databasePath: dataDir };
+          // Build first, write second: if the page builder throws, the catch below can still
+          // answer with a readable 500 instead of a blank 200 page (t42's crash was exactly
+          // that shape — `writeHead` had already gone out when the `ReferenceError` fired).
+          const page = buildFieldPage(boot);
           response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          response.end(buildFieldPage(boot));
+          response.end(page);
           return;
         }
         if (request.method === 'GET' && url.pathname === '/favicon.ico') {
@@ -2124,6 +2136,9 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
             segmentsUsed: payload.segmentsUsed,
             droppedSegments: payload.droppedSegments,
             privacyNote: payload.privacy.note,
+            replySegments: segmentPlan(payload.reply, config.reply).segments,
+            replyGapMs: segmentPlan(payload.reply, config.reply).gapMs,
+            source: '回应你',
           });
           json(response, 200, payload);
           return;
@@ -2187,23 +2202,37 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
         }
         json(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: '没有这个接口', hint: '页面上的按钮只用固定的几个接口；直接开 http://127.0.0.1:' + String(options.port) + ' 即可' } });
       } catch (error) {
+        /**
+         * Never write a second response on the same socket.
+         *
+         * t42: a page-builder crash *after* `writeHead(200)` left the response half-open and
+         * every later `json()` threw `ERR_HTTP_HEADERS_SENT`, which buried the real
+         * `ReferenceError` under a confusing second error. The real fix was the crash itself
+         * (`dataDir` → `boot.databasePath`), but a guard here keeps the next bug readable:
+         * if the headers already went out we can only log.
+         */
+        const canReply = !response.headersSent && !response.writableEnded;
         if (error instanceof ConsoleError) {
-          json(response, error.status, { ok: false, error: { code: error.code, message: error.message, hint: error.hint } });
+          if (canReply) json(response, error.status, { ok: false, error: { code: error.code, message: error.message, hint: error.hint } });
+          else log(`[error] ${error.code}: ${error.message}（响应已发出，无法再写回）`);
           return;
         }
         const message = error instanceof Error ? error.message : String(error);
         if (/MISSING_KEY|api.?key is not set/i.test(message)) {
-          json(response, 503, {
-            ok: false,
-            error: {
-              code: 'MISSING_KEY',
-              message: '缺少 MIMO_API_KEY：模型调用用不了',
-              hint: '把 .env.example 复制成 .env 并填入 MIMO_API_KEY，然后重启现场测试；没有密钥时用 npm run field-test -- --offline 仍可看页面与设备自检',
-            },
-          });
+          if (canReply) {
+            json(response, 503, {
+              ok: false,
+              error: {
+                code: 'MISSING_KEY',
+                message: '缺少 MIMO_API_KEY：模型调用用不了',
+                hint: '把 .env.example 复制成 .env 并填入 MIMO_API_KEY，然后重启现场测试；没有密钥时用 npm run field-test -- --offline 仍可看页面与设备自检',
+              },
+            });
+          }
           return;
         }
-        log(`[error] ${error instanceof Error ? (error.stack ?? message) : message}`);
+        log(`[error] ${error instanceof Error ? (error.stack ?? message) : message}${canReply ? '' : '（响应已发出，无法再写回；上面这条就是根因）'}`);
+        if (!canReply) return;
         json(response, 500, {
           ok: false,
           error: {
@@ -2291,6 +2320,14 @@ export interface FieldBootstrap {
   readonly modelConfigured: boolean;
   readonly calibration: CalibrationView;
   readonly policy: RetentionPolicy;
+  /**
+   * Which SQLite file this console writes to.
+   *
+   * It has to be *passed in* (t42): the page builder is a pure function of `FieldBootstrap`,
+   * and reaching for the server's local variable from inside it crashed the page with
+   * `ReferenceError: dataDir is not defined` the first time it was tried.
+   */
+  readonly databasePath: string;
 }
 
 // ==================================================== proactive console core (t42)
@@ -2891,8 +2928,51 @@ export function effectiveProactivity(profile: Readonly<Record<string, unknown>> 
   return typeof value === 'number' && Number.isFinite(value) ? value : DEFAULT_PROACTIVITY;
 }
 
-/** Element ids of the proactive card, shared by both pages (so the tests can assert them). */
-export const PROACTIVE_PANEL_IDS = Object.freeze({
+/**
+ * Which database each entry point uses.
+ *
+ * Four entry points, four separate SQLite files (by design — a demo must not write into the
+ * user's real conversation history). The pages print this **and** their own live path, because
+ * "我在 chat 里设的人格/聊过的历史，怎么这里没有" is a guaranteed question otherwise.
+ */
+export const XIXI_DB_ENTRIES: readonly { readonly entry: string; readonly command: string; readonly dir: string }[] = Object.freeze([
+  { entry: '终端对话', command: 'npm run chat', dir: 'data/chat' },
+  { entry: '试用页', command: 'npm run web', dir: 'data/web-chat' },
+  { entry: '语音闭环', command: 'npm run voice:turn', dir: 'data/voice' },
+  { entry: '现场测试控制台', command: 'npm run field-test', dir: 'data/field-test' },
+  { entry: '离线演示', command: 'npm run demo:m0:text', dir: 'data/demo' },
+]);
+
+/**
+ * What is *actually* segmented today.
+ *
+ * ADR-0010 is about how a reply is spoken, and the honest state of t42 is: the text/plan is
+ * segmented (the page shows each piece as it would be played, with the real pause), while TTS
+ * still synthesizes the whole reply in one call — so the ear does not hear the pause yet.
+ * Saying so on the page is mandatory (t42 acceptance item 3): a user must not conclude from the
+ * moving bubbles that the audio is segmented too.
+ */
+export const SEGMENT_TTS_NOTE =
+  '多段回复（ADR-0010）：文字与播放计划**真的按段**（每段之间停 450ms，页面逐条出现）。' +
+  '但**语音合成（TTS）目前仍是整条回复一次合成**，所以听感上暂时听不到段间停顿——按段合成属于下一步（M5）。';
+
+/** The 「本页用哪个库」block, shared by both pages. `currentDir` is the running page's own path. */
+export function databaseNoteHtml(currentDir: string): string {
+  // Defensive: this is a pure page helper, and a page must never crash because one display
+  // field was missing (t42's `ReferenceError: dataDir is not defined` took the whole console
+  // down). An unknown path renders as 「未知」 rather than throwing.
+  const current = typeof currentDir === 'string' && currentDir.length > 0 ? currentDir : '（未知）';
+  const rows = XIXI_DB_ENTRIES.map(
+    (item) => `<li><code>${item.command}</code> → <code>${item.dir}</code>（${item.entry}）${current.endsWith(item.dir) ? ' ← <b>本页</b>' : ''}</li>`,
+  ).join('');
+  return (
+    `<div class="muted">本页数据库：<code>${current}</code>｜<b>四个入口各用不同的库</b>：` +
+    `<ul style="margin:4px 0 4px 18px; padding:0">${rows}</ul>` +
+    `在 <code>npm run chat</code> 里设的人格与聊过的历史<b>不会</b>带到这里（各自的库互相独立）。</div>`
+  );
+}
+
+/** Element ids of the proactive card, shared by both pages (so the tests can assert them). */export const PROACTIVE_PANEL_IDS = Object.freeze({
   card: 'px-card',
   enabled: 'px-enabled',
   cooldown: 'px-cooldown',
@@ -3228,7 +3308,13 @@ ${PROACTIVE_PANEL_CSS}
   <section class="card">
     <h2>最近几轮（动作 / 拒绝原因 / 延迟分段）</h2>
     <div id="turns" class="muted">还没有轮次。按住 🎤 说一句试试。</div>
-    <div class="muted" style="margin-top:6px">多段回复（ADR-0010）在这里显示为「第 i/N 段 · 段间 450ms」——每段是分开播的，不是一次说完；完整一条也会写进事件日志。</div>
+    <div class="muted" style="margin-top:6px">多段回复（ADR-0010）在这里显示为「第 i/N 段 · 段间 450ms」（页面上逐条出现，终端也逐条打印）；完整一条也会写进事件日志。</div>
+    <div class="err" style="border-color:#5c4a22; background:#2a2314; color:#ffe6b8; margin-top:8px">${SEGMENT_TTS_NOTE}</div>
+  </section>
+
+  <section class="card">
+    <h2>本页用的是哪个数据库</h2>
+    ${databaseNoteHtml(boot.databasePath)}
   </section>
 
 ${proactivePanelHtml()}
@@ -3303,7 +3389,25 @@ function renderTurn(turn) {
   }
   if (turn.reply) {
     var reply = document.createElement('div');
-    reply.textContent = '西西：' + turn.reply;
+    var pieces = turn.replySegments && turn.replySegments.length > 0 ? turn.replySegments : [turn.reply];
+    if (pieces.length > 1) {
+      // ADR-0010: the reply is spoken in pieces with a pause between them; show the pieces
+      // one by one (the page plays them; here the pause is written down) so a reader can
+      // tell "还有一段没到" from "只回了一句".
+      reply.innerHTML = '<span class="muted">' + (turn.source || '回应你') + '（分 ' + pieces.length + ' 段，段间 ' + (turn.replyGapMs || 450) + 'ms，逐条说）</span>';
+      for (var index = 0; index < pieces.length; index += 1) {
+        var row = document.createElement('div');
+        row.style.marginTop = '4px';
+        var label = document.createElement('span');
+        label.className = 'muted';
+        label.textContent = '第 ' + (index + 1) + '/' + pieces.length + ' 段：';
+        row.appendChild(label);
+        row.appendChild(document.createTextNode(pieces[index]));
+        reply.appendChild(row);
+      }
+    } else {
+      reply.textContent = '西西：' + turn.reply;
+    }
     item.appendChild(reply);
   }
   var why = document.createElement('div');

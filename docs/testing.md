@@ -17,7 +17,7 @@
 
 | 层 | 目录 | 跑什么 | 是否联网 | 现在有什么 |
 |---|---|---|---|---|
-| 单元 | `tests/unit/` | 契约校验、领域持久化、transport 解析、会话 FSM、Prompt 组装、工具、语音前端、核心接线 | 否 | **16 个测试文件、124 项**（2026-09-30 实测；文件数用 `git ls-files "tests/unit/**/*.test.ts"` 可数，项数用 `npm run test:unit`） |
+| 单元 | `tests/unit/` | 契约校验、领域持久化、transport 解析、会话 FSM、Prompt 组装、工具、语音前端、核心接线 | 否 | **16 个测试文件、124 项**（2026-09-30 实测；文件数用 `git ls-files "tests/unit/*.test.ts" "tests/unit/**/*.test.ts"` 可数出 16——**两条通配都要给**：只写 `tests/unit/**/*.test.ts` 会漏掉 `tests/unit/` 顶层的 7 个文件，只数出 9；项数用 `npm run test:unit`） |
 | 集成 | `tests/integration/` | BrainAdapter ↔ transport ↔ store、会话引擎、离线重启恢复、主动引擎门禁与重启不重发 | 否 | **4 个文件、30 项**（2026-09-30 实测 `npm run test:integration`） |
 | 场景 | `tests/scenarios/` | 对话语料（8 场景，数据驱动），由 `scripts/eval-conversation.ts` 执行 | 执行时联网 | `corpus.ts`（**不是**空目录，也不产生 `npm test` 用例：它是数据模块） |
 | 回放 | `tests/replay/` | 导出事件区间 → 重放 → 复现决策（§22.3） | 否 | **空**（属 M5） |
@@ -27,7 +27,8 @@
 | 真机设备验收 | `scripts/field-test.ts --acceptance` | 麦克风/扬声器/摄像头自检（pycaw + WASAPI 回环 + DSHOW） | 否 | 需要真机；结果写 `docs/recon/field-test-report-<日期>.md` |
 
 全部测试用 Node 内置 `node:test` + `node:assert/strict`，直接执行 `.ts`（无构建步骤，[ADR-0006](adr/0006-runtime-and-dependency-choices.md)）。
-进默认门禁的四层合计 **23 个 `*.test.ts`、180 项**（2026-09-30 实测；文件数：`git ls-files "tests/**/*.test.ts"`；总数：`npm test` 末行）。
+进默认门禁的四层合计 **23 个 `*.test.ts`、180 项**（2026-09-30 实测；文件数：`git ls-files "tests/*/*.test.ts" "tests/**/*.test.ts"`；总数：`npm test` 末行）。
+（两条通配同样都要给，理由见上表单元行：`**` 至少要求一层子目录，只给 `**` 会漏掉直接放在层目录下的文件。）
 模型相关测试遵守 §51：验证**结构与行为**（`action` 取值、`toolName` 是否被调用、字段是否落在范围内），
 不做字符串相等断言。
 
@@ -227,7 +228,8 @@ manual audio hardware tests 三档；`AGENTS.md` 第 2 节也要求「联网验�
    （[ADR-0006](adr/0006-runtime-and-dependency-choices.md)、`docs/progress.md` 第 6 节）。
 2. **`tests/replay/` 为空**（`tests/scenarios/` 有语料 `corpus.ts`，但两者都不产生用例）：§22.3 的「事件区间重放 → 复现决策」属 M5，
    §32/§15 的场景测试同样等 M5 的模拟器。当前 `npm test` 的 glob 已经预留，不需要改脚本。
-3. **没有「真设备」自动化测试**：`tests/audio-fixtures/` 与噪声夹具**已经存在**（36 个 wav，含 6 档 SNR），
+3. **没有「真设备」自动化测试**：`tests/audio-fixtures/` 与噪声夹具**已经存在**（**35 个 wav**：顶层 5 个中文夹具 + `noisy/` 30 个噪声夹具，含 6 档 SNR；
+   复现：`(Get-ChildItem tests/audio-fixtures -Filter *.wav -File).Count` → 5，`(Get-ChildItem tests/audio-fixtures/noisy -Filter *.wav -File).Count` → 30，两者相加 35），
    前端 DSP、VAD 参数与噪声 pipeline 也都有离线断言（`tests/unit/voice/frontend.test.ts`、`npm run voice:bargein`）；
    **缺的是不需要人参与的真机回归**——麦克风电平、扬声器回环、摄像头取帧目前只由 `scripts/field-test.ts --acceptance` 手工跑一次，
    没有进 `npm test`（需要真机与 Python 3.12 venv，见 [`voice.md`](design/voice.md) 与 [`perception.md`](design/perception.md)）。

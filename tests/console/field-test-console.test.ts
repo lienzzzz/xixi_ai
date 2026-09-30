@@ -242,11 +242,17 @@ test('the page is Chinese, self-describing and carries the boot state', () => {
     modelConfigured: false,
     calibration: readCalibration('nope.json'),
     policy: DEFAULT_POLICY,
+    // t42: the page prints which store it uses, so the boot object has to carry it.
+    databasePath: join(REPO_ROOT, 'data', 'field-test'),
   };
   const page = buildFieldPage(boot);
-  for (const marker of ['麦克风实时电平与噪声底', '摄像头在场状态', '设备验收引导', '最近几轮', 'dBFS', '沉默', '下一步动作', '127.0.0.1:8792', '整段录音', '未接入']) {
+  for (const marker of ['麦克风实时电平与噪声底', '摄像头在场状态', '设备验收引导', '最近几轮', 'dBFS', '沉默', '下一步动作', '127.0.0.1:8792', '整段录音', '未接入', '本页用的是哪个数据库', '主动开口']) {
     assert.ok(page.includes(marker), `page is missing ${marker}`);
   }
+  // t42 acceptance item 3: a page must not let a reader think TTS is segmented too.
+  assert.ok(page.includes('整条回复一次合成'), 'the page states the TTS granularity');
+  assert.ok(page.includes('data/field-test'), 'and names its own database path');
+  assert.ok(page.includes('px-quiet-start'), 'and carries the proactive knobs');
   assert.ok(page.includes('延迟分段'), 'the per-stage latency line is part of the UI');
   assert.doesNotMatch(page, /\$\{/, 'no un-interpolated template placeholders leak into the served HTML');
 });

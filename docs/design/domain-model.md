@@ -187,6 +187,9 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
   **它不跨入口**：四个入口各自打开自己的库，`--personality` 只改它当时写的那一个
   （`scripts/chat.ts` → `data/chat/`、`scripts/serve-chat.ts` → `data/web-chat/`、`scripts/voice-turn.ts` → `data/voice/`、
   `scripts/field-test.ts` → `data/field-test/`；核对：`git grep -n "openXixiStore" -- scripts`）。
+  **库路径可被覆盖**（测试与并行实例用）：`chat` 认 `XIXI_CHAT_DATA_DIR`、试用页认 `XIXI_WEB_DATA_DIR`
+  （`git grep -n "XIXI_CHAT_DATA_DIR\|XIXI_WEB_DATA_DIR" -- scripts`），现场测试用 `--data-dir` / `--presence-data-dir` 参数；
+  `voice-turn` 目前固定 `data/voice`、没有开关。覆盖只改「哪个文件」，**不改变「不跨入口」这条结论**。
   也就是说「在 chat 里改过人格，打开试用页也是新人格」**不成立**——要么在另一个入口再覆盖一次，
   要么把 `config/xixi.example.yaml` 的基线改掉再让各入口 `seedSelfProfile` 补上（见 §5.3 `self_profile` 与本节上面的两张写入方式表）。
   > 修正记录：这条推论原写作「换入口（chat / web / voice-turn）都还在」，是错的——四个入口用四个不同的数据库文件，

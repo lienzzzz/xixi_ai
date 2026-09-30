@@ -26,6 +26,7 @@
  */
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, defaultTools, type BrainAdapter } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
@@ -141,7 +142,8 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   }
 
   const config = loadConfig();
-  const store = openXixiStore({ dataDir: join(REPO_ROOT, 'data', 'chat') });
+  /** `XIXI_CHAT_DATA_DIR` is the test/parallel-instance seam (same idea as the other entries). */
+  const store = openXixiStore({ dataDir: process.env.XIXI_CHAT_DATA_DIR ?? join(REPO_ROOT, 'data', 'chat') });
   const session = store.latestSession() ?? store.createSession();
   store.seedSelfProfile(config.personality.base);
   if (Object.keys(personalityOverride).length > 0) {
@@ -217,8 +219,6 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
       return;
     }
 
-    const streaming: string[] = [];
-    process.stdout.write('西西: ');
     try {
       // Same rule as the trial page (`scripts/serve-chat.ts`): the terminal has no
       // wake word yet (M2), so a line typed while the session is idle counts as
@@ -226,23 +226,38 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
       // next line must be accepted again. While a session is open, `addressed` is
       // ignored by the FSM (continuation), so mirroring the page is enough.
       const addressed = engine.state === 'IDLE';
+      /**
+       * Say the reply the way ADR-0010 means it to be said: **segment by segment**, with the
+       * real pause between them, instead of one wall of text. `onSegment` and `onTextChunk`
+       * are mutually exclusive by design (the engine stops handing out raw deltas once the
+       * playback seam is supplied), so the printing happens here and the summary below stays
+       * quiet — otherwise every reply would appear twice.
+       */
+      const played: string[] = [];
       const turn = await engine.respond(
         { sessionId: session.sessionId, text, addressed },
         {
-          onTextChunk: (chunk) => {
-            process.stdout.write(chunk);
-            streaming.push(chunk);
+          onSegment: async (segment) => {
+            const label = segment.total > 1 ? `【第 ${segment.index + 1}/${segment.total} 段】` : '';
+            process.stdout.write(`\n西西${label}：${segment.text}`);
+            played.push(segment.text);
+            if (segment.gapMsAfter !== null && segment.index + 1 < segment.total) {
+              process.stdout.write(`\n（停 ${segment.gapMsAfter}ms 再说下一段…）`);
+              await delay(segment.gapMsAfter);
+            }
           },
         },
       );
-      const timing = `[${turn.action} ${turn.latencyMs}ms${turn.firstTokenMs === null ? '' : ` 首字${turn.firstTokenMs}ms`} state=${turn.state} linger=${engine.lingerMs}ms 人格=${engine.silenceTolerance}]`;
+      const timing = `[${turn.action} ${turn.latencyMs}ms${turn.firstTokenMs === null ? '' : ` 首字${turn.firstTokenMs}ms`} state=${turn.state} linger=${engine.lingerMs}ms 人格=${engine.silenceTolerance}${turn.segments.length > 1 ? ` 分${turn.segments.length}段/间隔${turn.segmentGapMs}ms` : ''}]`;
       if (!turn.accepted) {
         // Say what this means instead of just refusing.
         console.log(`未接受（${turn.reason}）：西西正处在安静模式，用 /resume 恢复。`);
       } else if (turn.action === 'SILENCE') {
         console.log(`（沉默）${timing}`);
+      } else if (played.length > 0) {
+        console.log(`\n${timing}`);
       } else {
-        console.log(streaming.length === 0 ? `${turn.text ?? ''}\n${timing}` : `\n${timing}`);
+        console.log(`${turn.text ?? ''}\n${timing}`);
       }
     } catch (error) {
       console.log(`\n[错误] ${error instanceof Error ? error.message : String(error)}`);

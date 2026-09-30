@@ -12,7 +12,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 
-import { DshBrainAdapter, MimoBrainAdapter, defaultTools, type BrainAdapter } from '@xixi/brain-adapter';
+import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, defaultTools, type BrainAdapter } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
 import { ConversationEngine } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
@@ -21,9 +21,23 @@ import { openXixiStore } from '@xixi/domain';
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
 import {
   ConsoleError,
+  PROACTIVE_PANEL_CSS,
+  SEGMENT_TTS_NOTE,
+  XIXI_DB_ENTRIES,
+  applyProactiveSettingsPatch,
+  databaseNoteHtml,
+  effectiveProactivity,
   handleVoiceTurn,
+  persistProactiveSettings,
+  proactiveConsoleState,
+  proactiveDrill,
+  proactivePanelHtml,
+  proactivePanelScript,
   pruneVoiceDir,
   retentionPolicy,
+  restoreProactiveSettings,
+  segmentPlan,
+  type ProactiveConsoleState,
   type VoiceDeps,
   type VoiceTurnBody,
 } from './field-test.ts';
@@ -39,12 +53,21 @@ const PORT = Number(portArg >= 0 && args[portArg + 1] !== undefined ? args[portA
 const TTS_ENABLED = !args.includes('--no-tts');
 /** `--dsh` runs the same page through the DSH harness instead of the direct path (slower). */
 const USE_DSH = args.includes('--dsh');
+/**
+ * `--fake` runs the page against the deterministic offline adapter: no key, no network, no cost.
+ *
+ * Added in t42 so the multi-segment / proactive behaviour can be *demonstrated and tested*
+ * without spending a real call (the console tests drive this page end-to-end).
+ */
+const USE_FAKE = args.includes('--fake');
 const PYTHON = process.env.XIXI_PYTHON ?? join(REPO_ROOT, '.venvs', 'voice-pipecat', 'Scripts', 'python.exe');
 const VOICE_DIR = join(REPO_ROOT, 'data', 'voice-web');
 
 const config = loadConfig();
 const client = new MimoClient();
-const store = openXixiStore({ dataDir: join(REPO_ROOT, 'data', 'web-chat') });
+/** `XIXI_WEB_DATA_DIR` is the test/parallel-instance seam (the console has the same one). */
+const DATA_DIR = process.env.XIXI_WEB_DATA_DIR ?? join(REPO_ROOT, 'data', 'web-chat');
+const store = openXixiStore({ dataDir: DATA_DIR });
 store.seedSelfProfile(config.personality.base);
 const policy = retentionPolicy(config);
 // Same privacy fix as the field-test console: apply the retention policy to any
@@ -55,6 +78,7 @@ if (pruned.removed.length > 0) {
 }
 
 function buildAdapter(): BrainAdapter {
+  if (USE_FAKE) return new FakeBrainAdapter();
   if (!USE_DSH) {
     return new MimoBrainAdapter({
       client,
@@ -80,6 +104,25 @@ function buildAdapter(): BrainAdapter {
 const engine = new ConversationEngine({ adapter: buildAdapter(), store, config, turnTimeoutMs: 90_000 });
 
 let session = store.latestSession() ?? store.createSession();
+
+// ---------------------------------------------------------------- proactive card (t42)
+// Same core as the field-test console (imported from `scripts/field-test.ts`), its own store
+// (`data/web-chat`): tuning this page does not silently retune the console's dataset.
+let proactiveSnapshot = restoreProactiveSettings(store, config.proactive as unknown as Record<string, unknown>);
+function proactivePayload(): ProactiveConsoleState & { readonly ok: true } {
+  return {
+    ok: true,
+    ...proactiveConsoleState({
+      store,
+      settings: proactiveSnapshot.settings,
+      source: proactiveSnapshot.source,
+      updatedAt: proactiveSnapshot.updatedAt,
+      changes: proactiveSnapshot.changes,
+      now: new Date(),
+      proactivity: effectiveProactivity(store.selfProfile()),
+    }),
+  };
+}
 
 interface TurnBody {
   readonly text?: string;
@@ -108,7 +151,11 @@ const voiceDeps: VoiceDeps = {
  * one place now, so this page and the field-test console cannot drift apart.
  */
 async function handleVoice(body: TurnBody, response: ServerResponse): Promise<void> {
-  json(response, 200, await handleVoiceTurn(voiceDeps, body as VoiceTurnBody));
+  const result = await handleVoiceTurn(voiceDeps, body as VoiceTurnBody);
+  // The voice path returns the same reply text; re-deriving the plan with the same pure
+  // function the engine uses keeps the page's playback identical to a typed turn.
+  const plan = segmentPlan(typeof result.reply === 'string' ? result.reply : null, config.reply);
+  json(response, 200, { ...result, source: 'reply', sourceLabel: '回应你', segments: plan.segments, segmentGapMs: plan.gapMs, segmentSummary: plan.summary });
 }
 
 function json(response: ServerResponse, status: number, payload: unknown): void {
@@ -139,6 +186,9 @@ async function handleTurn(body: TurnBody, response: ServerResponse): Promise<voi
   if (TTS_ENABLED && body.speak !== false && turn.action === 'SPEAK' && turn.text !== null) {
     audio = (await client.synthesize(turn.text)).toString('base64');
   }
+  // `segments`/`segmentGapMs` are the engine's own plan (ADR-0010): the page plays them one by
+  // one with that pause instead of dropping a wall of text, and labels the source as 回应你.
+  const plan = segmentPlan(turn.text, config.reply);
   json(response, 200, {
     reply: turn.text,
     action: turn.action,
@@ -150,6 +200,11 @@ async function handleTurn(body: TurnBody, response: ServerResponse): Promise<voi
     model: turn.model,
     audio,
     at: toOffsetIso(),
+    source: 'reply',
+    sourceLabel: '回应你',
+    segments: turn.segments.length > 0 ? turn.segments : plan.segments,
+    segmentGapMs: turn.segments.length > 0 ? turn.segmentGapMs : plan.gapMs,
+    segmentSummary: plan.summary,
   });
 }
 
@@ -177,6 +232,11 @@ const server = createServer((request, response) => {
           identity: config.identity,
           adapter: engine.adapter.describe(),
           recent,
+          // Which SQLite file this page writes to (t42 acceptance item 3): four entry points,
+          // four stores — the note tells the user that persona/history from `npm run chat`
+          // does not appear here.
+          database: { path: DATA_DIR, entries: XIXI_DB_ENTRIES, note: '四个入口各用不同的库；在 chat 里设的人格与历史不会带到这里' },
+          segmentPlayback: { textSegmented: true, ttsSegmented: false, note: SEGMENT_TTS_NOTE },
         });
         return;
       }
@@ -199,6 +259,38 @@ const server = createServer((request, response) => {
         session = store.createSession();
         engine.resume();
         json(response, 200, { sessionId: session.sessionId });
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/api/proactive') {
+        json(response, 200, proactivePayload());
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/proactive/settings') {
+        const body = (await readBody(request)) as Record<string, unknown>;
+        const patched = applyProactiveSettingsPatch(proactiveSnapshot.settings, body);
+        if (patched.changes.length > 0) {
+          const event = persistProactiveSettings(store, patched.settings, patched.changes);
+          proactiveSnapshot = { settings: patched.settings, source: 'console', updatedAt: event.timestamp, changes: patched.changes };
+          console.log(`[proactive] 设置已更新（事件 #${event.sequence}）：${patched.changes.join('；')}`);
+        }
+        json(response, 200, { ok: true, changes: patched.changes, rejected: patched.rejected, state: proactivePayload() });
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/proactive/drill') {
+        const body = (await readBody(request)) as Record<string, unknown>;
+        const drill = await proactiveDrill({
+          store,
+          settings: proactiveSnapshot.settings,
+          now: new Date(),
+          conversationState: engine.state,
+          inFlightTurn: false,
+          proactivity: effectiveProactivity(store.selfProfile()),
+          sessionId: session.sessionId,
+          replyLimits: config.reply,
+          request: body,
+        });
+        console.log(`[proactive] 演练 ${drill.trigger} → ${drill.reasonCode}（分数 ${drill.score}/${drill.threshold}${drill.speak ? `，分 ${drill.segments.length} 段` : ''}）`);
+        json(response, 200, { ok: true, drill, state: proactivePayload() });
         return;
       }
       json(response, 404, { error: 'not found' });
@@ -246,6 +338,17 @@ const PAGE = `<!doctype html>
   button.primary { background:#2b6cb0; border-color:#2b6cb0; color:#fff; }
   label { font-size:12px; color:#9aa3b2; display:flex; align-items:center; gap:6px; }
   .hint { max-width:820px; margin:8px auto 0; font-size:12px; color:#7c869a; }
+  .badge { font-size:11px; color:#9aa3b2; margin-bottom:4px; }
+  .badge.reply { color:#8fb8ff; }
+  .badge.proactive { color:#ffd479; }
+  .seg { font-size:11px; color:#7c869a; margin-top:3px; }
+  .card { max-width:820px; margin:14px auto; padding:12px 14px; border:1px solid #262a33; border-radius:12px; background:#13161c; }
+  .card h2 { font-size:15px; margin:0 0 8px; }
+  .card h3 { color:#c8cfdb; font-weight:600; }
+  .card input[type=number], .card input[type=text] { padding:6px 8px; border-radius:8px; border:1px solid #2a2f3a; background:#161a21; color:#e8e8ea; font-size:13px; }
+  .card button { padding:8px 12px; font-size:13px; }
+  .muted { color:#7c869a; font-size:12px; }
+${PROACTIVE_PANEL_CSS}
 </style></head>
 <body>
 <header>
@@ -257,6 +360,9 @@ const PAGE = `<!doctype html>
   <button id="new">新会话</button>
 </header>
 <div id="log"></div>
+<div class="card">${databaseNoteHtml(DATA_DIR)}</div>
+<div class="card" style="border-color:#5c4a22; background:#2a2314; color:#ffe6b8">${SEGMENT_TTS_NOTE}</div>
+${proactivePanelHtml()}
 <footer>
   <form id="form">
     <input type="text" id="input" placeholder="直接打字，或按住右边的麦克风说话" autocomplete="off" />
@@ -266,6 +372,7 @@ const PAGE = `<!doctype html>
   <div class="hint" id="hint">打字或按麦克风说话（第一句视为叫醒西西）。语音只把 VAD 检出的语音段送去识别，整段录音不落盘；回复由浏览器播放。</div>
 </footer>
 <script>
+${proactivePanelScript('/api')}
 const log = document.getElementById('log');
 const banner = document.getElementById('banner');
 const input = document.getElementById('input');
@@ -277,7 +384,8 @@ const hint = document.getElementById('hint');
 function setBanner(state) {
   banner.textContent = '会话 ' + state.sessionId.slice(5, 13) + ' · ' + state.turnCount + ' 轮 · ' + state.state
     + ' · ' + (state.adapter ? state.adapter.provider : '?')
-    + ' · 地点 ' + (state.identity.place ?? '未设置');
+    + ' · 地点 ' + (state.identity.place ?? '未设置')
+    + (state.database ? ' · 库 ' + state.database.path : '');
 }
 
 /** Float32 samples → 16-bit PCM WAV (mono). */
@@ -366,7 +474,7 @@ async function stopRecording() {
         + ' · 语音段 ' + data.segmentsUsed + '/' + data.segmentsTotal + (data.droppedSegments && data.droppedSegments.length ? '（丢弃' + data.droppedSegments.length + '段）' : '')
         + ' · ' + data.state;
       if (data.action === 'SILENCE' || data.accepted === false) add('xixi silent', data.accepted === false ? '（这句不是对西西说的）' : '（西西选择沉默）', meta);
-      else add('xixi', data.reply ?? '', meta);
+      else addSegmented('xixi', data.sourceLabel ?? '回应你', data.segments, data.segmentGapMs ?? 450, meta);
       if (data.audio) new Audio('data:audio/wav;base64,' + data.audio).play().catch(() => {});
       if (data.privacy) hint.textContent = data.privacy.note;
     }
@@ -386,7 +494,7 @@ micButton.addEventListener('pointerdown', async (event) => {
 micButton.addEventListener('pointerup', (event) => { event.preventDefault(); stopRecording(); });
 micButton.addEventListener('pointerleave', () => { if (recorder) stopRecording(); });
 
-function add(role, text, meta) {
+function add(role, text, meta, source) {
   const row = document.createElement('div');
   row.className = 'row ' + role;
   const bubble = document.createElement('div');
@@ -399,6 +507,37 @@ function add(role, text, meta) {
   log.appendChild(row);
   window.scrollTo(0, document.body.scrollHeight);
   return bubble;
+}
+
+/**
+ * Say a reply the way the engine says it: one segment at a time, gapMs apart (ADR-0010).
+ *
+ * The first segment replaces the "…" placeholder; each later one is appended after the real
+ * pause, and every bubble carries 「第 i/N 段 · 间隔 xms」 so a user watching the screen can
+ * tell "还有一段没到" from "只回了一句".
+ */
+function addSegmented(role, label, segments, gapMs, meta) {
+  const list = Array.isArray(segments) && segments.length > 0 ? segments : [''];
+  const badgeText = label ? label + ' · 第 1/' + list.length + ' 段' : null;
+  const first = add(role, list[0], null);
+  const wrap = first.parentElement;
+  if (badgeText) {
+    const badge = document.createElement('div');
+    badge.className = 'badge ' + (label === '主动开口' ? 'proactive' : 'reply');
+    badge.textContent = badgeText + (list.length > 1 ? '（段间 ' + gapMs + 'ms，会逐条出现）' : '');
+    wrap.insertBefore(badge, first);
+  }
+  if (meta) { const m = document.createElement('div'); m.className = 'meta'; m.textContent = meta; wrap.appendChild(m); }
+  for (let index = 1; index < list.length; index += 1) {
+    window.setTimeout(function () {
+      const bubble = add(role, list[index]);
+      const badge = document.createElement('div');
+      badge.className = 'badge ' + (label === '主动开口' ? 'proactive' : 'reply');
+      badge.textContent = (label ? label + ' · ' : '') + '第 ' + (index + 1) + '/' + list.length + ' 段';
+      bubble.parentElement.insertBefore(badge, bubble);
+    }, gapMs * index);
+  }
+  return first;
 }
 
 async function refresh() {
@@ -433,7 +572,7 @@ form.addEventListener('submit', async (event) => {
     pending.parentElement.remove();
     if (data.ok === false) { add('xixi', '出错了：' + data.error, data.hint ?? ''); return; }
     if (data.action === 'SILENCE' || !data.accepted) add('xixi silent', data.accepted ? '（西西选择沉默）' : '（这句不是对西西说的）', meta);
-    else add('xixi', data.reply ?? '', meta);
+    else addSegmented('xixi', data.sourceLabel ?? '回应你', data.segments, data.segmentGapMs ?? 450, meta);
     if (data.audio) { const audio = new Audio('data:audio/wav;base64,' + data.audio); audio.play().catch(() => {}); }
     setBanner(await (await fetch('/api/state')).json());
   } catch (error) {
@@ -472,12 +611,18 @@ server.on('error', (error: NodeJS.ErrnoException) => {
 });
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`西西试用页面： http://127.0.0.1:${PORT}`);
+  // `--port 0` binds an ephemeral port; printing the *bound* one lets the console tests
+  // drive this page without guessing (and is more honest for a user who typed 0 by accident).
+  const bound = server.address();
+  const actualPort = typeof bound === 'object' && bound !== null ? bound.port : PORT;
+  console.log(`西西试用页面： http://127.0.0.1:${actualPort}`);
   console.log(
-    `大脑 ${USE_DSH ? 'DSH Harness（每轮启动 profile，较慢）' : '直连 MiMo（实时路径）'}` +
+    `大脑 ${USE_FAKE ? '离线替身（--fake，不联网、不花钱）' : USE_DSH ? 'DSH Harness（每轮启动 profile，较慢）' : '直连 MiMo（实时路径）'}` +
       `｜身份 ${config.identity.name}｜地点 ${config.identity.place ?? '未设置'}｜朗读回复 ${TTS_ENABLED ? '开' : '关'}`,
   );
   console.log(`会话 ${session.sessionId}`);
+  console.log('多段回复（ADR-0010）：西西的回复会按段逐条出现，段间停 450ms；页面上标着「第 i/N 段」。');
+  console.log('主动性：页面底部那块可以开关主动开口、调冷却/额度/静默时段，并能看每道门禁的判定。');
   console.log('语音输入：页面按住🎤说话（浏览器采集，只把 VAD 检出的语音段送去识别，整段录音不落盘）。按 Ctrl+C 结束。');
   console.log('现场测试（一条命令、含设备验收与实时状态页）：npm run field-test');
 });

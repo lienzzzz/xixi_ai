@@ -44,7 +44,9 @@ npm run chat                                  # 终端对话（直连 MiMo 实�
 npm run chat -- --personality verbosity=0.1,talkativeness=0.2
                                               # ↑ 人格的**持久化行政覆盖**：写进 self_profile（含 self_profile_history），
                                               #   重启后仍然生效；**但不跨入口**——`chat` / `web` / `voice-turn` / 现场测试
-                                              #   各用各自的 SQLite 文件。要回基线就再覆盖一次（没有「撤销」命令）。
+                                              #   各用各自的 SQLite 文件（库路径可用环境变量覆盖：chat 认
+                                              #   XIXI_CHAT_DATA_DIR、试用页认 XIXI_WEB_DATA_DIR；覆盖不改变「不跨入口」）。
+                                              #   要回基线就再覆盖一次（没有「撤销」命令）。
                                               #   详见 docs/design/domain-model.md §6「人格属性与两种写入方式」
 npm run demo:m0:text                          # 离线单轮演示（FakeBrainAdapter）
 npm run voice:turn -- --wav tests/audio-fixtures/direct-question.wav   # 语音闭环
