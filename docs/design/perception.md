@@ -241,6 +241,9 @@ node scripts/verify-camera-presence.ts --seconds 40 --require-transition
 node scripts/verify-camera-presence.ts --help
 ```
 
+画面是纯黑、怀疑摄像头本身有问题时，先跑 §8.5 的自查命令
+（`python -m perception_edge.run --probe-frames 10`）：它逐帧报告亮度并给出中文结论。
+
 - **两个库，别写混**（`--db <path>` 可显式覆盖，覆盖时会打印警告）：
   - 真实摄像头 → `data/perception/field-test.sqlite`（现场测试台账）；
   - `--self-test` → `data/perception/self-test.sqlite`（合成帧的自检库，默认单独一个文件）。
@@ -327,6 +330,72 @@ node scripts/verify-camera-presence.ts --camera-index -1 --seconds 3
 事件日志里一条都不写（实测 `presence.changed` 数量为 0），只有中文说明 + `exit 2`。此前版本会先写
 一条 `present=false` 的启动记录——那是一次「我们从没取到的读数」。
 
+### 8.5 画面是纯黑的：先跑这一条命令（t99 实测）
+
+**自查命令（只诊断，不检测、不写库、不写任何图片）**：
+
+```powershell
+E:\worker2\.venvs\cv4\Scripts\python.exe -m perception_edge.run --probe-frames 10
+```
+
+（在 `services/perception-edge` 目录下跑；它逐帧打印 `mean/min/max/std` 与是否空帧，最后给一条中文结论。）
+
+**t99 的实测结论：这台机器现在的黑帧不是「房间太黑」，而是驱动没有把画面交出来。**
+
+| 证据 | 实测（2026-09-30，命令与原始 JSON 见 `data/recon/t99-*.json`） |
+|---|---|
+| 设备与权限正常 | `Chicony USB2.0 Camera`：PnP `Status=OK`、`Problem=0`；注册表 `ConsentStore\webcam`：`NonPackaged=Allow`；没有其它进程在使用（ConsentStore 里没有进行中的使用记录） |
+| 每次开会话的**头 1–2 帧是真的** | `mean 14–31`、`max 84`、`std 13.4`、**77 个不同灰阶**，3×3 块均值从 20.2 递增到 50.4（有真实结构） |
+| 之后的帧是数学上的恒定值 | YUY2/NV12/I420：`mean = max = 0`、`std = 0.00`（**不是「很暗」，是「没有图像」**——被遮挡的镜头仍有传感器噪声，`std > 0`）；MJPG：`mean = 1.0`、`max = 1`、`std ≈ 0` |
+| 换格式/分辨率都不解决 | 试验 4 种格式 × 2 种分辨率：YUY2/NV12/I420 每 15 帧里只有 0–1 帧非零；MJPG 每帧都非零但恒定在 `mean 1.0` |
+| 软件调参无效 | `brightness / gain / exposure / auto_exposure / backlight / fps` 全部设置后读回仍是 `-1`（驱动不支持）或 `50`（原值），画面亮度不变 |
+| 长采样也不恢复 | 连续 40 帧：头 2 帧有内容（14.98 / 14.54），其余全 0；24 秒采样 185 帧全部 `mean = 1.0` |
+| 这些数字**每次开会话都要重新量** | 同一台机器、同一条命令、几分钟后再跑：10 帧里只有 1 帧是真实画面、9 帧空帧（`usable_ratio = 0.1`），头几帧也不总是有内容——**「几次会话里能不能拿到 1–2 帧真画面」本身不稳定** |
+
+**怎么读这张表（判据）**：
+
+- `max = 0` 且 `std = 0.00` → **空帧**：驱动回传了恒定缓冲区。这**不能**推成「镜头被挡住」，
+  也不能当成「家里没人」；
+- `max > 0` 且 `std > 0`（哪怕只有 `mean 3–15`）→ **真实画面，只是暗**：这时才轮到检查
+  镜头滑盖 / 隐私快门 / 房间灯；
+- 头几帧正常、之后恒定 → 设备状态问题（同一次会话里流断掉），不是光照问题。
+
+**用户该检查什么（按可能性排序）**：
+
+1. **镜头前的物理遮挡**：这台笔记本摄像头在屏幕上方，确认没有被贴纸、外壳或合上的保护盖挡住；
+   联想的机型还有 **Vantage / 相机隐私开关**（有的机型的摄像头电控快门就是走这个开关），把它关掉再试；
+2. **合规快门按键**：键盘上的摄像头隐私快捷键（`Fn + F8`/`F10` 之类，机身上通常有一个相机小图标）按一次切换；
+3. **USB/驱动卡死**：拔插一次摄像头（内置机型做一次「禁用/启用设备管理器里的摄像头」）或重启；
+4. **环境全黑**：把房间灯打开再跑一次自查命令，对比 `max` 有没有上升（有上升就说明是光照）。
+
+**软件能做的、已经做的（t99 修复）**：抓帧现在会**跳过空帧**再接受首帧——`FrameGrabber.open()`
+在 `blank_frame_timeout_s`（默认 1.5 s）内反复读取，丢掉 `max ≤ 4 且 std < 0.05` 的恒定帧，
+并把丢掉的帧数写进统计（`camera.blank_frames_skipped`，`--probe-frames` 的汇总里也能看到）。
+效果实测：
+
+| 场景 | 修复前 | 修复后 |
+|---|---|---|
+| 同一台机器、同一次会话，`--probe-frames 6` 的首帧 | 首帧 `mean 0 / max 0 / std 0`（黑帧直接进入检测，会被判成「无人」） | 首帧若在窗口内拿到真实帧（实测出现过 `mean 13.47 / max 37`）；若窗口内全是空帧，则**明确失败**而不是把黑帧当画面 |
+| 全是空帧时的行为 | 静默按「画面里没有人」处理 | 抛 `CameraUnavailable` + 中文说明（建议先跑 `--probe-frames`），退出码 2 |
+
+**边界（说清楚没做什么）**：这次**没有**发现能靠软件恢复画面的办法——换格式、换分辨率、压低帧率、
+手动曝光/增益全都试过，画面依旧是恒定值。因此「画面变好」这件事**只能在硬件/环境侧完成**
+（移开遮挡、按隐私快捷键、拔插/重启、开灯）。本任务改的是「不要把空帧当画面」这一层：
+诊断可复现、失败会说话。
+
+**验收脚本也跟着说清楚了这件事**：`node scripts/verify-camera-presence.ts` 的输出里新增了
+`movement_evidence`（`motion_ratio_max` / `motion_ratio_mean` / `frames_with_signal` + 一句结论）。
+因为「空帧」和「房间没人」在事件日志里长得**一模一样**（都是 `present=false`、都没有转换），
+只看事件是分不出来的；现在脚本在 `frames_with_signal=0` 时会明确提示先跑 `--probe-frames`，
+而不是让人把「画面根本没来」读成「我们看过，家里没人」。实测（本机当前状态）：
+
+```text
+frames_processed = 11，frames_with_signal = 0，camera.blank_frames_skipped = 11
+movement_evidence.frames_with_signal = 0
+movement_evidence.evidence_note = 「整个运行期没有任何运动证据（motion_ratio 全 0）：可能是房间真的没人，
+  也可能是驱动回传空帧/纯色帧。要区分请先跑 python -m perception_edge.run --probe-frames 10…」
+```
+
 ### 8.3 还没做的那一步（未完成项，明确标注）
 
 **「真人站在镜头前能否被检出」尚未验证。** 当前摄像头朝天，画面里没有人；
@@ -358,6 +427,9 @@ node scripts/verify-camera-presence.ts --camera-index -1 --seconds 3
    消费方应该同时看 `stale`（循环死掉 60 s 后自动 stale）。
 2. 低光照下 YuNet 召回会下降；此时只剩运动证据（confidence 0.75）。
 3. 帧差动对「大幅光照跳变」会判成运动；防抖层能挡住单次跳变，但持续闪烁会来回翻转。
+4. **驱动可能回传空帧**（t99 实测：这台机器每次开会话只有头 1–2 帧是真的，之后 `max=0`、`std=0`）。
+   现在的抓帧会跳过空帧并记录 `camera.blank_frames_skipped`；如果整段窗口都是空帧，进程会明确
+   失败（中文说明 + `exit 2`），不会把黑帧当「画面里没有人」。自查见 §8.5。
 
 ## 10. 与其它模块的接口
 
@@ -382,3 +454,4 @@ node scripts/verify-camera-presence.ts --camera-index -1 --seconds 3
 | `presence.changed` 的 payload 形状 | **必须**新增 `v2` schema、升 `SCHEMA_VERSION`、更新漂移测试，并同步 §5 与 [`../event-contracts.md`](../event-contracts.md) |
 | `perception_edge/semantic.py` 从 stub 变成实现 | §2、§7（必须写清触发条件、单帧大小、审计记录） |
 | 摄像头打不开时的等待预算 / 中文文案 / 看门狗（`run.py` 的 `CAMERA_OPEN_TIMEOUT_SECONDS`、`--camera-open-timeout`；脚本的 `CHILD_CAMERA_OPEN_TIMEOUT_S` 与看门狗） | §8.4（时长、文案原文与「为什么不能用 99/9 复现」都在那一节；改预算就要改这一节的数字） |
+| 空帧判据与首帧跳过（`camera.py` 的 `BLANK_MAX_LUMA` / `BLANK_MAX_STD` / `blank_frame_timeout_s`、`--probe-frames`、`blank_frames_skipped`） | §8.5（判据的实测依据、自查命令与实际看到的数字都在那一节） |

@@ -595,6 +595,40 @@ const eventList = [...uniqueEvents.values()].map((event) => ({
   payload: event.payload,
 }));
 /**
+ * t99: brightness evidence from the frames the child reported. A camera whose driver hands out
+ * blank buffers looks *identical* to an empty room in the event log (both say "nobody is there"),
+ * so the acceptance output has to carry the pixels' own testimony: if every frame has max 0, the
+ * picture never arrived and "0 transitions" must not be read as "we looked and the room was empty".
+ */
+const motionRatios = frames.map((frame) => Number(frame.motion_ratio ?? 0));
+const framesWithAnySignal = frames.filter((frame) => frame.signal === true).length;
+const movementEvidence = {
+  motion_ratio_max: motionRatios.length > 0 ? Math.max(...motionRatios) : null,
+  motion_ratio_mean:
+    motionRatios.length > 0 ? Number((motionRatios.reduce((sum, value) => sum + value, 0) / motionRatios.length).toFixed(5)) : null,
+  frames_with_signal: framesWithAnySignal,
+  evidence_note:
+    movementEvidenceNote(framesWithAnySignal, motionRatios),
+} as { motion_ratio_max: number | null; motion_ratio_mean: number | null; frames_with_signal: number; evidence_note: string };
+
+/**
+ * Whether the run saw *any* movement evidence. With a blank stream every `motion_ratio` is 0 and no
+ * frame carries a signal, which is exactly the same summary an empty-but-working room produces —
+ * this note states which reading the numbers support so a report cannot quietly claim the second.
+ */
+function movementEvidenceNote(signals: number, ratios: number[]): string {
+  const max = ratios.length > 0 ? Math.max(...ratios) : 0;
+  if (signals > 0 || max > 0) {
+    return `画面里确实出现了运动/人脸证据（frames_with_signal=${signals}）——这次的「无人」是看过画面的结论。`;
+  }
+  return (
+    `整个运行期没有任何运动证据（frames_with_signal=0，motion_ratio 全 0）：可能是房间真的没人，` +
+    '也可能是驱动回传空帧/纯色帧。要区分请先跑 ' +
+    'python -m perception_edge.run --probe-frames 10（逐帧亮度 + 中文结论），' +
+    '或让一个人走到镜头前重跑并加 --require-transition。'
+  );
+}
+/**
  * A startup record is a state announcement (`reason=camera_started`), not a transition the
  * detector observed. Keeping them apart matters: otherwise `--require-transition` would be
  * satisfied by the startup row and the check would prove nothing.
@@ -648,6 +682,7 @@ const payload = {
   events_in_log: eventList.length,
   startup_events: startupEvents.length,
   transitions: transitions.length,
+  movement_evidence: movementEvidence,
   events: eventList,
   event_trail: transitions.map((event) => ({
     at: event.timestamp,
@@ -671,12 +706,18 @@ if (problems.length > 0) {
   process.exit(1);
 }
 if (eventList.length === 0 || transitions.length === 0) {
+  const noEvidence = movementEvidence.frames_with_signal === 0 && (movementEvidence.motion_ratio_max ?? 0) === 0;
   console.log(
-    `\n摄像头在场检测验收 PASS（${eventList.length} 条状态记录，0 次真实转换，且没有任何问题）。\n` +
+    `\n摄像头在场检测 PASS（${eventList.length} 条状态记录，0 次真实转换，且没有任何问题）。\n` +
       (syntheticRun
         ? `自检写入的是${explicitDb === undefined ? '专用自检库' : '你显式指定的库'}：${dbFile}\n`
         : '') +
-      '注意：当前摄像头画面里没有人，所以「0 次转换」是正确结果，不是遗漏。\n' +
+      // t99: distinguish "we looked and the room was empty" from "no picture ever arrived".
+      (noEvidence && !syntheticRun
+        ? '注意：这次运行**没有任何运动证据**（motion_ratio 全 0）。房间真的没人、和驱动回传空帧，' +
+          '在事件日志里长得一样——先把画面本身验一下：\n' +
+          '  python -m perception_edge.run --probe-frames 10   # 在 services/perception-edge 下跑，逐帧亮度 + 中文结论\n'
+        : '注意：当前摄像头画面里没有人，所以「0 次转换」是正确结果，不是遗漏。\n') +
       '要验收「人在镜头前能被检出」，二选一：\n' +
       '  node scripts/verify-camera-presence.ts --self-test        # 用生成的「脸 + 移动」帧跑同一条写库路径（写入自检库）\n' +
       '  node scripts/verify-camera-presence.ts --seconds 40 --require-transition   # 让真人站到镜头前',

@@ -6,7 +6,13 @@
   * 结论只以 `presence.changed` 事件（xixi.event.v1）的形式离开本包，见 emitter.py。
 """
 
-from .camera import CameraConfig, FrameGrabber, FrameStats
+from .camera import (
+    CameraConfig,
+    FrameGrabber,
+    FrameStats,
+    frame_brightness,
+    is_blank_frame,
+)
 from .debounce import DebounceConfig, PresenceDebouncer
 from .detector import (
     DetectionConfig,
@@ -20,6 +26,8 @@ __all__ = [
     "CameraConfig",
     "FrameGrabber",
     "FrameStats",
+    "frame_brightness",
+    "is_blank_frame",
     "DebounceConfig",
     "PresenceDebouncer",
     "DetectionConfig",

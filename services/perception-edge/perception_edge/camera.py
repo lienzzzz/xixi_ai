@@ -35,6 +35,46 @@ class CameraConfig:
     backend: int = DEFAULT_BACKEND
     warmup_frames: int = 1
     open_timeout_s: float = 5.0
+    #: How long `open()` may keep skipping blank frames while hunting for a usable first frame
+    #: (t99). Must stay small: it is spent on top of `open_timeout_s` in the failure path.
+    blank_frame_timeout_s: float = 1.5
+
+
+#: A frame is treated as *blank* (the driver handed us a constant buffer) only when both hold: the
+#: brightest pixel is at or below `BLANK_MAX_LUMA` **and** the spread is below `BLANK_MAX_STD`.
+#:
+#: Justification, measured (`data/recon/t99-formats.json`, `t99-first-frame.json`):
+#:   * real picture delivered first in a session: max 84, mean 14-31, std 13.4, 77 grey levels;
+#:   * blank frames this driver emits afterwards: max 0-1, std exactly 0.00;
+#:   * a dark-but-real frame sits in between and is noisy (a covered lens still has sensor noise),
+#:     which the strict std bound keeps usable — a dim room must be reported as "nobody there", not
+#:     turned into a camera failure.
+BLANK_MAX_LUMA = 4
+BLANK_MAX_STD = 0.05
+
+
+def is_blank_frame(frame: np.ndarray) -> bool:
+    """True when the frame looks like a constant buffer rather than a dim picture.
+
+    Used to *diagnose and skip*, never to judge "is anyone there": a genuinely dark room produces a
+    usable, noisy frame that this predicate deliberately accepts.
+    """
+    if frame is None or frame.size == 0:
+        return True
+    grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+    return bool(int(grey.max()) <= BLANK_MAX_LUMA and float(grey.std()) < BLANK_MAX_STD)
+
+
+def frame_brightness(frame: np.ndarray) -> dict:
+    """Per-frame brightness evidence: the numbers a human needs to judge a black picture."""
+    grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+    return {
+        "mean": round(float(grey.mean()), 2),
+        "min": int(grey.min()),
+        "max": int(grey.max()),
+        "std": round(float(grey.std()), 2),
+        "blank": is_blank_frame(frame),
+    }
 
 
 @dataclass
@@ -46,6 +86,8 @@ class FrameStats:
     read_ms: list[float] = field(default_factory=list)
     width: int = 0
     height: int = 0
+    #: Blank frames skipped while looking for the first usable frame (t99 diagnosis).
+    blank_frames_skipped: int = 0
 
     def summary(self) -> dict:
         reads = sorted(self.read_ms)
@@ -57,6 +99,7 @@ class FrameStats:
                 "frames": 0,
                 "width": self.width,
                 "height": self.height,
+                "blank_frames_skipped": self.blank_frames_skipped,
             }
 
         def percentile(fraction: float) -> float:
@@ -69,6 +112,7 @@ class FrameStats:
             "frames": count,
             "width": self.width,
             "height": self.height,
+            "blank_frames_skipped": self.blank_frames_skipped,
             "read_ms_mean": round(sum(reads) / count, 1),
             "read_ms_p50": round(percentile(0.5), 1),
             "read_ms_p95": round(percentile(0.95), 1),
@@ -124,19 +168,41 @@ class FrameGrabber:
 
         frame = None
         first_started = time.perf_counter()
-        for _ in range(max(1, self.config.warmup_frames)):
-            ok, frame = capture.read()
+        # t99: a *blank* frame is one the driver filled with a constant value. Measured on this
+        # machine: the first frame of a session is a normal picture and every frame after it arrives
+        # as an exact zero (YUY2) or a flat 1.0 (MJPG); a covered lens or a truly dark room instead
+        # yields noise (std > 1, max > 5). So "constant and almost black" is a delivery fault, not a
+        # dark room — skipping such frames at open time is what turns a black first frame into a real
+        # one, and it is bounded so a device that only ever returns blanks fails loudly instead of
+        # hanging.
+        blank_frames = 0
+        warmup_deadline = first_started + max(0.0, self.config.blank_frame_timeout_s)
+        attempts = 0
+        while True:
+            attempts += 1
+            ok, candidate = capture.read()
             if not ok:
-                frame = None
+                candidate = None
+            if candidate is None:
+                if attempts >= max(1, self.config.warmup_frames) or time.perf_counter() >= warmup_deadline:
+                    break
+                continue
+            if is_blank_frame(candidate) and time.perf_counter() < warmup_deadline:
+                blank_frames += 1
+                continue
+            frame = candidate
+            break
         if frame is None:
             capture.release()
             raise CameraUnavailable(
-                "摄像头已打开，但读不到第一帧：设备被占用或驱动异常（先关掉其它使用摄像头的程序，再重试）。"
+                "摄像头已打开，但读不到可用的第一帧：驱动连续回传空帧（全 0 或单色）。"
+                "先用 python -m perception_edge.run --probe-frames 10 看逐帧亮度。"
             )
 
         self.stats.open_ms = (first_started - started) * 1000.0
         self.stats.first_frame_ms = (time.perf_counter() - first_started) * 1000.0
         self.stats.height, self.stats.width = frame.shape[:2]
+        self.stats.blank_frames_skipped = blank_frames
         self._capture = capture
 
     def frames(self) -> Iterator[tuple[np.ndarray, float]]:

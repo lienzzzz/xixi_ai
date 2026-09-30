@@ -46,7 +46,13 @@ from typing import Any, Callable, Sequence
 import cv2
 import numpy as np
 
-from .camera import CameraConfig, CameraUnavailable, FrameGrabber, SyntheticFrameSource
+from .camera import (
+    CameraConfig,
+    CameraUnavailable,
+    FrameGrabber,
+    SyntheticFrameSource,
+    frame_brightness,
+)
 from .debounce import ABSENT, PRESENT, DebounceConfig, PresenceDebouncer
 from .detector import DetectionConfig, PresenceDetector, create_face_detector
 from .emitter import EventEmitter, frame_record
@@ -86,6 +92,8 @@ class RunConfig:
     append: bool = False
     quiet_frames: bool = False
     ttl_seconds: float = 60.0
+    #: Seconds spent skipping blank frames while hunting for a usable first frame (t99).
+    camera_blank_timeout: float = 1.5
     #: Seconds to wait for the device before reporting a Chinese reason and exiting (t89).
     camera_open_timeout: float = CAMERA_OPEN_TIMEOUT_SECONDS
 
@@ -224,6 +232,8 @@ def run(
                 # device is either there or it is not; a long block only delays the explanation.
                 # The caller may shrink this further (see `--camera-open-timeout`).
                 open_timeout_s=cfg.camera_open_timeout,
+                # t99: skip the blank frames this driver emits after the first good one.
+                blank_frame_timeout_s=cfg.camera_blank_timeout,
             )
         )
         grabber.open()
@@ -358,11 +368,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--quiet-frames", action="store_true", help="不打印逐帧记录，只打印事件与汇总")
     parser.add_argument(
+        "--probe-frames",
+        type=int,
+        default=None,
+        metavar="N",
+        help="只做诊断：从摄像头连抓 N 帧，逐帧打印 mean/min/max/std 与「空帧」判定，再给一条中文结论。"
+        "不检测、不写库、不做任何事件（t99 用来区分「摄像头真的黑」与「驱动回传空帧」）",
+    )
+    parser.add_argument(
         "--camera-open-timeout",
         type=float,
         default=CAMERA_OPEN_TIMEOUT_SECONDS,
         help=f"打不开摄像头时最多等多少秒再报中文原因并退出（默认 {CAMERA_OPEN_TIMEOUT_SECONDS:g} 秒；"
         "调用方如果要保证「数秒内返回」，可以调小它）",
+    )
+    parser.add_argument(
+        "--camera-blank-timeout",
+        type=float,
+        default=1.5,
+        help="找可用首帧时最多跳多少秒的空帧（默认 1.5 秒；全 0/单色帧会被跳过，见 --probe-frames）",
     )
     parser.add_argument(
         "--threads",
@@ -409,6 +433,107 @@ def _force_utf8_output() -> None:
                 reconfigure(encoding="utf-8", errors="replace")
             except (ValueError, OSError):  # pragma: no cover - detached/invalid stream
                 pass
+
+
+def probe_camera_frames(count: int, cfg: RunConfig) -> int:
+    """Diagnostic mode: grab N frames and report per-frame brightness, then a Chinese verdict.
+
+    Written for t99 ("the camera hands out pure-black frames"). It answers the one question that
+    decides what to do next — is the *picture* dark, or is the *delivery* broken? — without running
+    the detector, without writing an event and without writing any image:
+
+      * every frame a flat near-zero constant (`mean = max = 0`, `std = 0`) -> the driver is handing
+        out blank buffers. On this machine that happens for every frame after the first one, in
+        YUY2/NV12/I420; MJPG keeps streaming, but with a near-constant 1 -> the picture itself never
+        arrives;
+      * a dim but noisy picture (`std` clearly > 0) -> the frame is real. Blame the lens, a privacy
+        shutter or the room;
+      * a normal picture -> nothing to fix; use `--seconds` for the real run.
+
+    `blank_frames_skipped` in the summary is how many blank frames `open()` discarded before it
+    accepted one, i.e. the direct measure of the driver handing out empty buffers.
+    """
+    grabber = FrameGrabber(
+        CameraConfig(
+            index=cfg.camera_index,
+            width=cfg.width,
+            height=cfg.height,
+            warmup_frames=1,
+            open_timeout_s=cfg.camera_open_timeout,
+            blank_frame_timeout_s=cfg.camera_blank_timeout,
+        )
+    )
+    grabber.open()
+    try:
+        readings: list[dict] = []
+        for index in range(max(1, count)):
+            started = time.perf_counter()
+            try:
+                frame, _ = next(grabber.frames())
+            except StopIteration:  # pragma: no cover - the generator is infinite by construction
+                break
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            reading = {"record": "probe_frame", "order": index, "read_ms": round(elapsed_ms, 1)}
+            reading.update(frame_brightness(frame))
+            readings.append(reading)
+            print(json.dumps(reading, ensure_ascii=False), flush=True)
+    finally:
+        grabber.close()
+
+    blanks = [reading for reading in readings if reading["blank"]]
+    usable = [reading for reading in readings if not reading["blank"]]
+    usable_ratio = (len(usable) / len(readings)) if readings else 0.0
+    brightest = max((reading["max"] for reading in usable), default=0)
+    if not readings:
+        verdict = "驱动连一帧都没给出来"
+        advice = "先关掉其它占用摄像头的程序，再跑一次；仍然如此就是驱动/设备状态问题。"
+    elif not usable:
+        verdict = "每一帧都是空帧（全 0 或单色）：驱动没有把画面交出来"
+        advice = (
+            "先关掉其它占用摄像头的程序（相机 App、会议软件、控制台「启用」）再跑一次；"
+            "仍然全是空帧就拔插一次摄像头或重启一次。注意：这**不能**推出「镜头被挡住」——"
+            "被挡住时画面偏暗但有噪声（std > 0），而这里是恒定值。"
+        )
+    elif usable_ratio <= 0.5:
+        verdict = (
+            f"取流不稳定：{len(readings)} 帧里只有 {len(usable)} 帧是真实画面，其余是空帧"
+            "——先按「别的程序占着摄像头」排查"
+        )
+        advice = (
+            "关掉其它占用摄像头的程序（相机 App、会议软件、控制台「启用」）后重跑；"
+            "再看这几帧亮不亮，决定是否继续查遮挡/光照。"
+        )
+    elif brightest <= 20:
+        verdict = f"画面很暗但确实是真实图像（最亮像素 {brightest}，有噪声），更像镜头被挡或环境没光"
+        advice = (
+            "检查镜头前的滑盖或隐私快门、笔记本是否合盖、房间灯是否关着；把灯打开再跑一次对比。"
+            "这条命令本身不改任何设备设置，也不写任何文件。"
+        )
+    else:
+        verdict = f"画面正常有内容（最亮像素 {brightest}），摄像头可用"
+        advice = "不需要处理；要跑真正的在场检测用 --seconds。"
+    summary = {
+        "record": "probe_summary",
+        "camera": grabber.stats.summary(),
+        "frames": len(readings),
+        "blank_frames": len(blanks),
+        "usable_frames": len(usable),
+        "usable_ratio": round(usable_ratio, 2),
+        "mean_range": [
+            min((reading["mean"] for reading in readings), default=None),
+            max((reading["mean"] for reading in readings), default=None),
+        ],
+        "max_range": [
+            min((reading["max"] for reading in readings), default=None),
+            max((reading["max"] for reading in readings), default=None),
+        ],
+        "verdict": verdict,
+        "advice": advice,
+        "privacy": describe_privacy_boundary(),
+    }
+    print(json.dumps(summary, ensure_ascii=False), flush=True)
+    print(f"结论：{verdict}\n建议：{advice}", file=sys.stderr)
+    return 0
 
 
 def _silence_opencv_logging() -> bool:
@@ -551,9 +676,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         "frame_max_width": parsed.pop("frame_max_width", 480),
     }
     live_fps = float(parsed.pop("live_fps", 8.0))
+    probe_frames = parsed.pop("probe_frames", None)
+    parsed["camera_blank_timeout"] = float(parsed.pop("camera_blank_timeout", 1.5))
     _force_utf8_output()
     _silence_opencv_logging()
     _apply_thread_limit(threads)
+    cfg = RunConfig(**parsed)
+    if probe_frames is not None:
+        # Diagnostic mode (t99): never touches the event log, never runs the detector.
+        try:
+            return probe_camera_frames(int(probe_frames), cfg)
+        except CameraUnavailable as cause:
+            print(f"摄像头不可用：{cause}", file=sys.stderr)
+            return 2
     if live:
         # Unbounded loop, paced to `--live-fps`; the caller stops it (stop button / closed pipe).
         parsed["seconds"] = 0.0
@@ -561,7 +696,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         # stderr stays for real problems (camera busy, bad --db): the caller already gets every
         # frame on stdout, so a per-frame note there would be noise.
         live_options["quiet_frames"] = True
-    cfg = RunConfig(**parsed)
     emitter = EventEmitter(db_path=cfg.db, append=cfg.append, ttl_seconds=cfg.ttl_seconds)
     on_frame = None
     should_stop = None
