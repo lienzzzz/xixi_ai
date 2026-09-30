@@ -1,5 +1,12 @@
 import { buildEvent, toOffsetIso } from '@xixi/contracts';
-import { isSilenceReply, type BrainAdapter, type BrainImageInput } from '@xixi/brain-adapter';
+import {
+  createSpokenTextFilter,
+  isSilenceReply,
+  sanitizeSpokenReply,
+  type BrainAdapter,
+  type BrainImageInput,
+  type ReplyHygieneResult,
+} from '@xixi/brain-adapter';
 import type { Clock, TurnAction, XixiConfig, XixiStore } from '@xixi/domain';
 import { systemClock } from '@xixi/domain';
 
@@ -335,9 +342,14 @@ export class ConversationEngine {
     text: string,
     toolName: string | null,
   ): { readonly ok: boolean; readonly text: string; readonly claims: readonly UnbackedFactClaim[] } {
-    if (toolName !== null) return { ok: true, text, claims: [] };
-    const claims = findUnbackedFactClaims(text);
-    if (claims.length === 0) return { ok: true, text, claims: [] };
+    // t7: this is the backstop for a line composed *outside* `respond()` — today the console's
+    // proactive delivery, which builds its own prompt and calls the adapter directly. The same reply
+    // hygiene therefore applies here: tool-call markup and leaked English reasoning never become a
+    // spoken line, whichever seam produced them.
+    const cleaned = sanitizeSpokenReply(text, { language: this.#config.identity.language }).text;
+    if (toolName !== null) return { ok: true, text: cleaned, claims: [] };
+    const claims = findUnbackedFactClaims(cleaned);
+    if (claims.length === 0) return { ok: true, text: cleaned, claims: [] };
     return { ok: false, text: UNBACKED_FACT_REPLY, claims };
   }
 
@@ -436,11 +448,24 @@ export class ConversationEngine {
        * The segment path never streams, so it only needs the end-of-turn decision.
        */
       let heldFacts = '';
+      /**
+       * t7: the streaming seam, and the reason it is not `hooks.onTextChunk` directly. A provider
+       * can put tool-call markup in the *text* stream (measured: 7 of 8 weather turns, baseline §4),
+       * and a TTS driven by deltas would speak it a piece at a time. `markupHold` buffers from the
+       * first possible marker until the block closes or the stream ends; the final text is gated
+       * again below, for every adapter — including ones this file knows nothing about.
+       */
+      const markupHold = createSpokenTextFilter({ language: this.#config.identity.language });
+      const speak = async (text: string): Promise<void> => {
+        if (playSegments) return;
+        const safe = markupHold.push(text);
+        if (safe.length > 0) await hooks.onTextChunk?.(safe);
+      };
       for await (const chunk of stream) {
         if (chunk.type === 'tool') {
           toolRan = true;
           if (heldFacts.length > 0 && !suppressed) {
-            if (!playSegments) await hooks.onTextChunk?.(heldFacts);
+            await speak(heldFacts);
             heldFacts = '';
           }
           continue;
@@ -462,18 +487,32 @@ export class ConversationEngine {
           held = '';
           continue;
         }
-        if (!playSegments) await hooks.onTextChunk?.(held);
+        await speak(held);
         held = '';
       }
-      if (!playSegments && !suppressed && held.length > 0) await hooks.onTextChunk?.(held);
+      if (!suppressed && held.length > 0) await speak(held);
+      if (!suppressed) {
+        const heldTail = markupHold.flush();
+        if (!playSegments && heldTail.length > 0) await hooks.onTextChunk?.(heldTail);
+      }
       const result = await stream.result;
+
+      // t7 (baseline §4): two artifacts were heard on the real voice path — a reply whose whole body
+      // was tool-call markup, and a reply that was English self-reasoning. 铁律 1 says the program
+      // owns that boundary, so both are removed here, before TTS, the transcript or working memory can
+      // see them, whatever adapter produced them. A reply that was nothing but an artifact is silence
+      // (§55), and the removal is reported through `onNotice` so it stays auditable.
+      const hygiene = sanitizeSpokenReply(result.text ?? '', { language: this.#config.identity.language });
+      if (hygiene.removedChars > 0) {
+        await hooks.onNotice?.({ code: 'REPLY_HYGIENE', detail: describeHygiene(hygiene) });
+      }
 
       // t111 (the「成都阴天 19 到 25 度」bug): the model asserted something only a lookup can know
       // and never called the tool. 铁律 1/3 put this boundary in the program, not in the prompt: the
       // claim must not reach audio, the transcript, or working memory. She says she is not sure
       // instead, and the caller gets a notice with the offending text for the audit trail.
-      const unbackedClaims = toolRan ? [] : findUnbackedFactClaims(result.text ?? '');
-      let replyText = result.text;
+      const unbackedClaims = toolRan || hygiene.text.length === 0 ? [] : findUnbackedFactClaims(hygiene.text);
+      let replyText: string | null = result.text === null ? null : hygiene.text;
       if (unbackedClaims.length > 0) {
         replyText = UNBACKED_FACT_REPLY;
         heldFacts = '';
@@ -481,10 +520,10 @@ export class ConversationEngine {
           code: 'UNBACKED_FACT_CLAIM',
           detail: `未调用工具却给出可核查事实：${unbackedClaims.map((claim) => claim.match).join('、')}`,
         });
-        if (!playSegments) await hooks.onTextChunk?.(UNBACKED_FACT_REPLY);
+        await speak(UNBACKED_FACT_REPLY);
       } else if (heldFacts.length > 0) {
         // A tool ran after the claim was held → the sentence was backed, so it may be spoken now.
-        if (!playSegments) await hooks.onTextChunk?.(heldFacts);
+        await speak(heldFacts);
         heldFacts = '';
       }
 
@@ -609,6 +648,20 @@ const ATTRIBUTION_CONTENT = /(?:\d|[「“『']|有|要|会|将|是|在|停|降|
 
 /** What she says instead of an unverified claim: no numbers, no new facts, no pretending. */
 export const UNBACKED_FACT_REPLY = '这个我记不准，不敢乱说——要不我查一下再告诉你？';
+
+/**
+ * The audit line for a reply the hygiene gate had to clean (t7).
+ *
+ * It names what was removed and whether anything was left to say, so a reader of the log never has
+ * to re-run the model to find out what the household did *not* hear.
+ */
+function describeHygiene(hygiene: ReplyHygieneResult): string {
+  const parts: string[] = [];
+  if (hygiene.removedMarkupChars > 0) parts.push(`${hygiene.removedMarkupChars} 字的工具调用标记`);
+  if (hygiene.removedReasoningChars > 0) parts.push(`${hygiene.removedReasoningChars} 字的英文推理`);
+  const remainder = hygiene.text.length === 0 ? '剩余为空，按沉默处理' : `剩余：${hygiene.text.slice(0, 40)}`;
+  return `回复里剔除了${parts.join('、')}（${remainder}）`;
+}
 
 /**
  * Find concrete claims in a reply that need a tool result to be true.

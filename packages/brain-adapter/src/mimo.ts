@@ -1,4 +1,4 @@
-import { MimoClient, ModelError, type MimoChatResult, type MimoMessage, type MimoToolDefinition } from '@xixi/model-adapters';
+import { MimoClient, ModelError, createSpokenTextFilter, type MimoChatResult, type MimoMessage, type MimoToolDefinition } from '@xixi/model-adapters';
 
 import { BrainError, brainErrorCodeFor } from './errors.ts';
 import type { ToolCallRecord, XixiTool } from './tools.ts';
@@ -237,6 +237,13 @@ export class MimoBrainAdapter implements BrainAdapter {
             ...(tools === undefined ? {} : { tools }),
           });
 
+          // t7: the provider can put tool-call markup in the *text* stream (measured on the voice
+          // path: 7 of 8 weather turns, and TTS read it out — baseline §4). Nothing a mouth should
+          // hear leaves this loop, so the deltas go through the hygiene hold and the round's text is
+          // accumulated from what the hold let through — never from the raw deltas. The hold is
+          // markup-only here: the deployment language (which decides about English reasoning) is the
+          // engine's configuration, not this adapter's.
+          const markupHold = createSpokenTextFilter();
           let roundText = '';
           let completed: MimoChatResult;
           for (;;) {
@@ -245,9 +252,13 @@ export class MimoBrainAdapter implements BrainAdapter {
               completed = next.value;
               break;
             }
-            roundText += next.value.text;
-            yield { type: 'text', text: next.value.text };
+            const safe = markupHold.push(next.value.text);
+            roundText += safe;
+            if (safe.length > 0) yield { type: 'text', text: safe };
           }
+          const heldTail = markupHold.flush();
+          roundText += heldTail;
+          if (heldTail.length > 0) yield { type: 'text', text: heldTail };
 
           model = completed.model;
           if (roundText.trim().length > 0) latestText = roundText;

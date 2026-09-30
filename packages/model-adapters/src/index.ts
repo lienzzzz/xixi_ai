@@ -19,3 +19,13 @@ export {
   type MimoToolDefinition,
   type MimoUsage,
 } from './mimo.ts';
+export {
+  createSpokenTextFilter,
+  isChineseLanguage,
+  sanitizeSpokenReply,
+  stripForeignReasoning,
+  stripToolCallMarkup,
+  type ReplyHygieneResult,
+  type SpokenReplyOptions,
+  type SpokenTextFilter,
+} from './reply-hygiene.ts';
