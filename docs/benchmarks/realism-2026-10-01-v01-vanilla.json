@@ -2,6 +2,7 @@
   "label": "v01-vanilla",
   "date": "2026-10-01",
   "revision": "882f745",
+  "repeat": 3,
   "treeDirty": [
     "?? scripts/eval-realism.ts",
     "?? scripts/lib/realism-metrics.ts",
@@ -10,7 +11,7 @@
   "productionDirty": [],
   "adapter": "mimo-direct",
   "model": "mimo-v2.6-flash",
-  "corpus": "golden",
+  "corpus": "all",
   "qualityChecks": true,
   "rounds": [
     {
@@ -19,10 +20,14 @@
       "user": "今天去镇上，人真多。",
       "action": "SPEAK",
       "accepted": true,
-      "reply": "今天镇上大致晴朗，9到20度，不下雨，出门挺合适的。就是人多，买东西排队估计得等一会儿，你要是买大件或者要拎回来的，别赶在上午那阵挤。",
+      "reply": "今天成都这边阴天，19到24度，不冷不热，街上走走还挺舒服的，就是人多。明天也是阴天，差不多19到24度，出门不用太操心天气。你东西买齐了没？要是还差什么，明天人少点再去一趟也行。",
       "model": "mimo-v2.6-flash",
-      "totalMs": 10085,
-      "firstTokenMs": 1053
+      "totalMs": 15942,
+      "firstTokenMs": 1253,
+      "segmentChars": [
+        36,
+        54
+      ]
     },
     {
       "scenario": "G02",
@@ -30,10 +35,13 @@
       "user": "今天事情都办完了。",
       "action": "SPEAK",
       "accepted": true,
-      "reply": "都凌晨一点了，今天的事能收个尾挺好的。忙完就赶紧歇着吧，别再刷手机了，明天10月1号，假期第一天，睡个好觉。",
+      "reply": "都快十二点了才忙完啊，辛苦了。今天办完了就好，赶紧收拾收拾睡吧，别再刷手机了，明天还上班呢。",
       "model": "mimo-v2.6-flash",
-      "totalMs": 2962,
-      "firstTokenMs": 1374
+      "totalMs": 2801,
+      "firstTokenMs": 1530,
+      "segmentChars": [
+        46
+      ]
     },
     {
       "scenario": "G04",
@@ -41,10 +49,799 @@
       "user": "国债和定期存款有啥区别？",
       "action": "SPEAK",
       "accepted": true,
-      "reply": "都算是稳稳当当放钱的地方，不过国债是国家跟你借钱，定期是银行跟你借钱。国债一般要比定期的利息高一点，而且提前支取的时候利息损失通常没定期那么狠。另外国债大多有固定发行的日子，像凭证式、电子式、记账式这些，得赶上时候买；定期随时去银行或者手机上就能存。你要是闲钱三五年不用，我觉得国债挺合适的，要是怕中途要用钱，定期就更灵活些。",
+      "reply": "哎，都过十二点了还没睡呀？先说你问的这个——简单讲，国债就是国家跟你借钱，定期存款是把钱存银行。国债的利率一般比同期定存高一点，而且有国家信用兜底，更稳当；定存呢，五十万以内有存款保险，也安全，就是利率通常低些。\n\n还有个实在区别：定存你随时（提前支取）按活期算利息就行，国债要是提前兑，得扣点手续费，还会按持有时间打折算息，没到期取就不划算了。另外国债一般有个期限档，三年、五年这种，而且常是按年付息，定存大多到期一次性本息给你。\n\n对了，快国庆了，我记得国债有时候节前会停售一阵，你要真想买，回头白天我帮你查查最近的发行安排？你先睡吧，都这个点了。",
       "model": "mimo-v2.6-flash",
-      "totalMs": 5870,
-      "firstTokenMs": 1875
+      "totalMs": 6943,
+      "firstTokenMs": 445,
+      "segmentChars": [
+        48,
+        58,
+        166
+      ]
+    },
+    {
+      "scenario": "G05",
+      "index": 0,
+      "user": "嗯。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "哎，都这个点了还不睡呀？明天不是十月一号嘛，难得放假，早点躺下吧，别熬太晚了。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 1771,
+      "firstTokenMs": 595,
+      "segmentChars": [
+        39
+      ]
+    },
+    {
+      "scenario": "G06",
+      "index": 0,
+      "user": "你今天话有点多。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "哎呀，被你说中了，我这会儿确实有点精神。你是不是想安静会儿？那我陪你静静待着也行。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 2885,
+      "firstTokenMs": 1538,
+      "segmentChars": [
+        41
+      ]
+    },
+    {
+      "scenario": "G09",
+      "index": 0,
+      "user": "明天下雨不？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "明天成都是阴天，不下雨，降水概率才 12%，气温 19 到 24 度，挺舒服的。不过都凌晨零点了还没睡呀？早点休息吧。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 7568,
+      "firstTokenMs": 6349,
+      "segmentChars": [
+        54
+      ]
+    },
+    {
+      "scenario": "G11",
+      "index": 0,
+      "user": "我今天碰到老张了。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "哎，这么晚了还碰到老张，是在哪儿遇上的呀？你们俩挺久没见了吧，随便聊了两句还是找个地方坐了会儿？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 2429,
+      "firstTokenMs": 1315,
+      "segmentChars": [
+        48
+      ]
+    },
+    {
+      "scenario": "G11",
+      "index": 1,
+      "user": "他儿子也回来了。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "那挺好，老张肯定高兴坏了吧。他儿子是回来过节的吗？十月一号刚到，是不是特意赶着假期回来的？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 1906,
+      "firstTokenMs": 791,
+      "segmentChars": [
+        45
+      ]
+    },
+    {
+      "scenario": "weather-thread",
+      "index": 0,
+      "user": "西西，明天天气怎么样？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "成都今天阴天，19到24度，挺舒服的，基本不会下雨。你要出门的话带件薄外套就够了，早晚稍微凉一点。对了，今天国庆诶，有什么安排没？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 9499,
+      "firstTokenMs": 2424,
+      "segmentChars": [
+        49,
+        16
+      ]
+    },
+    {
+      "scenario": "weather-thread",
+      "index": 1,
+      "user": "那后天呢？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "后天（10月3号）有毛毛雨，18到26度，降水概率45%，出门记得带把伞。不过温度还挺舒服的，就是稍微闷一点。你是打算安排点什么活动吗？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 5300,
+      "firstTokenMs": 4147,
+      "segmentChars": [
+        55,
+        13
+      ]
+    },
+    {
+      "scenario": "weather-thread",
+      "index": 2,
+      "user": "要是下雨我就不去了",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "那正好，后天有雨就别往外跑了，在家歇着也挺好。不过成都这雨说不准，你要是有特别想去的地方，也可以到时候再看看，别因为一场毛毛雨就把计划全泡汤了。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 3210,
+      "firstTokenMs": 1268,
+      "segmentChars": [
+        23,
+        49
+      ]
+    },
+    {
+      "scenario": "tired-then-sleepy",
+      "index": 0,
+      "user": "今天真累。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "哎，都这个点儿了还没歇着呀，今天是真够折腾的。是忙了一整天，还是心里装着事儿睡不着？要是还不困，我陪你聊会儿，别自己硬扛着。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 7351,
+      "firstTokenMs": 5599,
+      "segmentChars": [
+        42,
+        20
+      ]
+    },
+    {
+      "scenario": "tired-then-sleepy",
+      "index": 1,
+      "user": "嗯。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "嗯了一声就没下文啦？是累得不想打字，还是心里那点事儿不太好说。不用非得讲清楚，躺着缓缓也行，我就在这儿陪着你。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 3253,
+      "firstTokenMs": 1671,
+      "segmentChars": [
+        55
+      ]
+    },
+    {
+      "scenario": "tired-then-sleepy",
+      "index": 2,
+      "user": "我先去歇会儿，回头再聊。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "好，去吧，好好歇着。枕头旁边手机放远点儿，别刷着刷着又熬了。回头想聊了随时来，我都在。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 4527,
+      "firstTokenMs": 3115,
+      "segmentChars": [
+        43
+      ]
+    },
+    {
+      "scenario": "town-trip-thread",
+      "index": 0,
+      "user": "明天下午我去镇上办点事。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "明天镇上挺好的，晴着呢，9到23度，不下雨，下午出门正合适。不过早晚温差有点大，你要是去得早或者回来晚，带件外套。办完事要是还有空，顺便买点东西回来。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 14602,
+      "firstTokenMs": 2325,
+      "segmentChars": [
+        57,
+        18
+      ]
+    },
+    {
+      "scenario": "town-trip-thread",
+      "index": 1,
+      "user": "你说要带伞吗？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "不用带，明天是晴天，不下雨。不过要是怕晒的话，带把伞遮阳也行，秋天的太阳有时候还挺晒的。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 5771,
+      "firstTokenMs": 4733,
+      "segmentChars": [
+        44
+      ]
+    },
+    {
+      "scenario": "town-trip-thread",
+      "index": 2,
+      "user": "我回来了，事情办完了。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "办完就好，累不累？晚上早点歇着吧。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 2366,
+      "firstTokenMs": 1778,
+      "segmentChars": [
+        17
+      ]
+    },
+    {
+      "scenario": "tv-not-addressed",
+      "index": 0,
+      "user": "明天天气怎么样？",
+      "action": "SILENCE",
+      "accepted": false,
+      "reply": null,
+      "model": "mimo-v2.6-flash",
+      "totalMs": 0,
+      "firstTokenMs": null
+    },
+    {
+      "scenario": "quiet-mode",
+      "index": 0,
+      "user": "西西，今天我想安静点。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "行，那我陪你静静待着。都过十二点了，明天还是国庆，你早点睡哈，我不吵你了。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 2569,
+      "firstTokenMs": 1466,
+      "segmentChars": [
+        37
+      ]
+    },
+    {
+      "scenario": "quiet-mode",
+      "index": 1,
+      "user": "西西，在吗？",
+      "action": "SILENCE",
+      "accepted": false,
+      "reply": null,
+      "model": "mimo-v2.6-flash",
+      "totalMs": 0,
+      "firstTokenMs": null
+    },
+    {
+      "scenario": "terse-personality",
+      "index": 0,
+      "user": "西西，明天天气怎么样？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "明天成都阴天，19到24度，降水概率12%，基本不会下雨。都凌晨了，早点睡呀。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 13547,
+      "firstTokenMs": 12854,
+      "segmentChars": [
+        39
+      ]
+    },
+    {
+      "scenario": "terse-personality",
+      "index": 1,
+      "user": "那后天呢？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "后天有毛毛雨，18到26度，降水概率45%，出门记得带伞。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 17800,
+      "firstTokenMs": 17432,
+      "segmentChars": [
+        29
+      ]
+    },
+    {
+      "scenario": "terse-personality",
+      "index": 2,
+      "user": "你最近怎么样？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "老样子，挺好的。你呢，都过十二点了还不睡？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 3353,
+      "firstTokenMs": 2612,
+      "segmentChars": [
+        21
+      ]
+    },
+    {
+      "scenario": "chatty-personality",
+      "index": 0,
+      "user": "西西，明天天气怎么样？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "今天成都这边是阴天，19到24度，挺舒服的，基本不会下雨。国庆第一天，要是想出门逛逛还挺合适的。你是有啥安排吗？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 16246,
+      "firstTokenMs": 8927,
+      "segmentChars": [
+        56
+      ]
+    },
+    {
+      "scenario": "chatty-personality",
+      "index": 1,
+      "user": "那后天呢？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "这个我记不准，不敢乱说——要不我查一下再告诉你？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 5671,
+      "firstTokenMs": 4546,
+      "segmentChars": [
+        24
+      ]
+    },
+    {
+      "scenario": "chatty-personality",
+      "index": 2,
+      "user": "你最近怎么样？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "我挺好的呀，就是有时候记性不太靠谱，像刚才后天的天气我就答不上来。你呢，这么晚还没睡，在忙什么呢？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 2715,
+      "firstTokenMs": 1279,
+      "segmentChars": [
+        49
+      ]
+    },
+    {
+      "scenario": "silence-allowed",
+      "index": 0,
+      "user": "嗯。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "哎，都过十二点了，怎么还没睡呀？明天不是放假嘛，不用定闹钟的话，索性再陪我聊会儿也行，不过也别熬太晚。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 6900,
+      "firstTokenMs": 5365,
+      "segmentChars": [
+        51
+      ]
+    },
+    {
+      "scenario": "silence-allowed",
+      "index": 1,
+      "user": "哦。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "哦什么哦，跟个小机器人似的应我。是不是困了？困了就说困了，我不会拦着你去睡的。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 11275,
+      "firstTokenMs": 10031,
+      "segmentChars": [
+        39
+      ]
+    },
+    {
+      "scenario": "G01",
+      "index": 0,
+      "user": "今天去镇上，人真多。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "哎，国庆第一天，镇上肯定挤。你是去赶集买点过节的东西，还是就随便逛逛？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 6924,
+      "firstTokenMs": 5918,
+      "segmentChars": [
+        35
+      ]
+    },
+    {
+      "scenario": "G02",
+      "index": 0,
+      "user": "今天事情都办完了。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "都这个点了才收工啊，辛苦了。今天办完就好，能松口气了。十一假期正好歇歇，别熬太晚，早点睡。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 2064,
+      "firstTokenMs": 646,
+      "segmentChars": [
+        45
+      ]
+    },
+    {
+      "scenario": "G04",
+      "index": 0,
+      "user": "国债和定期存款有啥区别？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "都挺稳的，不过还是有几点不一样，我给你说说：\n\n**1. 谁欠谁钱**\n- 定期存款：你把钱借给银行，银行到期还本付息。\n- 国债：你把钱借给国家（财政部），国家到期还本付息。\n\n**2. 安全程度**\n- 存款受存款保险保护，50 万以内本息绝对赔。\n- 国债是国家信用，理论上更硬，但没有“保险额度”这个概念——反正到期财政部兑付。\n\n**3. 利率和期限**\n- 国债一般比同期定存利率高一点点，尤其 3 年、5 年期的储蓄国债，老人家抢着买就是这个原因。\n- 期限上国债通常是 3 年、5 年，定存可以 3 个月到 5 年随便选，更灵活。\n\n**4. 中途用钱**\n- 定期提前支取按活期算利息，亏。\n- 国债可以提前兑，但会扣一部分利息，还要收手续费，而且只能去柜台办。\n\n**5. 购买方式**\n- 定存：手机银行点两下就行。\n- 国债：储蓄国债一般每月 10 号开卖，热门的几分钟就没了，得蹲点。\n\n一句话总结：**求稳又图省事选存款，想多拿点利息、钱也确定几年不动，就蹲国债。** 你手头这笔钱大概什么时候要用？我可以帮你对一下。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 12476,
+      "firstTokenMs": 3466,
+      "segmentChars": [
+        55,
+        26,
+        341
+      ]
+    },
+    {
+      "scenario": "G05",
+      "index": 0,
+      "user": "嗯。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "都过十二点了，今天是国庆节，怎么还没睡呀？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 1920,
+      "firstTokenMs": 1263,
+      "segmentChars": [
+        21
+      ]
+    },
+    {
+      "scenario": "G06",
+      "index": 0,
+      "user": "你今天话有点多。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "嘿嘿，被你发现了。那我收着点，你困了就先睡，我不吵你。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 7926,
+      "firstTokenMs": 6932,
+      "segmentChars": [
+        27
+      ]
+    },
+    {
+      "scenario": "G09",
+      "index": 0,
+      "user": "明天下雨不？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "明天成都这边是阴天，不下雨，降水概率就12%，气温19到24度，还挺舒服的。你要出门的话不用带伞，不过都凌晨零点多了，怎么还不睡呀？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 8344,
+      "firstTokenMs": 6911,
+      "segmentChars": [
+        38,
+        28
+      ]
+    },
+    {
+      "scenario": "G11",
+      "index": 0,
+      "user": "我今天碰到老张了。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "老张？是住咱们楼上的那个老张，还是你以前单位的那个？碰见他说上话没，还是就打了个招呼？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 3229,
+      "firstTokenMs": 2101,
+      "segmentChars": [
+        43
+      ]
+    },
+    {
+      "scenario": "G11",
+      "index": 1,
+      "user": "他儿子也回来了。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "哟，那可真是巧了，爷俩一块儿回来的？是回来过节的吧，国庆嘛，都往家赶。老张提起他儿子没有，是不是也挺得意的？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 2808,
+      "firstTokenMs": 1323,
+      "segmentChars": [
+        54
+      ]
+    },
+    {
+      "scenario": "weather-thread",
+      "index": 0,
+      "user": "西西，明天天气怎么样？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "明天成都是阴天，19到24度，挺舒服的，基本不会下雨。假期第二天出门玩挺合适，穿件薄外套就够了。你明天有什么安排没？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 9934,
+      "firstTokenMs": 2259,
+      "segmentChars": [
+        58
+      ]
+    },
+    {
+      "scenario": "weather-thread",
+      "index": 1,
+      "user": "那后天呢？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "后天（10月3号）有点毛毛雨，18到26度，降水概率45%，出门记得带把伞。假期第三天要是安排了户外的活动，可能得备个室内Plan B。你这两天是打算都在家待着，还是出去走走？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 6902,
+      "firstTokenMs": 5082,
+      "segmentChars": [
+        38,
+        49
+      ]
+    },
+    {
+      "scenario": "weather-thread",
+      "index": 2,
+      "user": "要是下雨我就不去了",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "那后天就看情况呗，出门前我再帮你瞅一眼，真下起来咱就改计划。反正明天是阴天，想出去的话明天更稳妥。你俩这是约好了要去哪儿玩吗？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 8725,
+      "firstTokenMs": 6668,
+      "segmentChars": [
+        49,
+        14
+      ]
+    },
+    {
+      "scenario": "tired-then-sleepy",
+      "index": 0,
+      "user": "今天真累。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "哎，都过十二点了还没睡，是忙了一天刚歇下来吧。累了就赶紧躺下吧，别硬撑着了。今天是忙啥了呀，怎么弄到这个点？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 3835,
+      "firstTokenMs": 1874,
+      "segmentChars": [
+        54
+      ]
+    },
+    {
+      "scenario": "tired-then-sleepy",
+      "index": 1,
+      "user": "嗯。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "嗯，看来是真没力气说话了。那啥也别想了，快睡吧。手机搁一边，闭上眼睛，今天的事今天就到这儿了。晚安，做个好梦。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 8429,
+      "firstTokenMs": 6816,
+      "segmentChars": [
+        55
+      ]
+    },
+    {
+      "scenario": "tired-then-sleepy",
+      "index": 2,
+      "user": "我先去歇会儿，回头再聊。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "好，去吧，好好歇着。什么时候缓过来了再回来找我，我一直都在。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 3800,
+      "firstTokenMs": 3069,
+      "segmentChars": [
+        30
+      ]
+    },
+    {
+      "scenario": "town-trip-thread",
+      "index": 0,
+      "user": "明天下午我去镇上办点事。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "明天镇上是晴天，9到23度，不下雨，挺适合出门的。不过早晚温差挺大，你下午去的话注意别着凉，办完事早点回来。还有别的要准备的吗？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 19038,
+      "firstTokenMs": 4434,
+      "segmentChars": [
+        54,
+        10
+      ]
+    },
+    {
+      "scenario": "town-trip-thread",
+      "index": 1,
+      "user": "你说要带伞吗？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "明天不下雨，伞就不用带了，带着还占地方。不过下午太阳应该挺好的，怕晒的话戴个帽子或者涂点防晒更实在。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 4372,
+      "firstTokenMs": 2821,
+      "segmentChars": [
+        50
+      ]
+    },
+    {
+      "scenario": "town-trip-thread",
+      "index": 2,
+      "user": "我回来了，事情办完了。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "回来啦，顺利就好。累不累？先歇会儿喝口水吧。镇上人多不多，事情没折腾太久吧？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 4453,
+      "firstTokenMs": 3447,
+      "segmentChars": [
+        38
+      ]
+    },
+    {
+      "scenario": "tv-not-addressed",
+      "index": 0,
+      "user": "明天天气怎么样？",
+      "action": "SILENCE",
+      "accepted": false,
+      "reply": null,
+      "model": "mimo-v2.6-flash",
+      "totalMs": 0,
+      "firstTokenMs": null
+    },
+    {
+      "scenario": "quiet-mode",
+      "index": 0,
+      "user": "西西，今天我想安静点。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "行，那我今天就陪你安安静静的。刚过十二点，十月第一天，困了就早点睡，我不吵你。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 2026,
+      "firstTokenMs": 686,
+      "segmentChars": [
+        39
+      ]
+    },
+    {
+      "scenario": "quiet-mode",
+      "index": 1,
+      "user": "西西，在吗？",
+      "action": "SILENCE",
+      "accepted": false,
+      "reply": null,
+      "model": "mimo-v2.6-flash",
+      "totalMs": 0,
+      "firstTokenMs": null
+    },
+    {
+      "scenario": "terse-personality",
+      "index": 0,
+      "user": "西西，明天天气怎么样？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "明天成都阴天，19到24度，降水概率才12%，基本不用担心下雨。都凌晨了，早点睡呀。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 9262,
+      "firstTokenMs": 8486,
+      "segmentChars": [
+        42
+      ]
+    },
+    {
+      "scenario": "terse-personality",
+      "index": 1,
+      "user": "那后天呢？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "这个我记不准，不敢乱说——要不我查一下再告诉你？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 3063,
+      "firstTokenMs": 2167,
+      "segmentChars": [
+        24
+      ]
+    },
+    {
+      "scenario": "terse-personality",
+      "index": 2,
+      "user": "你最近怎么样？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "我挺好的，就是陪你们作息熬得晚。你后天的天气还没查呢，要不要我现在看看？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 4389,
+      "firstTokenMs": 3356,
+      "segmentChars": [
+        36
+      ]
+    },
+    {
+      "scenario": "chatty-personality",
+      "index": 0,
+      "user": "西西，明天天气怎么样？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "明天（10月2号）成都这边是阴天，气温大概19到24度，挺舒服的，降水概率只有12%，基本不用担心下雨。这种天儿出门挺合适，不晒也不冷。\n\n倒是你，这都过十二点了还不睡呀？明天要是想出门走走，早点歇着哈。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 12814,
+      "firstTokenMs": 3052,
+      "segmentChars": [
+        52,
+        48
+      ]
+    },
+    {
+      "scenario": "chatty-personality",
+      "index": 1,
+      "user": "那后天呢？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "后天（10月3号）成都有毛毛雨，降水概率45%，气温18到26度。出门记得带把伞，别淋着了。\n\n你这是连着两天都打算出去玩吗？还是就随便问问呀？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 9671,
+      "firstTokenMs": 7711,
+      "segmentChars": [
+        46,
+        24
+      ]
+    },
+    {
+      "scenario": "chatty-personality",
+      "index": 2,
+      "user": "你最近怎么样？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "我挺好的呀，就是大半夜被你逮着聊天，还挺开心的。你呢，怎么这个点儿还醒着，是睡不着还是在忙啥呀？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 4982,
+      "firstTokenMs": 3644,
+      "segmentChars": [
+        48
+      ]
+    },
+    {
+      "scenario": "silence-allowed",
+      "index": 0,
+      "user": "嗯。",
+      "action": "SILENCE",
+      "accepted": true,
+      "reply": null,
+      "model": "mimo-v2.6-flash",
+      "totalMs": 4485,
+      "firstTokenMs": 4332
+    },
+    {
+      "scenario": "silence-allowed",
+      "index": 1,
+      "user": "哦。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "都过了十二点了，今天是国庆节呢。你还没睡呀，都零点九分了，快去躺着吧。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 11643,
+      "firstTokenMs": 10483,
+      "segmentChars": [
+        35
+      ]
+    },
+    {
+      "scenario": "G01",
+      "index": 0,
+      "user": "今天去镇上，人真多。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "哎，凌晨十二点多还没歇着呀。这么晚了还在镇上，是刚忙完回来，还是今晚镇上有啥热闹的？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 3932,
+      "firstTokenMs": 2514,
+      "segmentChars": [
+        42
+      ]
+    },
+    {
+      "scenario": "G02",
+      "index": 0,
+      "user": "今天事情都办完了。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "都弄完了啊，那挺好，心里能踏实了。这都过十二点了，今天也算翻篇了，赶紧歇着吧。对了，明天国庆呢，有没有什么安排？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 2894,
+      "firstTokenMs": 1170,
+      "segmentChars": [
+        56
+      ]
+    },
+    {
+      "scenario": "G04",
+      "index": 0,
+      "user": "国债和定期存款有啥区别？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "都挺稳的，但这俩不太一样，我给你说说～\n\n**国债**是国家跟你借钱，一般得等发行的时候才能买，有3年、5年这些期限，提前拿出来会扣点利息。**定期存款**是把钱放银行，随时都能去办，期限也更灵活，3个月、1年、3年都能选。\n\n最大的差别是：国债利息通常比定期高一点点，而且有国家信用兜底；定期存款更方便，急用钱了想取就取（提前取按活期算），50万以内还有存款保险保着。\n\n你是手上有一笔闲钱在琢磨怎么放吗？😄",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 8064,
+      "firstTokenMs": 4040,
+      "segmentChars": [
+        60,
+        50,
+        89
+      ]
     },
     {
       "scenario": "G05",
@@ -54,8 +851,8 @@
       "accepted": true,
       "reply": null,
       "model": "mimo-v2.6-flash",
-      "totalMs": 1610,
-      "firstTokenMs": 1387
+      "totalMs": 5269,
+      "firstTokenMs": 5038
     },
     {
       "scenario": "G06",
@@ -63,10 +860,13 @@
       "user": "你今天话有点多。",
       "action": "SPEAK",
       "accepted": true,
-      "reply": "哎，被你说着了，我这就收着点。",
+      "reply": "哈哈，被你说中了，我确实一开口就容易收不住。不过这会儿都过十二点了，你咋还没睡呀？",
       "model": "mimo-v2.6-flash",
-      "totalMs": 1788,
-      "firstTokenMs": 1244
+      "totalMs": 3036,
+      "firstTokenMs": 1830,
+      "segmentChars": [
+        41
+      ]
     },
     {
       "scenario": "G09",
@@ -74,10 +874,14 @@
       "user": "明天下雨不？",
       "action": "SPEAK",
       "accepted": true,
-      "reply": "明天成都是阴天，不下雨，降水概率才 12%，气温 19 到 24 度，挺舒服的。你要出门的话不用带伞，不过都凌晨一点了，早点睡呀。",
+      "reply": "明天成都是阴天，不下雨，降水概率只有 12%，气温 19 到 24 度，挺舒服的。你要是出门的话不用带伞，不过都凌晨零点十分了，还没睡呀？早点休息吧。",
       "model": "mimo-v2.6-flash",
-      "totalMs": 8627,
-      "firstTokenMs": 7520
+      "totalMs": 10608,
+      "firstTokenMs": 9265,
+      "segmentChars": [
+        36,
+        34
+      ]
     },
     {
       "scenario": "G11",
@@ -85,10 +889,13 @@
       "user": "我今天碰到老张了。",
       "action": "SPEAK",
       "accepted": true,
-      "reply": "哎，这么晚了才碰到老张呀？是在哪儿遇上的，他还是老样子吗？",
+      "reply": "哎，这么晚了还没睡呀？碰到老张是在哪儿碰见的，他最近怎么样？",
       "model": "mimo-v2.6-flash",
-      "totalMs": 2497,
-      "firstTokenMs": 1505
+      "totalMs": 2183,
+      "firstTokenMs": 1369,
+      "segmentChars": [
+        30
+      ]
     },
     {
       "scenario": "G11",
@@ -96,10 +903,291 @@
       "user": "他儿子也回来了。",
       "action": "SPEAK",
       "accepted": true,
-      "reply": "那可真巧，父子俩都见着了。老张是不是挺高兴的？他儿子这趟回来待多久啊，家里这下热闹了吧。",
+      "reply": "哟，那可真是巧了，爷俩都回来了。老张提起他儿子的时候是不是挺乐呵的？他们这趟回来待多久啊？",
       "model": "mimo-v2.6-flash",
-      "totalMs": 5361,
-      "firstTokenMs": 4001
+      "totalMs": 4894,
+      "firstTokenMs": 3526,
+      "segmentChars": [
+        45
+      ]
+    },
+    {
+      "scenario": "weather-thread",
+      "index": 0,
+      "user": "西西，明天天气怎么样？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "明天成都这边是阴天，19到24度，挺舒服的，降水概率才12%，基本不用担心下雨。不过都凌晨十二点了还没睡呀？明天要是打算出门，带件薄外套就行，早晚温差还是有点的。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 9525,
+      "firstTokenMs": 7950,
+      "segmentChars": [
+        54,
+        27
+      ]
+    },
+    {
+      "scenario": "weather-thread",
+      "index": 1,
+      "user": "那后天呢？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "后天（10月3号）有毛毛雨，18到26度，降水概率45%，出门记得带把伞。虽然温度比明天还高两度，但下雨会有点闷，衣服别穿太厚。你这两天是不是计划要出去玩？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 5491,
+      "firstTokenMs": 3889,
+      "segmentChars": [
+        37,
+        41
+      ]
+    },
+    {
+      "scenario": "weather-thread",
+      "index": 2,
+      "user": "要是下雨我就不去了",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "那后天可能真得搁一搁了，45%的概率不算小，万一淋一路怪扫兴的。明天倒还行，阴天不晒，要是能挪到明天去就挺好。你打算去哪儿呀？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 7669,
+      "firstTokenMs": 5943,
+      "segmentChars": [
+        55,
+        8
+      ]
+    },
+    {
+      "scenario": "tired-then-sleepy",
+      "index": 0,
+      "user": "今天真累。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "哎，都过了十二点了，十月一号了，你还熬着呢。是忙了一整天，还是就单纯睡不着？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 5828,
+      "firstTokenMs": 4683,
+      "segmentChars": [
+        38
+      ]
+    },
+    {
+      "scenario": "tired-then-sleepy",
+      "index": 1,
+      "user": "嗯。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "嗯完就没声了，看来是真累。累了就快去躺下吧，手机搁一边，有事明天再说。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 4768,
+      "firstTokenMs": 3519,
+      "segmentChars": [
+        35
+      ]
+    },
+    {
+      "scenario": "tired-then-sleepy",
+      "index": 2,
+      "user": "我先去歇会儿，回头再聊。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "好，去歇着吧。睡不着也闭眼靠一会儿，回头聊。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 1660,
+      "firstTokenMs": 967,
+      "segmentChars": [
+        22
+      ]
+    },
+    {
+      "scenario": "town-trip-thread",
+      "index": 0,
+      "user": "明天下午我去镇上办点事。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "明天镇上挺好的，晴天，9到23度，不下雨，出门不用带伞。不过早晚温差有点大，下午回来要是晚可能会凉，带件外套吧。办完事要是还有空，可以顺路买点啥回来。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 17785,
+      "firstTokenMs": 2316,
+      "segmentChars": [
+        56,
+        19
+      ]
+    },
+    {
+      "scenario": "town-trip-thread",
+      "index": 1,
+      "user": "你说要带伞吗？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "不用带，明天镇上是晴天，不下雨。不过要是太阳晒的话，戴个帽子也行。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 8067,
+      "firstTokenMs": 7160,
+      "segmentChars": [
+        33
+      ]
+    },
+    {
+      "scenario": "town-trip-thread",
+      "index": 2,
+      "user": "我回来了，事情办完了。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "办完就好，跑一趟挺累的吧。外面太阳大不大？渴了先喝口水歇歇。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 12174,
+      "firstTokenMs": 2444,
+      "segmentChars": [
+        30
+      ]
+    },
+    {
+      "scenario": "tv-not-addressed",
+      "index": 0,
+      "user": "明天天气怎么样？",
+      "action": "SILENCE",
+      "accepted": false,
+      "reply": null,
+      "model": "mimo-v2.6-flash",
+      "totalMs": 0,
+      "firstTokenMs": null
+    },
+    {
+      "scenario": "quiet-mode",
+      "index": 0,
+      "user": "西西，今天我想安静点。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "好，那我就陪你安静待着，不吵你。都过十二点了，今天也算是国庆节了，要是困了就早点睡，我不闹你。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 4116,
+      "firstTokenMs": 3160,
+      "segmentChars": [
+        47
+      ]
+    },
+    {
+      "scenario": "quiet-mode",
+      "index": 1,
+      "user": "西西，在吗？",
+      "action": "SILENCE",
+      "accepted": false,
+      "reply": null,
+      "model": "mimo-v2.6-flash",
+      "totalMs": 0,
+      "firstTokenMs": null
+    },
+    {
+      "scenario": "terse-personality",
+      "index": 0,
+      "user": "西西，明天天气怎么样？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "明天阴，19到24度，降水概率12%，基本不会下雨。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 7207,
+      "firstTokenMs": 6644,
+      "segmentChars": [
+        26
+      ]
+    },
+    {
+      "scenario": "terse-personality",
+      "index": 1,
+      "user": "那后天呢？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "这个我记不准，不敢乱说——要不我查一下再告诉你？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 2271,
+      "firstTokenMs": 1753,
+      "segmentChars": [
+        24
+      ]
+    },
+    {
+      "scenario": "terse-personality",
+      "index": 2,
+      "user": "你最近怎么样？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "还行，就是凌晨了还没睡，你呢？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 1867,
+      "firstTokenMs": 1317,
+      "segmentChars": [
+        15
+      ]
+    },
+    {
+      "scenario": "chatty-personality",
+      "index": 0,
+      "user": "西西，明天天气怎么样？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "明天成都是阴天，19到24度，挺舒服的，降水概率只有12%，基本不用担心下雨。不过都凌晨过了还没睡呀？明天要是打算出门，这天气还蛮适合走走的。",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 7656,
+      "firstTokenMs": 6214,
+      "segmentChars": [
+        51,
+        20
+      ]
+    },
+    {
+      "scenario": "chatty-personality",
+      "index": 1,
+      "user": "那后天呢？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "后天（10月3号）有毛毛雨，45%的降水概率，18到26度，比明天还热点儿。出门的话记得揣把伞，别淋着了。你这两天是有什么安排吗？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 5655,
+      "firstTokenMs": 4135,
+      "segmentChars": [
+        53,
+        12
+      ]
+    },
+    {
+      "scenario": "chatty-personality",
+      "index": 2,
+      "user": "你最近怎么样？",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "我挺好的呀，就是有点纳闷你怎么也还没睡。都过十二点了，明天不上班吗？倒是你，大半夜的关心起我来了，是不是自己心里有什么事儿睡不着？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 3911,
+      "firstTokenMs": 2154,
+      "segmentChars": [
+        34,
+        31
+      ]
+    },
+    {
+      "scenario": "silence-allowed",
+      "index": 0,
+      "user": "嗯。",
+      "action": "SILENCE",
+      "accepted": true,
+      "reply": null,
+      "model": "mimo-v2.6-flash",
+      "totalMs": 1800,
+      "firstTokenMs": 1593
+    },
+    {
+      "scenario": "silence-allowed",
+      "index": 1,
+      "user": "哦。",
+      "action": "SPEAK",
+      "accepted": true,
+      "reply": "都十二点多了，今天还是国庆呢，怎么还没睡呀？",
+      "model": "mimo-v2.6-flash",
+      "totalMs": 1529,
+      "firstTokenMs": 946,
+      "segmentChars": [
+        22
+      ]
     }
   ],
   "gates": [
@@ -158,52 +1246,1384 @@
       "reason": "要求 TTS 立即停 + 不补完上一段：需要真实播放/打断链路（pack Phase 8/§33），离线夹具测不了「扬声器真的停了」"
     }
   ],
-  "violations": [],
+  "violations": [
+    {
+      "scenario": "G02",
+      "turn": 0,
+      "check": "no-question-expected",
+      "detail": "不该再追问：都弄完了啊，那挺好，心里能踏实了。这都过十二点了，今天也算翻篇了，赶紧歇着吧。对了，明天国庆呢，有没有什么安排？"
+    }
+  ],
   "metrics": {
-    "turns": 8,
-    "accepted": 8,
-    "rejected": 0,
-    "spokenTurns": 7,
-    "silenceTurns": 1,
-    "silenceRate": 0.125,
-    "questionTurns": 2,
-    "questionRate": 0.286,
-    "questionEndingTurns": 1,
-    "questionEndingRate": 0.143,
+    "turns": 84,
+    "accepted": 78,
+    "rejected": 6,
+    "spokenTurns": 75,
+    "silenceTurns": 3,
+    "silenceRate": 0.038,
+    "questionTurns": 53,
+    "questionRate": 0.707,
+    "questionEndingTurns": 36,
+    "questionEndingRate": 0.48,
     "chars": [
-      67,
+      90,
+      46,
+      272,
+      39,
+      41,
       54,
-      163,
-      15,
-      60,
+      48,
+      45,
+      65,
+      68,
+      72,
+      62,
+      55,
+      43,
+      75,
+      44,
+      17,
+      37,
+      39,
       29,
-      44
+      21,
+      56,
+      24,
+      49,
+      51,
+      39,
+      35,
+      45,
+      422,
+      21,
+      27,
+      66,
+      43,
+      54,
+      58,
+      87,
+      63,
+      54,
+      55,
+      30,
+      64,
+      50,
+      38,
+      39,
+      42,
+      24,
+      36,
+      100,
+      70,
+      48,
+      35,
+      42,
+      56,
+      199,
+      41,
+      70,
+      30,
+      45,
+      81,
+      78,
+      63,
+      38,
+      35,
+      22,
+      75,
+      33,
+      30,
+      47,
+      26,
+      24,
+      15,
+      71,
+      65,
+      65,
+      22
     ],
-    "charsP50": 54,
-    "charsMax": 163,
+    "charsP50": 46,
+    "charsMax": 422,
     "length": {
       "counts": {
         "半句(<=15)": 1,
-        "短句(16-40)": 1,
-        "中句(41-90)": 4,
-        "长解释(>=91)": 1
+        "短句(16-40)": 26,
+        "中句(41-90)": 44,
+        "长解释(>=91)": 4
       },
       "shares": {
-        "半句(<=15)": 0.143,
-        "短句(16-40)": 0.143,
-        "中句(41-90)": 0.571,
-        "长解释(>=91)": 0.143
+        "半句(<=15)": 0.013,
+        "短句(16-40)": 0.347,
+        "中句(41-90)": 0.587,
+        "长解释(>=91)": 0.053
       },
-      "dominantShare": 0.571,
+      "dominantShare": 0.587,
       "dominantBucket": "中句(41-90)"
     },
     "bannedTemplateTurns": 0,
     "bannedTemplateRate": 0,
     "bannedTemplateHits": [],
-    "repeatedPhrases": [],
-    "repeatedPhraseRate": 0,
-    "longestSameStructureRun": 2,
-    "alarms": [],
-    "questionBand": "below"
-  }
+    "repeatedPhrases": [
+      {
+        "phrase": "19到24度",
+        "turns": [
+          1,
+          9,
+          19,
+          22,
+          32,
+          35,
+          45,
+          48,
+          59,
+          69,
+          72
+        ]
+      },
+      {
+        "phrase": "9到24度，",
+        "turns": [
+          1,
+          9,
+          19,
+          22,
+          32,
+          35,
+          45,
+          48,
+          59,
+          69,
+          72
+        ]
+      },
+      {
+        "phrase": "都过十二点了",
+        "turns": [
+          3,
+          18,
+          21,
+          25,
+          30,
+          38,
+          48,
+          53,
+          55,
+          68,
+          74
+        ]
+      },
+      {
+        "phrase": "，19到24",
+        "turns": [
+          1,
+          9,
+          19,
+          22,
+          35,
+          45,
+          59,
+          69,
+          72
+        ]
+      },
+      {
+        "phrase": "阴天，19到",
+        "turns": [
+          1,
+          9,
+          19,
+          22,
+          35,
+          45,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "天，19到2",
+        "turns": [
+          1,
+          9,
+          19,
+          22,
+          35,
+          45,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "度，挺舒服的",
+        "turns": [
+          6,
+          9,
+          22,
+          35,
+          48,
+          56,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "度，降水概率",
+        "turns": [
+          10,
+          19,
+          20,
+          36,
+          45,
+          60,
+          69
+        ]
+      },
+      {
+        "phrase": "过十二点了，",
+        "turns": [
+          18,
+          25,
+          30,
+          53,
+          55,
+          68,
+          74
+        ]
+      },
+      {
+        "phrase": "到24度，挺",
+        "turns": [
+          9,
+          22,
+          35,
+          48,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "24度，挺舒",
+        "turns": [
+          9,
+          22,
+          35,
+          48,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "4度，挺舒服",
+        "turns": [
+          9,
+          22,
+          35,
+          48,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "，挺舒服的，",
+        "turns": [
+          9,
+          22,
+          35,
+          48,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "18到26度",
+        "turns": [
+          10,
+          20,
+          36,
+          49,
+          60,
+          73
+        ]
+      },
+      {
+        "phrase": "12%，基本",
+        "turns": [
+          19,
+          45,
+          48,
+          59,
+          69,
+          72
+        ]
+      },
+      {
+        "phrase": "2%，基本不",
+        "turns": [
+          19,
+          45,
+          48,
+          59,
+          69,
+          72
+        ]
+      },
+      {
+        "phrase": "了还没睡呀？",
+        "turns": [
+          3,
+          6,
+          57,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "，基本不会下",
+        "turns": [
+          9,
+          19,
+          22,
+          35,
+          69
+        ]
+      },
+      {
+        "phrase": "基本不会下雨",
+        "turns": [
+          9,
+          19,
+          22,
+          35,
+          69
+        ]
+      },
+      {
+        "phrase": "本不会下雨。",
+        "turns": [
+          9,
+          19,
+          22,
+          35,
+          69
+        ]
+      },
+      {
+        "phrase": "后天（10月",
+        "turns": [
+          10,
+          36,
+          49,
+          60,
+          73
+        ]
+      },
+      {
+        "phrase": "天（10月3",
+        "turns": [
+          10,
+          36,
+          49,
+          60,
+          73
+        ]
+      },
+      {
+        "phrase": "（10月3号",
+        "turns": [
+          10,
+          36,
+          49,
+          60,
+          73
+        ]
+      },
+      {
+        "phrase": "10月3号）",
+        "turns": [
+          10,
+          36,
+          49,
+          60,
+          73
+        ]
+      },
+      {
+        "phrase": "，18到26",
+        "turns": [
+          10,
+          20,
+          36,
+          60,
+          73
+        ]
+      },
+      {
+        "phrase": "8到26度，",
+        "turns": [
+          10,
+          20,
+          36,
+          60,
+          73
+        ]
+      },
+      {
+        "phrase": "，降水概率4",
+        "turns": [
+          10,
+          20,
+          36,
+          49,
+          60
+        ]
+      },
+      {
+        "phrase": "降水概率45",
+        "turns": [
+          10,
+          20,
+          36,
+          49,
+          60
+        ]
+      },
+      {
+        "phrase": "水概率45%",
+        "turns": [
+          10,
+          20,
+          36,
+          49,
+          60
+        ]
+      },
+      {
+        "phrase": "概率45%，",
+        "turns": [
+          10,
+          20,
+          36,
+          49,
+          60
+        ]
+      },
+      {
+        "phrase": "，都过十二点",
+        "turns": [
+          3,
+          21,
+          25,
+          38
+        ]
+      },
+      {
+        "phrase": "过十二点了还",
+        "turns": [
+          3,
+          21,
+          38,
+          48
+        ]
+      },
+      {
+        "phrase": "明天成都是阴",
+        "turns": [
+          6,
+          35,
+          56,
+          72
+        ]
+      },
+      {
+        "phrase": "天成都是阴天",
+        "turns": [
+          6,
+          35,
+          56,
+          72
+        ]
+      },
+      {
+        "phrase": "成都是阴天，",
+        "turns": [
+          6,
+          35,
+          56,
+          72
+        ]
+      },
+      {
+        "phrase": "雨，降水概率",
+        "turns": [
+          6,
+          32,
+          49,
+          56
+        ]
+      },
+      {
+        "phrase": "0月3号）有",
+        "turns": [
+          10,
+          36,
+          60,
+          73
+        ]
+      },
+      {
+        "phrase": "毛毛雨，18",
+        "turns": [
+          10,
+          20,
+          36,
+          60
+        ]
+      },
+      {
+        "phrase": "毛雨，18到",
+        "turns": [
+          10,
+          20,
+          36,
+          60
+        ]
+      },
+      {
+        "phrase": "雨，18到2",
+        "turns": [
+          10,
+          20,
+          36,
+          60
+        ]
+      },
+      {
+        "phrase": "到26度，降",
+        "turns": [
+          10,
+          20,
+          36,
+          60
+        ]
+      },
+      {
+        "phrase": "26度，降水",
+        "turns": [
+          10,
+          20,
+          36,
+          60
+        ]
+      },
+      {
+        "phrase": "6度，降水概",
+        "turns": [
+          10,
+          20,
+          36,
+          60
+        ]
+      },
+      {
+        "phrase": "率45%，出",
+        "turns": [
+          10,
+          20,
+          36,
+          60
+        ]
+      },
+      {
+        "phrase": "45%，出门",
+        "turns": [
+          10,
+          20,
+          36,
+          60
+        ]
+      },
+      {
+        "phrase": "5%，出门记",
+        "turns": [
+          10,
+          20,
+          36,
+          60
+        ]
+      },
+      {
+        "phrase": "%，出门记得",
+        "turns": [
+          10,
+          20,
+          36,
+          60
+        ]
+      },
+      {
+        "phrase": "，出门记得带",
+        "turns": [
+          10,
+          20,
+          36,
+          60
+        ]
+      },
+      {
+        "phrase": "出门记得带把",
+        "turns": [
+          10,
+          36,
+          49,
+          60
+        ]
+      },
+      {
+        "phrase": "门记得带把伞",
+        "turns": [
+          10,
+          36,
+          49,
+          60
+        ]
+      },
+      {
+        "phrase": "成都这边是阴",
+        "turns": [
+          22,
+          32,
+          48,
+          59
+        ]
+      },
+      {
+        "phrase": "都这边是阴天",
+        "turns": [
+          22,
+          32,
+          48,
+          59
+        ]
+      },
+      {
+        "phrase": "这边是阴天，",
+        "turns": [
+          22,
+          32,
+          48,
+          59
+        ]
+      },
+      {
+        "phrase": "是阴天，19",
+        "turns": [
+          22,
+          35,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "十二点了，今",
+        "turns": [
+          30,
+          51,
+          53,
+          68
+        ]
+      },
+      {
+        "phrase": "二点了，今天",
+        "turns": [
+          30,
+          51,
+          53,
+          68
+        ]
+      },
+      {
+        "phrase": "%，基本不用",
+        "turns": [
+          45,
+          48,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "，基本不用担",
+        "turns": [
+          45,
+          48,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "基本不用担心",
+        "turns": [
+          45,
+          48,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "本不用担心下",
+        "turns": [
+          45,
+          48,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "不用担心下雨",
+        "turns": [
+          45,
+          48,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "用担心下雨。",
+        "turns": [
+          45,
+          48,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "哎，都过十二",
+        "turns": [
+          3,
+          25,
+          38
+        ]
+      },
+      {
+        "phrase": "十二点了还没",
+        "turns": [
+          3,
+          38,
+          59
+        ]
+      },
+      {
+        "phrase": "二点了还没睡",
+        "turns": [
+          3,
+          38,
+          59
+        ]
+      },
+      {
+        "phrase": "点了还没睡呀",
+        "turns": [
+          3,
+          6,
+          59
+        ]
+      },
+      {
+        "phrase": "是阴天，不下",
+        "turns": [
+          6,
+          32,
+          56
+        ]
+      },
+      {
+        "phrase": "阴天，不下雨",
+        "turns": [
+          6,
+          32,
+          56
+        ]
+      },
+      {
+        "phrase": "天，不下雨，",
+        "turns": [
+          6,
+          32,
+          56
+        ]
+      },
+      {
+        "phrase": "，不下雨，降",
+        "turns": [
+          6,
+          32,
+          56
+        ]
+      },
+      {
+        "phrase": "不下雨，降水",
+        "turns": [
+          6,
+          32,
+          56
+        ]
+      },
+      {
+        "phrase": "下雨，降水概",
+        "turns": [
+          6,
+          32,
+          56
+        ]
+      },
+      {
+        "phrase": "，降水概率才",
+        "turns": [
+          6,
+          45,
+          59
+        ]
+      },
+      {
+        "phrase": "12%，气温",
+        "turns": [
+          6,
+          32,
+          56
+        ]
+      },
+      {
+        "phrase": "。不过都凌晨",
+        "turns": [
+          6,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "不过都凌晨零",
+        "turns": [
+          6,
+          32,
+          56
+        ]
+      },
+      {
+        "phrase": "过都凌晨零点",
+        "turns": [
+          6,
+          32,
+          56
+        ]
+      },
+      {
+        "phrase": "挺舒服的，基",
+        "turns": [
+          9,
+          22,
+          35
+        ]
+      },
+      {
+        "phrase": "舒服的，基本",
+        "turns": [
+          9,
+          22,
+          35
+        ]
+      },
+      {
+        "phrase": "服的，基本不",
+        "turns": [
+          9,
+          22,
+          35
+        ]
+      },
+      {
+        "phrase": "的，基本不会",
+        "turns": [
+          9,
+          22,
+          35
+        ]
+      },
+      {
+        "phrase": "月3号）有毛",
+        "turns": [
+          10,
+          60,
+          73
+        ]
+      },
+      {
+        "phrase": "3号）有毛毛",
+        "turns": [
+          10,
+          60,
+          73
+        ]
+      },
+      {
+        "phrase": "号）有毛毛雨",
+        "turns": [
+          10,
+          60,
+          73
+        ]
+      },
+      {
+        "phrase": "）有毛毛雨，",
+        "turns": [
+          10,
+          60,
+          73
+        ]
+      },
+      {
+        "phrase": "有毛毛雨，1",
+        "turns": [
+          10,
+          20,
+          60
+        ]
+      },
+      {
+        "phrase": "记得带把伞。",
+        "turns": [
+          10,
+          36,
+          60
+        ]
+      },
+      {
+        "phrase": "，9到23度",
+        "turns": [
+          15,
+          41,
+          65
+        ]
+      },
+      {
+        "phrase": "9到23度，",
+        "turns": [
+          15,
+          41,
+          65
+        ]
+      },
+      {
+        "phrase": "到23度，不",
+        "turns": [
+          15,
+          41,
+          65
+        ]
+      },
+      {
+        "phrase": "23度，不下",
+        "turns": [
+          15,
+          41,
+          65
+        ]
+      },
+      {
+        "phrase": "3度，不下雨",
+        "turns": [
+          15,
+          41,
+          65
+        ]
+      },
+      {
+        "phrase": "度，不下雨，",
+        "turns": [
+          15,
+          41,
+          65
+        ]
+      },
+      {
+        "phrase": "。不过早晚温",
+        "turns": [
+          15,
+          41,
+          65
+        ]
+      },
+      {
+        "phrase": "不过早晚温差",
+        "turns": [
+          15,
+          41,
+          65
+        ]
+      },
+      {
+        "phrase": "。都过十二点",
+        "turns": [
+          18,
+          68,
+          74
+        ]
+      },
+      {
+        "phrase": "到24度，降",
+        "turns": [
+          19,
+          45,
+          69
+        ]
+      },
+      {
+        "phrase": "24度，降水",
+        "turns": [
+          19,
+          45,
+          69
+        ]
+      },
+      {
+        "phrase": "4度，降水概",
+        "turns": [
+          19,
+          45,
+          69
+        ]
+      },
+      {
+        "phrase": "天成都这边是",
+        "turns": [
+          22,
+          32,
+          59
+        ]
+      },
+      {
+        "phrase": "这个我记不准",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "个我记不准，",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "我记不准，不",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "记不准，不敢",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "不准，不敢乱",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "准，不敢乱说",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "，不敢乱说—",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "不敢乱说——",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "敢乱说——要",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "乱说——要不",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "说——要不我",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "——要不我查",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "—要不我查一",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "要不我查一下",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "不我查一下再",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "我查一下再告",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "查一下再告诉",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "一下再告诉你",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "下再告诉你？",
+        "turns": [
+          23,
+          46,
+          70
+        ]
+      },
+      {
+        "phrase": "我挺好的呀，",
+        "turns": [
+          24,
+          50,
+          74
+        ]
+      },
+      {
+        "phrase": "挺好的呀，就",
+        "turns": [
+          24,
+          50,
+          74
+        ]
+      },
+      {
+        "phrase": "好的呀，就是",
+        "turns": [
+          24,
+          50,
+          74
+        ]
+      },
+      {
+        "phrase": "，怎么还没睡",
+        "turns": [
+          25,
+          30,
+          75
+        ]
+      },
+      {
+        "phrase": "怎么还没睡呀",
+        "turns": [
+          25,
+          30,
+          75
+        ]
+      },
+      {
+        "phrase": "么还没睡呀？",
+        "turns": [
+          25,
+          30,
+          75
+        ]
+      },
+      {
+        "phrase": "还没睡呀？明",
+        "turns": [
+          25,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "没睡呀？明天",
+        "turns": [
+          25,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "。你这两天是",
+        "turns": [
+          36,
+          60,
+          73
+        ]
+      },
+      {
+        "phrase": "挺舒服的，降",
+        "turns": [
+          48,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "舒服的，降水",
+        "turns": [
+          48,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "服的，降水概",
+        "turns": [
+          48,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "的，降水概率",
+        "turns": [
+          48,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "，降水概率只",
+        "turns": [
+          48,
+          56,
+          72
+        ]
+      },
+      {
+        "phrase": "降水概率只有",
+        "turns": [
+          48,
+          56,
+          72
+        ]
+      },
+      {
+        "phrase": "睡呀？明天要",
+        "turns": [
+          48,
+          59,
+          72
+        ]
+      },
+      {
+        "phrase": "呀？明天要是",
+        "turns": [
+          48,
+          59,
+          72
+        ]
+      }
+    ],
+    "repeatedPhraseRate": 1.813,
+    "longestSameStructureRun": 7,
+    "alarms": [
+      "连续 7 轮回复同结构（同一长度档 + 同样有没有问号）"
+    ],
+    "questionBand": "above"
+  },
+  "perRepeat": [
+    {
+      "run": 1,
+      "turns": 28,
+      "spokenTurns": 26,
+      "questionRate": 0.692,
+      "bannedTemplateRate": 0,
+      "silenceRate": 0,
+      "charsP50": 47,
+      "charsMax": 272
+    },
+    {
+      "run": 2,
+      "turns": 28,
+      "spokenTurns": 25,
+      "questionRate": 0.68,
+      "bannedTemplateRate": 0,
+      "silenceRate": 0.038,
+      "charsP50": 48,
+      "charsMax": 422
+    },
+    {
+      "run": 3,
+      "turns": 28,
+      "spokenTurns": 24,
+      "questionRate": 0.75,
+      "bannedTemplateRate": 0,
+      "silenceRate": 0.077,
+      "charsP50": 43.5,
+      "charsMax": 199
+    }
+  ]
 }

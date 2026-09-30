@@ -138,6 +138,25 @@ test('repetition is measured two ways: repeated phrases and same-structure runs'
   assert.ok(sameStructure.alarms.some((alarm) => alarm.includes('同结构')));
 });
 
+test('delivered segments are summarised when present, and reported as unmeasured when absent', () => {
+  const withSegments = measureRealism([
+    turn({ index: 0, reply: '一段。'.repeat(40), segmentChars: [60, 60, 40] }),
+    turn({ index: 1, reply: '短。', segmentChars: [2] }),
+  ]);
+  assert.equal(withSegments.segments.n, 2);
+  assert.equal(withSegments.segments.perTurnMean, 2);
+  assert.deepEqual(withSegments.segments.perTurnHistogram, { '3段': 1, '1段': 1 });
+  assert.equal(withSegments.segments.segmentCharsMax, 60);
+  assert.equal(withSegments.segments.overLimitTurns, 0);
+
+  const overflow = measureRelismUnmeasured();
+  assert.equal(overflow.segments.n, 0, '没有分段数据时必须报「未测」而不是 0 段');
+});
+
+function measureRelismUnmeasured() {
+  return measureRealism([turn({ index: 0, reply: '没有分段数据的一轮回复。' })]);
+}
+
 test('the golden corpus carries all twelve pack entries and never invents a reason-free skip', () => {
   assert.equal(GOLDEN_CONVERSATIONS.length, 12, 'pack 的第一批是 G01–G12');
   const ids = GOLDEN_CONVERSATIONS.map((golden) => golden.id);

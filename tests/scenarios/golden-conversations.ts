@@ -173,7 +173,9 @@ export const GOLDEN_CONVERSATIONS: readonly GoldenConversation[] = Object.freeze
     ],
     goodExample: '回来了。你上午去看的那个老朋友怎么样？',
     badExample: { text: '欢迎回家！今天过得怎么样呀？', detect: 'none', note: '泛泛的热情开场——词表抓不到，只能人工/评审判' },
-    note: '只验证「门禁层允许带具体话题开口」；消息内容是否具体属 Phase 3/5 的内容生成，本任务未测',
+    note:
+      '只验证「门禁层允许带具体话题开口」；消息内容是否具体属 Phase 3/5 的内容生成，本任务未测。' +
+      '与 G12 同理：门禁语义若被 ADR-0011 改动，这条期望要一起重审。',
   },
   {
     id: 'G08',
@@ -256,7 +258,11 @@ export const GOLDEN_CONVERSATIONS: readonly GoldenConversation[] = Object.freeze
         expectedReasonCode: 'TRIGGER_DISABLED',
       },
     ],
-    note: '期望 SILENCE 的机械镜像：门禁必须挡住「刚聊过」与「没有话题来源」两种硬聊',
+    note:
+      '期望 SILENCE 的机械镜像：门禁必须挡住「刚聊过」与「没有话题来源」两种硬聊。' +
+      '注意：本用例断言的是 ADR-0009 时代的当前硬门禁实现；ADR-0011（2026-10-01）把主动决策改成' +
+      '「硬底线 + 模型读空气」，冷却/话题重复是否仍属硬底线要由 Phase 5 重新审定——改完后这两条期望必须重审，' +
+      '不要把它们当成永久契约。',
   },
 ]);
 
