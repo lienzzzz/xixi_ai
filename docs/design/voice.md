@@ -232,30 +232,41 @@ recon 实测「夹具电平（−24.6 dBFS）下麦克风只比噪声底高 0.8�
 
 **两张表的出处不同，别混引**（这是 t7 评审 F1 的修正）：
 - **相似度 / 检出 / 判定**来自真实 ASR 运行 `data/voice/verify-voice-noise.json`；
-- **端点延迟 / VAD 起点延迟**来自 VAD 网格 `data/voice/frontend-vad-grid.json` 的 **120 Hz 行**。
-  `verify-voice-noise.json` 的 `tiers[].meanEndPointDelayMs` 实测是 **0 / 0 / 0 / −16 / −96 / null**：
-  它是**被截断**的 ASR 切片口径（`min(speech.endMs, cleanEndMs)`，恒 ≤0），**不能**用来引用端点延迟
-  ——这正是 F2 修掉的结构问题。F2 之后该文件同时给出不截断的 `vadEndpointDelayMs`
-  （= `speech.endMs − energyEndMs`，与网格同一定义）与 `tiers[].meanVadEndpointDelayMs` / `maxVadEndpointDelayMs`。
-  下表的端点延迟列因此写成**逐条值（最大）**，而不是均值。
-- **两条命令能各自复现**（都不花钱）：
-  `node scripts/verify-voice-noise.ts --fake --tiers 6` 现在报出
-  `direct-question 1056 / followup-turn 1376 / longer-turn 1472 / tv-dialogue 1088`（均值 1248、最大 1472，
-  与下表逐格一致）；修复前这一列恒为 0。
+- **端点延迟 / VAD 起点延迟**来自同一次运行的 `clips[].vadEndpointDelayMs`（F2 之后该字段不再被截断）。
+  修复前用的是被截断的 `clips[].endpointDelayMs`（`min(speech.endMs, cleanEndMs)`，恒 ≤0），
+  `tiers[].meanEndPointDelayMs` 实测是 **0 / 0 / 0 / −16 / −96 / null** —— 那是 ASR 切片口径，
+  **不能**用来引用端点延迟（这正是 F2 修掉的结构问题）。现在文件同时给出
+  `vadEndpointDelayMs` / `tiers[].meanVadEndpointDelayMs` / `maxVadEndpointDelayMs`。
+  下表的端点延迟列写成**逐条值（最大）**，而不是均值。
+- **两条命令能各自复现**（都不花钱的那条也能复现端点延迟）：
+  `node scripts/verify-voice-noise.ts --fake --tiers 6` 报出
+  `direct-question 1056 / followup-turn 1376 / longer-turn 1472 / tv-dialogue 1088`（与下表 6 dB 档逐格一致）；
   `python -m voice_edge.segment tests/audio-fixtures/noisy/direct-question-snr6db.wav` 报
-  `segments[0].endpointDelayMs = 1056`。
+  `segments[0].endpointDelayMs = 1056`。修复前 `--fake` 这一列恒为 0。
 
 2026-09-30 实测（相似度列：`data/voice/verify-voice-noise.json`；端点/起点列：`frontend-vad-grid.json` 120 Hz 行。
 `backchannel` 不计入：Silero 本来就看不见「嗯。」，§2）：
 
 | SNR 档 | 检出 | 平均字符相似度 | 端点延迟逐条值（最大） | VAD 起点延迟逐条值 | 判定 |
 |---|---|---|---|---|---|
-| 干净 | 4/4 | 0.800 | 600 / 512 / 512 / 480 → 最大 600（`frontend-vad-grid.json` 干净行） | 0 ms | PASS |
-| 18 dB | 4/4 | 0.841 | 640 ms（4 条皆 640 → 最大 640） | −72 ms | PASS |
-| 6 dB | 4/4 | 0.841 | 1056 / 1376 / 1472 / 1088 → **最大 1472**（4 条均值 1248） | −56 ms | PASS |
-| **3 dB** | **4/4** | **0.805** | **仅 1 条有效：1088**（其余 3 条 `endpointDelayMs = null`，不是 640） | −40 ms | **PASS** |
-| 0 dB | 4/4 | 0.491 | 0 条有效（全部 null） | 344 ms | FAIL（2 条相似度 <0.6） |
+| 干净 | 4/4 | 0.800 | 728 / 704 / 864 / 704 → 最大 864（均值 750） | 0 ms | PASS |
+| 18 dB | 4/4 | 0.841 | 640 / 640 / 640 / 640 → 最大 640 | −72 ms | PASS |
+| 6 dB | 4/4 | 0.841 | 1056 / 1376 / 1472 / 1088 → **最大 1472**（均值 1248） | −56 ms | PASS |
+| **3 dB** | **4/4** | **0.805** | 104 / 128 / −64 / 96 → 最大 128（均值 66） | −40 ms | **PASS** |
+| 0 dB | 4/4 | 0.491 | 72 / −32 / −352 / 64 → 最大 72（均值 −62） | 344 ms | FAIL（2 条相似度 <0.6） |
 | −6 dB | 0/4 | — | 0 条有效（全部漏检） | — | FAIL（全部漏检） |
+
+**端点延迟这一列的当前实测（`node scripts/verify-voice-noise.ts`，逐条值来自 `clips[].vadEndpointDelayMs`；
+F2 修复后该列**不再恒为 0**）：**
+- **离线与真实 ASR 两次运行给出完全相同的值**（端点延迟只由 VAD + 能量门限决定，与 ASR 无关）：
+  离线 `--fake --tiers 6` 与真实 ASR 都得到 6 dB 档 1056/1376/1472/1088、干净档 728/704/864/704。
+  所以「不花钱也能复核这一列」：`node scripts/verify-voice-noise.ts --fake --tiers 6`。
+- **与历史网格（`frontend-vad-grid.json`）的差异要说明**：网格记录的 6 dB 档 1056/1376/1088/1472 与当前一致，
+  但 3 dB 档网格只有 `direct-question` 一条有效（1088），当前 4 条都有值（104/128/−64/96）；
+  0 dB 档网格全为 null，当前 4 条都有值。差异来自 `voice_edge.segment` 在 F2 前后对
+  `energyEndMs`（校准门限口径）的取值变化——**以当前实测为准**，网格那份是修复前的历史记录。
+- **判据仍然全部通过**：`ENDPOINT_DELAY > 1500 ms` 现在可达（最大值 1472 ms 距门限仅 28 ms），
+  但没有一条超限——所以 6 dB 档仍是 PASS，而这条判据从此是**真的在测东西**。
 
 逐条失败样本（保留原样，不删）：0 dB 档 `followup-turn` →「嗯。」（相似度 0）、`tv-dialogue` →「怎么了？」（0.286）；
 −6 dB 档 4 条全部 `NO_SPEECH_DETECTED`。
