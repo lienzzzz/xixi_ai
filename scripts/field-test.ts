@@ -2782,6 +2782,13 @@ async function main(argv: string[]): Promise<number> {
     const index = argv.indexOf(flag);
     return index >= 0 && argv[index + 1] !== undefined ? (argv[index + 1] as string) : fallback;
   };
+  if (argv.includes('--help') || argv.includes('-h')) {
+    // Printed *before* anything binds a port on purpose: `--help` must never start
+    // the console (it used to start it, which made the flag look broken and could
+    // collide with an already-running field test).
+    console.log(FIELD_TEST_USAGE);
+    return 0;
+  }
   if (argv.includes('--self-test')) {
     console.log('现场测试控制台 · 离线自检（不碰麦克风/摄像头/网络）\n');
     const result = await runSelfTest({ log: (line) => console.log(line) });
