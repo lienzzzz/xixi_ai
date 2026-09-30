@@ -27,7 +27,8 @@
  * 见 `docs/design/perception.md` §8.3。
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { validateEvent, type EventEnvelope } from '@xixi/contracts';
@@ -75,7 +76,7 @@ const USAGE = `摄像头在场检测验收（M6）
   node scripts/verify-camera-presence.ts --seconds 15
   node scripts/verify-camera-presence.ts --self-test
   node scripts/verify-camera-presence.ts --seconds 40 --require-transition
-  node scripts/verify-camera-presence.ts --live --seconds 10     实时预览路径（控制台「启用」用的同一条：帧带画面、事件照常落库、磁盘上不留图像文件）`;
+  node scripts/verify-camera-presence.ts --live --seconds 10     实时预览路径（控制台「启用」用的同一条：帧只经内存与 localhost、在场事件照常落库；会打印图像文件的扫描范围）`;
 
 /** Every accepted option. Anything else is refused loudly instead of being ignored. */
 const OPTIONS_WITH_VALUE = new Set([
@@ -198,6 +199,12 @@ const store = openXixiStore({ dbPath });
 const dbFile = store.dbPath;
 const before = store.eventCount();
 const beforePresence = store.readEvents({ type: 'presence.changed', limit: Number.MAX_SAFE_INTEGER }).length;
+/**
+ * When this run started, in the filesystem's clock: the image-file check (t81) only counts files
+ * created/changed after this instant, so pre-existing images in `data/` are not mistaken for
+ * something the live path wrote.
+ */
+const imageBaselineAtMs = Date.now();
 
 interface FrameRecord {
   frame: number;
@@ -285,7 +292,9 @@ const pythonExit = await new Promise<number>((resolve) => {
   child.stderr.setEncoding('utf8');
   if (liveMode) {
     // The live loop runs until its stdin closes; this CLI stops it after --seconds (the console
-    // stops it with the 停用 button instead).
+    // stops it with the 停用 button instead). Close stdin first and give the child a moment to
+    // finish its loop and print `live_summary` — on Windows `kill()` maps to TerminateProcess, so
+    // killing immediately would destroy the very evidence we want (the child's own final report).
     setTimeout(() => {
       stoppedForLive = true;
       try {
@@ -293,7 +302,8 @@ const pythonExit = await new Promise<number>((resolve) => {
       } catch {
         /* already gone */
       }
-      child.kill();
+      const hardStop = setTimeout(() => child.kill(), 2500);
+      child.on('close', () => clearTimeout(hardStop));
     }, Math.max(1, seconds) * 1000);
   }
   child.stdout.on('data', (chunk: string) => {
@@ -341,15 +351,22 @@ if (pythonExit === 3) {
   process.exit(3);
 }
 if (pythonExit !== 0 && !(liveMode && stoppedForLive)) {
-  // In `--live` mode we stop the child on purpose after `--seconds`; on Windows a killed process
-  // reports exit code 1 (no signal marker), which is a successful stop, not a failure.
   console.error(`摄像头在场检测验收 FAILED：perception-edge 退出码 ${pythonExit}\n${stderrTail.trim()}`);
   process.exit(1);
 }
+// 约定（t81 写进文档：docs/design/perception.md §7.1）：`--live` 由**我们**在 --seconds 之后主动停
+// （先关 stdin 再 SIGTERM）。Windows 上被终止的子进程报 exit 1、没有信号标记——这是正常停止，
+// 不是失败；漏掉这一行的调用方（或评审）会把「停用」误报成验收失败。
+if (liveMode && stoppedForLive && pythonExit !== 0) {
+  console.log(`（正常停止：子进程被本脚本停掉，Windows 上返回 exit ${pythonExit}；按约定不算失败。）`);
+}
 
 if (liveMode) {
-  // t78: the same check for the console's 「启用」 path — frames must arrive *with a picture*, the
-  // picture must stay in memory (nothing on disk), and the presence events must still be written.
+  // t78/t81: the same check for the console's 「启用」 path — frames must arrive *with a picture*,
+  // the picture must stay in memory (nothing on disk), and the presence events must still be
+  // written. 口径（t81 起写清）：
+  //   * 「不保存图像」= 画面只经内存与 localhost；**在场事件照常写库**（事件才是产品）。
+  //   * 「0 个图像文件」只对下面列出的扫描范围成立，扫描范围会被打印出来（以前只扫了库目录）。
   const withPicture = liveFrames.filter((frame) => typeof frame.jpeg === 'string' && String(frame.jpeg).length > 0);
   const bytes = withPicture.map((frame) => Number(frame.jpeg_bytes ?? 0));
   const liveProblems: string[] = [];
@@ -360,9 +377,21 @@ if (liveMode) {
   if (bytes.some((value) => value <= 0)) liveProblems.push('有帧的 jpeg_bytes 是 0');
   const eventsWritten = after - before;
   if (eventsWritten <= 0) liveProblems.push('实时模式的 presence 事件没有落库（world_state 投影不会更新）');
-  const imageFiles: string[] = [];
-  const walk = (dir: string): void => {
-    let entries; 
+  /** Everywhere a frame could plausibly land; each entry is a directory we really walked. */
+  const scanScopes = [
+    dirname(dbPath),
+    join(REPO_ROOT, 'data'),
+    PERCEPTION_DIR,
+    tmpdir(),
+  ];
+  const imageFiles: { readonly scope: string; readonly file: string }[] = [];
+  /** Only files created/changed **by this run** count: `data/` legitimately holds older images
+   * (the YuNet self-check images and the T0 recon frames). Scanning for "any image" would fail on
+   * files that were already there — the check must be about what this run wrote. The baseline is
+   * taken before the child starts (see `imageBaselineAtMs`). */
+  const runStartedAtMs = imageBaselineAtMs;
+  const walk = (scope: string, dir: string, recursive: boolean): void => {
+    let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
     } catch {
@@ -370,25 +399,43 @@ if (liveMode) {
     }
     for (const entry of entries) {
       const full = join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (/\.(jpe?g|png|bmp|webp)$/i.test(entry.name)) imageFiles.push(full);
+      if (entry.isDirectory()) {
+        if (recursive && entry.name !== 'node_modules' && entry.name !== '.git') walk(scope, full, recursive);
+        continue;
+      }
+      if (!/\.(jpe?g|png|bmp|webp)$/i.test(entry.name)) continue;
+      try {
+        if (statSync(full).mtimeMs < runStartedAtMs) continue;
+      } catch {
+        continue;
+      }
+      imageFiles.push({ scope, file: full });
     }
   };
-  walk(dirname(dbPath));
-  if (imageFiles.length > 0) liveProblems.push(`实时模式在 ${dirname(dbPath)} 下留下了图像文件：${imageFiles.join(', ')}`);
+  for (const scope of scanScopes) walk(scope, scope, scope !== tmpdir());
+  // What the child itself reports — the field really exists in `live_summary` (t81), so this is a
+  // checked statement rather than an outside guess. A hard kill can lose the summary; say so
+  // instead of pretending the child reported anything.
+  const selfReport = summary === null ? null : ((summary as unknown as { images_written?: number }).images_written ?? null);
+  if (imageFiles.length > 0) {
+    liveProblems.push(`实时模式在这些范围内留下了图像文件：${imageFiles.map((row) => `${row.file}（${row.scope}）`).join(', ')}`);
+  }
+  if (selfReport !== null && selfReport !== 0) liveProblems.push(`子进程 live_summary 自报 images_written=${selfReport}（应为 0）`);
+  const report = selfReport === null ? '（没等到 live_summary：子进程被强杀或还没打印）' : String(selfReport);
   console.log(
     [
       `实时模式（--live）结果：收到 ${liveFrames.length} 帧，其中 ${withPicture.length} 帧带画面，`,
-      `平均 ${bytes.length > 0 ? Math.round(bytes.reduce((sum, value) => sum + value, 0) / bytes.length / 1024) : 0} KB/帧，`,
-      `presence 事件落库 ${eventsWritten} 条，磁盘上的图像文件 ${imageFiles.length} 个（必须是 0）。`,
-      `解释器：${python}；库：${dbFile}（画面只在内存里，不写文件、不上传）。`,
+      `平均 ${bytes.length > 0 ? Math.round(bytes.reduce((sum, value) => sum + value, 0) / bytes.length / 1024) : 0} KB/帧；`,
+      `presence 事件落库 ${eventsWritten} 条（事件照常入库，这是设计）；子进程 live_summary 自报 images_written=${report}。`,
+      `图像文件扫描范围（共 ${scanScopes.length} 处，只看本次运行新建/改动的，命中 ${imageFiles.length} 个，必须是 0）：${scanScopes.join('；')}`,
+      `解释器：${python}；库：${dbFile}。`,
     ].join('\n'),
   );
   if (liveProblems.length > 0) {
     console.error(['实时模式 FAILED：', ...liveProblems.map((row) => `  - ${row}`)].join('\n'));
     process.exit(1);
   }
-  console.log('实时模式 OK：画面能到页面、事件照常落库、磁盘上没有图像文件。');
+  console.log('实时模式 OK：画面只经内存与 localhost 到页面、在场事件照常入库、上述范围内没有图像文件。');
   process.exit(0);
 }
 

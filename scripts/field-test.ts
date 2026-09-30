@@ -3346,8 +3346,17 @@ export interface LiveCameraRunner {
   ): LiveCameraHandle;
 }
 
+/**
+ * The privacy sentence both pages show for the live picture (t78, reworded in t81).
+ *
+ * It has to be exact in both directions: **no image is saved** (a frame only ever travels through
+ * memory and localhost) — *and* the presence events are still written to the local store, because
+ * events are the product and the picture is only how you get to look at the camera. The first
+ * version said 「不落盘」 without qualifying it, which read as "nothing is written at all".
+ */
 export const LIVE_PRIVACY_NOTE =
-  '摄像头画面只在内存里显示：控制台把每一帧解码后原样发给这个页面，不写文件、不上传、不落盘；关掉「启用」后连进程一起退出。';
+  '摄像头画面不保存图像：每一帧只在内存里编码、经 localhost 发给这个页面，不产生图像文件、不上传；' +
+  '但**在场事件（presence.changed）与 world_state 投影照常写进本地库**——事件才是产品，画面只是给你看的。关掉「启用」后子进程一起退出。';
 
 /**
  * The live camera process + the最新一帧 it produced (t78).
@@ -3641,18 +3650,24 @@ export function createPerceptionLiveRunner(options: {
       return {
         pid: child.pid ?? -1,
         kill: () => {
-          // Close the pipe first (the child stops on stdin EOF), then terminate: the camera is
-          // released either way, and a half-dead child cannot keep the device busy.
+          // Close the pipe first: the child's own watcher stops the loop on stdin EOF, flushes
+          // `live_summary` and exits — that is the orderly path. Only if it is still alive after a
+          // couple of seconds do we terminate it (Windows `kill()` is TerminateProcess, which gives
+          // the child no chance to finish, so it must not be the first move). Either way the camera
+          // gets released: 停用 must never leave the device busy.
           try {
             child.stdin?.end();
           } catch {
             /* the pipe may already be gone */
           }
-          try {
-            child.kill('SIGTERM');
-          } catch {
-            /* already dead */
-          }
+          const hardStop = setTimeout(() => {
+            try {
+              child.kill('SIGTERM');
+            } catch {
+              /* already dead */
+            }
+          }, 2500);
+          child.once('exit', () => clearTimeout(hardStop));
         },
         write: (line: string) => {
           try {
@@ -4888,8 +4903,8 @@ function pxLiveSensors(payload) {
   if (img && frame && frame.dataUrl) img.src = frame.dataUrl;
   if (note) {
     note.textContent = frame
-      ? '第 ' + frame.frameIndex + ' 帧 · ' + frame.width + 'x' + frame.height + ' · ' + Math.round(frame.jpegBytes / 1024) + 'KB · 检测耗时 ' + frame.detectMs.toFixed(1) + 'ms · ' + new Date(frame.at).toLocaleTimeString() + '（画面只在内存里，不落盘、不上传）'
-      : (payload.status.child.running ? '正在等第一帧…' : '未启用：点上面的「启用」开始——画面只在内存里显示，不写任何文件。');
+      ? '第 ' + frame.frameIndex + ' 帧 · ' + frame.width + 'x' + frame.height + ' · ' + Math.round(frame.jpegBytes / 1024) + 'KB · 检测耗时 ' + frame.detectMs.toFixed(1) + 'ms · ' + new Date(frame.at).toLocaleTimeString() + '（不保存图像：只在内存与 localhost；在场事件照常入库）'
+      : (payload.status.child.running ? '正在等第一帧…' : '未启用：点上面的「启用」开始——画面只在内存里显示，不产生任何图像文件。');
   }
   var frames = document.getElementById('px-live-frames');
   var frameNote = document.getElementById('px-live-frame-note');
@@ -5142,7 +5157,7 @@ ${proactivePanelHtml()}
     <section class="card">
       <h2>隐私与保留策略</h2>
       <div id="privacy-detail" class="muted">加载中…</div>
-      <div class="muted" style="margin-top:8px">原始整段录音<b>不落盘</b>：它只在系统临时目录里存在到 VAD 结束，随后立即删除；没有语音时磁盘上不会留下任何录音。语音段只在配置明确要求时才写入 <code>data/voice-web/</code>，并按保留期自动清理。摄像头画面同样<b>只在内存里</b>：这一页的每一帧都不写文件、不上传。</div>
+      <div class="muted" style="margin-top:8px">原始整段录音<b>不落盘</b>：它只在系统临时目录里存在到 VAD 结束，随后立即删除；没有语音时磁盘上不会留下任何录音。语音段只在配置明确要求时才写入 <code>data/voice-web/</code>，并按保留期自动清理。摄像头同理<b>不保存图像</b>：这一页的每一帧都只在内存与 localhost 之间，不产生图像文件、不上传；<b>但摄像头产生的在场事件（presence.changed 与 world_state 投影）会照常写进本地库</b>——事件才是产品，画面只是给你看的。</div>
     </section>
   </div>
 
@@ -5926,6 +5941,7 @@ const FIELD_TEST_USAGE = `西西 · 现场测试控制台 —— 用法
 环境变量：XIXI_FIELD_PORT 默认端口；XIXI_PYTHON 语音 VAD 用的 Python；
           XIXI_PROBE_PYTHON / XIXI_AUDIO_PYTHON 设备探测与声学回环用的 Python（默认 .venvs/field-probe 与 .venvs/voice-livekit）。
 隐私：整段录音不落盘（只在系统临时目录存在到 VAD 结束，随后删除），语音段仅在 config 授权时保留；
+      摄像头「启用」后画面不保存图像（每帧只经内存与 localhost 送到本机页面），但在场事件与 world_state 照常写本地库；
       详见页面「隐私与保留策略」一节与 config/xixi.yaml 的 privacy / memory 字段。`;
 
 /** One parse of the console's command line: mode + every switch it understands. */

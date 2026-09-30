@@ -12,6 +12,19 @@ The loop prints one JSON object per line: `frame` records (evidence, for measure
 `event` records (the `presence.changed` events, contract-validated) and one final
 `summary`. Nothing is uploaded and no image is written: frame data dies with the process.
 
+`--live` (t78, used by the field-test console's 「启用」 button) keeps the same loop but streams
+the picture to the caller: one `frame` line per sampled frame, each carrying a base64 JPEG
+(`cv2.imencode`, memory only — `images_written` stays 0 and `image_sinks` is `stdout:base64-jpeg`).
+Two consequences worth writing down:
+
+* **The picture is not saved, the events are.** What gets persisted is exactly what always did:
+  `presence.changed` events plus the `world_state` projection (that is the product). The frame is
+  only how the local page gets to *see* the camera, over localhost.
+* **The caller stops it.** The live loop has no `--seconds`: it ends when its stdin closes or it is
+  terminated. On Windows a killed process reports exit code 1 with no signal marker, so a stop
+  initiated by the caller looks like a failure to a naive check — treat "we killed it ourselves"
+  as a normal stop (see `scripts/verify-camera-presence.ts --live` and docs/design/perception.md §7).
+
 Privacy note, stated once and enforced by construction: this module has no HTTP client, no
 socket, and no upload path. `semantic_hook` is the *only* place where a future "send one
 screenshot to a multimodal model on demand" path could live, and it is deliberately
@@ -423,7 +436,26 @@ def build_live_emitter(options: dict[str, Any], source: Callable[[], None] | Non
     watcher.start()
 
     def report() -> None:
-        print(json.dumps({"type": "live_summary", "frames_emitted": counter["emitted"], "frames_skipped": counter["skipped"]}), flush=True)
+        # `images_written` is 0 **by construction**, and that is checkable rather than a promise:
+        # this module's only image call is `cv2.imencode` (memory), and the package contains no
+        # `imwrite` / `VideoWriter` / binary file write —
+        #   git grep -n "imwrite\|VideoWriter" -- services/perception-edge/perception_edge
+        # prints nothing. The field exists so a caller (the console, a verification script) does
+        # not have to trust a directory scan of its own.
+        print(
+            json.dumps(
+                {
+                    "type": "live_summary",
+                    "frames_emitted": counter["emitted"],
+                    "frames_skipped": counter["skipped"],
+                    "images_written": 0,
+                    "image_sinks": ["stdout:base64-jpeg"],
+                    "note": "画面不保存：每帧只在内存里编码成 base64 JPEG 写 stdout，交给本机页面显示；在场事件照常写库。",
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
 
     return on_frame, should_stop, report
 

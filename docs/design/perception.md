@@ -165,13 +165,39 @@ TypeScript 侧再用权威的 `validateEvent()` 复核一遍（`tests/perception
 
 ## 7. 隐私边界：连续视频不出本机
 
+**一句话口径（t81 起照此写）**：摄像头路径**不保存图像**——画面只经内存与本机（`localhost` /
+进程 stdout）走一遍；**但会写入在场事件**（`presence.changed` 与 `world_state` 投影），那是设计，
+事件才是产品。说「不落盘」时必须带上后半句，否则读者会以为摄像头什么记录都不留。
+
 | 保证 | 怎么做到的（可核查） |
 |---|---|
 | 没有网络客户端 | 服务里没有 `requests`/`httpx`/`socket`/`aiohttp`/`websockets` 的 import（测试用 AST 扫描断言） |
-| 画面不落盘 | 帧只在内存中存活一次 `detect()` 调用；测试断言服务目录与测试目录里没有图片/视频文件 |
+| 不保存图像 | 帧只在内存中存活一次 `detect()` 调用；`--live` 也只是 `cv2.imencode` 成 base64 写 stdout。包内没有 `imwrite`/`VideoWriter`：`git grep -n "imwrite\|VideoWriter" -- services/perception-edge/perception_edge` 无输出 |
+| 会写入事件（这是设计） | 每次状态转换追加 `presence.changed`，并在同一事务里更新 `world_state.presence.home`（见 §6）。**库里没有图像**，只有 `{present, source_detail}` 这行文字摘要 |
 | 事件不含图像 | payload 只有 `{present, source_detail}`；`source_detail` 是一行文字摘要 |
 | 语义分析没有偷偷调用 | `SemanticAnalysisHook.on_presence_changed()` 默认什么都不做；打开 `enabled` 会**抛错**；`capture_snapshot()` 直接抛 `SemanticAnalysisNotImplemented` |
-| 每次运行自报边界 | `summary.privacy` = `{video_uploaded: false, stills_uploaded: 0, frames_written_to_disk: 0, network_clients: 0, local_only: true}` |
+| 每次运行自报边界（常规 `run()`） | `summary.privacy` = `{video_uploaded: false, stills_uploaded: 0, frames_written_to_disk: 0, network_clients: 0, local_only: true}` |
+| 每次直播自报边界（`--live`） | `live_summary` = `{frames_emitted, frames_skipped, images_written: 0, image_sinks: ["stdout:base64-jpeg"], note}`。`images_written` 是**代码里的常量**（不是外部扫描的结论）：本模块只有 `imencode`，没有写图调用 |
+
+### 7.1 `--live`（控制台「启用」用的那条路径）：画面怎么走、事件怎么写
+
+```
+摄像头 → FrameGrabber → detect/debounce → ├─ 状态转换 → presence.changed + world_state（写库，一个事务）
+                                          └─ 每帧 → cv2.imencode('.jpg') → base64 → stdout JSON 行
+                                                                                  ↓
+                                                    控制台（内存里只留最新一帧）→ 页面 img src=data:image/jpeg;base64,…
+```
+
+- 控制台**只保留最新一帧**（旧帧直接丢弃），所以开着很久也不涨内存。
+- 「0 个图像文件」这类结论必须写清扫描范围。`scripts/verify-camera-presence.ts --live`
+  会打印它真走过的四处：数据库所在目录、仓库 `data/`、`services/perception-edge/`、
+  系统临时目录（临时目录只算本次运行前后新建/改动的文件，否则别人的截图会误伤）。
+  更早的版本只扫了数据库所在目录，措辞却是「磁盘上的图像文件 0 个」——范围与结论不匹配。
+- **停用：被我们杀掉的子进程在 Windows 上返回 exit 1**（没有信号标记）。这是「主动停的」，
+  不是失败；调用方（控制台、`verify-camera-presence.ts --live`）必须按正常停止处理，否则停用会被
+  误报成验收失败。参见 `services/perception-edge/perception_edge/run.py` 的模块注释。
+- 谁负责停：`--live` 没有 `--seconds`（一直跑到 stdin 关闭或被终止）。控制台先关 stdin 再
+  `SIGTERM`，所以摄像头一定会被释放。
 
 「截图交多模态模型」的接口留在 `services/perception-edge/perception_edge/semantic.py`，
 并在文件头写清了将来实现必须遵守的五条（按需触发、单帧、可审计、结果带 TTL、默认关闭）。
