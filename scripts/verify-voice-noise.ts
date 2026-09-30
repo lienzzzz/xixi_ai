@@ -40,7 +40,7 @@
  * restores the old one-shot behaviour; the report records which path was used (`seed.vadProcess`).
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -334,6 +334,12 @@ class VadWorker {
     // caller can fall back instead of failing the first real clip.
     const ping = await worker.request({ ping: true }, 60_000);
     if (ping.pong !== true) throw new Error('VAD worker did not answer the handshake');
+    // Python has already read the whole file; drop it so runs do not litter the temp dir.
+    try {
+      rmSync(workerPath, { force: true });
+    } catch {
+      /* an unreadable temp file is harmless */
+    }
     return worker;
   }
 
