@@ -20,7 +20,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { buildEvent, toOffsetIso } from '@xixi/contracts';
-import { parseProactiveSettings } from '@xixi/conversation';
+import { parseProactiveSettings, proactiveThreshold } from '@xixi/conversation';
 import { openXixiStore } from '@xixi/domain';
 
 import { REPO_ROOT } from '../../scripts/lib/harness.ts';
@@ -30,14 +30,19 @@ import {
   MIN_LOOP_INTERVAL_MS,
   PROACTIVE_CLOCK_HOOKS,
   PROACTIVE_DANGLING_AFTER_MINUTES,
+  PROACTIVE_OFFLINE_LINES,
+  PROACTIVE_RANDOM_SMALLTALK_CHANCE,
+  PROACTIVE_TRIGGERS_WITH_SOURCES,
   ProactiveLoop,
   buildProactiveCandidates,
   createFakeProbeRunner,
   createFieldServer,
   formatClockMinutes,
   lastUserTurnAt,
+  proactiveDrill,
   proactivePanelHtml,
   proactivePanelScript,
+  triggerScoreCeiling,
 } from '../../scripts/field-test.ts';
 
 function tempDir(prefix: string): string {
@@ -53,6 +58,8 @@ function makeLoop(options: {
   readonly state?: 'IDLE' | 'LINGERING' | 'ACTIVE' | 'SUSPENDED' | 'ENGAGING';
   readonly settings?: ReturnType<typeof parseProactiveSettings>;
   readonly synthesize?: ((text: string) => Promise<Buffer>) | undefined;
+  readonly compose?: ((input: { readonly plan: { readonly line: string }; readonly delivery: unknown }) => Promise<{ readonly text: string; readonly source: 'model' | 'fixed'; readonly note: string | null }>) | undefined;
+  readonly sessionId?: string | null;
   readonly intervalMs?: number;
 }): ProactiveLoop {
   const settings =
@@ -65,13 +72,226 @@ function makeLoop(options: {
     readProactivity: () => 0.7,
     readPresence: async () => ({ present: options.present ?? null, updatedAt: null, source: 'test' }),
     readLastUserTurnAt: () => options.lastUserTurnAt ?? null,
-    readSessionId: () => null,
+    readSessionId: () => options.sessionId ?? null,
     synthesize: options.synthesize,
+    compose: options.compose,
     intervalMs: options.intervalMs,
     now: () => options.now,
     log: () => {},
   });
 }
+
+test('every trigger the panel lists can really reach the threshold floor (t74)', () => {
+  // The floor of the threshold curve is `proactivity = 1.0` → 0.45. A trigger whose *best* score
+  // is below that can never speak, no matter how the user tunes the panel — which is exactly what
+  // conversation_dangling (0.30) and future_hook_due (0.32) used to be.
+  const floor = proactiveThreshold(1);
+  assert.equal(floor, 0.45, 'the documented floor');
+
+  const ceiling = triggerScoreCeiling(new Date(2026, 8, 30, 12, 35, 0));
+  for (const trigger of PROACTIVE_TRIGGERS_WITH_SOURCES) {
+    const score = ceiling[trigger];
+    assert.ok(score !== null, `${trigger}: no candidate is ever built, so it can never speak`);
+    assert.ok((score ?? 0) >= floor, `${trigger} tops out at ${score}, below the ${floor} floor`);
+  }
+  // The two that were dead: named explicitly so the regression is obvious if they slip back.
+  assert.ok((ceiling.conversation_dangling ?? 0) >= floor, `conversation_dangling: ${ceiling.conversation_dangling}`);
+  assert.ok((ceiling.future_hook_due ?? 0) >= floor, `future_hook_due: ${ceiling.future_hook_due}`);
+
+  // …and the panel must not claim the sources this console cannot produce yet. It lists all six
+  // engine trigger switches, so each one carries the `live` flag and the page prints it.
+  const script = proactivePanelScript('/api/field');
+  assert.match(script, /这一轮还不会自己产生候选/, 'the panel labels triggers without a fact source');
+  assert.match(script, /row\.live/, 'and the page renders that flag');
+  assert.match(script, /会自己产生候选/, 'with a tooltip saying which ones do');
+});
+
+test('content is composed from inside the delivery seam, i.e. only after the gates pass (t74)', async () => {
+  const root = tempDir('xixi-t74-compose-');
+  const store = openXixiStore({ dataDir: join(root, 'main') });
+  const quietStore = openXixiStore({ dataDir: join(root, 'quiet') });
+  const blockedStore = openXixiStore({ dataDir: join(root, 'blocked') });
+  try {
+    const now = new Date(2026, 8, 30, 15, 0, 0);
+    const session = store.createSession();
+    const calls: string[] = [];
+    const compose = async (input: { readonly plan: { readonly line: string } }) => {
+      calls.push(input.plan.line);
+      return { text: '（模型写的）你回来啦，我刚把今天的事记下来了。', source: 'model' as const, note: null };
+    };
+
+    const loop = makeLoop({ store, now, present: true, lastUserTurnAt: new Date(now.getTime() - 20 * 60_000), compose, sessionId: session.sessionId });
+    const entry = await loop.tickOnce();
+    assert.equal(entry?.speak, true);
+    assert.equal(calls.length, 1, 'the composer is called exactly once for a delivered message');
+    assert.equal(entry?.text, '（模型写的）你回来啦，我刚把今天的事记下来了。', 'the model text is what gets spoken');
+    assert.equal(entry?.contentSource, 'model');
+    assert.equal(entry?.contentNote, null);
+    assert.equal(entry?.segments.join(''), entry?.text, 'and it is segmented like any other utterance');
+
+    // The spoken message is in the conversation history, so the next user turn has the context.
+    assert.ok(entry?.turnEventSequence !== null, 'an assistant turn was written');
+    const turns = store.recentTurns(session.sessionId, 5);
+    assert.equal(turns[turns.length - 1]?.role, 'assistant');
+    assert.equal(turns[turns.length - 1]?.text, entry?.text);
+
+    // A blocked candidate must not compose at all — no model call, no cost, no invention.
+    const quietLoop = makeLoop({
+      store: quietStore,
+      now,
+      present: true,
+      lastUserTurnAt: new Date(now.getTime() - 20 * 60_000),
+      settings: parseProactiveSettings({ enabled: true, base_cooldown_min: 0, quiet_hours: { start: '00:00', end: '23:59' } }),
+      compose,
+    });
+    const quietEntry = await quietLoop.tickOnce();
+    assert.equal(quietEntry?.reasonCode, 'QUIET_HOURS');
+    assert.equal(calls.length, 1, 'the composer was NOT called for the blocked candidate');
+    assert.equal(quietEntry?.contentSource, 'fixed');
+    assert.equal(quietEntry?.text, null, 'a blocked candidate has nothing to say');
+
+    // Without a composer (offline / no key) the fixed line is used and the reason is stated.
+    const fixedLoop = makeLoop({ store: blockedStore, now, present: true, lastUserTurnAt: new Date(now.getTime() - 20 * 60_000) });
+    const fixedEntry = await fixedLoop.tickOnce();
+    assert.equal(fixedEntry?.speak, true);
+    assert.equal(fixedEntry?.contentSource, 'fixed');
+    assert.match(fixedEntry?.contentNote ?? '', /固定短句兜底/, 'the page is told the content did not come from the model');
+    assert.ok((fixedEntry?.text ?? '').length > 0);
+
+    // A model that fails (or answers with the silence token) also falls back instead of breaking.
+    const failingStore = openXixiStore({ dataDir: join(root, 'failing') });
+    const failingLoop = makeLoop({
+      store: failingStore,
+      now,
+      present: true,
+      lastUserTurnAt: new Date(now.getTime() - 20 * 60_000),
+      compose: async () => {
+        throw new Error('429 too many requests');
+      },
+    });
+    const failingEntry = await failingLoop.tickOnce();
+    assert.equal(failingEntry?.speak, true, 'a model failure must not stop the message');
+    assert.equal(failingEntry?.contentSource, 'fixed');
+    assert.match(failingEntry?.contentNote ?? '', /429/, 'and the error is reported, not swallowed');
+    assert.match(failingEntry?.contentNote ?? '', /固定短句兜底/);
+    failingStore.close();
+  } finally {
+    store.close();
+    quietStore.close();
+    blockedStore.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('two consecutive messages never repeat the same sentence (t74)', async () => {
+  const root = tempDir('xixi-t74-norepeat-');
+  const store = openXixiStore({ dataDir: join(root, 'main') });
+  try {
+    const now = new Date(2026, 8, 30, 15, 0, 0);
+    // 1) The offline lines rotate: several per trigger, and a different one per spoken count.
+    for (const trigger of PROACTIVE_TRIGGERS_WITH_SOURCES) {
+      assert.ok((PROACTIVE_OFFLINE_LINES[trigger] ?? []).length >= 2, `${trigger}: needs more than one offline line to rotate`);
+    }
+    const base = { now, presence: { present: true, updatedAt: now.toISOString() }, lastUserTurnAt: new Date(now.getTime() - 20 * 60_000), inConversation: false, random: () => 1 };
+    const first = buildProactiveCandidates({ ...base, spokenCount: 0 });
+    const second = buildProactiveCandidates({ ...base, spokenCount: 1 });
+    assert.notEqual(first[0]?.line, second[0]?.line, 'the same trigger must not repeat its previous sentence');
+
+    // 2) A model that echoes itself is replaced instead of being spoken twice.
+    const compose = async () => ({ text: '我在呢。', source: 'model' as const, note: null });
+    const loop = makeLoop({ store, now, present: true, lastUserTurnAt: new Date(now.getTime() - 20 * 60_000), compose, sessionId: null });
+    const one = await loop.tickOnce();
+    assert.equal(one?.text, '我在呢。', 'the first message is spoken as composed');
+    let second2 = await loop.tickOnce();
+    // The candidate id changes hour to hour, so nudge the clock to make a fresh candidate.
+    for (let attempt = 0; attempt < 4 && second2 !== null && second2.text === '我在呢。'; attempt += 1) {
+      second2 = await loop.tickOnce();
+    }
+    if (second2 !== null && second2.speak) {
+      assert.notEqual(second2.text, '我在呢。', 'the repeated sentence must not be spoken again');
+      assert.match(second2.contentNote ?? '', /重复/, 'and the page is told why it changed');
+    }
+    assert.equal(loop.spokenLines().filter((line) => line === '我在呢。').length <= 1, true, 'no duplicates in the spoken memory');
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('the two chit-chat sources are fact-based and can be switched off (t74)', () => {
+  const now = new Date(2026, 8, 30, 15, 0, 0);
+  const withTopic = buildProactiveCandidates({
+    now,
+    presence: null,
+    lastUserTurnAt: new Date(now.getTime() - 20 * 60_000),
+    inConversation: false,
+    recentUserTopics: ['明天得去把车修一下'],
+    random: () => 1, // no smalltalk this time
+  });
+  const topic = withTopic.find((plan) => plan.candidate.trigger === 'topic_pool');
+  assert.ok(topic !== undefined, 'a recent user turn must produce a 话题池 candidate');
+  assert.match(topic?.line ?? '', /车修/, 'and it is built from what the user actually said');
+  assert.match(topic?.fact ?? '', /用户轮次/, 'with the log as its fact');
+
+  const noTopic = buildProactiveCandidates({ now, presence: null, lastUserTurnAt: new Date(now.getTime() - 20 * 60_000), inConversation: false, recentUserTopics: [], random: () => 1 });
+  assert.ok(!noTopic.some((plan) => plan.candidate.trigger === 'topic_pool'), 'no topic in the log → no topic candidate (never invented)');
+
+  // 随机闲聊 fires only below its chance, and it is off in the shipped config.
+  const never = buildProactiveCandidates({ now, presence: null, lastUserTurnAt: new Date(now.getTime() - 20 * 60_000), inConversation: false, random: () => PROACTIVE_RANDOM_SMALLTALK_CHANCE + 0.01 });
+  assert.ok(!never.some((plan) => plan.candidate.trigger === 'random_smalltalk'), 'above the chance: nothing is said');
+  const always = buildProactiveCandidates({ now, presence: null, lastUserTurnAt: new Date(now.getTime() - 20 * 60_000), inConversation: false, random: () => 0 });
+  const smalltalk = always.find((plan) => plan.candidate.trigger === 'random_smalltalk');
+  assert.ok(smalltalk !== undefined, 'below the chance: it may speak');
+  assert.match(smalltalk?.fact ?? '', /低概率/, 'and says it is a low-probability, agenda-free line');
+});
+
+test('the drill button speaks too, through the same TTS seam (t74)', async () => {
+  const root = tempDir('xixi-t74-drill-');
+  const store = openXixiStore({ dataDir: root });
+  try {
+    const now = new Date(2026, 8, 30, 15, 0, 0);
+    const settings = parseProactiveSettings({ enabled: true, base_cooldown_min: 0, quiet_hours: { start: '00:00', end: '00:00' } });
+    const synthesized: string[] = [];
+    const spoken = await proactiveDrill({
+      store,
+      settings,
+      now,
+      conversationState: 'IDLE',
+      proactivity: 0.7,
+      replyLimits: undefined,
+      request: { trigger: 'presence_arrived' },
+      synthesize: async (text) => {
+        synthesized.push(text);
+        return Buffer.from(`wav:${text}`);
+      },
+    });
+    assert.equal(spoken.speak, true);
+    assert.ok(spoken.segments.length >= 1);
+    assert.equal(spoken.audio?.length, spoken.segments.length, 'one clip per segment');
+    assert.deepEqual(synthesized, [...spoken.segments], 'each segment was synthesized separately');
+    assert.equal(spoken.audioNote, null);
+
+    const silentStore = openXixiStore({ dataDir: join(root, 'silent') });
+    const silent = await proactiveDrill({
+      store: silentStore,
+      settings,
+      now,
+      conversationState: 'IDLE',
+      proactivity: 0.7,
+      request: { trigger: 'presence_arrived', candidateId: 'drill-silent' },
+    });
+    assert.equal(silent.speak, true);
+    assert.equal(silent.audio, null);
+    assert.match(silent.audioNote ?? '', /只显示文字/, 'no TTS available is reported, not hidden');
+    silentStore.close();
+
+    // …and the page wires the clips into the player.
+    assert.match(proactivePanelScript('/api'), /pxPlayClips\(drill\.audio, drill\.gapMs\)/);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
 
 test('the loop starts off, and the panel says so', () => {
   const html = proactivePanelHtml();
@@ -96,6 +316,7 @@ test('candidates come from facts, and only from facts', () => {
     presence: { present: true, updatedAt: '2026-09-30T04:30:00.000Z' },
     lastUserTurnAt: new Date(2026, 8, 30, 11, 0, 0),
     inConversation: false,
+    random: () => 1, // 「随机闲聊」 is chance-based; this test is about the factual three
   });
   const triggers = rich.map((plan) => plan.candidate.trigger);
   assert.ok(triggers.includes('presence_arrived'), `在场到达 must be a source: ${JSON.stringify(triggers)}`);
@@ -110,20 +331,20 @@ test('candidates come from facts, and only from facts', () => {
   }
 
   // Nothing to go on: no presence reading, a turn two minutes ago, no hook in window.
-  const empty = buildProactiveCandidates({ now: midday, presence: null, lastUserTurnAt: new Date(2026, 8, 30, 12, 3, 0), inConversation: false });
+  const empty = buildProactiveCandidates({ now: midday, presence: null, lastUserTurnAt: new Date(2026, 8, 30, 12, 3, 0), inConversation: false, random: () => 1 });
   assert.equal(empty.length, 0, 'without a fact there is no candidate — nothing is invented');
 
   // A fresh store has no turns at all: that is still a fact (silence), not a guess.
-  const fresh = buildProactiveCandidates({ now: midday, presence: null, lastUserTurnAt: null, inConversation: false });
+  const fresh = buildProactiveCandidates({ now: midday, presence: null, lastUserTurnAt: null, inConversation: false, random: () => 1 });
   assert.equal(fresh.length, 1);
   assert.equal(fresh[0]?.candidate.trigger, 'conversation_dangling');
   assert.match(fresh[0]?.fact ?? '', /还没有轮次/);
 
   // The hook window is 30 minutes wide, and the hooks are documented minutes.
   for (const hook of PROACTIVE_CLOCK_HOOKS) {
-    const inside = buildProactiveCandidates({ now: new Date(2026, 8, 30, Math.floor(hook.minutes / 60), hook.minutes % 60, 0), presence: null, lastUserTurnAt: midday, inConversation: false });
+    const inside = buildProactiveCandidates({ now: new Date(2026, 8, 30, Math.floor(hook.minutes / 60), hook.minutes % 60, 0), presence: null, lastUserTurnAt: midday, inConversation: false, random: () => 1 });
     assert.ok(inside.some((plan) => plan.candidate.trigger === 'future_hook_due'), `hook ${formatClockMinutes(hook.minutes)} should fire`);
-    const outside = buildProactiveCandidates({ now: new Date(2026, 8, 30, Math.floor((hook.minutes + 31) / 60) % 24, (hook.minutes + 31) % 60, 0), presence: null, lastUserTurnAt: midday, inConversation: false });
+    const outside = buildProactiveCandidates({ now: new Date(2026, 8, 30, Math.floor((hook.minutes + 31) / 60) % 24, (hook.minutes + 31) % 60, 0), presence: null, lastUserTurnAt: midday, inConversation: false, random: () => 1 });
     assert.ok(!outside.some((plan) => plan.candidate.trigger === 'future_hook_due'), `hook ${formatClockMinutes(hook.minutes)} should stop after 30 minutes`);
   }
   assert.ok(PROACTIVE_DANGLING_AFTER_MINUTES >= 5, 'the silence threshold is a documented, sane number');

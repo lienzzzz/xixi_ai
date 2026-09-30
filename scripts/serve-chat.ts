@@ -28,6 +28,7 @@ import {
   SEGMENT_TTS_NOTE,
   XIXI_DB_ENTRIES,
   applyAndPersistProactivePatch,
+  createModelComposer,
   databaseNoteHtml,
   effectiveProactivity,
   handleVoiceTurn,
@@ -38,6 +39,7 @@ import {
   proactivePanelScript,
   pruneVoiceDir,
   readPresence,
+  recentUserTopics,
   retentionPolicy,
   restoreProactiveSettings,
   segmentPlan,
@@ -123,7 +125,7 @@ function proactivePayload(): ProactiveConsoleState & { readonly ok: true } {
       updatedAt: proactiveSnapshot.updatedAt,
       changes: proactiveSnapshot.changes,
       now: new Date(),
-      proactivity: effectiveProactivity(store.selfProfile()),
+      personality: store.selfProfile(),
     }),
   };
 }
@@ -143,9 +145,19 @@ const proactiveLoop = new ProactiveLoop({
     return view === null ? null : { present: view.present, updatedAt: view.updatedAt, source: view.source };
   },
   readLastUserTurnAt: () => lastUserTurnAt(store, session.sessionId),
+  readRecentUserTopics: () => recentUserTopics(store, session.sessionId),
   readSessionId: () => session.sessionId,
   replyLimits: config.reply,
   synthesize: loopSynthesize,
+  // Same composer as the console: the model writes the line (tools included), from inside the
+  // delivery seam only — the gates have already decided by then (t74).
+  compose: createModelComposer({
+    engine,
+    sessionId: () => session.sessionId,
+    available: !USE_FAKE && !USE_DSH && client.hasKey,
+    recentLines: () => proactiveLoop.spokenLines(),
+    log: (line) => console.log(line),
+  }),
   log: (line) => console.log(line),
 });
 function loopPayload(cursor: number): Record<string, unknown> {
@@ -330,7 +342,7 @@ const server = createServer((request, response) => {
           store,
           settings: proactiveSnapshot.settings,
           patch: body,
-          proactivityBefore: effectiveProactivity(store.selfProfile()),
+          personalityBefore: store.selfProfile(),
           log: (line) => console.log(line),
         });
         if (applied.changes.length > 0) {
@@ -340,7 +352,7 @@ const server = createServer((request, response) => {
           ok: true,
           changes: applied.changes,
           rejected: applied.rejected,
-          proactivity: applied.proactivity,
+          personality: applied.personality,
           auditSequence: applied.auditSequence,
           state: proactivePayload(),
         });
@@ -357,6 +369,7 @@ const server = createServer((request, response) => {
           proactivity: effectiveProactivity(store.selfProfile()),
           sessionId: session.sessionId,
           replyLimits: config.reply,
+          synthesize: loopSynthesize,
           request: body,
         });
         console.log(`[proactive] 演练 ${drill.trigger} → ${drill.reasonCode}（分数 ${drill.score}/${drill.threshold}${drill.speak ? `，分 ${drill.segments.length} 段` : ''}）`);

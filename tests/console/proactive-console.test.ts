@@ -155,7 +155,7 @@ test('settings changed on the page are persisted, restored, and validated field 
     assert.equal(noop.changes.length, 0, 'saving the same value writes nothing');
     assert.equal(noop.rejected.length, 0, 'a no-op is not a rejection either');
 
-    const state = proactiveConsoleState({ store, settings: after.settings, source: after.source, updatedAt: after.updatedAt, changes: after.changes, now: new Date(), proactivity: 0.6 });
+    const state = proactiveConsoleState({ store, settings: after.settings, source: after.source, updatedAt: after.updatedAt, changes: after.changes, now: new Date(), personality: { proactivity: 0.6, talkativeness: 0.45, verbosity: 0.4 } });
     assert.equal(state.audit.length, 1);
     assert.equal(state.triggerLabels.length, 6);
     assert.equal(state.threshold, proactiveThreshold(0.6));
@@ -166,15 +166,25 @@ test('settings changed on the page are persisted, restored, and validated field 
   }
 });
 
-test('the panel exposes the proactivity control and explains what it does', () => {
+test('the panel exposes the personality controls (proactivity / talkativeness / verbosity)', () => {
   const html = proactivePanelHtml();
   assert.ok(html.includes(`id="${PROACTIVE_PANEL_IDS.proactivity}"`), 'the panel has the 主动性总强度 control');
   assert.ok(html.includes(`id="${PROACTIVE_PANEL_IDS.proactivityNow}"`), 'and shows the value in effect');
   assert.match(html, /主动性总强度（人格 proactivity）/, 'labelled so nobody confuses it with the quota knobs');
   assert.match(html, /self_profile/, 'and says where it is written');
   assert.match(html, /一道门禁都不会被跳过/, 'and that it cannot skip a gate');
+  // t74: the two talkativeness knobs use the same write + audit path.
+  assert.ok(html.includes(`id="${PROACTIVE_PANEL_IDS.talkativeness}"`), 'the panel has 话痨程度');
+  assert.ok(html.includes(`id="${PROACTIVE_PANEL_IDS.verbosity}"`), 'and 话的长度');
+  assert.ok(html.includes(`id="${PROACTIVE_PANEL_IDS.talkativenessNow}"`), 'with its value in effect');
+  assert.ok(html.includes(`id="${PROACTIVE_PANEL_IDS.verbosityNow}"`), 'and the same for verbosity');
+  assert.match(html, /话痨程度（人格 talkativeness）/, 'labelled by property name');
+  assert.match(html, /话的长度（人格 verbosity）/);
+  assert.match(html, /step="0\.05"/, 'the sliders step by 0.05');
+
   const script = proactivePanelScript('/api/field');
-  assert.match(script, /patch\.proactivity = Number\(raw\)/, 'the page sends proactivity');
+  assert.match(script, /personalityFields = \['proactivity', 'talkativeness', 'verbosity'\]/, 'the page sends all three personality values');
+  assert.match(script, /patch\[name\] = Number\(raw\)/, 'each one as a number');
   assert.match(script, /String\(raw\)\.trim\(\) !== ''/, 'and never sends an empty box as 0');
 });
 
@@ -195,23 +205,23 @@ test('a patch that changes proactivity writes self_profile and moves the thresho
       store,
       settings: snapshot.settings,
       patch: { proactivity: 0.7 },
-      proactivityBefore: before,
+      personalityBefore: { proactivity: before },
     });
     assert.equal(applied.rejected.length, 0, 'proactivity is a known field now');
     assert.ok(applied.changes.some((row) => row.includes('主动性总强度')), `changes: ${JSON.stringify(applied.changes)}`);
-    assert.deepEqual(applied.proactivity, { before, after: 0.7 });
+    assert.deepEqual(applied.personality.proactivity, { before, after: 0.7 });
     assert.ok(applied.auditSequence !== null, 'the change left an audit row');
 
     // Written to the personality table (and its history), not just returned to the caller.
     assert.equal(store.selfProfile().proactivity, 0.7);
     const history = store.selfProfileHistory?.('proactivity') ?? [];
     assert.ok(
-      history.some((row: { sourceType?: string }) => row.sourceType === 'console:proactivity'),
+      history.some((row: { sourceType?: string }) => row.sourceType === 'console:personality'),
       'the override is attributed in self_profile_history',
     );
 
     // ...and the entry's threshold is the documented function of that value.
-    const state = proactiveConsoleState({ store, settings: applied.settings, source: 'console', updatedAt: applied.auditAt, changes: applied.changes, now: new Date(), proactivity: effectiveProactivity(store.selfProfile()) });
+    const state = proactiveConsoleState({ store, settings: applied.settings, source: 'console', updatedAt: applied.auditAt, changes: applied.changes, now: new Date(), personality: store.selfProfile() });
     assert.equal(state.proactivity, 0.7);
     assert.equal(state.threshold, 0.54, '0.45 + 0.30 × (1 − 0.70)');
   } finally {
@@ -230,7 +240,7 @@ test('unknown patch fields are reported in Chinese instead of being dropped', ()
       store,
       settings: snapshot.settings,
       patch: { max_per_day: 3, proactivityy: 0.7, quietStart: '21:30' },
-      proactivityBefore: 0.55,
+      personalityBefore: { proactivity: 0.55 },
     });
     assert.equal(applied.changes.length, 1, 'only the known field changed');
     assert.equal(applied.rejected.length, 2, `both unknown keys are reported: ${JSON.stringify(applied.rejected)}`);
@@ -340,7 +350,7 @@ test('the console serves the proactive card, its state, and obeys the switch ove
 
     const raised = await post('/api/field/proactive/settings', { proactivity: 0.7 });
     assert.equal(raised.rejected.length, 0);
-    assert.deepEqual(raised.proactivity, { before: 0.55, after: 0.7 });
+    assert.deepEqual(raised.personality.proactivity, { before: 0.55, after: 0.7 });
     assert.equal(raised.state.proactivity, 0.7);
     assert.equal(raised.state.threshold, 0.54, '调到 0.70 后 threshold 必须是 0.54');
 

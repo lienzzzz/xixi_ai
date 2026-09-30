@@ -63,7 +63,10 @@ import {
   proactiveThreshold,
   readProactiveHistory,
   resolveReplyLimits,
+  scoreProactiveCandidate,
+  SILENCE_TOKEN,
   splitReplyIntoSegments,
+  type ProactiveDelivery,
   type ProactiveReasonCode,
   type ProactiveSettings,
   type ProactiveTrigger,
@@ -1911,7 +1914,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
         updatedAt: proactiveSnapshot.updatedAt,
         changes: proactiveSnapshot.changes,
         now: new Date(),
-        proactivity: effectiveProactivity(store.selfProfile()),
+        personality: store.selfProfile(),
       }),
     };
   }
@@ -1936,9 +1939,19 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       return view === null ? null : { present: view.present, updatedAt: view.updatedAt, source: view.source };
     },
     readLastUserTurnAt: () => lastUserTurnAt(store, session.sessionId),
+    readRecentUserTopics: () => recentUserTopics(store, session.sessionId),
     readSessionId: () => session.sessionId,
     replyLimits: config.reply,
     synthesize: loopSynthesize,
+    // Content is composed through the same prompt + adapter path a reply uses (tools included),
+    // and only from inside the delivery seam — see `ProactiveLoopOptions.compose`.
+    compose: createModelComposer({
+      engine,
+      sessionId: () => session.sessionId,
+      available: !offline && client.hasKey,
+      recentLines: () => proactiveLoop.spokenLines(),
+      log,
+    }),
     log,
   });
   function loopPayload(cursor: number): Record<string, unknown> {
@@ -2135,7 +2148,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
             store,
             settings: proactiveSnapshot.settings,
             patch: body,
-            proactivityBefore: effectiveProactivity(store.selfProfile()),
+            personalityBefore: store.selfProfile(),
             log,
           });
           if (applied.changes.length > 0) {
@@ -2150,7 +2163,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
             ok: true,
             changes: applied.changes,
             rejected: applied.rejected,
-            proactivity: applied.proactivity,
+            personality: applied.personality,
             auditSequence: applied.auditSequence,
             state: proactivePayload(),
           });
@@ -2167,6 +2180,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
             proactivity: effectiveProactivity(store.selfProfile()),
             sessionId: session.sessionId,
             replyLimits: config.reply,
+            synthesize: loopSynthesize,
             request: body,
           });
           log(`[proactive] 演练 ${drill.trigger} → ${drill.reasonCode}（分数 ${drill.score}/${drill.threshold}${drill.speak ? `，分 ${drill.segments.length} 段` : ''}）`);
@@ -2543,12 +2557,26 @@ export function persistProactiveSettings(
   settings: ProactiveSettings,
   changes: readonly string[],
 ): StoredEvent {
+  const compact = compactAuditChanges(changes);
   const detail = JSON.stringify({
     v: PROACTIVE_SETTINGS_AUDIT_VERSION,
     settings: proactiveSettingsToConfig(settings),
-    changes,
+    changes: compact,
   });
+  // The `system.health` schema caps `detail` at 500 characters. A save that changed many knobs at
+  // once (t74 can move three personality values plus the quotas) must not fail the whole request,
+  // so the change list is trimmed *here* — with a marker, never silently.
+  if (detail.length > 480) {
+    const trimmed = JSON.stringify({ v: PROACTIVE_SETTINGS_AUDIT_VERSION, settings: proactiveSettingsToConfig(settings), changes: compact.slice(0, 3) });
+    return store.recordHealth(PROACTIVE_SETTINGS_SERVICE, 'ok', `${trimmed.slice(0, 470)}…`);
+  }
   return store.recordHealth(PROACTIVE_SETTINGS_SERVICE, 'ok', detail);
+}
+
+/** Keep at most the first few change lines so the audit payload always fits the schema. */
+function compactAuditChanges(changes: readonly string[]): readonly string[] {
+  if (changes.length <= 6) return changes;
+  return [...changes.slice(0, 5), `…（共 ${changes.length} 项）`];
 }
 
 /** Typed settings → the `config.proactive` shape, so one parser validates both sources. */
@@ -2572,14 +2600,17 @@ export interface ProactiveSettingsPatchResult {
   /** Fields the page sent that were ignored, with the reason. */
   readonly rejected: readonly string[];
   /**
-   * The new 「主动性总强度」 (personality `proactivity`) when the patch asked for one.
+   * The personality writes this patch asked for, already validated into `[0, 1]`.
    *
-   * It is *not* part of `ProactiveSettings`: proactivity is a personality property that lives in
-   * `self_profile` (ADR-0009 §4 — it moves the score threshold and nothing else), so the caller
-   * writes it through `overrideSelfProfile` while the gate/knob settings go to the audit record.
+   * They are *not* part of `ProactiveSettings`: `proactivity` / `talkativeness` / `verbosity` live
+   * in `self_profile`, so the caller writes them through `overrideSelfProfile` (with its own
+   * history row) while the gate/knob settings go to the audit record.
    */
-  readonly proactivity: number | null;
+  readonly personality: Readonly<Record<string, number>>;
 }
+
+/** Personality properties the console may tune (t63's proactivity + t74's talkativeness/verbosity). */
+export const PROACTIVE_PERSONALITY_FIELDS: readonly string[] = Object.freeze(['proactivity', 'talkativeness', 'verbosity']);
 
 /** The fields `applyProactiveSettingsPatch` understands; anything else is reported, never dropped. */
 export const PROACTIVE_PATCH_FIELDS: readonly string[] = Object.freeze([
@@ -2592,8 +2623,15 @@ export const PROACTIVE_PATCH_FIELDS: readonly string[] = Object.freeze([
   'quietStart',
   'quietEnd',
   'triggers',
-  'proactivity',
+  ...PROACTIVE_PERSONALITY_FIELDS,
 ]);
+
+/** Chinese label for each tunable personality property (the panel shows these). */
+export const PERSONALITY_FIELD_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  proactivity: '主动性总强度',
+  talkativeness: '话痨程度',
+  verbosity: '话的长度',
+});
 
 /**
  * Apply a page patch to the current settings.
@@ -2618,16 +2656,16 @@ export function applyProactiveSettingsPatch(current: ProactiveSettings, patch: R
     }
   }
 
-  // 「主动性总强度」 is a personality value, not an engine setting: validate 0..1 here and let
-  // the caller write it to `self_profile` (with its own history row).
-  let proactivity: number | null = null;
-  if (patch['proactivity'] !== undefined) {
-    const parsed = typeof patch['proactivity'] === 'number' ? patch['proactivity'] : Number(String(patch['proactivity']).trim());
+  // Personality values (0..1), validated here and written to `self_profile` by the caller.
+  const personality: Record<string, number> = {};
+  for (const field of PROACTIVE_PERSONALITY_FIELDS) {
+    if (patch[field] === undefined) continue;
+    const parsed = typeof patch[field] === 'number' ? (patch[field] as number) : Number(String(patch[field]).trim());
     if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
-      rejected.push(`proactivity：要在 0 到 1 之间（当前 ${current === undefined ? '?' : ''}数值不合法），已忽略`);
-    } else {
-      proactivity = parsed;
+      rejected.push(`${field}：要在 0 到 1 之间（收到 ${JSON.stringify(patch[field])}），已忽略`);
+      continue;
     }
+    personality[field] = parsed;
   }
 
   if (patch['enabled'] !== undefined) merged['enabled'] = patch['enabled'] === true || patch['enabled'] === 'true';
@@ -2696,20 +2734,26 @@ export function applyProactiveSettingsPatch(current: ProactiveSettings, patch: R
       changes.push(`${PROACTIVE_TRIGGER_LABELS[trigger]}：${current.triggers[trigger] ? '开' : '关'} → ${settings.triggers[trigger] ? '开' : '关'}`);
     }
   }
-  return { settings, changes, rejected, proactivity };
+  return { settings, changes, rejected, personality };
 }
 
-/** The change line for a personality write, kept out of `changes` only when nothing moved. */
+/** The change line for one personality write, kept out of `changes` only when nothing moved. */
+export function personalityChangeLine(property: string, before: number, after: number): string {
+  const label = PERSONALITY_FIELD_LABELS[property] ?? property;
+  return `${label}：${before} → ${after}（self_profile / console:personality）`;
+}
+
+/** Kept as a named export: t63's page/report wording referred to it by this name. */
 export function proactivityChangeLine(before: number, after: number): string {
-  return `主动性总强度（人格 proactivity）：${before} → ${after}（写入 self_profile，来源 console:proactivity）`;
+  return personalityChangeLine('proactivity', before, after);
 }
 
 export interface ProactivePatchApplication {
   readonly settings: ProactiveSettings;
   readonly changes: readonly string[];
   readonly rejected: readonly string[];
-  /** The personality write, when the patch asked for one that actually moved the value. */
-  readonly proactivity: { readonly before: number; readonly after: number } | null;
+  /** Personality writes that actually moved a value, keyed by property. */
+  readonly personality: Readonly<Record<string, { readonly before: number; readonly after: number }>>;
   /** Sequence of the `system.health` audit row, or `null` when nothing changed. */
   readonly auditSequence: number | null;
   /** Timestamp of that audit row (what the page shows as 「上次保存」), or `null`. */
@@ -2717,28 +2761,38 @@ export interface ProactivePatchApplication {
 }
 
 /**
- * Apply one patch end-to-end: engine settings + the personality value, then one audit row.
+ * Apply one patch end-to-end: engine settings + the personality values, then one audit row.
  *
- * Both pages call this, so "调完就生效、还留了痕迹" is one code path (t63). The personality
- * write goes through `overrideSelfProfile`, which is the project's **administrative override**
- * seam: it upserts `self_profile` *and* appends a `self_profile_history` row, so the change is
- * both live and auditable — while the engine knobs land in the `system.health` audit record
- * that `restoreProactiveSettings` reads back on the next start.
+ * Both pages call this, so "调完就生效、还留了痕迹" is one code path (t63, extended in t74 to
+ * talkativeness/verbosity). The personality write goes through `overrideSelfProfile`, which is the
+ * project's **administrative override** seam: it upserts `self_profile` *and* appends a
+ * `self_profile_history` row per property, so the change is both live and auditable — while the
+ * engine knobs land in the `system.health` audit record that `restoreProactiveSettings` reads
+ * back on the next start.
  */
 export function applyAndPersistProactivePatch(options: {
   readonly store: XixiStore;
   readonly settings: ProactiveSettings;
   readonly patch: Readonly<Record<string, unknown>>;
-  readonly proactivityBefore: number;
+  /** The effective personality before the patch (from `store.selfProfile()`). */
+  readonly personalityBefore: Readonly<Record<string, number>>;
   readonly log?: ((line: string) => void) | undefined;
 }): ProactivePatchApplication {
   const patched = applyProactiveSettingsPatch(options.settings, options.patch);
   const changes = [...patched.changes];
-  let proactivity: { before: number; after: number } | null = null;
-  if (patched.proactivity !== null && patched.proactivity !== options.proactivityBefore) {
-    options.store.overrideSelfProfile({ proactivity: patched.proactivity }, 'console:proactivity');
-    proactivity = { before: options.proactivityBefore, after: patched.proactivity };
-    changes.push(proactivityChangeLine(proactivity.before, proactivity.after));
+  const personality: Record<string, { before: number; after: number }> = {};
+  const writes: Record<string, number> = {};
+  for (const [property, after] of Object.entries(patched.personality)) {
+    const before = options.personalityBefore[property];
+    if (before === after) continue; // no-op: nothing to write, nothing to audit
+    writes[property] = after;
+    personality[property] = { before: before ?? Number.NaN, after };
+  }
+  if (Object.keys(writes).length > 0) {
+    options.store.overrideSelfProfile(writes, 'console:personality');
+    for (const [property, move] of Object.entries(personality)) {
+      changes.push(personalityChangeLine(property, move.before, move.after));
+    }
   }
   let auditSequence: number | null = null;
   let auditAt: string | null = null;
@@ -2748,7 +2802,7 @@ export function applyAndPersistProactivePatch(options: {
     auditAt = event.timestamp;
     options.log?.(`[proactive] 设置已更新（事件 #${event.sequence}）：${changes.join('；')}`);
   }
-  return { settings: patched.settings, changes, rejected: patched.rejected, proactivity, auditSequence, auditAt };
+  return { settings: patched.settings, changes, rejected: patched.rejected, personality, auditSequence, auditAt };
 }
 
 export interface ProactiveGateRow {
@@ -2896,6 +2950,10 @@ export interface ProactiveDrillResult {
   /** The same text as the page should play it: one entry per segment, in order. */
   readonly segments: readonly string[];
   readonly gapMs: number;
+  /** One clip per segment (base64 WAV) so the drill button really speaks; `null` = no TTS. */
+  readonly audio: readonly (string | null)[] | null;
+  /** Why there is no audio, when there is none. */
+  readonly audioNote: string | null;
   readonly eventSequence: number | null;
   readonly usage: ProactiveUsage;
   /** What the user should do about a blocked candidate (Chinese, actionable). */
@@ -2921,6 +2979,8 @@ export async function proactiveDrill(options: {
   readonly speechAvailable?: boolean;
   readonly sessionId?: string | null;
   readonly replyLimits?: Readonly<Record<string, unknown>> | undefined;
+  /** Same TTS seam the resident loop uses — the drill must *speak*, not only print (t74). */
+  readonly synthesize?: ((text: string) => Promise<Buffer>) | undefined;
   readonly request: ProactiveDrillRequest;
   readonly offsetMinutes?: number;
 }): Promise<ProactiveDrillResult> {
@@ -2961,6 +3021,26 @@ export async function proactiveDrill(options: {
   });
 
   const split = delivered === null ? null : splitReplyIntoSegments(delivered, resolveReplyLimits(options.replyLimits));
+  const segments = split?.segments ?? [];
+  const gapMs = split?.gapMs ?? 0;
+  let audio: (string | null)[] | null = null;
+  let audioNote: string | null = null;
+  if (outcome.speak) {
+    if (options.synthesize === undefined) {
+      audioNote = '只显示文字：朗读关闭（--no-tts）或没有可用密钥，所以这次没有合成语音。';
+    } else {
+      const clips: (string | null)[] = [];
+      for (const segment of segments) {
+        try {
+          clips.push((await options.synthesize(segment)).toString('base64'));
+        } catch (error) {
+          clips.push(null);
+          audioNote = `第 ${clips.length} 段合成失败：${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+      audio = clips;
+    }
+  }
   return {
     speak: outcome.speak,
     delivered: outcome.delivered,
@@ -2972,8 +3052,10 @@ export async function proactiveDrill(options: {
     threshold: outcome.threshold,
     gates: proactiveGateRows(outcome.reasonCode),
     text: delivered,
-    segments: split?.segments ?? [],
-    gapMs: split?.gapMs ?? 0,
+    segments,
+    gapMs,
+    audio,
+    audioNote,
     eventSequence: outcome.event?.sequence ?? null,
     usage: proactiveUsage(options.store, options.settings, options.now, options.offsetMinutes),
     nextStep: PROACTIVE_GATE_NEXT_STEPS[outcome.reasonCode],
@@ -3044,9 +3126,17 @@ export interface ProactiveConsoleState {
   readonly changes: readonly string[];
   readonly quietHours: { readonly start: string; readonly end: string; readonly activeNow: boolean };
   readonly proactivity: number;
+  /** The effective personality values the panel may tune (`proactivity` / `talkativeness` / `verbosity`). */
+  readonly personality: Readonly<Record<string, number>>;
   readonly threshold: number;
   readonly usage: ProactiveUsage;
-  readonly triggerLabels: readonly { readonly trigger: ProactiveTrigger; readonly label: string; readonly enabled: boolean }[];
+  readonly triggerLabels: readonly {
+    readonly trigger: ProactiveTrigger;
+    readonly label: string;
+    readonly enabled: boolean;
+    /** `true` when this console can actually produce a candidate of this kind today (t74). */
+    readonly live: boolean;
+  }[];
   readonly gateOrder: readonly { readonly code: ProactiveReasonCode; readonly label: string; readonly status: ProactiveGateRow['status'] }[];
   readonly lastDecision: ProactiveDecisionRow | null;
   readonly decisions: readonly ProactiveDecisionRow[];
@@ -3068,12 +3158,14 @@ export function proactiveConsoleState(options: {
   readonly updatedAt: string | null;
   readonly changes: readonly string[];
   readonly now: Date;
-  readonly proactivity: number;
+  /** The effective personality (from `selfProfile()`); `proactivity` is read from here. */
+  readonly personality: Readonly<Record<string, number>>;
   readonly offsetMinutes?: number;
   readonly historyLimit?: number;
 }): ProactiveConsoleState {
   const decisions = proactiveDecisionHistory(options.store, options.historyLimit ?? 8);
   const last = decisions[decisions.length - 1] ?? null;
+  const proactivity = typeof options.personality['proactivity'] === 'number' ? (options.personality['proactivity'] as number) : DEFAULT_PROACTIVITY;
   const localMinutes = options.now.getHours() * 60 + options.now.getMinutes();
   return {
     settings: options.settings,
@@ -3085,13 +3177,15 @@ export function proactiveConsoleState(options: {
       end: formatClockMinutes(options.settings.quietHours.endMinutes),
       activeNow: isWithinQuietHours(localMinutes, options.settings.quietHours.startMinutes, options.settings.quietHours.endMinutes),
     },
-    proactivity: options.proactivity,
-    threshold: proactiveThreshold(options.proactivity),
+    proactivity,
+    personality: { ...options.personality },
+    threshold: proactiveThreshold(proactivity),
     usage: proactiveUsage(options.store, options.settings, options.now, options.offsetMinutes),
     triggerLabels: PROACTIVE_TRIGGERS.map((trigger) => ({
       trigger,
       label: PROACTIVE_TRIGGER_LABELS[trigger],
       enabled: options.settings.triggers[trigger],
+      live: PROACTIVE_TRIGGERS_WITH_SOURCES.includes(trigger),
     })),
     gateOrder: proactiveGateRows((last?.reasonCode as ProactiveReasonCode | undefined) ?? null),
     lastDecision: last,
@@ -3127,6 +3221,43 @@ export const PROACTIVE_CLOCK_HOOKS: readonly { readonly minutes: number; readonl
 /** How long without a user turn before 「长时间没人说话」 becomes a candidate. */
 export const PROACTIVE_DANGLING_AFTER_MINUTES = 10;
 
+/**
+ * Offline (or no-key) fallback lines, several per trigger and rotated (t74).
+ *
+ * One fixed sentence per trigger meant every offline message was literally the same words; the
+ * loop now rotates through these so a user without a key still hears variety. They stay factual —
+ * each is a short statement, never an invented fact.
+ */
+export const PROACTIVE_OFFLINE_LINES: Readonly<Record<ProactiveTrigger, readonly string[]>> = Object.freeze({
+  presence_arrived: [
+    '哎，你回来啦。今天外面挺冷的，我看你外套都没穿厚。要不要先喝口热水暖暖手？对了，你要问的那件事我也记着呢，等你想说的时候再问我。',
+    '回来啦。家里挺安静的，我先给你留了盏灯。要是累了就先歇会儿，想说的时候再叫我。',
+  ],
+  conversation_dangling: [
+    '你刚才是有一会儿没说话了，我在这儿。想接着说就说，不想说也没关系。',
+    '安静了一会儿了。要不要从刚才那件事接着聊？我记着呢。',
+  ],
+  future_hook_due: [
+    '到点了，之前你让我记着的那件事可以开始了。要不要我帮你把下一步写下来？',
+    '时间到了。你之前提过的那件事，现在做正合适。需要我提醒得更具体一点吗？',
+  ],
+  topic_pool: [
+    '你前面提到过一件事，我还记着。要不要接着说两句？',
+    '我刚才想起你之前说的那件事了，后来怎么样了？',
+  ],
+  routine_expected: [
+    '这个点你通常在忙，我就问一句：需要我帮你看着时间吗？',
+    '按你平时的节奏，这会儿该歇一下了。要不要我提醒你？',
+  ],
+  random_smalltalk: [
+    '今天家里挺安静的，我就随口说一句：我在呢。',
+    '没什么事，就是忽然想跟你说一声：今天过得还行吧？',
+  ],
+});
+
+/** How often 「随机闲聊」 fires when the scheduler asks (it is off in the config by default). */
+export const PROACTIVE_RANDOM_SMALLTALK_CHANCE = 0.15;
+
 export interface ProactiveCandidatePlan {
   readonly candidate: ProactiveCandidate;
   /** The sentence the candidate would speak (factual, checkable against the log/clock). */
@@ -3146,6 +3277,14 @@ export interface ProactiveCandidateContext {
   readonly lastUserTurnAt: Date | null;
   /** True when a conversation is open right now (the engine blocks it anyway; this only orders). */
   readonly inConversation: boolean;
+  /** Recent *user* utterances (newest first) — the fact behind 「话题池」 (t74). */
+  readonly recentUserTopics?: readonly string[] | undefined;
+  /** Injected for tests; defaults to `Math.random`. 「随机闲聊」 only fires below its chance. */
+  readonly random?: (() => number) | undefined;
+  /** How many prior messages have been sent, used to rotate the offline lines. */
+  readonly spokenCount?: number | undefined;
+  /** Lines already said (newest last) — they are avoided, so two messages never repeat. */
+  readonly recentLines?: readonly string[] | undefined;
   readonly limit?: number;
 }
 
@@ -3166,9 +3305,7 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
       planFor(
         'presence_arrived',
         `${day}-presence`,
-        // Long enough to be spoken in two segments (ADR-0010), so the page really shows the
-        // pause between them instead of one clip.
-        '哎，你回来啦。今天外面挺冷的，我看你外套都没穿厚。要不要先喝口热水暖暖手？对了，你要问的那件事我也记着呢，等你想说的时候再问我。',
+        pickOfflineLine('presence_arrived', context),
         `在场投影：present=true（更新于 ${context.presence.updatedAt ?? '—'}）`,
         // A greeting right after someone walks in is a strong candidate on every axis — and the
         // numbers are the §15.4 ones, not a thumb on the scale to sneak past the threshold.
@@ -3188,20 +3325,41 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
   // 2. conversation_dangling — nobody has said anything for a while.
   const silentMinutes = context.lastUserTurnAt === null ? null : Math.round((context.now.getTime() - context.lastUserTurnAt.getTime()) / 60_000);
   if (silentMinutes === null || silentMinutes >= PROACTIVE_DANGLING_AFTER_MINUTES) {
-    const line = silentMinutes === null ? '家里安静了一会儿了，我在。' : `你上次说话是 ${silentMinutes} 分钟前了，还好吗？`;
+    const fallback = pickOfflineLine('conversation_dangling', context);
+    const line = silentMinutes === null ? fallback : `你上次说话是 ${silentMinutes} 分钟前了，还好吗？`;
     plans.push(
       planFor(
         'conversation_dangling',
         `${day}-dangling-${Math.floor(minutes / 30)}`,
         line,
         `事件日志：上一条 user 轮次在 ${context.lastUserTurnAt?.toISOString() ?? '（这个库还没有轮次）'}`,
-        { time_since_last_interaction: 1, social_value: 0.8, memory_relevance: 0.5, user_receptiveness: 0.7 },
+        // t74: this used to sum to 0.30 — below the 0.45 floor, so 「对话悬着」 could *never*
+        // speak no matter how proactivity was tuned. The values below are the §15.4 ones read
+        // properly for this situation, not a thumb on the scale:
+        {
+          // An unfinished thread is a real event (方案 §16 lists it as a trigger source); 0.5
+          // would be something dramatic happening, which is not the case here.
+          event_salience: 0.7,
+          // Checking in on someone after a long silence is the highest-value thing a companion
+          // can do — this is what the trigger exists for.
+          social_value: 1,
+          // The line refers to what the user last said, which we have in the log.
+          memory_relevance: 0.8,
+          // Nothing new has happened, so novelty is genuinely low.
+          novelty: 0.3,
+          // By construction: the candidate is only built after PROACTIVE_DANGLING_AFTER_MINUTES.
+          time_since_last_interaction: 1,
+          // Nothing says they are busy (no DND, no in-flight turn) — the gates still check.
+          user_receptiveness: 0.8,
+          // An unfinished thread is usually an open hook ("那件事回头再说").
+          future_hook_bonus: 0.3,
+        },
       ),
     );
   }
 
   // 3. future_hook_due — a documented clock hook, valid for 30 minutes after the minute.
-  const hook = PROACTIVE_CLOCK_HOOKS.find((entry) => minutes >= entry.minutes && minutes < entry.minutes + 30);
+  const hook = PROACTIVE_CLOCK_HOOKS.find((entry) => minutes >= entry.minutes && entry.minutes !== undefined && minutes < entry.minutes + 30);
   if (hook !== undefined) {
     plans.push(
       planFor(
@@ -3209,13 +3367,146 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
         `${day}-hook-${hook.minutes}`,
         hook.line,
         `时钟：本地时间 ${formatClockMinutes(minutes)} 命中固定钩子 ${formatClockMinutes(hook.minutes)}`,
-        { event_salience: 0.8, future_hook_bonus: 1, social_value: 0.6, user_receptiveness: 0.8 },
+        // t74: this used to sum to 0.32 — same dead-end as the dangling candidate. A hook that
+        // *we* promised to bring up is exactly what §15.4's `future_hook_bonus` is for:
+        {
+          // A due hook is worth more than background noise; 0.9 = "this is why it is speaking".
+          event_salience: 0.9,
+          // The full bonus: this candidate exists because of a future hook.
+          future_hook_bonus: 1,
+          // It is a scheduled, expected moment, so addressing the user is appropriate.
+          social_value: 0.9,
+          // …and it was their own request, so they are receptive to hearing it.
+          user_receptiveness: 0.9,
+          // It refers back to something the user asked us to remember.
+          memory_relevance: 0.8,
+          // Some time has passed since the last interaction (the hook is a clock event).
+          time_since_last_interaction: 0.6,
+        },
         hook.intent,
       ),
     );
   }
 
+  // 4. topic_pool — something the user actually said recently (t74). No topic in the log means
+  // no candidate: 「话题池」 must not invent a topic.
+  const topic = (context.recentUserTopics ?? []).find((text) => text.trim().length >= 4);
+  if (topic !== undefined) {
+    const snippet = topic.trim().length > 24 ? `${topic.trim().slice(0, 24)}…` : topic.trim();
+    plans.push(
+      planFor(
+        'topic_pool',
+        `${day}-topic-${hashText(topic)}`,
+        `你前面提到「${snippet}」，要不接着说两句？`,
+        `事件日志：最近的用户轮次说过「${snippet}」`,
+        // The topic *is* memory, and re-opening it with the person who mentioned it is valuable;
+        // salience is lower than a live event because nothing happened just now.
+        {
+          memory_relevance: 1,
+          social_value: 0.9,
+          event_salience: 0.6,
+          novelty: 0.5,
+          time_since_last_interaction: 0.7,
+          user_receptiveness: 0.9,
+          future_hook_bonus: 0.4,
+        },
+      ),
+    );
+  }
+
+  // 5. random_smalltalk — 「没理由，就想说一句」 (t74). It is **off in the shipped config**, and it
+  // only fires occasionally even when switched on: a companion that always has something to say
+  // is not company, it is noise.
+  const random = context.random ?? Math.random;
+  if (random() < PROACTIVE_RANDOM_SMALLTALK_CHANCE) {
+    plans.push(
+      planFor(
+        'random_smalltalk',
+        `${day}-smalltalk-${Math.floor(minutes)}`,
+        pickOfflineLine('random_smalltalk', context),
+        '随机闲聊：没有具体事件，只是低概率自发说一句（面板可单独关）',
+        {
+          // Nothing happened — that is the point of this source, so salience stays low.
+          event_salience: 0.6,
+          // Talking to family with no agenda is the highest social value there is…
+          social_value: 1,
+          // …and it is new (nothing has been said for a while).
+          novelty: 0.8,
+          // Usually a while since the last exchange, otherwise the gates would have blocked it.
+          time_since_last_interaction: 1,
+          // Low: no memory thread is being continued.
+          memory_relevance: 0.5,
+          user_receptiveness: 0.8,
+        },
+      ),
+    );
+  }
+
   return plans.slice(0, limit);
+}
+
+/** Pick an offline line that has not been said recently, rotating with the message count. */
+function pickOfflineLine(trigger: ProactiveTrigger, context: ProactiveCandidateContext): string {
+  const lines = PROACTIVE_OFFLINE_LINES[trigger];
+  if (lines.length === 0) return '我在。';
+  const recent = context.recentLines ?? [];
+  const fresh = lines.filter((line) => !recent.includes(line));
+  const pool = fresh.length > 0 ? fresh : lines;
+  const index = (context.spokenCount ?? 0) % pool.length;
+  return pool[index] as string;
+}
+
+/** Stable short hash for a candidate id (the text itself is too long to embed). */
+function hashText(text: string): string {
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) % 1_000_000_007;
+  }
+  return hash.toString(36);
+}
+
+/**
+ * The triggers the loop can actually produce today (t74).
+ *
+ * `routine_expected` (作息预期) is registered in the engine's settings and shown in the panel, but
+ * this console has **no routine model** to base it on (M4 work) — and a candidate with no fact
+ * behind it would be exactly the "model invents something to say" behaviour this project forbids.
+ * The panel labels it as such instead of pretending, and `buildProactiveCandidates` never emits it.
+ */
+export const PROACTIVE_TRIGGERS_WITH_SOURCES: readonly ProactiveTrigger[] = Object.freeze([
+  'presence_arrived',
+  'conversation_dangling',
+  'future_hook_due',
+  'topic_pool',
+  'random_smalltalk',
+]);
+
+/**
+ * The strongest score each live trigger can reach with the facts available to it.
+ *
+ * Used by the tests (and shown in the panel) so a trigger can never silently become impossible
+ * again: 「这个源在最高主动性下能过线吗」 is a question with a numeric answer. The scenario supplies
+ * every fact the sources can use (someone home, a long silence, a clock hook, a recent topic).
+ */
+export function triggerScoreCeiling(now: Date, recentTopic = '明天要去医院复查一下'): Record<ProactiveTrigger, number | null> {
+  const ceiling = {} as Record<ProactiveTrigger, number | null>;
+  for (const trigger of PROACTIVE_TRIGGERS) ceiling[trigger] = null;
+  const rich = buildProactiveCandidates({
+    now,
+    presence: { present: true, updatedAt: now.toISOString() },
+    lastUserTurnAt: new Date(now.getTime() - (PROACTIVE_DANGLING_AFTER_MINUTES + 5) * 60_000),
+    inConversation: false,
+    recentUserTopics: [recentTopic],
+    random: () => 0, // force 「随机闲聊」 to be considered, so its ceiling is included
+    limit: 8,
+  });
+  for (const plan of rich) {
+    // `proactivity = 1.0` is the floor of the threshold curve: 0.45 + 0.30 × (1 − 1.0).
+    const score = scoreProactiveCandidate(plan.candidate.components);
+    const current = ceiling[plan.candidate.trigger];
+    ceiling[plan.candidate.trigger] = current === null ? score : Math.max(current, score);
+  }
+  return ceiling;
 }
 
 function planFor(
@@ -3256,6 +3547,26 @@ export interface ProactiveLoopEntry {
   /** Why there is no audio (no key, `--no-tts`, a TTS error) — never silently empty. */
   readonly audioNote: string | null;
   readonly fact: string;
+  /** Where the *content* came from: the model (key present) or the fixed fallback line (t74). */
+  readonly contentSource: ProactiveContentSource;
+  /** Anything the reader should know about the content (fallback reason, model error, …). */
+  readonly contentNote: string | null;
+  /** Sequence of the assistant `conversation.turn` written for this message, when one was. */
+  readonly turnEventSequence: number | null;
+}
+
+/** Where a proactive line came from. */
+export type ProactiveContentSource = 'model' | 'fixed';
+
+export interface ProactiveComposedContent {
+  readonly text: string;
+  readonly source: ProactiveContentSource;
+  readonly note: string | null;
+}
+
+export interface ProactiveComposeInput {
+  readonly plan: ProactiveCandidatePlan;
+  readonly delivery: ProactiveDelivery;
 }
 
 export interface ProactiveLoopOptions {
@@ -3266,9 +3577,19 @@ export interface ProactiveLoopOptions {
   readonly readProactivity: () => number;
   readonly readPresence: () => Promise<{ readonly present: boolean | null; readonly updatedAt: string | null; readonly source?: string | null } | null>;
   readonly readLastUserTurnAt: () => Date | null;
+  /** Recent user utterances (newest first) — the fact behind 「话题池」 (t74). */
+  readonly readRecentUserTopics?: (() => readonly string[] | undefined) | undefined;
+  /** Injected for tests; 「随机闲聊」 only fires below `PROACTIVE_RANDOM_SMALLTALK_CHANCE`. */
+  readonly random?: (() => number) | undefined;
   readonly readSessionId: () => string | null;
   readonly replyLimits?: Readonly<Record<string, unknown>> | undefined;
   readonly synthesize?: ((text: string) => Promise<Buffer>) | undefined;
+  /**
+   * How the spoken line is produced — called **from inside the delivery seam**, i.e. only after
+   * every gate has let the candidate through (t74). A model call here means "we already decided
+   * to speak"; it can never be what made the decision.
+   */
+  readonly compose?: ((input: ProactiveComposeInput) => Promise<ProactiveComposedContent>) | undefined;
   readonly intervalMs?: number | undefined;
   readonly now?: (() => Date) | undefined;
   readonly log?: ((line: string) => void) | undefined;
@@ -3291,6 +3612,8 @@ const LOOP_HISTORY_LIMIT = 40;
 export class ProactiveLoop {
   readonly #options: ProactiveLoopOptions;
   readonly #entries: ProactiveLoopEntry[] = [];
+  /** Every line already spoken (newest last): the source of 「连续两条不重复同一句」 (t74). */
+  readonly #spoken: string[] = [];
   #timer: NodeJS.Timeout | null = null;
   #intervalMs: number;
   #ticking = false;
@@ -3316,6 +3639,11 @@ export class ProactiveLoop {
 
   entries(): readonly ProactiveLoopEntry[] {
     return this.#entries;
+  }
+
+  /** Lines this loop has already spoken, newest last (the no-repeat memory). */
+  spokenLines(): readonly string[] {
+    return [...this.#spoken];
   }
 
   /** Entries the page has not seen yet (`cursor` = how many it already has). */
@@ -3359,6 +3687,10 @@ export class ProactiveLoop {
         presence,
         lastUserTurnAt: this.#options.readLastUserTurnAt(),
         inConversation: this.#options.readState() !== 'IDLE' || (this.#options.readInFlightTurn?.() ?? false),
+        recentUserTopics: this.#options.readRecentUserTopics?.(),
+        random: this.#options.random,
+        spokenCount: this.#spoken.length,
+        recentLines: this.#spoken.slice(-4),
       });
       if (plans.length === 0) {
         this.#options.log?.('[proactive-loop] 这一次没有可说的候选（没有事实支撑就不开口）');
@@ -3384,6 +3716,8 @@ export class ProactiveLoop {
   async #consider(plan: ProactiveCandidatePlan, now: Date): Promise<ProactiveLoopEntry> {
     const settings = this.#options.readSettings();
     let delivered: string | null = null;
+    let contentSource: ProactiveContentSource = 'fixed';
+    let contentNote: string | null = this.#options.compose === undefined ? '离线/无密钥：用固定短句兜底（内容不经过模型）。' : null;
     const engine = new ProactiveEngine({ store: this.#options.store, settings, clock: () => now });
     const outcome = await engine.consider({
       candidate: plan.candidate,
@@ -3392,8 +3726,47 @@ export class ProactiveLoop {
       inFlightTurn: this.#options.readInFlightTurn?.() ?? false,
       proactivity: this.#options.readProactivity(),
       sessionId: this.#options.readSessionId(),
-      deliver: () => {
-        delivered = plan.line;
+      /**
+       * The delivery seam. **This is the first and only place content is produced** (t74): the
+       * engine calls it after every gate has passed, so a model call here can never influence a
+       * decision. Offline (or without a key) the composer returns the candidate's fixed line, and
+       * a model that fails or answers with the silence token falls back the same way.
+       */
+      deliver: async (delivery) => {
+        let composed: ProactiveComposedContent;
+        if (this.#options.compose === undefined) {
+          composed = { text: pickOfflineLine(plan.candidate.trigger, { recentLines: this.#spoken, spokenCount: this.#spoken.length }), source: 'fixed', note: '离线/无密钥：用固定短句兜底（内容不经过模型）。' };
+        } else {
+          try {
+            composed = await this.#options.compose({ plan, delivery });
+          } catch (error) {
+            composed = {
+              text: pickOfflineLine(plan.candidate.trigger, { recentLines: this.#spoken, spokenCount: this.#spoken.length }),
+              source: 'fixed',
+              note: `内容生成失败（${error instanceof Error ? error.message : String(error)}）：用固定短句兜底。`,
+            };
+          }
+        }
+        const text = composed.text.trim();
+        if (text.length === 0 || text === SILENCE_TOKEN || text.includes(SILENCE_TOKEN)) {
+          composed = {
+            text: pickOfflineLine(plan.candidate.trigger, { recentLines: this.#spoken, spokenCount: this.#spoken.length }),
+            source: 'fixed',
+            note: '模型这次没有给出可用内容（或返回了沉默标记）：用固定短句兜底。',
+          };
+        } else if (this.#spoken.includes(text)) {
+          // 「连续两条不重复同一句」: a repeated line is treated as unusable and replaced by another
+          // of the trigger's lines (a model that echoes itself is not going to be more creative on
+          // a second try, and the user should never hear the same sentence twice in a row).
+          composed = {
+            text: pickOfflineLine(plan.candidate.trigger, { recentLines: this.#spoken, spokenCount: this.#spoken.length }),
+            source: 'fixed',
+            note: '内容与最近说过的一句重复：换成这个触发源下的另一句。',
+          };
+        }
+        delivered = composed.text;
+        contentSource = composed.source;
+        contentNote = composed.note;
       },
     });
     const split = delivered === null ? null : splitReplyIntoSegments(delivered, resolveReplyLimits(this.#options.replyLimits));
@@ -3419,6 +3792,27 @@ export class ProactiveLoop {
         audio = clips;
       }
     }
+    // 西西 actually said it, so it belongs in the conversation history: the *next* user turn must
+    // see it as context (otherwise a proactive message would be invisible to the dialogue).
+    let turnEventSequence: number | null = null;
+    if (outcome.speak && delivered !== null) {
+      const sessionId = this.#options.readSessionId();
+      if (sessionId !== null) {
+        try {
+          const recorded = this.#options.store.recordTurn({ sessionId, role: 'assistant', action: 'SPEAK', text: delivered, source: 'proactive' });
+          turnEventSequence = recorded.event.sequence;
+        } catch (error) {
+          contentNote = [contentNote, `没能写进对话历史：${error instanceof Error ? error.message : String(error)}`]
+            .filter((row): row is string => row !== null && row.length > 0)
+            .join('；');
+        }
+      }
+    }
+    // Remember what was said, so the next message cannot repeat it (t74).
+    if (delivered !== null) {
+      this.#spoken.push(delivered);
+      while (this.#spoken.length > 10) this.#spoken.shift();
+    }
     return {
       at: now.toISOString(),
       candidateId: plan.candidate.candidateId,
@@ -3437,6 +3831,9 @@ export class ProactiveLoop {
       audio,
       audioNote,
       fact: plan.fact,
+      contentSource,
+      contentNote,
+      turnEventSequence,
     };
   }
 
@@ -3449,6 +3846,86 @@ export class ProactiveLoop {
 function clampInterval(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_LOOP_INTERVAL_MS;
   return Math.max(MIN_LOOP_INTERVAL_MS, Math.min(value, 60 * 60_000));
+}
+
+/**
+ * How each trigger asks the model to open its mouth.
+ *
+ * The directive carries the **fact** the candidate was built from and, as a hint only, the fixed
+ * line. It is a prompt, never a decision: it is only ever built after the gates passed.
+ */
+export function proactiveComposeDirective(plan: ProactiveCandidatePlan, recentLines: readonly string[] = []): string {
+  const avoid =
+    recentLines.length === 0
+      ? ''
+      : `最近已经说过这几句，这次不要再重复（换一种说法）：\n${recentLines.map((line) => `- ${line}`).join('\n')}\n`;
+  return [
+    '（这是「主动开口」时机，不是用户说话：请用一到两句自然的中文开口，像家里人一样；',
+    '不要复述这条指令，不要提问超过一句，不要编造没发生过的事。',
+    `触发源：${plan.candidate.trigger}。依据：${plan.fact}。`,
+    avoid,
+    `如果合适，可以调用工具核对真实信息（例如时间、天气）；也可以参考这句话，但要说得更自然：${plan.line}）`,
+  ].join('');
+}
+
+/**
+ * Compose a proactive line with the model, through the **existing** prompt + adapter path.
+ *
+ * Why not `engine.respond`: that would write a user turn we never received (the log would claim
+ * the user said something). Instead this assembles the same system prompt the engine uses
+ * (identity, hard policy, personality directives, world state, recent history) and asks the same
+ * adapter — the one wired with the read-only tools — so a proactive line is as "in context" as a
+ * reply, and the assistant turn is written by the loop afterwards.
+ */
+export function createModelComposer(options: {
+  readonly engine: ConversationEngine;
+  readonly sessionId: () => string | null;
+  readonly available: boolean;
+  readonly recentLines?: (() => readonly string[]) | undefined;
+  readonly timeoutMs?: number;
+  readonly log?: ((line: string) => void) | undefined;
+}): (input: ProactiveComposeInput) => Promise<ProactiveComposedContent> {
+  return async (input: ProactiveComposeInput): Promise<ProactiveComposedContent> => {
+    if (!options.available) {
+      return { text: input.plan.line, source: 'fixed', note: '离线/无密钥：用固定短句兜底（内容不经过模型）。' };
+    }
+    const sessionId = options.sessionId();
+    if (sessionId === null) {
+      return { text: input.plan.line, source: 'fixed', note: '没有会话可以承载主动消息：用固定短句兜底。' };
+    }
+    const directive = proactiveComposeDirective(input.plan, options.recentLines?.() ?? []);
+    const at = new Date();
+    const prompt = options.engine.buildPrompt({ sessionId, text: directive, addressed: true, at });
+    const stream = await options.engine.adapter.handleUserTurn({ sessionId, text: directive, prompt, timeoutMs: options.timeoutMs ?? 60_000 });
+    for await (const chunk of stream) void chunk; // the text is only needed at the end
+    const result = await stream.result;
+    const text = typeof result.text === 'string' ? result.text.trim() : '';
+    if (result.action !== 'SPEAK' || text.length === 0 || text.includes(SILENCE_TOKEN)) {
+      options.log?.(`[proactive] 模型这次没给出可用内容（action=${result.action}）：用固定短句兜底`);
+      return { text: input.plan.line, source: 'fixed', note: `模型返回 action=${result.action}（或沉默标记）：用固定短句兜底。` };
+    }
+    options.log?.(`[proactive] 内容由模型生成（${result.provider}/${result.model}，${text.length} 字）`);
+    return { text, source: 'model', note: null };
+  };
+}
+
+/** Recent *user* utterances, newest first — the fact behind 「话题池」 (t74). */
+export function recentUserTopics(store: XixiStore, sessionId?: string | null, limit = 5): string[] {
+  const events = store.readEvents({
+    type: 'conversation.turn',
+    ...(sessionId === undefined || sessionId === null ? {} : { sessionId }),
+    limit: Number.MAX_SAFE_INTEGER,
+  });
+  const topics: string[] = [];
+  for (let index = events.length - 1; index >= 0 && topics.length < limit; index -= 1) {
+    const event = events[index];
+    if (event === undefined) continue;
+    const payload = event.payload as Record<string, unknown>;
+    if (payload['role'] !== 'user') continue;
+    const text = typeof payload['text'] === 'string' ? payload['text'].trim() : '';
+    if (text.length > 0) topics.push(text);
+  }
+  return topics;
 }
 
 /** When the last *user* turn happened, straight from the event log (t70's 「长时间没人说话」). */
@@ -3526,6 +4003,10 @@ export function databaseNoteHtml(currentDir: string): string {
   negative: 'px-neg',
   proactivity: 'px-proactivity',
   proactivityNow: 'px-proactivity-now',
+  talkativeness: 'px-talkativeness',
+  talkativenessNow: 'px-talkativeness-now',
+  verbosity: 'px-verbosity',
+  verbosityNow: 'px-verbosity-now',
   loopEnabled: 'px-loop-enabled',
   loopInterval: 'px-loop-interval',
   loopTick: 'px-loop-tick',
@@ -3564,8 +4045,10 @@ export function proactivePanelHtml(): string {
       <label>同主题抑制（小时）<input type="number" id="${id.topic}" min="0" max="720" /></label>
       <label>负面反馈倍率<input type="number" id="${id.negative}" min="1" max="10" step="0.5" /></label>
       <label>主动性总强度（人格 proactivity）<input type="number" id="${id.proactivity}" min="0" max="1" step="0.05" /></label>
+      <label>话痨程度（人格 talkativeness）<input type="number" id="${id.talkativeness}" min="0" max="1" step="0.05" /></label>
+      <label>话的长度（人格 verbosity）<input type="number" id="${id.verbosity}" min="0" max="1" step="0.05" /></label>
     </div>
-    <div class="muted">「主动性总强度」写的是<b>人格</b> <code>proactivity</code>（进 <code>self_profile</code>，留一条 <code>self_profile_history</code>）：它只把阈值改成 <code>0.45 + 0.30 × (1 − proactivity)</code>，<b>一道门禁都不会被跳过</b>。当前生效值：<b id="${id.proactivityNow}">—</b></div>
+    <div class="muted">上面三个是<b>人格</b>值（进 <code>self_profile</code>，留 <code>self_profile_history</code>）：主动性只把阈值改成 <code>0.45 + 0.30 × (1 − proactivity)</code>，<b>一道门禁都不会被跳过</b>；话痨/话长直接改提示词里的说话方式。当前生效值：主动性 <b id="${id.proactivityNow}">—</b>、话痨 <b id="${id.talkativenessNow}">—</b>、话长 <b id="${id.verbosityNow}">—</b></div>
     <div id="${id.triggers}" class="px-triggers"></div>
     <div style="margin:10px 0">
       <button id="${id.save}" class="primary">保存（立即生效并落库）</button>
@@ -3623,8 +4106,17 @@ function pxRender(state) {
   pxSet('quietStart', state.quietHours.start); pxSet('quietEnd', state.quietHours.end);
   pxSet('topic', s.topicRepeatWindowHours); pxSet('negative', s.negativeFeedbackCooldownMultiplier);
   pxSet('proactivity', state.proactivity);
-  var proactivityNow = document.getElementById(PX.ids.proactivityNow);
-  if (proactivityNow) proactivityNow.textContent = String(state.proactivity);
+  pxSet('talkativeness', state.personality.talkativeness);
+  pxSet('verbosity', state.personality.verbosity);
+  var nowBoxes = [
+    [PX.ids.proactivityNow, state.personality.proactivity],
+    [PX.ids.talkativenessNow, state.personality.talkativeness],
+    [PX.ids.verbosityNow, state.personality.verbosity],
+  ];
+  for (var box = 0; box < nowBoxes.length; box += 1) {
+    var node = document.getElementById(nowBoxes[box][0]);
+    if (node) node.textContent = String(nowBoxes[box][1]);
+  }
   var summary = document.getElementById(PX.ids.summary);
   if (summary) {
     summary.textContent = (s.enabled ? '已开启' : '已关闭')
@@ -3637,7 +4129,12 @@ function pxRender(state) {
   var triggers = document.getElementById(PX.ids.triggers);
   if (triggers) {
     triggers.innerHTML = '<span class="muted">触发源（关了就不会因为这件事开口）：</span>' + state.triggerLabels.map(function (row) {
-      return '<label style="margin-right:10px"><input type="checkbox" data-trigger="' + row.trigger + '"' + (row.enabled ? ' checked' : '') + ' /> ' + row.label + '</label>';
+      // row.live distinguishes the sources this console can really produce today from the ones
+      // that are registered but have no fact source yet (t74): the panel must not promise a
+      // trigger that can never fire.
+      return '<label style="margin-right:10px" title="' + (row.live ? '会自己产生候选' : '已登记，但这一轮还不会自己产生候选（缺事实来源）') + '">'
+        + '<input type="checkbox" data-trigger="' + row.trigger + '"' + (row.enabled ? ' checked' : '') + ' /> '
+        + row.label + (row.live ? '' : '（这一轮还不会自己产生候选）') + '</label>';
     }).join('');
   }
   var gates = document.getElementById(PX.ids.gates);
@@ -3689,10 +4186,14 @@ function pxPatch() {
     negativeFeedbackCooldownMultiplier: Number(pxVal('negative')),
     triggers: triggers,
   };
-  // Only send proactivity when the box really holds a number: an empty box must not be read as
-  // 0 (which would silently make 西西 maximally willing to speak).
-  var raw = pxVal('proactivity');
-  if (raw !== undefined && String(raw).trim() !== '' && isFinite(Number(raw))) patch.proactivity = Number(raw);
+  // Only send a personality value when the box really holds a number: an empty box must not be
+  // read as 0 (which would silently make 西西 maximally willing to speak).
+  var personalityFields = ['proactivity', 'talkativeness', 'verbosity'];
+  for (var field = 0; field < personalityFields.length; field += 1) {
+    var name = personalityFields[field];
+    var raw = pxVal(name);
+    if (raw !== undefined && String(raw).trim() !== '' && isFinite(Number(raw))) patch[name] = Number(raw);
+  }
   return patch;
 }
 /** Play the drill's reply the way the engine intends: one segment at a time, gapMs apart. */
@@ -3723,6 +4224,15 @@ async function pxDrill() {
   if (drill.speak) {
     pxStatus('通过：' + drill.reasonLabel + '（分数 ' + drill.score + ' ≥ 阈值 ' + drill.threshold + '，已写审计事件 #' + drill.eventSequence + '）');
     pxPlaySegments(target, drill.segments, drill.gapMs, '主动开口');
+    // The drill speaks too (t74): the same TTS path as the resident loop, so 「演练」 can be used
+    // to check the speaker without waiting for the loop to fire.
+    if (drill.audio) pxPlayClips(drill.audio, drill.gapMs);
+    if (drill.audioNote && target) {
+      var drillNote = document.createElement('div');
+      drillNote.className = 'muted';
+      drillNote.textContent = drill.audioNote;
+      target.appendChild(drillNote);
+    }
   } else {
     pxStatus('没开口：' + drill.reasonLabel + '（' + drill.reasonCode + '）');
     if (target) target.innerHTML = '<div class="muted">' + drill.nextStep + '</div>';
