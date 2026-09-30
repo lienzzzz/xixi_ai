@@ -10,3 +10,4 @@ data/
 *.log
 dist/
 vendor/
+.agent-teams/
