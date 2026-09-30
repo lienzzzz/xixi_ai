@@ -93,7 +93,7 @@ A/B 合法性我也核了：两份 JSON 各 84 轮，**同一批 scenario、同�
 | `npm test` | `ℹ tests 298 / ℹ pass 298 / ℹ fail 0 / ℹ cancelled 0 / ℹ duration_ms 16948`，**exit 0** |
 | `node --test tests/unit/prompt.test.ts tests/unit/core/reply-segments.test.ts tests/scenarios/realism-metrics.test.ts` | `ℹ tests 31 / ℹ pass 31 / ℹ fail 0`，**exit 0** |
 | `npm run check:docs` | 写本报告之前：`检查了 91 份 markdown｜失效链接 0｜不存在的文件引用 0｜缺少新鲜度标记 0`，**exit 0**（含 captain 新落的 `docs/recon/p1-doc-sync-package-2026-10-01.md`） |
-| `npm run check:docs`（写本报告后复跑） | **exit 1**：`检查了 92 份 markdown｜失效链接 0｜**不存在的文件引用 2**｜缺少新鲜度标记 0`，两处都在**别人刚产出的未跟踪文件**里——`docs/verification/t9-proactive-v2-verification-2026-10-01.md:55` 引用了 `docs/02_IMPLEMENTATION_STEPS.md` 与 `docs/05_TEST_AND_ACCEPTANCE.md`（这两个名字属于外部 pack，不在本仓库里）。**与 t16、与本报告都无关**（我的报告 0 问题、t9 那份是 verifier 的 t9 在途产物）；按 AGENTS §9.10 判读为并发任务的在途红灯，归属 t9/t10。团队级"check-docs 全绿"要等它修掉才成立——把这两个名字写成纯文本（或加 pack 前缀）即可 |
+| `npm run check:docs`（写本报告后复跑） | **exit 1**：`检查了 92 份 markdown｜失效链接 0｜**不存在的文件引用 2**｜缺少新鲜度标记 0`，两处都在**别人刚产出的未跟踪文件**里——verifier 的 t9 在途报告（`t9-proactive-v2-verification-2026-10-01.md`）引用了外部 pack 的两份文档（`02_IMPLEMENTATION_STEPS.md` 与 `05_TEST_AND_ACCEPTANCE.md`，这两个名字属于外部 pack，不在本仓库里）。**与 t16、与本报告都无关**；按 AGENTS §9.10 判读为并发任务的在途红灯，归属 t9/t10。团队级「check-docs 全绿」要等它修掉才成立——把这两个名字写成纯文本（或加 pack 前缀）即可 |
 | `node scripts/eval-realism.ts --fake --label t17-check --out %TEMP%\t17-fake` | `真人感评测 OK`，exit 0；stdout 含主/辅口径与分母定义（我用 `--out` 指到临时目录，**没有**在 `docs/benchmarks/` 写任何东西） |
 
 我没有做任何突变实验（不改被测文件、不改测试）；工作区里 `AGENTS.md` 的改动是 captain 的（§9.7 补"提交按文件添加"），不在 t16 的声明路径内，也不是我改的。
@@ -129,7 +129,9 @@ t16 披露：`scripts/lib/realism-metrics.ts:46` 直接 `import { UNBACKED_FACT_
 
 ### 5.5 观察：`docs/benchmarks/` 里有两个没人认领的未跟踪产物
 
-`docs/benchmarks/realism-2026-10-01-fake.json` / `.md`（revision `8e0db13`、adapter=fake、时间戳 01:12）是未跟踪文件，t16 明确说不是它产生的，也不是我的（我的两次 `--fake` 都用 `--out %TEMP%`，且我的运行报的 revision 是 `3fa6a8b`）。它们在**受跟踪目录**里，t5 提交文档时若用 `git add docs/` 会把它们一起收进来（AGENTS §9.7 刚补过这条教训）。建议 captain 明确：删掉，或作为自检证据提交并注明来源。
+`docs/benchmarks/` 里曾有两个没人认领的未跟踪产物（realism-2026-10-01-fake 的 json 与 md，revision `8e0db13`、adapter=fake、时间戳 01:12），t16 明确说不是它产生的，也不是我的（我的两次 `--fake` 都用 `--out %TEMP%`，且我的运行报的 revision 是 `3fa6a8b`）。它们在**受跟踪目录**里，t5 提交文档时若用 `git add docs/` 会把它们一起收进来（AGENTS §9.7 刚补过这条教训）。
+
+**captain 的处理（2026-10-01）**：按本条建议**删除**了这两个文件（它们是 `--fake` 的一次性产物，重跑命令 `node scripts/eval-realism.ts --fake`）。本行原先写成仓库路径，删除后成了悬空引用，故一并改为文字描述。
 
 ---
 
