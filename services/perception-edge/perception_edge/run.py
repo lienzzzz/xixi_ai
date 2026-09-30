@@ -54,6 +54,14 @@ from .contracts import local_timestamp
 from .scenes import empty_static, face_track, person_track, speckle_frame, still_track
 from .semantic import SemanticAnalysisHook, describe_privacy_boundary
 
+#: How long `open()` may spend waiting for the device before we give up and explain why (t89).
+#: The budget covers the whole failure path (process start + VideoCapture + polling) and the
+#: acceptance target is "exit within about 5 seconds". Measured on this machine: importing cv2 and
+#: numpy costs ~0.27 s, the DSHOW constructor 0.1-1.4 s when the index does not exist (it varies),
+#: and the rest is this budget. 3.0 s keeps the total inside the target with margin; callers that
+#: also have their own startup work can shrink it further with `--camera-open-timeout`.
+CAMERA_OPEN_TIMEOUT_SECONDS = 3.0
+
 
 @dataclass
 class RunConfig:
@@ -78,6 +86,8 @@ class RunConfig:
     append: bool = False
     quiet_frames: bool = False
     ttl_seconds: float = 60.0
+    #: Seconds to wait for the device before reporting a Chinese reason and exiting (t89).
+    camera_open_timeout: float = CAMERA_OPEN_TIMEOUT_SECONDS
 
 
 def _face_detector(cfg: RunConfig, size: tuple[int, int]):
@@ -193,19 +203,6 @@ def run(
     debouncer = PresenceDebouncer(debounce)
     semantic = semantic or SemanticAnalysisHook()
 
-    # Announce the starting state once, so the WorldState projection exists from the first
-    # second instead of being absent (a reader then always sees a value + updated_at + TTL).
-    emitter.emit_presence(
-        present=debouncer.state == PRESENT,
-        confidence=0.85,
-        source_detail=(
-            f"state={debouncer.state} startup frames=0 motion_ratio=0.0000 faces=0 "
-            f"gate=motion+face reason=camera_started"
-        ),
-        timestamp=local_timestamp(),
-    )
-    events = 1
-
     frames_seen = 0
     started = time.perf_counter()
     loop_ms: list[float] = []
@@ -218,13 +215,40 @@ def run(
         source = SyntheticFrameSource(frames).frames()
     elif cfg.source != "synthetic":
         grabber = FrameGrabber(
-            CameraConfig(index=cfg.camera_index, width=cfg.width, height=cfg.height, warmup_frames=1)
+            CameraConfig(
+                index=cfg.camera_index,
+                width=cfg.width,
+                height=cfg.height,
+                warmup_frames=1,
+                # t89: fail fast instead of retrying for as long as the default allows. The
+                # device is either there or it is not; a long block only delays the explanation.
+                # The caller may shrink this further (see `--camera-open-timeout`).
+                open_timeout_s=cfg.camera_open_timeout,
+            )
         )
         grabber.open()
         source = grabber.frames()
     else:
         scenario = cfg.scenario or "person-arrives-moves-leaves"
         source = SyntheticFrameSource(synthetic_scenario(scenario)).frames()
+
+    # Announce the starting state once, so the WorldState projection exists from the first
+    # second instead of being absent (a reader then always sees a value + updated_at + TTL).
+    #
+    # t89: this happens **after** the camera has actually opened. Before that fix it ran first,
+    # so a failure to open still wrote a `present=false` "we looked and nobody is there" event —
+    # a reading we never took. Ordering it after the open means a camera that refuses to open
+    # leaves the log untouched and only produces a Chinese explanation plus exit code 2.
+    emitter.emit_presence(
+        present=debouncer.state == PRESENT,
+        confidence=0.85,
+        source_detail=(
+            f"state={debouncer.state} startup frames=0 motion_ratio=0.0000 faces=0 "
+            f"gate=motion+face reason=camera_started"
+        ),
+        timestamp=local_timestamp(),
+    )
+    events = 1
 
     try:
         for frame, timestamp_ms in source:
@@ -334,6 +358,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--quiet-frames", action="store_true", help="不打印逐帧记录，只打印事件与汇总")
     parser.add_argument(
+        "--camera-open-timeout",
+        type=float,
+        default=CAMERA_OPEN_TIMEOUT_SECONDS,
+        help=f"打不开摄像头时最多等多少秒再报中文原因并退出（默认 {CAMERA_OPEN_TIMEOUT_SECONDS:g} 秒；"
+        "调用方如果要保证「数秒内返回」，可以调小它）",
+    )
+    parser.add_argument(
         "--threads",
         type=int,
         default=None,
@@ -357,6 +388,56 @@ def _apply_thread_limit(threads: int | None) -> None:
     setup = getattr(cv2, "setNumThreads", None)
     if callable(setup):
         setup(max(1, int(threads)))
+
+
+def _force_utf8_output() -> None:
+    """Make stdout/stderr UTF-8 regardless of the Windows locale codec.
+
+    Why this exists (t89): on a Chinese Windows install, a Python child whose output is a pipe
+    encodes text with the ANSI code page (cp936/GBK), not UTF-8. The field-test page decodes the
+    child's stderr as UTF-8, so a GBK-encoded Chinese reason arrived as mojibake — the user saw
+    «����ͷ�����ã�…» instead of the sentence we wrote. Forcing UTF-8 at the source fixes it for
+    every consumer at once, without asking the caller to guess an encoding.
+
+    The JSON stdout records were never affected (they are `ensure_ascii=False` but written, so
+    they had the same latent problem for non-ASCII text inside them — this closes that too).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):  # pragma: no cover - detached/invalid stream
+                pass
+
+
+def _silence_opencv_logging() -> bool:
+    """Turn OpenCV's own log messages off, so the operator only sees our Chinese reason.
+
+    Why this exists (t89): with a camera index that does not exist, OpenCV prints a native
+    English warning to stderr before we ever get to raise:
+
+        [ WARN:0@0.121] global cap.cpp:477 cv::VideoCapture::open VIDEOIO(DSHOW): backend is
+        generally available but can't be used to capture by index
+
+    The field-test page shows the child's stderr verbatim, so without this the user reads an
+    English OpenCV line and has to guess. The warning carries no information our own Chinese
+    message does not carry (which index, and the three likely causes).
+
+    Returns True when the level was applied, False when this OpenCV has no logging API — the
+    caller keeps working either way, and `scripts/verify-camera-presence.ts` also strips any
+    native line that still arrives, so this is belt *and* braces on purpose.
+    """
+    try:
+        logging_api = getattr(getattr(cv2, "utils", None), "logging", None)
+        level = getattr(logging_api, "LOG_LEVEL_SILENT", None)
+        setter = getattr(logging_api, "setLogLevel", None)
+        if level is None or not callable(setter):
+            return False
+        setter(level)
+        return True
+    except Exception:  # noqa: BLE001 - a diagnostic convenience must never break the run
+        return False
 
 
 def build_live_emitter(options: dict[str, Any], source: Callable[[], None] | None = None):
@@ -470,6 +551,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "frame_max_width": parsed.pop("frame_max_width", 480),
     }
     live_fps = float(parsed.pop("live_fps", 8.0))
+    _force_utf8_output()
+    _silence_opencv_logging()
     _apply_thread_limit(threads)
     if live:
         # Unbounded loop, paced to `--live-fps`; the caller stops it (stop button / closed pipe).
@@ -485,14 +568,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     report = None
     if live:
         on_frame, should_stop, report = build_live_emitter(live_options)
+    started_at = time.perf_counter()
     try:
         result = run(cfg, emitter, on_frame=on_frame, should_stop=should_stop, pace_fps=live_fps if live else None)
         if report is not None:
             report()
         return 0 if result is not None else 0
     except CameraUnavailable as cause:
-        print(f"摄像头不可用：{cause}", file=sys.stderr)
-        print("提示：先关掉占用摄像头的程序（相机 App / 会议软件 / 其它预览窗口），或换 --camera-index。", file=sys.stderr)
+        # t89: this is the whole failure path a user sees. One Chinese paragraph, measured
+        # elapsed time included, and **no OpenCV English warning** (silenced above; the caller
+        # also strips native lines as a second line of defence).
+        elapsed = time.perf_counter() - started_at
+        print(
+            f"摄像头不可用（已等待 {elapsed:.1f} 秒后放弃，不会一直重试）：{cause}",
+            file=sys.stderr,
+        )
+        print(
+            "提示：先关掉占用摄像头的程序（相机 App / 会议软件 / 其它预览窗口），再重试；"
+            "本机通常只有 1 个摄像头（索引 0），用别的索引一定打不开——"
+            "要专门验证「打不开时会不会快速失败」，可以用 --camera-index -1。",
+            file=sys.stderr,
+        )
         return 2
     except FileNotFoundError as cause:
         print(f"缺少模型文件：{cause}", file=sys.stderr)

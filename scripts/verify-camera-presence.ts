@@ -92,6 +92,8 @@ const FLAGS = new Set(['--self-test', '--require-transition', '--require-event',
 function parseArgs(argv: string[]): { values: Map<string, string>; flags: Set<string> } {
   const values = new Map<string, string>();
   const flags = new Set<string>();
+  /** Numeric options legitimately take negative values (`--camera-index -1`). */
+  const NUMERIC_OPTIONS = new Set(['--seconds', '--camera-index', '--min-fps', '--live-fps']);
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index] as string;
     if (FLAGS.has(token)) {
@@ -100,16 +102,34 @@ function parseArgs(argv: string[]): { values: Map<string, string>; flags: Set<st
     }
     if (OPTIONS_WITH_VALUE.has(token)) {
       const value = argv[index + 1];
-      if (value === undefined || value.startsWith('--')) {
+      const startsLikeFlag =
+        value === undefined ||
+        value.startsWith('--') ||
+        (value.startsWith('-') && !(NUMERIC_OPTIONS.has(token) && /^-\d+$/.test(value)));
+      if (startsLikeFlag) {
         console.error(`参数错误：${token} 需要一个值。\n\n${USAGE}`);
         process.exit(1);
       }
-      values.set(token, value);
+      values.set(token, value as string);
       index += 1;
       continue;
     }
     // An unknown argument used to be ignored silently, which turned a typo into a run with
     // default settings — the worst outcome, because it looks like it worked.
+    //
+    // A bare negative number is a VALUE, not a flag: `--camera-index -1` is a legitimate way to
+    // ask for a camera that cannot exist, and `-1` must not be rejected as "unknown parameter".
+    const looksLikeNegativeNumber = /^-\d+$/.test(token);
+    if (looksLikeNegativeNumber) {
+      console.error(
+        `参数错误：${token} 像一个数值，但没有对应的选项。\n` +
+          '如果你要指定不存在的摄像头索引，请写成「--camera-index ' +
+          token +
+          '」（例如 --camera-index -1 用来验证「打不开时会不会快速失败」）。\n\n' +
+          USAGE,
+      );
+      process.exit(1);
+    }
     const hint = token.startsWith('-') && !token.startsWith('--') ? '\n（选项要用两个短横线，例如 --seconds）' : '';
     console.error(`参数错误：无法识别的参数「${token}」。${hint}\n\n${USAGE}`);
     process.exit(1);
@@ -138,6 +158,12 @@ const explicitDb = parsed.values.get('--db');
 const dbPath = explicitDb ?? (selfTest ? SELF_TEST_DB : DEFAULT_DB);
 const requireTransition = hasFlag('--require-event') || hasFlag('--require-transition');
 const qualityFloorFps = Number(argValue('--min-fps', '20'));
+/**
+ * t89: `--camera-index` was parsed and documented but **never forwarded to the child**, so the
+ * option did nothing — the script always opened index 0. That is exactly why "point it at a camera
+ * that cannot exist" never produced a failure to observe: the request never left this process.
+ */
+const cameraIndex = Number(argValue('--camera-index', '0'));
 
 if (!Number.isFinite(seconds) || seconds <= 0) {
   console.error(`参数错误：--seconds 需要正数，收到「${argValue('--seconds', '')}」。\n\n${USAGE}`);
@@ -145,6 +171,10 @@ if (!Number.isFinite(seconds) || seconds <= 0) {
 }
 if (!Number.isFinite(qualityFloorFps) || qualityFloorFps <= 0) {
   console.error(`参数错误：--min-fps 需要正数，收到「${argValue('--min-fps', '')}」。\n\n${USAGE}`);
+  process.exit(1);
+}
+if (!Number.isInteger(cameraIndex)) {
+  console.error(`参数错误：--camera-index 需要整数（摄像头设备索引），收到「${argValue('--camera-index', '')}」。\n\n${USAGE}`);
   process.exit(1);
 }
 if (explicitDb !== undefined && selfTest) {
@@ -184,7 +214,7 @@ const python = pythonCandidates().find((candidate) => probe(candidate));
 if (python === undefined) {
   console.error(
     [
-      '摄像头在场检测验收 FAILED：找不到带 OpenCV 的 Python 解释器。',
+      '摄像头在场检测 FAILED：找不到带 OpenCV 的 Python 解释器。',
       '  py -3.12 -m venv .venvs/cv4',
       '  .venvs/cv4/Scripts/python.exe -m pip install "opencv-python-headless<5" numpy',
       '（Haar 需要 opencv<5；只用 YuNet 时 5.x 也可）',
@@ -234,17 +264,35 @@ interface SummaryRecord {
   [key: string]: unknown;
 }
 
+/**
+ * Budget handed to the child for waiting on the device. Measured (t89): the whole run must come
+ * back in about 5 s, and this process needs 1-1.5 s of its own for probing the interpreter and
+ * opening the store. 2.5 s here leaves the end-to-end failure path inside the target even when the
+ * DSHOW constructor is slow (measured 0.1-1.4 s across runs) while still giving a real device time
+ * to answer — enumeration is fast; it is waiting for a device that does not exist that is pointless.
+ */
+const CHILD_CAMERA_OPEN_TIMEOUT_S = 2.5;
+
 const pythonArgs = [
   '-m',
   'perception_edge.run',
   '--seconds',
   String(seconds),
+  // t89: forwarded, not assumed. Without this line `--camera-index` was inert and a run against a
+  // non-existent index silently opened the default device instead of failing.
+  '--camera-index',
+  String(cameraIndex),
   '--db',
   dbFile,
   '--append',
   '--quiet-frames',
   '--threads',
   '1',
+  // t89: the whole point is that the caller gets an answer in seconds. This process also spends
+  // time probing interpreters and opening the store, so the child's own device wait is capped
+  // below the 5 s target instead of using the module's own default.
+  '--camera-open-timeout',
+  String(CHILD_CAMERA_OPEN_TIMEOUT_S),
 ];
 if (hasFlag('--self-test')) {
   // No real person is needed (and no real person is present): play the generated
@@ -264,20 +312,24 @@ if (liveMode) {
     '--live',
     '--live-fps',
     argValue('--live-fps', '8'),
+    '--camera-index',
+    String(cameraIndex),
     '--db',
     dbFile,
     '--append',
     '--quiet-frames',
     '--threads',
     '1',
+    '--camera-open-timeout',
+    String(CHILD_CAMERA_OPEN_TIMEOUT_S),
   );
   if (hasFlag('--self-test')) pythonArgs.push('--source', 'synthetic', '--scenario', argValue('--scenario', 'long-occlusion'));
 }
 
 console.log(
-  hasFlag('--self-test')
+  selfTest
     ? `自检模式：用生成帧（不是真人）跑通检测→事件→投影的写库路径；写入自检库 ${dbPath}`
-    : `用真实摄像头跑 ${seconds} s：${python} -m perception_edge.run（摄像头 DSHOW，画面不出本机）；写入台账 ${dbPath}`,
+    : `用真实摄像头跑 ${seconds} s（索引 ${cameraIndex}）：${python} -m perception_edge.run（摄像头 DSHOW，画面不出本机）；写入台账 ${dbPath}`,
 );
 const frames: FrameRecord[] = [];
 /** t78 `--live`: one entry per frame the child streamed on stdout (base64 JPEG in memory). */
@@ -285,11 +337,66 @@ const liveFrames: Record<string, unknown>[] = [];
 let summary: SummaryRecord | null = null;
 let stderrTail = '';
 let stoppedForLive = false;
+/**
+ * Widow watchdog (t89): the child is expected to finish on its own — `--seconds` for the finite
+ * modes, and for `--live` it is this script that closes stdin. If neither happens (a driver that
+ * hangs in `VideoCapture`, a blocked read), the caller must still get an answer instead of an
+ * endless wait. Budget = what we asked for + a generous buffer for process start and shutdown.
+ */
+let watchdogFired = false;
+let killedByWatchdog = false;
+const watchdogMs = liveMode ? Math.max(1, seconds) * 1000 + 20_000 : Math.max(1, seconds) * 1000 + 15_000;
+
+/**
+ * Lines that come from OpenCV's C++ layer rather than from our own Python code. The field-test
+ * page shows the child's stderr verbatim, so a raw `[ WARN:0@0.12] global cap.cpp:477 …` line
+ * would reach the user as English noise about an internal file. `run.py` already silences
+ * OpenCV's logger; this is the second line of defence for builds where that API is unavailable.
+ */
+const NATIVE_WARNING_PATTERNS = [/^\[\s*(WARN|ERROR|FATAL|INFO):/i, /\bglobal\s+[\w./-]+\.(cpp|hpp|h):\d+/i, /VIDEOIO\s*\(/i];
+
+function splitChildStderr(text: string): { ours: string; native: string[] } {
+  const ours: string[] = [];
+  const native: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    if (NATIVE_WARNING_PATTERNS.some((pattern) => pattern.test(trimmed))) native.push(trimmed);
+    else ours.push(trimmed);
+  }
+  return { ours: ours.join('\n'), native };
+}
+
 const pythonExit = await new Promise<number>((resolve) => {
-  const child = spawn(python, pythonArgs, { cwd: PERCEPTION_DIR, windowsHide: true });
+  const child = spawn(python, pythonArgs, {
+    cwd: PERCEPTION_DIR,
+    windowsHide: true,
+    env: {
+      ...process.env,
+      // The child prints Chinese reasons on stderr; without UTF-8 mode a Chinese Windows install
+      // encodes them with the ANSI code page (GBK) and the page, which decodes UTF-8, shows
+      // mojibake. `run.py` also reconfigures its streams — both, on purpose (t89).
+      PYTHONUTF8: '1',
+      PYTHONIOENCODING: 'utf-8',
+    },
+  });
   let buffered = '';
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
+  const watchdog = setTimeout(() => {
+    watchdogFired = true;
+    child.kill();
+    // On Windows `kill()` is TerminateProcess; if the child is stuck inside a driver call it may
+    // need a moment. Escalate only if it is still alive.
+    const escalate = setTimeout(() => {
+      if (!killedByWatchdog) child.kill('SIGKILL');
+    }, 3000);
+    child.on('close', () => clearTimeout(escalate));
+  }, watchdogMs);
+  child.on('close', () => {
+    clearTimeout(watchdog);
+    killedByWatchdog = watchdogFired;
+  });
   if (liveMode) {
     // The live loop runs until its stdin closes; this CLI stops it after --seconds (the console
     // stops it with the 停用 button instead). Close stdin first and give the child a moment to
@@ -335,11 +442,28 @@ const stored = store.readEvents({ type: 'presence.changed', limit: Number.MAX_SA
 const projection = store.worldState(PRESENCE_KEY);
 store.close();
 
+/** Only our own Chinese lines reach the operator; OpenCV's native lines are dropped (t89). */
+const childStderr = splitChildStderr(stderrTail);
+const childReason = childStderr.ours.trim();
+
+if (watchdogFired) {
+  // The child did not finish in its budget and was terminated. Say so, in Chinese, with the
+  // numbers — the caller's job is to show this sentence, not to guess what a bare exit code meant.
+  console.error(
+    [
+      `摄像头在场检测 FAILED：等待子进程超过 ${Math.round(watchdogMs / 1000)} 秒仍没有结束，已结束它（不会一直等下去）。`,
+      childReason.length > 0 ? `子进程最后的中文说明：${childReason}` : '子进程在被结束前没有给出中文说明。',
+      '可能原因：设备不存在 / 被别的程序占用（相机 App、会议软件、另一个预览窗口）/ Windows 隐私设置禁止了相机。',
+      '先关掉占用摄像头的程序，或用 --camera-index 换一个索引（环境变量 XIXI_PERCEPTION_PYTHON 可指定解释器）。',
+    ].join('\n'),
+  );
+  process.exit(2);
+}
 if (pythonExit === 2) {
   console.error(
     [
-      '摄像头在场检测验收 FAILED：没有可用的摄像头。',
-      stderrTail.trim(),
+      '摄像头在场检测 FAILED：没有可用的摄像头。',
+      childReason.length > 0 ? childReason : '（子进程没有留下中文说明）',
       '可能原因：设备不存在 / 被别的程序占用（相机 App、会议软件、另一个预览窗口）/ Windows 隐私设置禁止了相机。',
       '先关掉占用摄像头的程序，或换 --camera-index（环境变量 XIXI_PERCEPTION_PYTHON 可指定解释器）。',
     ].join('\n'),
@@ -347,11 +471,11 @@ if (pythonExit === 2) {
   process.exit(2);
 }
 if (pythonExit === 3) {
-  console.error(`摄像头在场检测验收 FAILED：缺少模型文件。\n${stderrTail.trim()}`);
+  console.error(`摄像头在场检测 FAILED：缺少模型文件或解释器。\n${childReason}`);
   process.exit(3);
 }
 if (pythonExit !== 0 && !(liveMode && stoppedForLive)) {
-  console.error(`摄像头在场检测验收 FAILED：perception-edge 退出码 ${pythonExit}\n${stderrTail.trim()}`);
+  console.error(`摄像头在场检测 FAILED：perception-edge 退出码 ${pythonExit}\n${childReason}`);
   process.exit(1);
 }
 // 约定（t81 写进文档：docs/design/perception.md §7.1）：`--live` 由**我们**在 --seconds 之后主动停
