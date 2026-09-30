@@ -21,6 +21,7 @@ import { test } from 'node:test';
 import { DEFAULT_PROACTIVITY, parseProactiveSettings, proactiveThreshold } from '@xixi/conversation';
 
 import { REPO_ROOT, loadConfig } from '../../scripts/lib/harness.ts';
+import { startTrialPage } from './serve-chat-fixture.ts';
 import {
   PROACTIVE_PANEL_IDS,
   applyAndPersistProactivePatch,
@@ -380,44 +381,20 @@ test('the console serves the proactive card, its state, and obeys the switch ove
 
 test('the trial page shows segments in order, labels the source, and carries the same knobs', { timeout: HTTP_TIMEOUT_MS * 4 }, async () => {
   const root = tempDir('xixi-t42-web-');
-  const child = spawn(process.execPath, ['scripts/serve-chat.ts', '--fake', '--no-tts', '--port', '0'], {
-    cwd: REPO_ROOT,
-    env: { ...process.env, XIXI_WEB_DATA_DIR: root },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let out = '';
-  child.stdout.setEncoding('utf8');
-  child.stderr.setEncoding('utf8');
-  child.stdout.on('data', (chunk: string) => {
-    out += chunk;
-  });
-  child.stderr.on('data', (chunk: string) => {
-    out += chunk;
-  });
-  const port = await new Promise<number>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`serve-chat 没有打印端口：\n${out}`)), HTTP_TIMEOUT_MS);
-    const check = (): void => {
-      const match = /http:\/\/127\.0\.0\.1:(\d+)/.exec(out);
-      if (match !== null) {
-        clearTimeout(timer);
-        resolve(Number(match[1]));
-      }
-    };
-    child.stdout.on('data', check);
-    child.stderr.on('data', check);
-    check();
-  });
-  const base = `http://127.0.0.1:${port}`;
+  // t96: one shared fixture waits for the *service* (an answered request), not for a log line, and
+  // reaps the process — this is the test that used to go red now and then on a loaded machine.
+  const page = await startTrialPage({ dataDir: root });
+  const base = page.base;
   const post = async (path: string, body: unknown): Promise<Record<string, any>> =>
     (await (await fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}) })).json()) as Record<string, any>;
   try {
-    const page = await (await fetch(base + '/')).text();
-    assert.ok(page.includes('addSegmented'), 'the page renders a reply segment by segment');
-    assert.ok(page.includes('回应你'), 'and labels who is speaking');
-    assert.ok(page.includes('主动开口'), 'proactive messages are labelled differently');
-    assert.ok(page.includes(`id="${PROACTIVE_PANEL_IDS.card}"`), 'the trial page carries the same proactive card');
-    assert.ok(page.includes('data/web-chat'), 'the trial page names its own database');
-    assert.ok(page.includes('整条回复一次合成'), 'and discloses that TTS is not segmented yet');
+    const html = await (await fetch(base + '/')).text();
+    assert.ok(html.includes('addSegmented'), 'the page renders a reply segment by segment');
+    assert.ok(html.includes('回应你'), 'and labels who is speaking');
+    assert.ok(html.includes('主动开口'), 'proactive messages are labelled differently');
+    assert.ok(html.includes(`id="${PROACTIVE_PANEL_IDS.card}"`), 'the trial page carries the same proactive card');
+    assert.ok(html.includes('data/web-chat'), 'the trial page names its own database');
+    assert.ok(html.includes('整条回复一次合成'), 'and discloses that TTS is not segmented yet');
 
     const webState = (await (await fetch(base + '/api/state')).json()) as Record<string, any>;
     assert.equal(webState.database?.path, root, 'the trial page reports the store it is really using');
@@ -466,7 +443,7 @@ test('the trial page shows segments in order, labels the source, and carries the
     assert.equal(unknown.changes.length, 0);
     assert.equal(unknown.rejected.length, 1, `nested objects are not a shortcut: ${JSON.stringify(unknown.rejected)}`);
   } finally {
-    child.kill();
+    await page.stop();
     rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
   }
 });

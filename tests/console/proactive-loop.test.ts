@@ -24,6 +24,7 @@ import { parseProactiveSettings, proactiveThreshold } from '@xixi/conversation';
 import { openXixiStore } from '@xixi/domain';
 
 import { REPO_ROOT } from '../../scripts/lib/harness.ts';
+import { startTrialPage } from './serve-chat-fixture.ts';
 
 import {
   DEFAULT_LOOP_INTERVAL_MS,
@@ -516,27 +517,10 @@ test('lastUserTurnAt reads the fact from the log, and only user turns count', ()
 
 test('the trial page runs the same loop, and a spoken message lands in its conversation log', { timeout: 90_000 }, async () => {
   const root = tempDir('xixi-t70-web-');
-  const child = spawn(process.execPath, ['scripts/serve-chat.ts', '--fake', '--no-tts', '--port', '0'], {
-    cwd: REPO_ROOT,
-    env: { ...process.env, XIXI_WEB_DATA_DIR: root },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let out = '';
-  child.stdout.setEncoding('utf8');
-  child.stderr.setEncoding('utf8');
-  child.stdout.on('data', (chunk: string) => { out += chunk; });
-  child.stderr.on('data', (chunk: string) => { out += chunk; });
-  const port = await new Promise<number>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`serve-chat 没有打印端口：\n${out}`)), 60_000);
-    const check = (): void => {
-      const match = /http:\/\/127\.0\.0\.1:(\d+)/.exec(out);
-      if (match !== null) { clearTimeout(timer); resolve(Number(match[1])); }
-    };
-    child.stdout.on('data', check);
-    child.stderr.on('data', check);
-    check();
-  });
-  const base = `http://127.0.0.1:${port}`;
+  // Same shared fixture as the proactive-console test (t96): it waits for an answered request
+  // instead of a log line, and always reaps the child.
+  const page = await startTrialPage({ dataDir: root });
+  const base = page.base;
   try {
     const html = await (await fetch(base + '/')).text();
     assert.ok(html.includes('px-loop-enabled'), 'the trial page carries the loop switch');
@@ -552,7 +536,7 @@ test('the trial page runs the same loop, and a spoken message lands in its conve
     assert.ok(typeof ticked.entries[0].reasonCode === 'string');
     assert.ok(ticked.entries[0].fact.length > 0, 'with its fact, so the page can show why');
   } finally {
-    child.kill();
+    await page.stop();
     rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });

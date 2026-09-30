@@ -244,6 +244,21 @@ FatherModel/RelationshipModel/FutureHooks 恢复（这些领域对象尚不存�
 - **控制台侧的三条保障**（`scripts/field-test.ts`）：按钮文案写明「会把一张画面发给小米服务器」；默认只允许手动触发（自主看是另一个**默认关**的开关 `vision.auto_look`）；每次上传写一条 `system.health`（`service=vision-look-once`）记录——时间/大小/触发源/结果，**记录里没有图像**。
 - **不落盘、不连续**：帧来自控制台内存里最新的那一帧（感知边以 `--frame-max-width` 480px 编码），超过上限会被拒绝而不是缩放后发送；一次点击就是一次上传，没有队列、没有重试。
 
+#### 8.1.1 两条看图路径**不对称**（这是设计，不是疏漏）
+
+| | 手动看（默认，按钮） | 自主看（`vision.auto_look`，默认关） |
+|---|---|---|
+| 入口 | `POST /api/field/look` | 主动开口的 composer（`createModelComposer({vision})`） |
+| 走哪条链 | `ConversationEngine.respond({images})` —— 和打字/说话同一轮 | **绕过引擎**，直接 `engine.buildPrompt()` + `adapter.handleUserTurn({images})` |
+| 门禁与状态机 | 照常：`shouldAcceptTurn` 接受判定、`conversation.decision` 审计、两条 `conversation.turn`、ADR-0010 分段、`onSegment` 逐段 TTS 全部生效 | 不由它决定说不说——**先说后挂图**：候选已经过了 `ProactiveEngine.consider` 的九道硬门禁（含冷却/额度/静默），图只是这次已放行的投递上的附加物 |
+| 审计 | 上传记录 `outcome` = 模型真实 action（`SPEAK`／`no-text:SILENCE`／`failed:…`） | 上传记录 `outcome` = **`auto-look`**（同一张 `system.health` 表，`trigger=auto`） |
+| 频率 | 你按几次就几次 | 受主动开口门禁约束（冷却/6h/当日额度）——没有单独的看视频率开关 |
+| 控制台状态 | 写进右栏「对话记录」（`source=看一眼（manual）`），回复朗读 | 写进右栏「主动开口」那条，那一行会多出「附了 1 张静帧」（`imageUsed=true`） |
+
+**两者共同的隐私口径**：都是「一张、当前、内存里的帧」；都不落盘、都不连续、都留一条不含图像的记录。
+**差别只在「谁决定说」**：手动看是你在对话里问了一句（所以受会话门禁与状态机管），自主看是西西自己决定开口（所以受主动开口硬门禁管）。
+读完这张表就该知道：**想审计「西西自己看没看」，查 `trigger=auto` 且 `outcome=auto-look` 的记录**；手动看则去看 `trigger=manual` 那一串。
+
 ## 维护规则
 
 | 改了哪个源文件 | 必须同步更新本文件的小节 |
