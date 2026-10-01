@@ -92,6 +92,74 @@ test('用户的回答落成三种收口，且都不再追问', () => {
   assert.equal(classifyThreadAnswer('还没办好呢'), 'snoozed');
 });
 
+/**
+ * 走一遍生产里的对齐路径「昨天说 → 今天问 → 他回答」，回来看这一轮话有没有被当成回答。
+ *
+ * 只驱动 `TopicEngine.reconcile`（不是另写一份判定），时间由 store 与引擎的可变时钟控制；
+ * 唯一手工造的事件是那条 `proactive.decision`（生产里它由 `ProactiveEngine` 说出那句话时写下，
+ * 这里要测的不是它）。
+ */
+function reconcileAfterAnswer(answer: string): { status: string | null; settled: number; ignored: readonly string[] } {
+  const dir = mkdtempSync(join(tmpdir(), 'xixi-topic-answer-'));
+  let now = DAY1;
+  const store = openXixiStore({ dbPath: join(dir, 'x.sqlite'), clock: () => now });
+  try {
+    const session = store.createSession();
+    store.recordTurn({ sessionId: session.sessionId, role: 'user', action: 'SPEAK', text: '明天下午我要去镇上办证。' });
+
+    const engine = new TopicEngine({ store, clock: () => now });
+    const [thread] = engine.reconcile(DAY1).created;
+    assert.ok(thread !== undefined, '先得有一条话题，否则下面测的不是收口');
+
+    // 第二天 15:00 主动问过一句。
+    const askedAt = new Date(2026, 9, 2, 15, 0, 0);
+    store.appendEvent(
+      buildEvent({
+        event_type: 'proactive.decision',
+        source: 'conversation',
+        actor: 'system',
+        confidence: 1,
+        timestamp: toOffsetIso(askedAt),
+        payload: {
+          candidate_id: 'open-thread-a1',
+          trigger: 'future_hook_due',
+          speak: true,
+          reason_code: 'PASSED',
+          topic_ref: thread.threadId,
+        },
+      }),
+    );
+    now = askedAt;
+    engine.reconcile(askedAt);
+
+    // 十分钟后他说话了。
+    now = new Date(2026, 9, 2, 15, 10, 0);
+    store.recordTurn({ sessionId: session.sessionId, role: 'user', action: 'SPEAK', text: answer });
+    const result = engine.reconcile(now);
+    return {
+      status: store.openThread(thread.threadId)?.status ?? null,
+      settled: result.settled.length,
+      ignored: result.ignored.map((entry) => entry.text),
+    };
+  } finally {
+    store.close();
+  }
+}
+
+test('收口与被问的那件事挂钩：相关的一轮照旧收口，无关的一轮不算回答（T7-F1）', () => {
+  // 相关：出现话题的信号字（镇/办/证）→ 三种收口都算回应过。
+  assert.deepEqual(reconcileAfterAnswer('办好了，昨天就办完了。'), { status: 'resolved', settled: 1, ignored: [] });
+  assert.deepEqual(reconcileAfterAnswer('还没办，过两天再去。'), { status: 'snoozed', settled: 1, ignored: [] });
+  assert.deepEqual(reconcileAfterAnswer('正在办，下午去镇上。'), { status: 'engaged', settled: 1, ignored: [] });
+  // 弱证据：答复形状（「没去」是收口模板）并且命中的字就在话题里 —— 他确实在回答这件事。
+  assert.deepEqual(reconcileAfterAnswer('没去成，改天再说吧。'), { status: 'snoozed', settled: 1, ignored: [] });
+
+  // 无关：只是接着聊别的 → 不收口、不写事件，话题还开着（第二天照样惦记着）。
+  for (const chatter of ['今天天气不错啊。', '明天天气怎么样？', '嗯，你问这个干嘛。', '我今天修好了电视。']) {
+    assert.deepEqual(reconcileAfterAnswer(chatter), { status: 'offered', settled: 0, ignored: [chatter] }, chatter);
+  }
+});
+
 test('设置：非数字/非布尔退回默认，越界被夹进合法区间，出厂 config 与代码默认逐字一致', () => {
   assert.deepEqual(parseTopicEngineSettings(undefined), DEFAULT_TOPIC_ENGINE_SETTINGS);
   assert.deepEqual(

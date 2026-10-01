@@ -30,6 +30,14 @@ import { buildProactiveCandidates, lastUserTurnAt } from '../../scripts/field-te
 const DAY1 = new Date(2026, 9, 1, 20, 0, 0);
 const DAY2 = new Date(2026, 9, 2, 15, 0, 0);
 const DAY2_ANSWER = new Date(2026, 9, 2, 15, 10, 0);
+/** 追问之后他先聊了句别的（与那件事无关）。 */
+const DAY2_CHITCHAT = new Date(2026, 9, 2, 15, 20, 0);
+/** 他过了半小时才答到那件事上（仍在第一次追问的等待里）。 */
+const DAY2_LATE_ANSWER = new Date(2026, 9, 2, 16, 30, 0);
+/** 距第一次追问 4 小时：过了 `reoffer_after_min`（180 分钟），同一件事可以再问一次。 */
+const DAY2_REOFFER = new Date(2026, 9, 2, 19, 0, 0);
+/** 第二次追问之后，他才答到那件事上。 */
+const DAY2_REOFFER_ANSWER = new Date(2026, 9, 2, 19, 30, 0);
 const DAY3 = new Date(2026, 9, 3, 15, 0, 0);
 const DAY4 = new Date(2026, 9, 4, 15, 0, 0);
 
@@ -262,6 +270,173 @@ test('没人回应：过一阵子允许再问一次，问满 2 次后作废（�
     assert.equal(h.store.openThread(first.candidate.topicRef ?? '')?.status, 'exhausted');
     assert.equal(plansAt(h, MUCH_LATER).filter((plan) => plan.candidate.initiativeKind === 'open_loop_followup').length, 0);
     assert.equal(openLoopPlans(h, DAY4).length, 0);
+  } finally {
+    h.store.close();
+  }
+});
+
+test('回到候选、还没被再问之前他就答了那件事：照旧收口，不再问第二遍', async () => {
+  const h = harness();
+  try {
+    h.say(ERLAND);
+    h.engine.reconcile(DAY1);
+
+    h.at(DAY2);
+    h.engine.reconcile(DAY2);
+    const plan = openLoopPlans(h, DAY2)[0];
+    assert.ok(plan !== undefined);
+    const threadId = plan.candidate.topicRef ?? '';
+    await h.proactive.consider({ candidate: plan.candidate, at: DAY2, conversationState: 'IDLE', sessionId: h.sessionId });
+    h.engine.reconcile(DAY2);
+
+    // 4 小时没人回答：话题回到候选，等着被再问一次（这一次只对齐，没有真的开口）。
+    h.at(DAY2_REOFFER);
+    const backToCandidate = h.engine.reconcile(DAY2_REOFFER);
+    assert.equal(backToCandidate.settled.length, 0);
+    assert.equal(h.store.openThread(threadId)?.status, 'candidate');
+    assert.equal(openLoopPlans(h, DAY2_REOFFER).length, 1, '候选摆在那里等着，但这次没有开口');
+
+    // 就在这时候他答了那件事 —— 它仍是「那句话」的回答，不该再问第二遍。
+    h.at(DAY2_REOFFER_ANSWER);
+    h.say('办好了。');
+    const settled = h.engine.reconcile(DAY2_REOFFER_ANSWER);
+    assert.equal(settled.settled.length, 1, '回到候选之后答的话照样算回答');
+    assert.equal(settled.settled[0]?.status, 'resolved');
+    assert.equal(h.engine.followUps(DAY2_REOFFER_ANSWER).length, 0);
+    assert.equal(
+      h.store
+        .readEvents({ type: 'proactive.decision', limit: Number.MAX_SAFE_INTEGER })
+        .filter((event) => (event.payload as { speak: boolean }).speak).length,
+      1,
+      '第二遍没来得及问出口，就不会再问',
+    );
+  } finally {
+    h.store.close();
+  }
+});
+
+/**
+ * 追问之后他说的话**必须与那件事有关**才算回答（t7 评审 T7-F1）。
+ *
+ * 与第 1 条用例同样的生产路径（`buildProactiveCandidates` + 真实 `ProactiveEngine`），只是中间插了一句
+ * 与话题无关的话：它不能被当成回答，这件事得照旧惦记着、在窗口内还能再问一次。
+ */
+test('他说的是别的事：不算回答、不收口，同一件事在窗口内还能再问一次', async () => {
+  const h = harness();
+  try {
+    h.say(ERLAND);
+    h.engine.reconcile(DAY1);
+
+    h.at(DAY2);
+    h.engine.reconcile(DAY2);
+    const first = openLoopPlans(h, DAY2)[0];
+    assert.ok(first !== undefined);
+    const threadId = first.candidate.topicRef ?? '';
+    const firstOutcome = await h.proactive.consider({
+      candidate: first.candidate,
+      at: DAY2,
+      conversationState: 'IDLE',
+      sessionId: h.sessionId,
+    });
+    assert.equal(firstOutcome.speak, true, `应当开口：${firstOutcome.reasonCode} ${firstOutcome.score}`);
+    h.engine.reconcile(DAY2);
+    assert.equal(h.store.openThread(threadId)?.status, 'offered');
+
+    // 他说的是天气，不是那件事。
+    h.at(DAY2_CHITCHAT);
+    h.say('今天天气不错啊。');
+    const unrelated = h.engine.reconcile(DAY2_CHITCHAT);
+    assert.equal(unrelated.settled.length, 0, '无关的一轮不能被当成回答');
+    assert.deepEqual(
+      unrelated.ignored.map((entry) => [entry.threadId, entry.text]),
+      [[threadId, '今天天气不错啊。']],
+      '不写事件，但要留下「这一轮不算回答」的凭据',
+    );
+    assert.equal(h.store.openThread(threadId)?.status, 'offered', '话题还开着，等的是那件事的回答');
+    assert.equal(h.engine.followUps(DAY2_CHITCHAT).length, 0, '刚问过，不该立刻再问');
+
+    // 过了 `reoffer_after_min`（180 分钟）：回到候选 —— 同一件事在窗口内还能再问一次。
+    h.at(DAY2_REOFFER);
+    const backToCandidate = h.engine.reconcile(DAY2_REOFFER);
+    assert.equal(backToCandidate.expired.length, 0);
+    assert.equal(backToCandidate.ignored.length, 1, '同一轮次再对齐一次仍然只是「不算回答」，不会变成回答');
+    assert.equal(h.store.openThread(threadId)?.status, 'candidate');
+    const second = openLoopPlans(h, DAY2_REOFFER)[0];
+    assert.ok(second !== undefined, '他说了句别的不该让这件事消失');
+    assert.match(second.candidate.candidateId, /-a2$/);
+    const secondOutcome = await h.proactive.consider({
+      candidate: second.candidate,
+      at: DAY2_REOFFER,
+      conversationState: 'IDLE',
+      sessionId: h.sessionId,
+    });
+    assert.equal(secondOutcome.speak, true, `第二次追问也应当能过线：${secondOutcome.reasonCode} ${secondOutcome.score}`);
+    h.engine.reconcile(DAY2_REOFFER);
+    assert.equal(h.store.openThread(threadId)?.attempts, 2);
+
+    // 这次他真的答了那件事 → 照旧收口，之后不再问。
+    h.at(DAY2_REOFFER_ANSWER);
+    h.say('办好了。');
+    const settled = h.engine.reconcile(DAY2_REOFFER_ANSWER);
+    assert.equal(settled.settled.length, 1);
+    assert.equal(settled.settled[0]?.status, 'resolved');
+    for (const day of [DAY3, DAY4]) {
+      h.at(day);
+      h.engine.reconcile(day);
+      assert.equal(openLoopPlans(h, day).length, 0, `${day.toLocaleDateString()} 不该再追问同一件事`);
+    }
+
+    // 日志里的事实：无关的那一轮**一个事件都没写**；两次追问各留一条痕。
+    assert.deepEqual(
+      h.store
+        .readEvents({ type: 'open_thread.changed', limit: Number.MAX_SAFE_INTEGER })
+        .map((event) => (event.payload as { status: string }).status),
+      ['candidate', 'offered', 'candidate', 'offered', 'resolved'],
+    );
+  } finally {
+    h.store.close();
+  }
+});
+
+test('他先聊了句别的、随后才答那件事：仍然收口，真正的追问没被静默丢掉', async () => {
+  const h = harness();
+  try {
+    h.say(ERLAND);
+    h.engine.reconcile(DAY1);
+
+    h.at(DAY2);
+    h.engine.reconcile(DAY2);
+    const plan = openLoopPlans(h, DAY2)[0];
+    assert.ok(plan !== undefined);
+    const threadId = plan.candidate.topicRef ?? '';
+    await h.proactive.consider({ candidate: plan.candidate, at: DAY2, conversationState: 'IDLE', sessionId: h.sessionId });
+    h.engine.reconcile(DAY2);
+
+    // 先说了句与话题无关的，再答那件事：中间那句不该把话题关掉，否则真正的回答无处可落。
+    h.at(DAY2_CHITCHAT);
+    h.say('今天天气不错啊。');
+    assert.equal(h.engine.reconcile(DAY2_CHITCHAT).settled.length, 0);
+
+    h.at(DAY2_LATE_ANSWER);
+    h.say('办好了，昨天就办完了。');
+    const settled = h.engine.reconcile(DAY2_LATE_ANSWER);
+    assert.equal(settled.settled.length, 1, '那件事的回答没被前面那句闲聊挤掉');
+    assert.equal(settled.settled[0]?.status, 'resolved');
+    assert.equal(h.store.openThread(threadId)?.note, '用户回答：办好了，昨天就办完了。');
+
+    for (const day of [DAY3, DAY4]) {
+      h.at(day);
+      h.engine.reconcile(day);
+      assert.equal(h.engine.followUps(day).length, 0, `${day.toLocaleDateString()} 不该再追问同一件事`);
+      assert.equal(openLoopPlans(h, day).length, 0);
+    }
+    assert.equal(
+      h.store
+        .readEvents({ type: 'proactive.decision', limit: Number.MAX_SAFE_INTEGER })
+        .filter((event) => (event.payload as { speak: boolean }).speak).length,
+      1,
+      '这件事只被主动问过了一次',
+    );
   } finally {
     h.store.close();
   }

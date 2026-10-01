@@ -9,8 +9,9 @@
  *
  *   1. **提取**（`extractOpenThreads`）：从用户的一轮话里认出「将来要做的一件事」，纯规则、可单测。
  *      认出「明天下午我要去镇上办证」→ 明天 14:00 之后可以问，48 小时后过期。
- *   2. **对齐**（`reconcile`）：把日志与话题表对齐 —— 主动问过了就是 `offered`；在那之后用户回了话，
- *      就按回答收口（`resolved`/`snoozed`/`engaged`，**收口后不再重复问**）；过了追问窗口或试过太多次
+ *   2. **对齐**（`reconcile`）：把日志与话题表对齐 —— 主动问过了就是 `offered`；在那之后用户**答的是那件事**
+ *      才按回答收口（`resolved`/`snoozed`/`engaged`，**收口后不再重复问**）；说别的事不算回答，
+ *      话题留在 `offered`，过一阵子（`reofferAfterMinutes`）还能在窗口内再问一次；过了追问窗口或试过太多次
  *      就是 `exhausted`。对齐是幂等的：同一条日志重放多少次，结果都一样。
  *   3. **出候选**（`followUps`）：到点、还没收口的那些，变成主动开口的候选，交给既有的
  *      `ProactiveEngine`（分数、硬门禁、读空气都在那边，这里不重复实现）。
@@ -244,12 +245,60 @@ const DONE = /办好了|办完了|办下来了|办妥了|搞定了|弄好了|弄
  * 追着问没办完的事是打扰，不是惦记）；其余有关这件事的回答是 `engaged`。
  *
  * 三种都是**收口**：被回应之后不再重复问，这是 Phase 3 的验收要求。
+ *
+ * 它**只看这一轮话本身**：这句话是不是在回答「那件事」由 {@link isAnswerAboutThread} 先判
+ * （`reconcile` 里两者配合 —— 先过相关性门槛，再在这里分三种收口）。
  */
 export function classifyThreadAnswer(text: string): ThreadAnswerKind {
   const trimmed = text.trim();
   if (NOT_DONE_YET.test(trimmed)) return 'snoozed';
   if (DONE.test(trimmed)) return 'resolved';
   return 'engaged';
+}
+
+/**
+ * 时间词：说明「什么时候」，不说明「哪件事」。比对相关性前先从话题文本里去掉 ——
+ * 否则「今天天气不错啊」会靠一个「天」字粘上「明天去办证」。
+ */
+const TOPIC_TIME_WORDS =
+  /(?:大后天|后天|明天|明日|明早|明晚|下个星期|下星期|下周|今晚|今天晚上|今天|待会儿|一会儿|早上|早晨|一早|上午|中午|下午|傍晚|日落|晚上|夜里|晚点|时候|时间|点钟)/gu;
+
+/**
+ * 换个话题也照样出现的字：人称、虚词、语气词、量词，以及「去/来/上/到」这类只表示位移的字。
+ * 它们单独出现说明不了「在说那件事」（「去」在「去散步」里也有），所以不算**信号字**。
+ */
+const TOPIC_GENERIC_CHARS = new Set([
+  ...'我你他她它你们的了是有在要得想会能就都也还不好很太再又只把被给让跟和与或而但如果这那哪谁什么怎样为因所以上下来到过走进回出起个点些一二三几多少事儿子时候号天',
+]);
+
+/**
+ * 这一轮话是不是在回答「那件事」。
+ *
+ * 只看**字面证据**（铁律 1：判断由规则做、可复算，不需要模型理解）：
+ *
+ *   1. 强证据：回答里出现话题的**信号字** —— `subject`（没有就用 `summary`）去掉时间词、
+ *      人称与虚词之后剩下的字（「去镇上办证」→ 镇/办/证）。
+ *   2. 弱证据：回答是**答复形状**（「办好了」/「还没办」这两组收口模板，与 `classifyThreadAnswer`
+ *      用的是同一组词），并且命中的那几个字里有一个是话题里的字 —— 「没去成，改天再说吧。」
+ *      没有「证」字，但它确实在回答这件事。
+ *
+ * 两条都不成立就是**不相关**：他只是接着聊别的（「今天天气不错啊。」），不是回答。
+ *
+ * 边界（如实记下，不假装它是理解）：字面证据不是语义理解 —— 一句同样带「去」的答复形状的话
+ * （「我今天没去散步。」）会被算作相关；反过来只说「算了」而一个字都不提话题的回答不会被算作回答。
+ * 前者的代价是话题收口、后者的代价是过一阵子再问一次，都比「他随口聊了句天气就静默丢一件事」轻。
+ */
+export function isAnswerAboutThread(thread: Pick<OpenThread, 'summary' | 'subject'>, text: string): boolean {
+  const answer = text.trim();
+  if (answer.length === 0) return false;
+
+  const topicChars = [...new Set([...(thread.subject ?? thread.summary).replace(TOPIC_TIME_WORDS, '')])];
+  if (topicChars.some((char) => !TOPIC_GENERIC_CHARS.has(char) && answer.includes(char))) return true;
+
+  const template = NOT_DONE_YET.exec(answer) ?? DONE.exec(answer);
+  if (template === null) return false;
+  const hit = template[0];
+  return topicChars.some((char) => hit.includes(char));
 }
 
 // ------------------------------------------------------------------ follow-ups
@@ -309,6 +358,20 @@ export interface ReconcileResult {
   readonly settled: readonly OpenThread[];
   /** 这次作废的话题（过了窗口或试过太多次）。 */
   readonly expired: readonly OpenThread[];
+  /**
+   * 追问之后用户说了话、但那一轮与话题对不上（见 `isAnswerAboutThread`）：**不写事件、不算收口**，
+   * 只列出来供核对「为什么这件事还开着」。同一轮次会在每次对齐里重新算一次（无状态、幂等）。
+   */
+  readonly ignored: readonly IgnoredThreadTurn[];
+}
+
+/** 追问之后与话题对不上的一轮话（它可能是聊天，也可能是在说别的事）。 */
+export interface IgnoredThreadTurn {
+  readonly threadId: string;
+  /** 那一轮是什么时候说的。 */
+  readonly at: string;
+  /** 那一轮说的话（裁剪到 30 字，与收口 `note` 同一口径）。 */
+  readonly text: string;
 }
 
 export interface TopicEngineStatus {
@@ -365,7 +428,8 @@ export class TopicEngine {
     const offered: OpenThread[] = [];
     const settled: OpenThread[] = [];
     const expired: OpenThread[] = [];
-    if (!this.#settings.enabled) return { created, offered, settled, expired };
+    const ignored: IgnoredThreadTurn[] = [];
+    if (!this.#settings.enabled) return { created, offered, settled, expired, ignored };
 
     const turns = readUserTurns(this.#store);
 
@@ -391,12 +455,30 @@ export class TopicEngine {
       if (change !== null) offered.push(change.thread);
     }
 
-    // 3) 收口：问过之后用户回了话。**收口之后不再重复问**（三种收口都算回应过）。
-    for (const thread of this.#store.openThreads({ status: 'offered' })) {
+    // 3) 收口：问过之后用户**真的答了那件事**。**收口之后不再重复问**（三种收口都算回应过）。
+    //
+    // 不是「追问之后他说的第一句话」就算回答：他可能只是接着聊别的（「今天天气不错啊。」）。
+    // 把那种轮次当成回答，会让这件事被静默收口、第二天再也不问（t7 评审 T7-F1）；
+    // 所以他说的每一轮都要先过 `isAnswerAboutThread` 这道字面证据门槛，只有对得上的那一轮才收口，
+    // 对不上的记进 `ignored`（不写事件）。话题因此留在 `offered` —— 第 4 步会在
+    // `reofferAfterMinutes` 之后把它放回候选，于是同一件事在这个窗口内还能再问一次，
+    // 问够 `maxAttempts` 次仍然作废（不会没完没了地问）。
+    //
+    // 也认「已经回到候选、但这次还没被再问出去」的话题（`candidate` + `lastOfferedAt`）：
+    // 他可能在回到候选之后、真的被再问一次之前就把事情答了（再问会被硬门禁 / 静默时段推迟），
+    // 那时候不该再问第二遍。
+    for (const thread of this.#store.openThreads({ status: ['candidate', 'offered'] })) {
       const offeredAt = thread.lastOfferedAt;
       if (offeredAt === null) continue;
-      const answer = turns.find((turn) => turn.at.getTime() > Date.parse(offeredAt));
-      if (answer === undefined) continue;
+      const after = turns.filter((turn) => turn.at.getTime() > Date.parse(offeredAt));
+      if (after.length === 0) continue;
+      const answer = after.find((turn) => isAnswerAboutThread(thread, turn.text));
+      if (answer === undefined) {
+        for (const turn of after) {
+          ignored.push({ threadId: thread.threadId, at: toOffsetIso(turn.at), text: snippetOf(turn.text, 30) });
+        }
+        continue;
+      }
       const kind = classifyThreadAnswer(answer.text);
       const change = this.#store.transitionOpenThread(thread.threadId, kind, {
         at: answer.at,
@@ -422,19 +504,20 @@ export class TopicEngine {
       if (thread.attempts >= this.#settings.maxAttempts) {
         const change = this.#store.transitionOpenThread(thread.threadId, 'exhausted', {
           at: now,
-          note: `问过 ${thread.attempts} 次都没人回应`,
+          note: `问过 ${thread.attempts} 次都没得到回答`,
         });
         if (change !== null) expired.push(change.thread);
         continue;
       }
-      // 没人回答、还没问够 → 回到候选，允许过一阵子再问一次（`attempts` 记着问过几次）。
+      // 没得到回答（没人回应，或他说的是别的事）、还没问够 → 回到候选，允许过一阵子再问一次
+      // （`attempts` 记着问过几次）。
       this.#store.transitionOpenThread(thread.threadId, 'candidate', {
         at: now,
-        note: `第一次追问没人回应，${this.#settings.reofferAfterMinutes} 分钟后可再问一次`,
+        note: `追问没得到回答，${this.#settings.reofferAfterMinutes} 分钟后可再问一次`,
       });
     }
 
-    return { created, offered, settled, expired };
+    return { created, offered, settled, expired, ignored };
   }
 
   /**
