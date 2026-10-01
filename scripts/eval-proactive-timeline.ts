@@ -182,6 +182,8 @@ interface DecisionRow {
   readonly reasonCode: ProactiveReasonCode;
   readonly trigger: string;
   readonly modelConsulted: boolean;
+  /** Minutes into the simulated day — the F4 probe judges 「拒绝发生在开口之前还是之后」 with it. */
+  readonly minute: number;
 }
 
 interface ScenarioResult {
@@ -192,7 +194,17 @@ interface ScenarioResult {
   readonly userTurns: readonly string[];
 }
 
-async function runScenario(scenario: string, decider: ProactiveDecider | undefined): Promise<ScenarioResult> {
+interface ScenarioOptions {
+  /** How many simulated minutes the run covers; defaults to the full 12-hour household day. */
+  readonly minutes?: number;
+  /** Settings for this run; defaults to the shipped `config/xixi.example.yaml` proactive section. */
+  readonly settings?: ProactiveSettings;
+  /** The household script; defaults to `householdFor(scenario)`. */
+  readonly household?: Household;
+}
+
+async function runScenario(scenario: string, decider: ProactiveDecider | undefined, options: ScenarioOptions = {}): Promise<ScenarioResult> {
+  const scenarioSettings = options.settings ?? settings;
   const dataDir = mkdtempSync(join(tmpdir(), `xixi-timeline-${scenario}-`));
   /**
    * The simulated clock is the *only* time source: the FSM (`ConversationEngine`) and every event

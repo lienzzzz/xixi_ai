@@ -18,11 +18,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { DEFAULT_PROACTIVITY, PROACTIVE_REASON_CODES, TOPIC_SOURCES, parseProactiveSettings, proactiveThreshold } from '@xixi/conversation';
+import { DEFAULT_PROACTIVITY, PROACTIVE_REASON_CODES, PROACTIVE_RETIRED_REASON_CODES, TOPIC_SOURCES, parseProactiveSettings, proactiveThreshold } from '@xixi/conversation';
 
 import { REPO_ROOT, loadConfig } from '../../scripts/lib/harness.ts';
 import { startTrialPage } from './serve-chat-fixture.ts';
 import {
+  PROACTIVE_GATE_LABELS,
   PROACTIVE_PANEL_IDS,
   applyAndPersistProactivePatch,
   applyProactiveSettingsPatch,
@@ -47,6 +48,30 @@ function tempDir(prefix: string): string {
 /** The window the console needs to answer a request; generous because the machine is shared. */
 const HTTP_TIMEOUT_MS = 30_000;
 
+/**
+ * Which reason codes the console's gate table cannot explain (t3 review R2).
+ *
+ * A reason code the engine can report but the table does not know renders as `undefined` on the
+ * page — that is the "someone added a reason code and nobody registered it" failure. The old
+ * `assert.equal(rows.length, 14)` used to notice it by hand; `rows.length === PROACTIVE_REASON_CODES.length`
+ * cannot, because both sides follow the engine's own list, so the assertion is true by construction
+ * (AGENTS §9.9: an adaptive length is not an assertion).
+ *
+ * The two inputs are parameters on purpose: that is what lets the tests below prove the checker
+ * *does* report a gap (negative control) instead of trusting that it would.
+ */
+function unregisteredGateCodes(codes: readonly string[], labels: Readonly<Record<string, string>>): string[] {
+  return codes.filter((code) => {
+    const label = labels[code];
+    if (typeof label !== 'string' || label.trim().length === 0) return true; // no row at all
+    if (label === code) return true; // a placeholder, not a label for a person
+    return !/[\u4e00-\u9fff]/.test(label); // the console is Chinese-only (AGENTS §6)
+  });
+}
+
+/** Every code a page can be asked to explain: the live ones **and** the retired ones already in the log. */
+const EXPLAINABLE_REASON_CODES: readonly string[] = [...PROACTIVE_REASON_CODES, ...PROACTIVE_RETIRED_REASON_CODES];
+
 test('a reply longer than one segment is planned as N pieces with the documented pause', () => {
   const short = segmentPlan('嗯，我在。', undefined);
   assert.equal(short.total, 1, 'a short reply stays one segment');
@@ -70,8 +95,32 @@ test('a reply longer than one segment is planned as N pieces with the documented
 
 test('the gate table marks passed / blocked / skipped from the single reason code', () => {
   const passed = proactiveGateRows('PASSED');
-  assert.equal(passed.length, PROACTIVE_REASON_CODES.length, 'every reason code has a row');
+  // t3 review R2: the rows *are* the engine's reason codes, in the engine's evaluation order. The
+  // old check was a length compared against the engine's own list, which cannot fail; this one is
+  // the real claim ("every code has a row, and nobody else does") and it fails on a new code.
+  assert.deepEqual(passed.map((row) => row.code), [...PROACTIVE_REASON_CODES], 'every reason code has a row, in order');
   assert.ok(passed.every((row) => row.status === 'passed'), 'PASSED means every gate let it through');
+  // …and every row carries a real Chinese label, so a code that was added to the engine but never
+  // registered in this table (the actual R2 failure) shows up as a failure, not as `undefined`.
+  assert.deepEqual(unregisteredGateCodes(EXPLAINABLE_REASON_CODES, PROACTIVE_GATE_LABELS), [], '每个理由码都要有中文标签');
+  assert.deepEqual(
+    [...Object.keys(PROACTIVE_GATE_LABELS)].sort(),
+    [...EXPLAINABLE_REASON_CODES].sort(),
+    '标签表与理由码清单一一对应（不多不少：多出来的孤儿标签同样要处理）',
+  );
+  for (const rows of [passed, proactiveGateRows(null)]) {
+    assert.deepEqual(rows.map((row) => row.code), [...PROACTIVE_REASON_CODES]);
+    assert.ok(
+      rows.every((row) => typeof row.label === 'string' && row.label.trim().length > 0),
+      'no row may render as undefined',
+    );
+  }
+  // Negative control: the checker must really report a gap, or the three assertions above are
+  // theatre. `BRAND_NEW_CODE` stands in for the next reason code somebody adds.
+  assert.deepEqual(unregisteredGateCodes([...EXPLAINABLE_REASON_CODES, 'BRAND_NEW_CODE'], PROACTIVE_GATE_LABELS), ['BRAND_NEW_CODE']);
+  assert.deepEqual(unregisteredGateCodes(['PASSED'], {}), ['PASSED'], '缺标签算没登记');
+  assert.deepEqual(unregisteredGateCodes(['PASSED'], { PASSED: 'PASSED' }), ['PASSED'], '占位标签算没登记');
+  assert.deepEqual(unregisteredGateCodes(['PASSED'], { PASSED: '全部通过' }), [], '真标签才放行');
 
   const quiet = proactiveGateRows('QUIET_HOURS');
   const blocked = quiet.filter((row) => row.status === 'blocked');
@@ -320,7 +369,15 @@ test('the console serves the proactive card, its state, and obeys the switch ove
 
     const state = (await (await fetch(`${handle.url}/api/field/proactive`)).json()) as Record<string, any>;
     assert.equal(state.ok, true);
-    assert.equal(state.gateOrder.length, PROACTIVE_REASON_CODES.length);
+    // The served gate order is the same table as above (t3 review R2): codes in the engine's order,
+    // each with a real label, so a code that never got registered cannot slip through the HTTP path
+    // either. `state.gateOrder` is what the page actually renders.
+    assert.deepEqual(state.gateOrder.map((row: { code: string }) => row.code), [...PROACTIVE_REASON_CODES]);
+    assert.deepEqual(
+      state.gateOrder.filter((row: { label?: string }) => typeof row.label !== 'string' || row.label.trim().length === 0),
+      [],
+      '服务端渲染的门禁表也要有中文标签',
+    );
     assert.equal(state.triggerLabels.length, 6);
     assert.equal(state.source, 'config');
     assert.equal(state.enabled, true);
