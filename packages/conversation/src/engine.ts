@@ -828,7 +828,11 @@ function summarizeHygiene(hygiene: ReplyHygieneResult): ReplyHygieneSummary {
  *   * a bare 12-hour form (no period word) has two readings — 「现在十二点半了」 at 00:32 means
  *     00:30 (t4's own live example) — and the sentence is only a contradiction if **both** readings
  *     miss the real clock. The repair line must not fire on a true statement: that is the over-gate
- *     class the t114 review warned about.
+ *     class the t114 review warned about;
+ *   * the minute token is read as written (t2 review of the t21 snapshot): every Chinese minute token
+ *     used to be folded as 30 past the hour, so 「现在凌晨三点五十分了」 at 03:00 measured 03:30 — 30
+ *     minutes away — and slipped through the gate. Digits were always read as written; see
+ *     `clockMinute` for the numerals.
  */
 export function findUnbackedFactClaims(
   text: string,
@@ -866,16 +870,16 @@ const NOW_CUE = /(现在|这会儿|这个点|这么晚|都\d|已经|还没|还�
 /** Past-tense markers: 「昨天三点半」 is a memory, not a claim about now. */
 const PAST_CUE = /(昨天|昨晚|昨天晚上|前天|上周|上个?月|去年|以前|平时|小时候|当年|那次|那天|当时|刚刚?才)/;
 const TIME_OF_DAY = /(凌晨|清早|早上|上午|中午|下午|傍晚|晚上|深夜|半夜)/;
-/** `凌晨一点半`, `两点多`, `23:30`, `晚上 7 点` — a clock time with an optional period word. */
-const CLOCK_SPOKEN = /(凌晨|清早|早上|上午|中午|下午|傍晚|晚上|深夜|半夜)?\s*([0-9]{1,2})\s*点(?:(半)|([0-9]{1,2})\s*分)?([多几])?/;
+/** `凌晨一点半`, `两点多`, `23:30`, `晚上 7 点`, `3 点五十分` — a clock time with an optional period word. */
+const CLOCK_SPOKEN = /(凌晨|清早|早上|上午|中午|下午|傍晚|晚上|深夜|半夜)?\s*([0-9]{1,2})\s*点(?:(半)|([0-9]{1,2}|[零一二两三四五六七八九十]{1,3})\s*分)?([多几])?/;
 const CLOCK_DIGITAL = /(?:^|[^\d])([01]?[0-9]|2[0-3])[:：]([0-5][0-9])(?![\d])/;
 
 const CN_DIGITS: Readonly<Record<string, number>> = Object.freeze({
   零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10,
 });
 
-/** Parse a spoken Chinese hour token (`一`, `两`, `三`, `十`, `十一`) into 0..23. */
-function chineseHour(token: string): number | null {
+/** Parse a spoken Chinese numeral token (`一`, `两`, `三`, `十`, `十一`, `五十`) into its value. */
+function chineseNumeral(token: string): number | null {
   if (token.length === 1) return CN_DIGITS[token] ?? null;
   if (token.startsWith('十')) return 10 + (CN_DIGITS[token[1] as string] ?? 0);
   if (token.endsWith('十')) return (CN_DIGITS[token[0] as string] ?? 0) * 10;
@@ -884,6 +888,25 @@ function chineseHour(token: string): number | null {
     return (CN_DIGITS[tens] ?? 0) * 10 + (CN_DIGITS[ones] ?? 0);
   }
   return null;
+}
+
+/**
+ * The minutes a clock sentence names, read as written (t2 review of the t21 snapshot).
+ *
+ * It used to be the constant 30 for **every** Chinese minute token, so a sentence whose real reading
+ * sat more than `CLOCK_TOLERANCE_MINUTES` (45) from the clock was still measured as 30 past the hour:
+ * 「现在凌晨三点五十分了」 at 03:00 read as 03:30 (30 min away) and slipped through the gate. Digits
+ * are `Number`-parsed as before; `半` is still 30; a token the numerals cannot read keeps the old
+ * coarse 30 rather than being silently folded to 0. A leading 零 is the spoken filler before a
+ * one-digit minute (「三点零五分」 is 5, 「三点零五十分」 is 50), not a digit to add.
+ */
+function clockMinute(token: string | undefined): number {
+  if (token === undefined || token.length === 0) return 0;
+  if (token === '半') return 30;
+  if (/^[0-9]+$/.test(token)) return Number(token);
+  const stripped = token.replace(/^零+/, '') || '零';
+  const value = chineseNumeral(stripped);
+  return value !== null && value >= 0 && value <= 59 ? value : 30;
 }
 
 /** The period word → the hours it covers, for "does this time of day match now". */
@@ -913,7 +936,7 @@ function findClockClaim(text: string, now: Date, offsetMinutes: number | undefin
   const realHour = Math.floor(realMinutes / 60);
 
   // Chinese numerals are the common form in speech; digits are handled by both patterns below.
-  const spoken = /(凌晨|清早|早上|上午|中午|下午|傍晚|晚上|深夜|半夜)?\s*([零一二两三四五六七八九十]{1,3})\s*点(?:(半)|([0-9一二三四五六七八九十]{1,3})\s*分)?([多几])?/.exec(text);
+  const spoken = /(凌晨|清早|早上|上午|中午|下午|傍晚|晚上|深夜|半夜)?\s*([零一二两三四五六七八九十]{1,3})\s*点(?:(半)|([0-9零一二两三四五六七八九十]{1,3})\s*分)?([多几])?/.exec(text);
   const digital = CLOCK_DIGITAL.exec(text);
   const ascii = CLOCK_SPOKEN.exec(text);
 
@@ -926,7 +949,7 @@ function findClockClaim(text: string, now: Date, offsetMinutes: number | undefin
   if (ascii !== null) {
     period = ascii[1] ?? '';
     const hour = Number(ascii[2]);
-    const minutes = ascii[3] === '半' ? 30 : ascii[4] === undefined ? 0 : Number(ascii[4]);
+    const minutes = clockMinute(ascii[3] ?? ascii[4]);
     if (Number.isFinite(hour) && hour < 24 && Number.isFinite(minutes)) {
       claimedHour = hour;
       claimedMinutes = minutes;
@@ -936,9 +959,9 @@ function findClockClaim(text: string, now: Date, offsetMinutes: number | undefin
   if (claimedHour === null && spoken !== null) {
     period = spoken[1] ?? '';
     const token = spoken[2] as string;
-    const hour = /^[0-9]+$/.test(token) ? Number(token) : chineseHour(token);
+    const hour = /^[0-9]+$/.test(token) ? Number(token) : chineseNumeral(token);
     if (hour !== null && hour < 24) {
-      claimedMinutes = spoken[3] === '半' ? 30 : spoken[4] === undefined ? 0 : 30;
+      claimedMinutes = clockMinute(spoken[3] ?? spoken[4]);
       claimedHour = hour;
       match = spoken[0].trim();
     }

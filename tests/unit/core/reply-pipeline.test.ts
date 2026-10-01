@@ -303,3 +303,59 @@ test('the period word and the 12-hour reading decide the claim, so a true clock 
     close(midnight.store);
   }
 });
+
+test('a spoken minute is measured as written at the reply seam too (t10)', async () => {
+  // The t2 review of the t21 snapshot: the minute token was the constant 30, so a sentence whose real
+  // reading sat further than the tolerance from the clock was measured at `:30` and got through.
+  // 「下午三点五十分」 said at 15:00 is 50 minutes away; the old reading (15:30) was 30 — inside the
+  // 45-minute tolerance. The delivered line is what must change, not only the helper.
+  const at = new Date('2026-10-01T15:00:00+08:00');
+  const invented = harness(scriptedAdapter('现在已经下午三点五十分了，准备收拾。', 'stop'), at);
+  try {
+    const session = invented.store.createSession();
+    const turn = await invented.engine.respond(
+      { sessionId: session.sessionId, text: '明天天气怎么样？', addressed: true, at },
+      {
+        onTextChunk: (chunk) => void invented.spoken.push(chunk),
+        onNotice: (notice) => void invented.notices.push({ code: notice.code, detail: notice.detail }),
+      },
+    );
+    assert.equal(turn.text, UNBACKED_FACT_REPLY, '下午三点五十分 (15:50) is 50 minutes from 15:00 — a fabrication');
+    assert.match(invented.notices.find((item) => item.code === 'UNBACKED_FACT_CLAIM')?.detail ?? '', /下午三点五十分/);
+    // The durable record is the repaired line, like every other unbacked claim (t111/t21).
+    const assistant = invented.store.recentTurns(session.sessionId, 10).filter((entry) => entry.role === 'assistant');
+    assert.equal(assistant[0]?.text, UNBACKED_FACT_REPLY, 'the log keeps the repair, not the invented minute');
+    // NOTE: `spoken` is deliberately not asserted. The streaming seam holds a claim it can already see
+    // (it checks `held` with no clock — `heldFacts` in engine.ts), so a *clock* claim is streamed and
+    // retracted only once the full text is in. That is a pre-existing property of the stream, not of
+    // this fix: at HEAD the same sentence was not gated in `turn.text` or the log at all, so this fix
+    // strictly narrows what is delivered and logged. Reported to the captain as an observation.
+  } finally {
+    close(invented.store);
+  }
+
+  // …and a true minute reading is spoken, so the sharper reading is not an over-gate.
+  const trueOne = harness(scriptedAdapter('现在已经下午三点四十分了，准备收拾。', 'stop'), at);
+  try {
+    const turn = await speakOnce(trueOne);
+    assert.equal(turn.text, '现在已经下午三点四十分了，准备收拾。', '15:40 vs 15:00 is inside the tolerance');
+    assert.equal(trueOne.notices.some((item) => item.code === 'UNBACKED_FACT_CLAIM'), false);
+  } finally {
+    close(trueOne.store);
+  }
+
+  // The tolerance is untouched: 45 minutes is not a contradiction, 46 is.
+  const edgeIn = harness(scriptedAdapter('现在已经下午三点四十五分了。', 'stop'), at);
+  try {
+    assert.equal((await speakOnce(edgeIn)).text, '现在已经下午三点四十五分了。', '45 minutes is inside the tolerance');
+  } finally {
+    close(edgeIn.store);
+  }
+  const edgeOut = harness(scriptedAdapter('现在已经下午三点四十六分了。', 'stop'), at);
+  try {
+    assert.equal((await speakOnce(edgeOut)).text, UNBACKED_FACT_REPLY, '46 minutes is outside the tolerance');
+  } finally {
+    close(edgeOut.store);
+  }
+});
+

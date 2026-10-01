@@ -13,7 +13,7 @@ import {
   type BrainTurnStream,
   type UserTurnInput,
 } from '@xixi/brain-adapter';
-import { ConversationEngine } from '@xixi/conversation';
+import { CLOCK_TOLERANCE_MINUTES, ConversationEngine, findUnbackedFactClaims } from '@xixi/conversation';
 import { fixedClock, openXixiStore, type XixiConfig, type XixiStore } from '@xixi/domain';
 
 /**
@@ -151,6 +151,49 @@ test('ordinary talk is not blocked — the class promise the review asked for (t
   } finally {
     s.close();
   }
+});
+
+/**
+ * t10 — a spoken minute is read as written, not folded as 30 minutes past the hour.
+ *
+ * The t2 review of the t21 snapshot found the narrow false negative pinned here: **every** Chinese
+ * minute token used to be read as `30`, so 「凌晨三点五十分」 at 03:00 was measured as 03:30 — 30
+ * minutes away — and passed the gate. The 45-minute tolerance itself is unchanged: the pair below
+ * straddles it (45 in, 46 out), and the constant is pinned so a moved tolerance is visible here.
+ */
+test('a spoken minute reading is measured as written, so the invented one is still caught (t10)', () => {
+  const claimsFor = (text: string, iso: string): string[] =>
+    findUnbackedFactClaims(text, { now: new Date(iso), offsetMinutes: 480 }).map((claim) => `${claim.kind}:${claim.match}`);
+
+  // 03:00 local. The minute token decides: 3:50 is 50 minutes from the clock, 3:30 (the old reading)
+  // is 30 — inside the tolerance, which is exactly how the fabrication used to get through.
+  const T0300 = '2026-09-30T19:00:00Z';
+  assert.deepEqual(claimsFor('现在凌晨三点五十分了，早点睡吧。', T0300), ['clock:凌晨三点五十分']);
+  assert.deepEqual(claimsFor('现在三点五十分了，该睡了。', T0300), ['clock:三点五十分'], 'bare hour, no period word');
+  assert.deepEqual(
+    claimsFor('现在3点五十分了，早点睡吧。', T0300),
+    ['clock:3点五十分'],
+    'the same Chinese minute token behind a digit hour used to be dropped (read as 0)',
+  );
+
+  // Tolerance behaviour, unchanged: exactly 45 minutes is not a contradiction, 46 is.
+  assert.equal(CLOCK_TOLERANCE_MINUTES, 45, 'the tolerance itself did not move with this fix');
+  assert.deepEqual(claimsFor('现在凌晨三点四十五分了。', T0300), [], '45 minutes is inside the tolerance');
+  assert.deepEqual(claimsFor('现在凌晨三点四十六分了。', T0300), ['clock:凌晨三点四十六分'], '46 minutes is outside it');
+
+  // A true minute reading must still be spoken: 3:05 at 02:30 is 35 minutes away (and the old reading
+  // of 3:00 would have been 30 — a true sentence stays true either way).
+  assert.deepEqual(claimsFor('现在凌晨三点零五分了。', '2026-09-30T18:30:00Z'), [], 'a true sentence is not gated');
+  // …while 3:05 at 02:16 is 49 minutes away — the residual window the 零 filler used to hide (the
+  // token used to be dropped entirely and read as 3:00, 44 minutes away).
+  assert.deepEqual(claimsFor('现在凌晨三点零五分了。', '2026-09-30T18:16:00Z'), ['clock:凌晨三点零五分']);
+
+  // Shapes that must not change: half-hours, plain digits, digital clocks, past tense, the 两点多 rule.
+  assert.deepEqual(claimsFor('现在凌晨两点半了。', '2026-09-30T18:30:00Z'), [], '半 is still 30: 02:30 at 02:30 is true');
+  assert.deepEqual(claimsFor('现在3点50分了。', T0300), ['clock:3点50分'], 'digit minutes were already read as written');
+  assert.deepEqual(claimsFor('现在03:50了。', T0300).length, 1, 'digital minutes were already read as written');
+  assert.deepEqual(claimsFor('我昨天三点五十分就醒了。', T0300), [], 'a past-tense clock is not a claim about now');
+  assert.deepEqual(claimsFor('现在凌晨两点多，人最容易想这些。', T0300), ['clock:凌晨两点多'], 'the t21 rule is untouched');
 });
 
 test('a fabricated number never reaches the audio, the log or the caller', async () => {
