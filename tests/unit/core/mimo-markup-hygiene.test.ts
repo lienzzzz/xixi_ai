@@ -14,9 +14,12 @@ import { MimoClient } from '@xixi/model-adapters';
  *
  * t21 (re-checked by t1) added the other two things the t12/t4 reviews measured at *this* seam:
  * mid-reply English reasoning must not stream out either (t12 F1 — the shape its report reproduced
- * independently at the adapter exit), `options.language` is what arms that hold (the acceptance
- * clause 「适配器出口的过滤器带上语言参数」), and the provider's `finish_reason` must reach `result`
- * so a reply cut mid-word can be attributed (t4 F5). The engine-seam shapes live in
+ * independently at the adapter exit), `options.language` selects which language the hold treats as
+ * foreign (the acceptance clause 「适配器出口的过滤器带上语言参数」), and the provider's `finish_reason`
+ * must reach `result` so a reply cut mid-word can be attributed (t4 F5). The option is **not** what
+ * switches the hold on: omitted, the adapter falls back to `zh-CN` and the Chinese rules run anyway —
+ * what the wiring is load-bearing for is a deployment that speaks something else, which the
+ * `options.language` test below pins on both sides. The engine-seam shapes live in
  * `reply-pipeline.test.ts`; the filter's own shapes in `reply-hygiene.test.ts`.
  */
 
@@ -102,11 +105,14 @@ test('the adapter exit never streams mid-reply English reasoning (t12 F1 / t21)'
   assert.equal(result.text?.includes('The user'), false, 'the accumulated turn text is clean too');
 });
 
-test('options.language is what arms the hold at the adapter exit (t12 F1 / t21)', async () => {
-  // The acceptance clause is 「适配器出口的过滤器带上语言参数」: if `language` stops reaching the
-  // filter, a zh-CN deployment streams the English run out again (first assertion), while an English
-  // deployment must keep its own text untouched (second assertion — a hardcoded Chinese hold breaks
-  // it). Two sides, one wiring: neither passes without the option being threaded through.
+test('options.language selects which language the hold treats as foreign (t12 F1 / t21)', async () => {
+  // The acceptance clause is 「适配器出口的过滤器带上语言参数」, and the two sides below are what it
+  // buys. The zh-CN side passes with the option omitted too: the adapter falls back to `zh-CN`
+  // (`options.language ?? 'zh-CN'`), so the Chinese rules run either way — that assertion pins the
+  // behaviour, not the wiring. The en-US side is the one that needs the option: with a hardcoded
+  // Chinese hold (or with the option dropped) it goes red, because the deployment's own English text
+  // is then held back as reasoning. Measured by deleting both `language:` options and re-running this
+  // file: the zh-CN case stayed green, the en-US case failed.
   const zh = new MimoBrainAdapter({ client: clientWith(REASONING_DELTAS), maxCompletionTokens: 64, temperature: 0, language: 'zh-CN' });
   const zhOut = await collectTurn(await zh.handleUserTurn({ sessionId: SESSION, text: '明天天气怎么样？' }));
   assert.equal(streamedText(zhOut.chunks).includes('The user'), false, `zh-CN must hold the English run: ${streamedText(zhOut.chunks)}`);
