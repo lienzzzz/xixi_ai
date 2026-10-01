@@ -6,15 +6,19 @@ import { join } from 'node:path';
 
 import { buildEvent, type EventEnvelope } from '@xixi/contracts';
 import {
+  DEFAULT_SELF_MODEL_SETTINGS,
   DomainError,
   fixedClock,
   listMigrationFiles,
   loadXixiConfig,
+  MemoryStore,
   migrate,
   OpenThreadStore,
   openXixiStore,
+  parseSelfModelSettings,
   parseXixiConfig,
   personalityProperty,
+  SelfModel,
   XixiStore,
 } from '@xixi/domain';
 import { DatabaseSync } from 'node:sqlite';
@@ -276,6 +280,140 @@ test('配置里的 open_threads 段是可选的：没有它的旧配置照旧加
     'legacy.yaml',
   );
   assert.equal(legacy.openThreads, undefined, '缺段 = 出厂默认，不是加载失败');
+  assert.equal(legacy.selfModel, undefined, 'self_model 段同样是可选的');
+});
+
+test('长期记忆：三类记忆都能写、能查、能改、能删（AGENTS §5）', () => {
+  const store = tempStore();
+  try {
+    const memory = new MemoryStore(store);
+    const episodic = memory.recordEpisodic({
+      summary: '记下一件事：明天下午我要去镇上办证',
+      kind: 'plan',
+      sourceType: 'program_extraction',
+      sourceEventId: 'evt_00000000-0000-4000-8000-000000000001',
+      importance: 0.85,
+    });
+    assert.match(episodic.memoryId, /^mem_/);
+    assert.equal(episodic.confidence, 0.8, 'program_extraction 的可信度 0.8（显式纠正才是 1.0）');
+    assert.equal(episodic.sourceEventId, 'evt_00000000-0000-4000-8000-000000000001', '每条记忆都指回原始事实');
+
+    const semantic = memory.recordSemantic({ property: 'preference', statement: '我平时喜欢早上听会儿新闻', sourceType: 'explicit_correction' });
+    assert.equal(semantic.confidence, 1, '父亲自己说的偏好，可信度 1');
+    const note = memory.recordNote({ aspect: 'chat_style', note: '嫌话多：少说、少主动', sourceType: 'explicit_correction' });
+    assert.equal(note.aspect, 'chat_style');
+
+    // 查看（可按 kind / property / aspect 过滤）。
+    assert.equal(memory.episodic({ kind: 'plan' }).length, 1);
+    assert.equal(memory.episodic({ kind: 'correction' }).length, 0);
+    assert.equal(memory.semantic({ property: 'preference' }).length, 1);
+    assert.equal(memory.notes({ aspect: 'chat_style' }).length, 1);
+
+    // 编辑与删除（父亲说「记错了」「忘掉这个」时程序真的照做）。
+    assert.equal(memory.updateEpisodic(episodic.memoryId, { summary: '改过的摘要' }).summary, '改过的摘要');
+    assert.equal(memory.updateSemantic(semantic.memoryId, { statement: '改过的事实' }).statement, '改过的事实');
+    assert.equal(memory.forget(episodic.memoryId), true);
+    assert.equal(memory.episodic().length, 0);
+    assert.equal(memory.forgetSemantic(semantic.memoryId), true);
+    assert.equal(memory.semantic().length, 0);
+    expectCode('UNKNOWN_MEMORY', () => store.episodicMemory(episodic.memoryId));
+  } finally {
+    store.close();
+  }
+});
+
+test('三层自我画像：基础 + 学习 + 会话覆盖，会话覆盖次日自动恢复', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'xixi-selfmodel-'));
+  const DAY1 = new Date(2026, 9, 1, 20, 0, 0);
+  const DAY2 = new Date(2026, 9, 2, 9, 0, 0);
+  let now = DAY1;
+  const store = openXixiStore({ dbPath: join(dir, 'x.sqlite'), clock: () => now });
+  try {
+    store.seedSelfProfile({ proactivity: 0.85, talkativeness: 0.75, verbosity: 0.7 });
+    const self = new SelfModel(store);
+
+    // 三层都空时，有效人格与基础层逐字相同（旧行为不变）。
+    assert.deepEqual(store.selfProfile(), store.baseProfile());
+
+    // 第二层：学习。
+    const learned = self.learn({ property: 'proactivity', delta: 0.12, sourceType: 'explicit_correction', evidence: '用户说「你可以主动一点」' });
+    assert.equal(learned.applied, 0.12);
+    assert.equal(store.selfProfile().proactivity, 0.97);
+    assert.equal(store.baseProfile().proactivity, 0.85, '基础层不被改写：学习是单独一层');
+
+    // 第三层：会话覆盖（只对今天）。
+    self.overrideToday({
+      deltas: { proactivity: -0.3, talkativeness: -0.25, verbosity: -0.2 },
+      reason: '用户说「今天想安静点」',
+      sourceType: 'explicit_correction',
+    });
+    assert.equal(store.selfProfile({ now: DAY1 }).proactivity, 0.67, '0.85 + 0.12 − 0.30');
+    assert.equal(store.selfProfile({ now: DAY1 }).talkativeness, 0.5);
+    assert.equal(self.overrides(DAY1).length, 3);
+
+    // 次日：覆盖失效（读取时按 valid_day 过滤，不需要定时任务）。
+    now = DAY2;
+    assert.equal(store.selfProfile({ now: DAY2 }).proactivity, 0.97, '学习层留下，覆盖层恢复');
+    assert.equal(store.selfProfile({ now: DAY2 }).talkativeness, 0.75);
+    assert.equal(self.overrides(DAY2).length, 0);
+
+    // 同一天重复说「今天安静点」不会把偏移叠成 −0.7（同属性只保留一条）。
+    now = DAY1;
+    self.overrideToday({ deltas: { proactivity: -0.3 }, reason: '用户又说了一次', sourceType: 'explicit_correction' });
+    assert.equal(store.selfProfile({ now: DAY1 }).proactivity, 0.67);
+
+    // 可回滚：清掉学习层，历史不删。
+    const rolled = self.rollback('proactivity');
+    assert.equal(rolled.applied, -0.12);
+    assert.equal(self.learned().find((entry) => entry.property === 'proactivity')?.delta, 0);
+    const history = self.history('proactivity');
+    assert.ok(history.some((change) => change.sourceType === 'learned:rollback'));
+    assert.ok(history.some((change) => change.sourceType === 'session_override:explicit_correction'));
+    assert.ok(history.every((change) => change.afterValue <= 1 && change.afterValue >= 0), 'history 记的是有效值');
+
+    // 反向换算：面板（有效值）→ 基础层。学习层 −0.12 时，把有效值调到 0.7 要写基础层 0.82，
+    // 否则学习偏移会被叠加两次（0.7 − 0.12 = 0.58）。这里用 DAY2 算，避开当天那条会话覆盖。
+    self.learn({ property: 'talkativeness', delta: -0.12, sourceType: 'explicit_correction' });
+    assert.equal(self.baseValueFor('talkativeness', 0.7, DAY2), 0.82);
+    store.overrideSelfProfile({ talkativeness: self.baseValueFor('talkativeness', 0.7, DAY2) }, 'test:panel');
+    assert.equal(store.selfProfile({ now: DAY2 }).talkativeness, 0.7, '用户看到的数就是他调的那个数');
+  } finally {
+    store.close();
+  }
+});
+
+test('004_memory 是新增迁移：四张表落地，旧库照旧能打开', () => {
+  const files = listMigrationFiles();
+  assert.deepEqual(
+    files.map((file) => file.name),
+    ['001_initial.sql', '002_world_state.sql', '003_open_threads.sql', '004_memory.sql'],
+    '已发布的迁移只能新增，不能改写',
+  );
+  const store = tempStore();
+  try {
+    assert.equal(store.appliedMigrations.length, files.length);
+    // 四张表都能写（迁移真的建了表，而不是只写了个文件）。
+    const memory = new MemoryStore(store);
+    assert.ok(memory.recordEpisodic({ summary: '一件事', kind: 'episode', sourceType: 'program_extraction' }));
+    assert.ok(memory.recordSemantic({ property: 'place', statement: '我住在城东', sourceType: 'explicit_correction' }));
+    assert.ok(memory.recordNote({ aspect: 'humor', note: '喜欢听笑话', sourceType: 'explicit_correction' }));
+    const self = new SelfModel(store);
+    assert.equal(self.learn({ property: 'humor', delta: 0.1, sourceType: 'explicit_correction' }).applied, 0.1);
+    assert.equal(self.overrides().length, 0);
+  } finally {
+    store.close();
+  }
+});
+
+test('self_model 段：出厂配置与代码默认逐字一致，坏值被夹进区间', () => {
+  const config = loadXixiConfig(join(REPO_ROOT, 'config', 'xixi.example.yaml'));
+  assert.deepEqual(parseSelfModelSettings(config.selfModel), DEFAULT_SELF_MODEL_SETTINGS);
+  assert.deepEqual(parseSelfModelSettings(undefined), DEFAULT_SELF_MODEL_SETTINGS);
+  assert.equal(parseSelfModelSettings({ daily_limit_explicit: 0.4 }).dailyLimitExplicit, 0.4);
+  assert.deepEqual(
+    parseSelfModelSettings({ learning_enabled: 'yes', daily_limit_explicit: null, drift_limit: {}, session_override_limit: [] }),
+    DEFAULT_SELF_MODEL_SETTINGS,
+  );
 });
 
 test('malformed configuration is refused with a named path', () => {

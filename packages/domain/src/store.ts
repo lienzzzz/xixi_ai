@@ -15,6 +15,15 @@ import {
 
 import { type Clock, systemClock } from './clock.ts';
 import { DomainError } from './errors.ts';
+import {
+  type EpisodicMemory,
+  type MemoryQuery,
+  type NewEpisodicMemory,
+  type NewRelationshipNote,
+  type NewSemanticMemory,
+  type RelationshipNote,
+  type SemanticMemory,
+} from './memory.ts';
 import { migrate, type AppliedMigration } from './migrations.ts';
 import {
   OPEN_THREAD_SETTLED_STATUSES,
@@ -26,6 +35,12 @@ import {
   type TransitionOpenThreadOptions,
 } from './open-threads.ts';
 import { clampPersonality, personalityProperty } from './personality.ts';
+import {
+  effectivePersonality,
+  localDayOf,
+  type LearnedDelta,
+  type SessionOverride,
+} from './self-model.ts';
 
 export const DEFAULT_DATA_DIR = 'data';
 export const DEFAULT_DB_FILE = 'xixi.sqlite';
@@ -237,6 +252,62 @@ interface OpenThreadRow {
   last_offered_at: string | null;
   source_event_id: string | null;
   note: string | null;
+}
+
+interface EpisodicMemoryRow {
+  memory_id: string;
+  occurred_at: string;
+  summary: string;
+  kind: string;
+  source_type: string;
+  source_event_id: string | null;
+  session_id: string | null;
+  importance: number;
+  confidence: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface SemanticMemoryRow {
+  memory_id: string;
+  property: string;
+  statement: string;
+  source_type: string;
+  source_event_id: string | null;
+  confidence: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface RelationshipNoteRow {
+  note_id: string;
+  aspect: string;
+  note: string;
+  source_type: string;
+  source_event_id: string | null;
+  confidence: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface LearnedDeltaRow {
+  property: string;
+  delta: number;
+  source_type: string;
+  evidence: string | null;
+  confidence: number;
+  updated_at: string;
+}
+
+interface SessionOverrideRow {
+  override_id: string;
+  session_id: string | null;
+  property: string;
+  delta: number;
+  reason: string;
+  source_type: string;
+  valid_day: string;
+  created_at: string;
 }
 
 /**
@@ -656,13 +727,31 @@ export class XixiStore {
     return this.selfProfileEntries();
   }
 
-  selfProfile(): Record<string, number> {
+  /**
+   * 基础层（`self_profile` 原始行）：配置种子与管理员覆盖的结果。
+   *
+   * 这是三层里的**第一层**；要「她现在实际上按什么来说话」请用 {@link selfProfile}。
+   */
+  baseProfile(): Record<string, number> {
     this.#assertOpen();
     const rows = this.#db.prepare('SELECT property, value FROM self_profile ORDER BY property').all() as unknown as Array<{
       property: string;
       value: number;
     }>;
     return Object.fromEntries(rows.map((row) => [row.property, row.value]));
+  }
+
+  /**
+   * **有效人格**：基础 + 学习 + 当天会话覆盖（《方案》§13）。
+   *
+   * 所有消费方（提示词、FSM 窗口、主动引擎的 `base_proactivity`、控制台面板）读的都是这一个方法，
+   * 所以「父亲说了一句『你话太多了』」不需要在四个地方各接一次线。三层都空时它与 `baseProfile()`
+   * 逐字相同（旧行为不变）。
+   */
+  selfProfile(query: { readonly now?: Date } = {}): Record<string, number> {
+    this.#assertOpen();
+    const at = query.now ?? this.clock();
+    return effectivePersonality(this.baseProfile(), this.learnedDeltas(), this.sessionOverrides({ day: localDayOf(at) }));
   }
 
   selfProfileEntries(): SelfProfileEntry[] {
@@ -1036,6 +1125,354 @@ export class XixiStore {
       return payload['thread_id'] === threadId;
     });
   }
+
+  // ----------------------------------------------- long-term memory (pack Phase 4)
+  //
+  // 记忆是**推导**（铁律 4）：这些表只存程序提炼出来的东西，每行带 source_event_id 指回原始轮次。
+  // 因此这里不写新事件类型 —— 日志是事实与判定，记忆可以按来源重建（见 004_memory.sql 的说明）。
+
+  insertEpisodicMemory(input: NewEpisodicMemory): EpisodicMemory {
+    this.#assertOpen();
+    const at = input.occurredAt ?? this.#now();
+    const memoryId = input.memoryId ?? `mem_${randomUUID()}`;
+    this.#db
+      .prepare(
+        `INSERT INTO episodic_memory (
+           memory_id, schema_version, occurred_at, summary, kind, source_type,
+           source_event_id, session_id, importance, confidence, created_at, updated_at
+         ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        memoryId,
+        at,
+        input.summary,
+        input.kind,
+        input.sourceType,
+        input.sourceEventId ?? null,
+        input.sessionId ?? null,
+        clamp01(input.importance ?? 0.5),
+        clamp01(input.confidence ?? 0.5),
+        at,
+        at,
+      );
+    return this.episodicMemory(memoryId);
+  }
+
+  episodicMemory(memoryId: string): EpisodicMemory {
+    this.#assertOpen();
+    const row = this.#db.prepare('SELECT * FROM episodic_memory WHERE memory_id = ?').get(memoryId) as unknown;
+    if (row === undefined) throw new DomainError('UNKNOWN_MEMORY', `no episodic memory ${memoryId}`);
+    return toEpisodicMemory(row as EpisodicMemoryRow);
+  }
+
+  episodicMemories(query: MemoryQuery = {}): EpisodicMemory[] {
+    this.#assertOpen();
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (query.kind !== undefined) {
+      clauses.push('kind = ?');
+      params.push(query.kind);
+    }
+    const since = toEpochMs(query.since);
+    if (since !== null) {
+      clauses.push('occurred_at >= ?');
+      params.push(toOffsetIso(new Date(since)));
+    }
+    const where = clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`;
+    params.push(query.limit ?? 50);
+    const rows = this.#db
+      .prepare(`SELECT * FROM episodic_memory ${where} ORDER BY occurred_at DESC, rowid DESC LIMIT ?`)
+      .all(...params) as unknown as EpisodicMemoryRow[];
+    return rows.map(toEpisodicMemory);
+  }
+
+  updateEpisodicMemory(
+    memoryId: string,
+    patch: { readonly summary?: string; readonly importance?: number },
+  ): EpisodicMemory {
+    this.#assertOpen();
+    const current = this.episodicMemory(memoryId);
+    const summary = patch.summary ?? current.summary;
+    const importance = patch.importance === undefined ? current.importance : clamp01(patch.importance);
+    this.#db
+      .prepare('UPDATE episodic_memory SET summary = ?, importance = ?, updated_at = ? WHERE memory_id = ?')
+      .run(summary, importance, this.#now(), memoryId);
+    return this.episodicMemory(memoryId);
+  }
+
+  deleteEpisodicMemory(memoryId: string): boolean {
+    this.#assertOpen();
+    const result = this.#db.prepare('DELETE FROM episodic_memory WHERE memory_id = ?').run(memoryId);
+    return Number(result.changes) > 0;
+  }
+
+  insertSemanticMemory(input: NewSemanticMemory): SemanticMemory {
+    this.#assertOpen();
+    const at = this.#now();
+    const memoryId = input.memoryId ?? `sem_${randomUUID()}`;
+    this.#db
+      .prepare(
+        `INSERT INTO semantic_memory (
+           memory_id, schema_version, property, statement, source_type, source_event_id,
+           confidence, created_at, updated_at
+         ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        memoryId,
+        input.property,
+        input.statement,
+        input.sourceType,
+        input.sourceEventId ?? null,
+        clamp01(input.confidence ?? 0.5),
+        at,
+        at,
+      );
+    return this.semanticMemory(memoryId);
+  }
+
+  semanticMemory(memoryId: string): SemanticMemory {
+    this.#assertOpen();
+    const row = this.#db.prepare('SELECT * FROM semantic_memory WHERE memory_id = ?').get(memoryId) as unknown;
+    if (row === undefined) throw new DomainError('UNKNOWN_MEMORY', `no semantic memory ${memoryId}`);
+    return toSemanticMemory(row as SemanticMemoryRow);
+  }
+
+  semanticMemories(query: MemoryQuery = {}): SemanticMemory[] {
+    this.#assertOpen();
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (query.property !== undefined) {
+      clauses.push('property = ?');
+      params.push(query.property);
+    }
+    const since = toEpochMs(query.since);
+    if (since !== null) {
+      clauses.push('created_at >= ?');
+      params.push(toOffsetIso(new Date(since)));
+    }
+    const where = clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`;
+    params.push(query.limit ?? 50);
+    const rows = this.#db
+      .prepare(`SELECT * FROM semantic_memory ${where} ORDER BY updated_at DESC, rowid DESC LIMIT ?`)
+      .all(...params) as unknown as SemanticMemoryRow[];
+    return rows.map(toSemanticMemory);
+  }
+
+  updateSemanticMemory(
+    memoryId: string,
+    patch: { readonly statement?: string; readonly property?: string },
+  ): SemanticMemory {
+    this.#assertOpen();
+    const current = this.semanticMemory(memoryId);
+    this.#db
+      .prepare('UPDATE semantic_memory SET statement = ?, property = ?, updated_at = ? WHERE memory_id = ?')
+      .run(patch.statement ?? current.statement, patch.property ?? current.property, this.#now(), memoryId);
+    return this.semanticMemory(memoryId);
+  }
+
+  deleteSemanticMemory(memoryId: string): boolean {
+    this.#assertOpen();
+    const result = this.#db.prepare('DELETE FROM semantic_memory WHERE memory_id = ?').run(memoryId);
+    return Number(result.changes) > 0;
+  }
+
+  insertRelationshipNote(input: NewRelationshipNote): RelationshipNote {
+    this.#assertOpen();
+    const at = this.#now();
+    const noteId = input.noteId ?? `rel_${randomUUID()}`;
+    this.#db
+      .prepare(
+        `INSERT INTO relationship_notes (
+           note_id, schema_version, aspect, note, source_type, source_event_id, confidence, created_at, updated_at
+         ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        noteId,
+        input.aspect,
+        input.note,
+        input.sourceType,
+        input.sourceEventId ?? null,
+        clamp01(input.confidence ?? 0.5),
+        at,
+        at,
+      );
+    return this.relationshipNote(noteId);
+  }
+
+  relationshipNote(noteId: string): RelationshipNote {
+    this.#assertOpen();
+    const row = this.#db.prepare('SELECT * FROM relationship_notes WHERE note_id = ?').get(noteId) as unknown;
+    if (row === undefined) throw new DomainError('UNKNOWN_MEMORY', `no relationship note ${noteId}`);
+    return toRelationshipNote(row as RelationshipNoteRow);
+  }
+
+  relationshipNotes(query: MemoryQuery = {}): RelationshipNote[] {
+    this.#assertOpen();
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (query.aspect !== undefined) {
+      clauses.push('aspect = ?');
+      params.push(query.aspect);
+    }
+    const since = toEpochMs(query.since);
+    if (since !== null) {
+      clauses.push('created_at >= ?');
+      params.push(toOffsetIso(new Date(since)));
+    }
+    const where = clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`;
+    params.push(query.limit ?? 50);
+    const rows = this.#db
+      .prepare(`SELECT * FROM relationship_notes ${where} ORDER BY updated_at DESC, rowid DESC LIMIT ?`)
+      .all(...params) as unknown as RelationshipNoteRow[];
+    return rows.map(toRelationshipNote);
+  }
+
+  // ------------------------------------------- three-layer self model (pack Phase 4)
+  //
+  // 有效人格 = 基础（`self_profile`，配置/管理员）+ 学习（`self_profile_learned`）+ 会话覆盖
+  // （`session_overrides`，只认今天）。`selfProfile()` 读的就是这个和 —— 所有消费方
+  // （提示词、FSM 窗口、主动引擎的 base_proactivity）因此自动拿到三层结果，不需要各自拼。
+
+  /** 学习到的偏移（LearnedProfile 那一层）。 */
+  learnedDeltas(): LearnedDelta[] {
+    this.#assertOpen();
+    const rows = this.#db
+      .prepare('SELECT * FROM self_profile_learned ORDER BY property')
+      .all() as unknown as LearnedDeltaRow[];
+    return rows.map((row) => ({
+      property: row.property,
+      delta: row.delta,
+      sourceType: row.source_type,
+      evidence: row.evidence,
+      confidence: row.confidence,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  learnedDelta(property: string): LearnedDelta | null {
+    return this.learnedDeltas().find((entry) => entry.property === property) ?? null;
+  }
+
+  /** 写一层的累计值（策略与上限在 `SelfModel`，这里只落库）。 */
+  writeLearnedDelta(
+    property: string,
+    delta: number,
+    options: { readonly sourceType: string; readonly evidence: string | null; readonly confidence: number },
+  ): LearnedDelta {
+    this.#assertOpen();
+    const at = this.#now();
+    this.#db
+      .prepare(
+        `INSERT INTO self_profile_learned (property, schema_version, delta, source_type, evidence, confidence, updated_at)
+         VALUES (?, 1, ?, ?, ?, ?, ?)
+         ON CONFLICT(property) DO UPDATE SET
+           delta = excluded.delta,
+           source_type = excluded.source_type,
+           evidence = excluded.evidence,
+           confidence = excluded.confidence,
+           updated_at = excluded.updated_at`,
+      )
+      .run(property, delta, options.sourceType, options.evidence, clamp01(options.confidence), at);
+    const written = this.learnedDelta(property);
+    if (written === null) {
+      throw new DomainError('INVALID_SELF_MODEL', `learned delta for ${property} vanished right after writing`);
+    }
+    return written;
+  }
+
+  /** 某一天生效的会话覆盖（默认：今天）。`valid_day` 是本地自然日，所以次日自动失效。 */
+  sessionOverrides(query: { readonly day?: string; readonly sessionId?: string | null } = {}): SessionOverride[] {
+    this.#assertOpen();
+    const day = query.day ?? localDayOf(this.clock());
+    const rows = (
+      query.sessionId === undefined
+        ? this.#db.prepare('SELECT * FROM session_overrides WHERE valid_day = ? ORDER BY property').all(day)
+        : this.#db
+            .prepare('SELECT * FROM session_overrides WHERE valid_day = ? AND (session_id IS ? OR session_id = ?) ORDER BY property')
+            .all(day, query.sessionId, query.sessionId)
+    ) as unknown as SessionOverrideRow[];
+    return rows.map((row) => ({
+      overrideId: row.override_id,
+      sessionId: row.session_id,
+      property: row.property,
+      delta: row.delta,
+      reason: row.reason,
+      sourceType: row.source_type,
+      validDay: row.valid_day,
+      createdAt: row.created_at,
+    }));
+  }
+
+  insertSessionOverride(input: {
+    readonly property: string;
+    readonly delta: number;
+    readonly reason: string;
+    readonly sourceType: string;
+    readonly sessionId?: string | null;
+    readonly validDay?: string;
+  }): SessionOverride {
+    this.#assertOpen();
+    const at = this.#now();
+    const overrideId = `ovr_${randomUUID()}`;
+    const validDay = input.validDay ?? localDayOf(this.clock());
+    this.#db
+      .prepare(
+        `INSERT INTO session_overrides (
+           override_id, schema_version, session_id, property, delta, reason, source_type, valid_day, created_at
+         ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(overrideId, input.sessionId ?? null, input.property, input.delta, input.reason, input.sourceType, validDay, at);
+    const written = this.sessionOverrides({ day: validDay }).find((entry) => entry.overrideId === overrideId);
+    if (written === undefined) {
+      throw new DomainError('INVALID_SELF_MODEL', 'session override vanished right after writing');
+    }
+    return written;
+  }
+
+  /** 抹掉某一天某属性的会话覆盖（重复说「今天安静点」只保留一条）。 */
+  clearSessionOverride(query: { readonly property: string; readonly day: string; readonly sessionId?: string | null }): number {
+    this.#assertOpen();
+    const result =
+      query.sessionId === undefined || query.sessionId === null
+        ? this.#db
+            .prepare('DELETE FROM session_overrides WHERE property = ? AND valid_day = ?')
+            .run(query.property, query.day)
+        : this.#db
+            .prepare('DELETE FROM session_overrides WHERE property = ? AND valid_day = ? AND session_id IS ?')
+            .run(query.property, query.day, query.sessionId);
+    return Number(result.changes);
+  }
+
+  /** 自我画像变更历史（§7.5）：学习、会话覆盖、admin 覆盖都往这里写。 */
+  recordSelfProfileChange(input: {
+    readonly property: string;
+    readonly before: number | null;
+    readonly after: number;
+    readonly sourceType: string;
+    readonly summary: string;
+    readonly confidence?: number;
+    readonly sourceEventId?: string | null;
+  }): void {
+    this.#assertOpen();
+    this.#db
+      .prepare(
+        `INSERT INTO self_profile_history (
+           change_id, schema_version, property, before_value, after_value, source_type,
+           source_event_id, summary, confidence, created_at
+         ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        `selfchg_${randomUUID()}`,
+        input.property,
+        input.before,
+        input.after,
+        input.sourceType,
+        input.sourceEventId ?? null,
+        input.summary,
+        clamp01(input.confidence ?? 1),
+        this.#now(),
+      );
+  }
 }
 
 /**
@@ -1107,6 +1544,56 @@ function openThreadPayload(thread: OpenThread, previousStatus: OpenThreadStatus 
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.min(1, Math.max(0, value));
+}
+
+function toEpisodicMemory(row: EpisodicMemoryRow): EpisodicMemory {
+  return {
+    memoryId: row.memory_id,
+    occurredAt: row.occurred_at,
+    summary: row.summary,
+    kind: row.kind as EpisodicMemory['kind'],
+    sourceType: row.source_type as EpisodicMemory['sourceType'],
+    sourceEventId: row.source_event_id,
+    sessionId: row.session_id,
+    importance: row.importance,
+    confidence: row.confidence,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toSemanticMemory(row: SemanticMemoryRow): SemanticMemory {
+  return {
+    memoryId: row.memory_id,
+    property: row.property,
+    statement: row.statement,
+    sourceType: row.source_type as SemanticMemory['sourceType'],
+    sourceEventId: row.source_event_id,
+    confidence: row.confidence,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toRelationshipNote(row: RelationshipNoteRow): RelationshipNote {
+  return {
+    noteId: row.note_id,
+    aspect: row.aspect,
+    note: row.note,
+    sourceType: row.source_type as RelationshipNote['sourceType'],
+    sourceEventId: row.source_event_id,
+    confidence: row.confidence,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** `since` 允许 ISO 字符串或 epoch 毫秒；读不出来就是「不过滤」。 */
+function toEpochMs(since: string | number | undefined): number | null {
+  if (since === undefined) return null;
+  if (typeof since === 'number') return Number.isFinite(since) ? since : null;
+  const parsed = Date.parse(since);
+  return Number.isNaN(parsed) ? null : parsed;
 }
 
 function sessionIdOf(event: EventEnvelope): string | null {  const payload = event.payload as JsonValue;

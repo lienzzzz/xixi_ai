@@ -103,6 +103,23 @@ xixi:
     event_log_retention_days: 90
     semantic_memory: true
     future_hooks: true
+    # pack Phase 4 新增的两种记忆（表在迁移 004；这段是**声明**，读取方是 domain 的 MemoryStore 调用方）：
+    episodic_memory: true    # 发生过的事（将来的计划、一次明确纠正）
+    relationship_notes: true # 「我们怎么相处」的笔记（由明确反馈写下来）
+    async_extraction: true   # 提取在回复之后异步做（《方案》§11.1：不阻塞语音）
+
+  # 三层自我画像与反馈学习（pack Phase 4 / 《方案》§7.4 §13）。
+  # BaseProfile（personality.base）+ LearnedProfile + SessionOverride = 有效人格。
+  # 本段**已被代码读取**：`packages/domain/src/self-model.ts` 的 `parseSelfModelSettings` 读它，
+  # 现场测试控制台与试用页用它构造 `SelfModel`（scripts/field-test.ts、scripts/serve-chat.ts）。
+  # 上限按《方案》§7.4：明确长期指令一次最大 ±0.15；隐式/推断反馈单次最多 ±0.03；
+  # 学习层累计漂移 ±0.30（不允许单次抱怨把属性拉到极端）；会话覆盖只对当天有效，次日自动恢复。
+  self_model:
+    learning_enabled: true        # 关掉后不再学习（已有偏移保持原样，可 rollback）
+    daily_limit_explicit: 0.15    # 明确长期指令的单日累计上限
+    daily_limit_inferred: 0.03    # 模型推断（读空气白名单码）的单日累计上限——权重只有显式的 0.4
+    drift_limit: 0.30             # 学习层累计偏移上限
+    session_override_limit: 0.35  # 「今天想安静点」这类当天覆盖的单次上限
 
   privacy:
     continuous_audio_cloud_upload: false

@@ -22,6 +22,39 @@ export {
 } from './open-threads.ts';
 export { appliedMigrations, listMigrationFiles, migrate, type AppliedMigration, type MigrationFile } from './migrations.ts';
 export {
+  MEMORY_SOURCE_CONFIDENCE,
+  MEMORY_SOURCE_TYPES,
+  MemoryStore,
+  RELATIONSHIP_ANSWER_WINDOW_MINUTES,
+  type EpisodicKind,
+  type EpisodicMemory,
+  type MemoryQuery,
+  type MemorySourceType,
+  type NewEpisodicMemory,
+  type NewRelationshipNote,
+  type NewSemanticMemory,
+  type RelationshipNote,
+  type RelationshipSnapshot,
+  type SemanticMemory,
+} from './memory.ts';
+export {
+  DEFAULT_SELF_MODEL_SETTINGS,
+  effectivePersonality,
+  localDayOf,
+  NEUTRAL_PROFILE_VALUE,
+  parseSelfModelSettings,
+  SELF_MODEL_SOURCES,
+  SELF_MODEL_SOURCE_WEIGHTS,
+  SelfModel,
+  type LearnedDelta,
+  type LearnedDeltaInput,
+  type LearnedDeltaResult,
+  type SelfModelSettings,
+  type SelfModelSource,
+  type SessionOverride,
+  type SessionOverrideInput,
+} from './self-model.ts';
+export {
   clampPersonality,
   PERSONALITY_PROPERTIES,
   personalityProperty,

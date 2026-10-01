@@ -89,6 +89,7 @@ import {
   splitReplyIntoSegments,
   TOPIC_SOURCES,
   TopicEngine,
+  TurnMemoryExtractor,
   openThreadFollowUpComponents,
   type OpenThreadFollowUp,
   type TopicEngineStatus,
@@ -105,7 +106,16 @@ import {
   type ConversationState,
 } from '@xixi/conversation';
 import { MimoClient, WeatherClient } from '@xixi/model-adapters';
-import { DEFAULT_PRESENCE_TTL_SECONDS, openXixiStore, type XixiConfig, type StoredEvent, type XixiStore } from '@xixi/domain';
+import {
+  DEFAULT_PRESENCE_TTL_SECONDS,
+  MemoryStore,
+  openXixiStore,
+  parseSelfModelSettings,
+  SelfModel,
+  type XixiConfig,
+  type StoredEvent,
+  type XixiStore,
+} from '@xixi/domain';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
 import { concatWav, readWav, readWavInfo, sliceWav } from './lib/wav.ts';
@@ -2043,7 +2053,27 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
     });
   }
 
-  const engine = new ConversationEngine({ adapter: buildAdapter(), store, config, turnTimeoutMs: 90_000 });
+  /**
+   * 长期记忆与反馈学习（pack Phase 4）：一轮说完之后**异步**提取，不阻塞回复。
+   *
+   * `SelfModel` 的三层（基础+学习+会话覆盖）由 `store.selfProfile()` 统一读出来，所以学习到的偏移
+   * 会自动影响提示词、FSM 窗口与主动引擎的阈值 —— 面板上显示的人格也已经是有效值。
+   */
+  const memory = new MemoryStore(store);
+  const selfModel = new SelfModel(store, parseSelfModelSettings(config.selfModel));
+  const extractor = new TurnMemoryExtractor({
+    store,
+    selfModel,
+    memory,
+    onError: (error) => log(`[memory] 后台提取出错（不影响这一轮）：${error instanceof Error ? error.message : String(error)}`),
+  });
+  const engine = new ConversationEngine({
+    adapter: buildAdapter(),
+    store,
+    config,
+    turnTimeoutMs: 90_000,
+    afterTurn: (job) => extractor.enqueue(job),
+  });
   let session = store.latestSession() ?? store.createSession();
 
   // -------------------------------------------------- proactive card state (t42)
@@ -3342,16 +3372,29 @@ export function applyAndPersistProactivePatch(options: {
   const changes = [...patched.changes];
   const personality: Record<string, { before: number; after: number }> = {};
   const writes: Record<string, number> = {};
+  /**
+   * pack Phase 4：面板显示与改写的都是**有效值**（基础+学习+当天覆盖），而 `overrideSelfProfile`
+   * 写的是**基础层**。两件事都要处理，否则面板上的数就是假的：
+   *
+   *   1. 学习层有偏移时直接写绝对值和会把它叠加两次（0.63 拉到 0.70 会变成 0.58）；
+   *   2. 今天有过「安静点」这类会话覆盖时，基础层可能已经顶到上界，改完仍然到不了目标值 ——
+   *      操作者现在明确改这一个属性，就取消它今天在这一属性上的覆盖（其它属性保留）。
+   */
+  const selfModel = new SelfModel(options.store);
+  /** 这次被面板取代掉的「今天」覆盖（写进变更行，别让它们悄悄消失）。 */
+  const clearedOverrides = new Set<string>();
   for (const [property, after] of Object.entries(patched.personality)) {
     const before = options.personalityBefore[property];
     if (before === after) continue; // no-op: nothing to write, nothing to audit
-    writes[property] = after;
+    if (selfModel.clearTodayOverride(property) > 0) clearedOverrides.add(property);
+    writes[property] = selfModel.baseValueFor(property, after);
     personality[property] = { before: before ?? Number.NaN, after };
   }
   if (Object.keys(writes).length > 0) {
     options.store.overrideSelfProfile(writes, 'console:personality');
     for (const [property, move] of Object.entries(personality)) {
-      changes.push(personalityChangeLine(property, move.before, move.after));
+      const note = clearedOverrides.has(property) ? '；今天这一属性上的会话覆盖已取消（面板是更明确的设置）' : '';
+      changes.push(`${personalityChangeLine(property, move.before, move.after)}${note}`);
     }
   }
   let auditSequence: number | null = null;

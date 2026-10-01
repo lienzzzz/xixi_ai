@@ -14,9 +14,9 @@ import { join } from 'node:path';
 
 import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
-import { ConversationEngine, TopicEngine } from '@xixi/conversation';
+import { ConversationEngine, TopicEngine, TurnMemoryExtractor } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
-import { openXixiStore } from '@xixi/domain';
+import { MemoryStore, openXixiStore, parseSelfModelSettings, SelfModel } from '@xixi/domain';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
 import {
@@ -117,7 +117,23 @@ function buildAdapter(): BrainAdapter {
   });
 }
 
-const engine = new ConversationEngine({ adapter: buildAdapter(), store, config, turnTimeoutMs: 90_000 });
+// pack Phase 4：长期记忆与反馈学习。一轮说完之后**异步**提取（`afterTurn` 只入队，不 await），
+// 所以试用页的回复速度与「她要不要写记忆」无关；学习到的偏移通过 `store.selfProfile()` 影响提示词。
+const memory = new MemoryStore(store);
+const selfModel = new SelfModel(store, parseSelfModelSettings(config.selfModel));
+const extractor = new TurnMemoryExtractor({
+  store,
+  selfModel,
+  memory,
+  onError: (error) => console.log(`[memory] 后台提取出错（不影响这一轮）：${error instanceof Error ? error.message : String(error)}`),
+});
+const engine = new ConversationEngine({
+  adapter: buildAdapter(),
+  store,
+  config,
+  turnTimeoutMs: 90_000,
+  afterTurn: (job) => extractor.enqueue(job),
+});
 
 let session = store.latestSession() ?? store.createSession();
 

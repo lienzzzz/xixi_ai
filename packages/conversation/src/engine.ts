@@ -19,6 +19,7 @@ import {
 } from './fsm.ts';
 import { PromptAssembler, SILENCE_TOKEN, worldStateLite, type AssembledPrompt, type PromptTurn } from './prompt.ts';
 import { DEFAULT_SILENCE_TOLERANCE } from './personality.ts';
+import type { PostTurnJob } from './extractor.ts';
 import { REPLY_LIMITS, resolveReplyLimits, splitReplyIntoSegments, type ReplySegmentOptions, type SegmentedReply } from './segments.ts';
 
 export interface ConversationEngineOptions {
@@ -46,6 +47,14 @@ export interface ConversationEngineOptions {
    * ceilings in `REPLY_LIMITS` — see `resolveReplyLimits`.
    */
   readonly reply?: ReplySegmentOptions;
+  /**
+   * pack Phase 4（《方案》§11.1）：一轮结束后的**后台提取**接缝。
+   *
+   * 引擎在回复说完、`conversation.turn` 都落库之后调用它，**不 await、不抛错**：写记忆、
+   * 学反馈、记未完话题都是回复之后的事，不能拖慢语音。生产传的是
+   * `TurnMemoryExtractor.enqueue`（见 `packages/conversation/src/extractor.ts`）。
+   */
+  readonly afterTurn?: ((job: PostTurnJob) => void) | undefined;
 }
 
 export interface RespondInput {
@@ -171,6 +180,8 @@ export class ConversationEngine {
   readonly #offsetMinutes: number | undefined;
   /** Effective reply limits, already clamped to the hard ceilings (ADR-0010 §3). */
   readonly #replyLimits: ReplySegmentOptions;
+  /** pack Phase 4：一轮之后的异步提取接缝（见 `ConversationEngineOptions.afterTurn`）。 */
+  readonly #afterTurn: ((job: PostTurnJob) => void) | undefined;
   /** Set only when the caller passed `fsm.silenceTolerance` explicitly. */
   readonly #silenceToleranceOverride: number | null;
   /**
@@ -195,6 +206,7 @@ export class ConversationEngine {
     // it; reading it here is what makes the section true. Every value is clamped,
     // so neither the config nor a caller can raise the ADR-0010 ceilings.
     this.#replyLimits = resolveReplyLimits(this.#config.reply, options.reply);
+    this.#afterTurn = options.afterTurn;
     // The personality is the source of truth, so it is read at construction and
     // re-read on every turn. Forgetting this wiring is no longer invisible: an
     // unset tolerance leaves the window unscaled instead of silently matching
@@ -434,7 +446,14 @@ export class ConversationEngine {
     this.#fsm.onUserTurn(at.getTime());
     const prompt = this.buildPrompt({ ...input, at });
     const startedAt = Date.now();
-    this.#store.recordTurn({ sessionId: input.sessionId, role: 'user', action: 'SPEAK', text: input.text });
+    // pack Phase 4：用户这条轮次的事件 id 要交给后台提取器 —— 派生出来的记忆/学习/未完话题
+    // 都靠它指回原始事实（铁律 4：Raw Event 与 Memory 分层）。
+    const userTurnEventId = this.#store.recordTurn({
+      sessionId: input.sessionId,
+      role: 'user',
+      action: 'SPEAK',
+      text: input.text,
+    }).event.event_id;
 
     let decisionRecorded = false;
     const recordAcceptedDecision = (action: TurnAction, state: ConversationState): void => {
@@ -663,6 +682,25 @@ export class ConversationEngine {
       }
       const finishedAt = this.#clock();
       this.#fsm.onReplyCompleted(finishedAt.getTime());
+      // pack Phase 4 /《方案》§11.1：回复已经说完、两个 turn 都已落库，现在把「这一轮」交给
+      // 后台提取（记忆 / 反馈学习 / 未完话题）。**不 await**：提取慢不慢与用户听到回复无关；
+      // 提取里出错也不能让这一轮失败（只记 notice，调用方可以打日志）。
+      if (this.#afterTurn !== undefined) {
+        try {
+          this.#afterTurn({
+            sessionId: input.sessionId,
+            userText: input.text,
+            replyText: turnText,
+            at: finishedAt,
+            userEventId: userTurnEventId,
+          });
+        } catch (error) {
+          await hooks.onNotice?.({
+            code: 'EXTRACTION_ENQUEUE_FAILED',
+            detail: `后台提取没能入队：${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
+      }
       if (playbackError !== null) throw playbackError;
     } finally {
       // Recorded even when the model throws: "the turn was accepted, then the

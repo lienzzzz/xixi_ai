@@ -44,6 +44,11 @@ export interface XixiConfig {
    * （`packages/conversation/src/topic-engine.ts` 的 `DEFAULT_TOPIC_ENGINE_SETTINGS`）。
    */
   readonly openThreads?: Record<string, unknown>;
+  /**
+   * 三层自我画像与反馈学习（pack Phase 4 / 《方案》§7.4）。可选：缺段 = 出厂默认
+   * （`packages/domain/src/self-model.ts` 的 `DEFAULT_SELF_MODEL_SETTINGS`）。
+   */
+  readonly selfModel?: Record<string, unknown>;
   readonly memory: Record<string, unknown>;
   readonly privacy: Record<string, unknown>;
   readonly features: Record<string, unknown>;
@@ -141,6 +146,7 @@ export function parseXixiConfig(source: string, file = '<inline>'): XixiConfig {
     proactive: section(xixi, 'proactive', file),
     reply: optionalSection(xixi, 'reply'),
     openThreads: optionalSection(xixi, 'open_threads'),
+    selfModel: optionalSection(xixi, 'self_model'),
     memory: section(xixi, 'memory', file),
     privacy: section(xixi, 'privacy', file),
     features: section(xixi, 'features', file),

@@ -10,6 +10,8 @@ export type DomainErrorCode =
   | 'INVALID_WORLD_STATE'
   | 'UNKNOWN_OPEN_THREAD'
   | 'INVALID_OPEN_THREAD'
+  | 'UNKNOWN_MEMORY'
+  | 'INVALID_SELF_MODEL'
   | 'INVALID_CONFIG';
 
 export class DomainError extends Error {

@@ -118,6 +118,16 @@ test('personality changes the directives, which is what makes feedback verifiabl
   }
 });
 
+test('pack Phase 4：学习到的人格偏移会真的改掉提示词里的说话方式', () => {
+  // 「你话太多了」之后的出厂基线（talkativeness 0.75 → 0.63、verbosity 0.7 → 0.6）：
+  // talkativeness 掉到 0.65 以下，提示词里那句「可以主动接话」就该消失。
+  const before = personalityDirectives({ talkativeness: 0.75, verbosity: 0.7 });
+  const after = personalityDirectives({ talkativeness: 0.63, verbosity: 0.6 });
+  assert.ok(before.some((line) => line.includes('可以主动接话')), '学习之前鼓励主动接话');
+  assert.ok(!after.some((line) => line.includes('可以主动接话')), `学习之后不该再鼓励：${JSON.stringify(after)}`);
+  assert.notDeepEqual(before, after, '反馈必须在行为上可验证，而不是只改了一个数');
+});
+
 test('the model-visible prompt separates the stable prefix from the changing suffix', () => {
   const first = assembler.assemble(input({ turnIndex: 1, userText: '那后天呢？' }));
   const second = assembler.assemble(input({ turnIndex: 2, userText: '知道了' }));

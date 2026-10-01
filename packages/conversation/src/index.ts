@@ -50,6 +50,25 @@ export {
   type SegmentedReply,
 } from './segments.ts';
 export {
+  DEFAULT_EXTRACTION_SCHEDULER,
+  TurnMemoryExtractor,
+  type ExtractionResult,
+  type ExtractionScheduler,
+  type PostTurnJob,
+  type TurnMemoryExtractorOptions,
+} from './extractor.ts';
+export {
+  EXPLICIT_FEEDBACK_WEIGHT,
+  FEEDBACK_RULES,
+  INFERRED_FEEDBACK_WEIGHT,
+  interpretFeedback,
+  interpretFeedbackInput,
+  interpretInference,
+  type FeedbackInterpretation,
+  type FeedbackKind,
+  type FeedbackRule,
+} from './feedback-interpreter.ts';
+export {
   classifyThreadAnswer,
   DEFAULT_TOPIC_ENGINE_SETTINGS,
   extractOpenThreads,
