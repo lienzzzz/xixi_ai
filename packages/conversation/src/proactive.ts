@@ -327,6 +327,14 @@ export interface ProactiveSettings {
    * 热聊中接话 (`conversation_continuation`) is exempt — pack §14.3 keeps that path free.
    */
   readonly newSessionMinGapMinutes: number;
+  /**
+   * What counts as 「正在热聊」 (pack §14.3): a live conversation **and** at least this many user turns
+   * inside {@link hotChatWindowMinutes}. One stray remark does not make a hot chat — see
+   * {@link ProactiveSettings.hotChatWindowMinutes}. `0`/`1` both mean 「只要对话还开着就算」.
+   */
+  readonly hotChatMinTurns: number;
+  /** The window {@link ProactiveSettings.hotChatMinTurns} counts user turns over, in minutes. */
+  readonly hotChatWindowMinutes: number;
   /** How long "the same topic" keeps its repetition penalty. */
   readonly topicRepeatWindowHours: number;
   /** A generic line (no `topicRef`) pays its own, longer window (pack: 24 h). */
@@ -366,6 +374,9 @@ export const DEFAULT_PROACTIVE_SETTINGS: ProactiveSettings = Object.freeze({
   maxConsultsPerDay: 120,
   // t9 F6: a narrow, auditable floor for starting a new thread (热聊接话 is exempt).
   newSessionMinGapMinutes: 2,
+  // t9 F5: 「正在热聊」 is a back-and-forth, not a single remark — see `deriveProactiveSignals`.
+  hotChatMinTurns: 2,
+  hotChatWindowMinutes: 15,
   topicRepeatWindowHours: 12,
   genericTopicCooldownHours: 24,
   unansweredPenalty: 0.45,
@@ -408,6 +419,8 @@ export function parseProactiveSettings(source?: Readonly<Record<string, unknown>
     maxPerDay: numberField(source, 'max_per_day', fallback.maxPerDay, 0, 100),
     maxConsultsPerDay: numberField(source, 'max_consults_per_day', fallback.maxConsultsPerDay, 0, 1000),
     newSessionMinGapMinutes: numberField(source, 'new_session_min_gap_min', fallback.newSessionMinGapMinutes, 0, 240),
+    hotChatMinTurns: numberField(source, 'hot_chat_min_turns', fallback.hotChatMinTurns, 0, 50),
+    hotChatWindowMinutes: numberField(source, 'hot_chat_window_min', fallback.hotChatWindowMinutes, 0, 24 * 60),
     topicRepeatWindowHours: numberField(source, 'topic_repeat_window_h', fallback.topicRepeatWindowHours, 0, 24 * 30),
     genericTopicCooldownHours: numberField(
       source,
@@ -650,11 +663,23 @@ export function deriveProactiveSignals(
 
   const interruption = Math.max(supplied('interruption_cost'), clamp01(cooldownGrade(kind, context, past) * multiplier));
   const repeatedTopic = Math.max(supplied('repeated_topic_penalty'), topicGrade(candidate, context, past));
+  // t9 F5 (and the reading F2 needs): 未回应惩罚 means **「她说了，没人回来」**. While a hot chat is
+  // going on (see `isHotChat`) the person *is* talking to her right now, so the condition that
+  // signal names is false by construction and 热聊接话 (a `conversation_continuation`) is not charged
+  // it. Without this the two Phase-5 goals contradicted each other in practice: after a morning
+  // nobody answered, the streak grade sits at its ceiling, and since even the best continuation's
+  // raw score (0.7825) cannot clear `0.495 + 0.35`, the live-chat path stayed shut for the whole
+  // day — and could not recover either, because a graded-out candidate is never delivered and so
+  // never gets answered. The exemption is deliberately narrow (`isHotChat`: a live conversation
+  // *plus* a real back-and-forth, never a stray remark), because an ignored day must still go
+  // quiet (F2). The caller-supplied component and `explicitReject` are untouched.
   const unanswered = Math.max(
     supplied('recent_unanswered_penalty'),
     context.explicitReject === true
       ? context.settings.explicitRejectPenalty
-      : clamp01(unansweredGrade(context, past) * multiplier),
+      : isHotChat(kind, context)
+        ? 0
+        : clamp01(unansweredGrade(context, past) * multiplier),
   );
 
   return {
@@ -668,6 +693,33 @@ export function deriveProactiveSignals(
     repeated_topic_penalty: round4(repeatedTopic),
     recent_unanswered_penalty: round4(unanswered),
   };
+}
+
+/**
+ * Is the household **in the middle of a hot chat** with her (pack §14.3 / t9 F5)?
+ *
+ * Three conditions, all of them observable from the log and the FSM — no model call, no invented
+ * fact:
+ *
+ *   1. the candidate is 热聊接话 (`conversation_continuation`) — this exemption exists for that path
+ *      only (a new thread never gets it);
+ *   2. the conversation is still open (`conversationState !== 'IDLE'`): the FSM says someone just
+ *      spoke to her and the thread has not closed;
+ *   3. at least `hotChatMinTurns` user turns fall inside the last `hotChatWindowMinutes`.
+ *
+ * Condition 3 is what makes it 「热聊」 rather than 「刚才有人说过一句话」: t9 F5 needed the live-chat
+ * path to work after a morning nobody answered, but a *stray remark* must not cancel the
+ * 未回应惩罚 — an ignored day (where the household's own chatter is spread hours apart) still has
+ * to go quiet, which is exactly what Phase 5's 「两次未回应后显著降频」 demands.
+ */
+function isHotChat(kind: ProactiveInitiativeKind, context: ProactiveGateContext): boolean {
+  if (kind !== 'conversation_continuation') return false;
+  if (context.conversationState === 'IDLE') return false;
+  const windowMs = context.settings.hotChatWindowMinutes * 60_000;
+  const minimum = Math.max(1, context.settings.hotChatMinTurns);
+  const nowMs = context.now.getTime();
+  const recent = (context.userTurns ?? []).filter((at) => at <= nowMs && nowMs - at <= windowMs).length;
+  return recent >= minimum;
 }
 
 /** A countdown over the kind's window: 1 right after speaking, 0 once the window has passed. */

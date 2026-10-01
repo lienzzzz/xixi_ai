@@ -14,6 +14,9 @@
  *   - 候选与 tick 语义 = 常驻考虑循环 `ProactiveLoop.tickOnce`（scripts/field-test.ts）本体，
  *     含 t9 F1 的修复（被扣分的候选不再吃光 tick）与 F5 的生产通路（对话开着时话题池候选
  *     变成 `conversation_continuation`）；
+ *   - 「热聊」的判定 = 引擎自己的 `isHotChat`（对话还开着 + 窗口内至少 N 次用户轮次 → 热聊接话
+ *     不吃未回应惩罚），参数是配置里的 `hot_chat_min_turns` / `hot_chat_window_min`；一句孤零零的
+ *     搭话不算热聊，所以「被忽视的一天」仍会显著降频（第四项与第五项目标靠它同时成立）；
  *   - 门禁 / 分数 / 硬底线 = 真实 `ProactiveEngine` + 出厂 config（config/xixi.example.yaml 的
  *     `proactive` 段）；
  *   - 会话状态 = 真实 `ConversationEngine` + FSM（FakeBrainAdapter，注入模拟时钟——混用两个
@@ -31,6 +34,16 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+/**
+ * 时间线按 +08:00（Asia/Shanghai，家里的墙钟）判定，不按跑脚本的机器所在时区。
+ *
+ * 为什么必须写：候选生成器（`buildProactiveCandidates`）读的是**本地墙钟**的小时数与本地自然日
+ * （产线就该这样——家里那台机器在哪个时区，哪个时区就是事实）。但模拟时间线用的是固定的绝对时刻，
+ * 于是同一份脚本在 UTC 机器上会判成**另外一天**（钩子窗口整体平移 8 小时、日界也变），结论不可比。
+ * Node 支持运行时改 `TZ`，所以在这里钉住即可；必须在任何 `Date` 取本地字段之前执行。
+ */
+process.env['TZ'] = 'Asia/Shanghai';
 
 import { FakeBrainAdapter } from '@xixi/brain-adapter';
 import {
@@ -59,6 +72,9 @@ const USAGE = [
   '退出码：五项全部通过才 exit 0；有任何一项未过 exit 1。',
   '本命令不联网、不花 API 费用；tick 间隔默认沿用 t9 独立验证的口径，想对齐生产节奏可传',
   '--tick-seconds=30。结论看运行输出的末尾判定表，不依赖任何固定数字。',
+  '',
+  '五项：主动次数区间、generic 占比、具体来源占比、未回应后降频、热聊中接话。',
+  '时区固定为 +08:00（Asia/Shanghai），否则同一份脚本在不同机器上会判成不同的一天。',
 ].join('\n');
 
 if (process.argv.includes('--help') || process.argv.includes('-h')) {

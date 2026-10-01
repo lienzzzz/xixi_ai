@@ -54,6 +54,8 @@ xixi:
     max_per_day: 40                # 本地自然日开口上限（只算真正说出口的次数）
     max_consults_per_day: 120      # 「问模型说还是不说」的当日次数上限（与开口额度分开计——t9 F4：问询不吃开口额度；仍是费用代理，本项目没有金额级费用上限）
     new_session_min_gap_min: 2     # 新会话速率下限：非「热聊接话」的主动与上一条开口至少隔这么久（t9 F6；热聊接话不受限，pack §14.3）
+    hot_chat_min_turns: 2          # 「正在热聊」的判定：对话还开着，且下面这个窗口里有这么多次用户轮次才算热聊（t9 F5；0/1 = 只要对话开着就算）
+    hot_chat_window_min: 15        # 上面那次数的统计窗口（分钟）——一句孤零零的搭话不算热聊，所以被忽视的一天仍会显著降频
     topic_repeat_window_h: 12      # 同主题重复惩罚的窗口（pack v02：same_topic_cooldown_hours 12）
     generic_topic_cooldown_h: 24   # 没带具体话题的泛泛开口，用更长的窗口扣分（pack v02：generic 24）
     unanswered_penalty: 0.45       # 最近几条主动没人回应时的扣分（pack v02：unanswered 0.45）

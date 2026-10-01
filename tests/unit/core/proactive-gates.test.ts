@@ -135,6 +135,10 @@ test('the config defaults match the shipped config and the pack’s recommended 
   assert.equal(parsed.continuationCooldownMinutes, 0, 'pack §14.3: continuation cooldown = 0');
   assert.equal(parsed.maxPer6h, 15);
   assert.equal(parsed.maxPerDay, 40);
+  assert.equal(parsed.maxConsultsPerDay, 120, 't9 F4: paid 读空气 calls spend their own daily count');
+  assert.equal(parsed.newSessionMinGapMinutes, 2, 't9 F6: the new-session rate floor');
+  assert.equal(parsed.hotChatMinTurns, 2, 't9 F5: 热聊 is a back-and-forth, not a stray remark');
+  assert.equal(parsed.hotChatWindowMinutes, 15, 't9 F5: the window those turns are counted over');
   assert.equal(parsed.topicRepeatWindowHours, 12, 'pack v02: same_topic_cooldown_hours 12');
   assert.equal(parsed.genericTopicCooldownHours, 24, 'pack v02: generic_topic_cooldown_hours 24');
   assert.equal(parsed.unansweredPenalty, 0.45, 'pack v02: unanswered 0.45');
@@ -492,6 +496,56 @@ test('unanswered proactive messages become a grade, never a silent ban', () => {
     context({ history, userTurns: [history[0]!.at.getTime() + 60_000, history[1]!.at.getTime() + 60_000] }),
   );
   assert.ok(mixed.signals.recent_unanswered_penalty > 0 && mixed.signals.recent_unanswered_penalty < 0.45);
+});
+
+test('a hot chat suspends the 未回应惩罚 for 热聊接话; a stray remark does not (t9 F5)', () => {
+  // Three deliveries nobody answered: the ceiling of the F2 escalation (see the test above).
+  const ignored = [60, 50, 40].map((minutes) => delivered(`old_${minutes}`, minutesBefore(AFTERNOON, minutes)));
+  const continuation = candidate({ trigger: 'conversation_dangling', topicRef: '明天要去医院复查' });
+  /** A real back-and-forth: three user turns inside the 15-minute window. */
+  const burst = [1, 4, 7].map((minutes) => minutesBefore(AFTERNOON, minutes).getTime());
+
+  // Baseline: nobody has spoken to her, so the penalty presses at full strength.
+  const ignoredDay = evaluateProactiveGates(continuation, context({ history: ignored, userTurns: [] }));
+  assert.equal(ignoredDay.signals.recent_unanswered_penalty, 0.9);
+
+  // 1. A live conversation **with a back-and-forth** is the pack's 「正在热聊」: the person is talking
+  //    to her right now, so 「她说了没人回来」 is false by construction and the continuation is not
+  //    charged the grade. Before this, the ceiling held the live-chat path shut for the whole day
+  //    (t9's hot-chat timeline produced 0 continuations inside the window because of it).
+  const hot = evaluateProactiveGates(continuation, context({ history: ignored, userTurns: burst, conversationState: 'LINGERING' }));
+  assert.equal(hot.signals.recent_unanswered_penalty, 0, '热聊中接话不再吃未回应惩罚');
+  assert.equal(hot.reasonCode, 'PASSED');
+  assert.equal(hot.signals.interruption_cost, 0, '§14.3: continuation cooldown is still 0');
+
+  // 2. One stray remark is not a hot chat — otherwise an ignored day would simply be cancelled by
+  //    the household's own chatter (the timeline's 被忽视的一天 speaks every 30+ minutes).
+  const stray = evaluateProactiveGates(continuation, context({ history: ignored, userTurns: [burst[2]!], conversationState: 'LINGERING' }));
+  assert.equal(stray.signals.recent_unanswered_penalty, 0.9, '一句孤零零的搭话不算热聊');
+
+  // 3. …and a burst is not a hot chat once the thread has closed (the FSM is back to IDLE).
+  const closed = evaluateProactiveGates(continuation, context({ history: ignored, userTurns: burst, conversationState: 'IDLE' }));
+  assert.equal(closed.signals.recent_unanswered_penalty, 0.9, '对话已经收尾就不算「正在热聊」');
+
+  // 4. Only 热聊接话 gets the exemption: a *new* thread during the same hot chat still pays it.
+  const newThread = evaluateProactiveGates(candidate(), context({ history: ignored, userTurns: burst, conversationState: 'LINGERING' }));
+  assert.equal(newThread.signals.recent_unanswered_penalty, 0.9, '新会话不享受热聊豁免');
+
+  // 5. 「别说了」 still outranks everything, hot chat or not.
+  const rejected = evaluateProactiveGates(continuation, context({ history: ignored, userTurns: burst, conversationState: 'LINGERING', explicitReject: true }));
+  assert.equal(rejected.signals.recent_unanswered_penalty, 0.8);
+
+  // The window and the turn count are settings, so the definition is auditable rather than magic.
+  const wideOpen = evaluateProactiveGates(
+    continuation,
+    context({ history: ignored, userTurns: [burst[2]!], conversationState: 'LINGERING', settings: settings({ hotChatMinTurns: 1 }) }),
+  );
+  assert.equal(wideOpen.signals.recent_unanswered_penalty, 0, '1 = 只要对话还开着就算热聊');
+  const staleBurst = evaluateProactiveGates(
+    continuation,
+    context({ history: ignored, userTurns: burst, conversationState: 'LINGERING', settings: settings({ hotChatWindowMinutes: 2 }) }),
+  );
+  assert.equal(staleBurst.signals.recent_unanswered_penalty, 0.9, '窗口外的轮次不算数');
 });
 
 test('an explicit "别说了" is the strongest penalty, and negative feedback multiplies the grades', () => {
