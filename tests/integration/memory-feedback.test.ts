@@ -17,11 +17,17 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { FakeBrainAdapter } from '@xixi/brain-adapter';
+import { buildEvent, toOffsetIso } from '@xixi/contracts';
 import { ConversationEngine, proactiveThreshold, TurnMemoryExtractor, type PostTurnJob } from '@xixi/conversation';
 import { MemoryStore, openXixiStore, SelfModel, type XixiConfig, type XixiStore } from '@xixi/domain';
 
 const DAY1 = new Date(2026, 9, 1, 20, 0, 0);
 const DAY2 = new Date(2026, 9, 2, 9, 0, 0);
+/** 推断学习的归属边界都在这三个时刻之间（间隔十几秒：FSM 的 follow-up 窗口之内，轮次才不会被拒）。 */
+const READ_BEFORE_FIRST_TURN = new Date(2026, 9, 1, 19, 59, 0);
+const READ_BETWEEN_TURNS = new Date(2026, 9, 1, 20, 0, 5);
+const SECOND_TURN_AT = new Date(2026, 9, 1, 20, 0, 10);
+const THIRD_TURN_AT = new Date(2026, 9, 1, 20, 0, 20);
 
 const CONFIG: XixiConfig = {
   identity: { name: '西西', language: 'zh-CN', timezone: 'Asia/Shanghai', place: null },
@@ -163,8 +169,146 @@ test('三条离线用例走真实引擎：「主动一点」「话太多」「�
   }
 });
 
-test('学习后的有效人格真的进了提示词（反馈在行为上可验证）', async () => {
+/**
+ * 在日志里写一条「读空气」的判断（t9 F1：推断分支在生产里的来源）。
+ *
+ * 生产里由 `ProactiveEngine.consider` 在咨询模型之后写这条事件；这里只造事实 ——
+ * 这一组用例要证明的是**下一轮会不会因此学习**。
+ */
+function recordAirReading(
+  h: Harness,
+  options: { readonly at: Date; readonly code: string; readonly sessionId?: string },
+): void {
+  h.store.appendEvent(
+    buildEvent({
+      event_type: 'proactive.decision',
+      source: 'conversation',
+      actor: 'system',
+      confidence: 1,
+      timestamp: toOffsetIso(options.at),
+      payload: {
+        session_id: options.sessionId ?? h.sessionId,
+        candidate_id: 'presence-arrived-1',
+        trigger: 'presence_arrived',
+        speak: false,
+        reason_code: 'MODEL_DECLINED',
+        decided_by: 'model',
+        model_consulted: true,
+        model_reason_code: options.code,
+      },
+    }),
+  );
+}
+
+/** 学习层现在的偏移，属性 → 累计值。 */
+function learnedOf(h: Harness): Map<string, number> {
+  return new Map(h.selfModel.learned().map((entry) => [entry.property, entry.delta]));
+}
+
+test('读空气的码真的产生推断学习（权重只乘一次），而且只在两次开口之间有效', async () => {
   const h = harness();
+  try {
+    // 会话第一轮之前的那条读法没有「上一条轮次」作边界：不吃，也不该被后面的轮次捡起来。
+    recordAirReading(h, { at: READ_BEFORE_FIRST_TURN, code: 'user_quiet' });
+    await h.say('你好。');
+    await h.extractor.flush();
+    assert.equal(h.store.learnedDeltas().length, 0, '第一轮不吃推断');
+
+    // 他第一轮之后、第二轮之前：模型读了一次空气（user_quiet）。
+    recordAirReading(h, { at: READ_BETWEEN_TURNS, code: 'user_quiet' });
+    h.at(SECOND_TURN_AT);
+    await h.say('嗯，今天天气不错。');
+    await h.extractor.flush();
+
+    const learned = learnedOf(h);
+    assert.equal(learned.get('proactivity'), -0.02, '名义 −0.05 × 权重 0.4（只乘一次）');
+    assert.equal(learned.get('talkativeness'), -0.012, '名义 −0.03 × 0.4');
+    assert.equal(h.store.selfProfile().proactivity, 0.83);
+    assert.ok(
+      h.selfModel.history('proactivity').some((change) => change.sourceType === 'learned:model_inference'),
+      '来源要写清是模型推断（铁律 4：可解释、可回滚）',
+    );
+    assert.ok(
+      h.selfModel.history('proactivity').some((change) => (change.summary ?? '').includes('inferred:user_quiet')),
+      '审计里存白名单码，不存模型自由文本（铁律 5）',
+    );
+
+    // 他再开口一次：边界前移，同一次读法不会再解释下一轮。
+    h.at(THIRD_TURN_AT);
+    await h.say('我去做饭了。');
+    await h.extractor.flush();
+    assert.equal(learnedOf(h).get('proactivity'), -0.02, '同一个读法只学一次（否则会叠成 −0.04）');
+    assert.equal(h.store.selfProfile().proactivity, 0.83);
+  } finally {
+    h.store.close();
+  }
+});
+
+test('同一轮里显式纠正压过推断码：推断那一路完全不落库（对照证明它确实在窗口里）', async () => {
+  // 对照：同样一条读法，没有显式纠正时它确实会学。
+  const control = harness();
+  try {
+    recordAirReading(control, { at: READ_BETWEEN_TURNS, code: 'already_said' });
+    await control.say('你好。');
+    await control.extractor.flush();
+    control.at(SECOND_TURN_AT);
+    await control.say('嗯，今天天气不错。');
+    await control.extractor.flush();
+    assert.equal(learnedOf(control).get('old_topic_resurface'), -0.02, '没有显式反馈时，推断码就是唯一的信号');
+  } finally {
+    control.store.close();
+  }
+
+  const h = harness();
+  try {
+    recordAirReading(h, { at: READ_BETWEEN_TURNS, code: 'already_said' });
+    await h.say('你好。');
+    await h.extractor.flush();
+    h.at(SECOND_TURN_AT);
+    await h.say('你话太多了。');
+    await h.extractor.flush();
+
+    const learned = learnedOf(h);
+    assert.equal(learned.get('talkativeness'), -0.12, '显式纠正量级照旧');
+    assert.equal(learned.get('verbosity'), -0.1);
+    assert.equal(learned.get('old_topic_resurface'), undefined, '同轮有显式时推断被丢弃 —— 不是叠加，也不是平均');
+    assert.ok(
+      h.selfModel.history().every((change) => !change.sourceType.includes('model_inference')),
+      '这一轮没有任何一条推断学习',
+    );
+  } finally {
+    h.store.close();
+  }
+});
+
+test('边界之外不学：别的会话的读法不借过来，没有偏移含义的码取到也不学', async () => {
+  const h = harness();
+  try {
+    // 别的会话的空气不算到这一轮上。
+    recordAirReading(h, {
+      at: READ_BETWEEN_TURNS,
+      code: 'user_quiet',
+      sessionId: 'sess_00000000-0000-4000-8000-000000000099',
+    });
+    await h.say('你好。');
+    await h.extractor.flush();
+    h.at(SECOND_TURN_AT);
+    await h.say('嗯。');
+    await h.extractor.flush();
+    assert.equal(h.store.learnedDeltas().length, 0, '只读同一段对话里的空气');
+
+    // good_moment 在白名单里，但没有偏移含义：取到也不学（宁可不学，也不瞎归因）。
+    recordAirReading(h, { at: new Date(2026, 9, 1, 20, 0, 15), code: 'good_moment' });
+    h.at(THIRD_TURN_AT);
+    await h.say('我去做饭了。');
+    await h.extractor.flush();
+    assert.equal(h.store.learnedDeltas().length, 0);
+  } finally {
+    h.store.close();
+  }
+});
+
+test('学习后的有效人格真的进了提示词（反馈在行为上可验证）', async () => {  const h = harness();
   try {
     const before = await h.say('你好。');
     assert.ok(

@@ -693,6 +693,9 @@ export class ConversationEngine {
             replyText: turnText,
             at: finishedAt,
             userEventId: userTurnEventId,
+            // pack Phase 4 的推断侧（铁律 4）：读空气时模型给出的白名单码，只在他「上一条轮次之后、
+            // 这一条轮次之前」真的有过一次读法时才有值（边界与理由见 `#inferredCodeForTurn`）。
+            inferredCode: this.#inferredCodeForTurn(input.sessionId, finishedAt),
           });
         } catch (error) {
           await hooks.onNotice?.({
@@ -729,6 +732,66 @@ export class ConversationEngine {
       firstTokenMs: firstChunkAt === null ? null : firstChunkAt - startedAt,
       prompt,
     };
+  }
+
+  /**
+   * 这一轮的**推断反馈码**（pack Phase 4 / 铁律 4 的推断侧）：读空气时模型在
+   * `proactive.decision.model_reason_code` 上给出的白名单码。
+   *
+   * 它不是「模型对这一轮的评价」，而是**在他两次开口之间读到的东西** —— 所以归属只用一条可复算的
+   * 边界，不做任何猜测：
+   *
+   *   * 只看**这一轮之前**写下的判断（`at` 之后的属于未来）；
+   *   * 只看**他上一条轮次之后**写下的判断：他再开口一次边界就前移，同一个读法不会再解释下一轮
+   *     （同一次读法只学一次，不会反复学）；
+   *   * 只看**同一个会话**（读的是这一段对话里的空气）：别的会话的读法不借过来；
+   *   * 取其中**最新**的一条带码判断；会话第一轮没有「上一条轮次」作边界，因此不吃推断。
+   *
+   * 取不到就返回 `null`：提取器这时只按显式反馈解释 —— **宁可不学，也不瞎归因**。至于这个码算不算
+   * 学习信号，由 `interpretInference` 的白名单与偏移表决定（`good_moment` / `not_worth_it` /
+   * `wrong_moment` / `unspecified` 都没有偏移，取到也不会学）。
+   */
+  #inferredCodeForTurn(sessionId: string, at: Date): string | null {
+    const previousUserTurnAt = this.#previousUserTurnAt(sessionId);
+    if (previousUserTurnAt === null) return null;
+    const decisions = this.#store.readEvents({
+      type: 'proactive.decision',
+      sessionId,
+      limit: Number.MAX_SAFE_INTEGER,
+    });
+    for (let index = decisions.length - 1; index >= 0; index -= 1) {
+      const event = decisions[index];
+      if (event === undefined) continue;
+      const decisionAt = Date.parse(event.timestamp);
+      if (!Number.isFinite(decisionAt) || decisionAt > at.getTime()) continue;
+      // 从新往旧扫：第一条落在边界之外的判断意味着**窗口里没有**可用的读法。
+      if (decisionAt <= previousUserTurnAt) return null;
+      const code = (event.payload as Record<string, unknown>)['model_reason_code'];
+      if (typeof code === 'string' && code.length > 0) return code;
+    }
+    return null;
+  }
+
+  /**
+   * 这个会话里**上一条用户轮次**的时刻（毫秒），没有就返回 `null`。
+   *
+   * 调用它时这一轮的两条 `conversation.turn`（用户 + 西西）都已经落库，所以最近的一条 user 轮次
+   * 就是**这一轮自己**，再往前第一条才是「上一条」。
+   */
+  #previousUserTurnAt(sessionId: string): number | null {
+    const turns = this.#store.recentTurns(sessionId, 8);
+    let seenCurrentTurn = false;
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turn = turns[index];
+      if (turn === undefined || turn.role !== 'user') continue;
+      if (!seenCurrentTurn) {
+        seenCurrentTurn = true;
+        continue;
+      }
+      const parsed = Date.parse(turn.createdAt);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
   }
 }
 

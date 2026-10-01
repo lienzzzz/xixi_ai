@@ -30,9 +30,14 @@ function tempStore(): XixiStore {
   return store;
 }
 
-/** 把一次解释真正落到三层里（与 `TurnMemoryExtractor.runJob` 同一个顺序）。 */
+/**
+ * 把一次解释真正落到三层里（与 `TurnMemoryExtractor.runJob` 同一个顺序）。
+ *
+ * 落库用**名义值**：权重由 `SelfModel.learn` 按 `sourceType` 乘一次（显式 1.0 / 推断 0.4），
+ * 拿已经乘过权重的 `deltas` 去落库会把推断乘两遍 —— 那正是接线推断分支时要避免的事。
+ */
 function apply(store: XixiStore, self: SelfModel, interpretation: NonNullable<ReturnType<typeof interpretFeedback>>): void {
-  for (const [property, delta] of Object.entries(interpretation.deltas)) {
+  for (const [property, delta] of Object.entries(interpretation.nominalDeltas)) {
     self.learn({
       property,
       delta,
@@ -148,7 +153,10 @@ test('显式纠正的权重高于模型推断，且同一轮里只取显式', ()
   assert.equal(explicit.weight, 1);
   assert.equal(inferred.weight, 0.4, '模型推断的权重必须低于显式纠正（铁律 4）');
   assert.equal(inferred.source, 'model_inference');
-  assert.equal(inferred.deltas['proactivity'], -0.02, '推断的名义值 ±0.05 × 0.4 = 0.02，落在 §7.4 的 0.01~0.03 内');
+  assert.equal(inferred.nominalDeltas['proactivity'], -0.05, '名义值就是《方案》§13.1 里那个数，没有乘权重');
+  assert.equal(inferred.deltas['proactivity'], -0.02, '乘过权重的视图：0.05 × 0.4 = 0.02，落在 §7.4 的 0.01~0.03 内');
+  assert.equal(explicit.nominalDeltas['talkativeness'], -0.12, '显式的权重是 1.0，两份值一样');
+  assert.equal(explicit.deltas['talkativeness'], -0.12);
   assert.ok(Math.abs(explicit.deltas['talkativeness'] ?? 0) > Math.abs(inferred.deltas['proactivity'] ?? 0));
 
   // 两个输入同时存在：只取显式，推断被丢弃（不是叠加）。
@@ -162,6 +170,25 @@ test('显式纠正的权重高于模型推断，且同一轮里只取显式', ()
   const onlyInferred = interpretFeedbackInput({ inferredCode: 'user_quiet' });
   assert.equal(onlyInferred?.source, 'model_inference');
   assert.equal(onlyInferred?.deltas['proactivity'], -0.02);
+});
+
+test('推断落库只乘一次权重：名义 −0.05 → 落库 −0.02（不是 0.4 × 0.4）', () => {
+  const store = tempStore();
+  try {
+    const self = new SelfModel(store);
+    const inferred = interpretFeedbackInput({ inferredCode: 'user_quiet' });
+    assert.ok(inferred !== null);
+    // 与生产（`TurnMemoryExtractor.runJob` → `SelfModel.learn`）同一条路：名义值进，权重在自我模型那层乘。
+    apply(store, self, inferred);
+    assert.equal(self.learned().find((entry) => entry.property === 'proactivity')?.delta, -0.02, '0.05 × 0.4');
+    assert.equal(self.learned().find((entry) => entry.property === 'talkativeness')?.delta, -0.012, '0.03 × 0.4');
+    assert.equal(store.selfProfile().proactivity, 0.83);
+    // 证据里存的是白名单码，不是模型的自由文本（铁律 5）。
+    const change = self.history('proactivity').find((entry) => entry.sourceType === 'learned:model_inference');
+    assert.match(change?.summary ?? '', /inferred:user_quiet/);
+  } finally {
+    store.close();
+  }
 });
 
 test('推断只认白名单码：自由文本与无关码都不产生偏移', () => {

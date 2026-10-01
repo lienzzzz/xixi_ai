@@ -5,8 +5,9 @@
  * 这个类存在的唯一理由是**不阻塞回复**：
  *
  *   * `enqueue(job)` 只把活放进队列（同步、微秒级），真正的提取由**调度器**在之后的宏任务里跑；
- *   * 生产用默认调度器 `setTimeout(run, 0)`（一个 unref 过的宏任务）：回复已经交给 TTS/页面了，
- *     提取才发生。语音路径最怕的就是「回复说完还卡着写库」；
+ *   * 生产用默认调度器 `setTimeout(run, 0)`（一个 `unref` 过的宏任务）：回复已经交给 TTS/页面了，
+ *     提取才发生。语音路径最怕的就是「回复说完还卡着写库」——但「可以随时退出」不等于「可以随手丢」：
+ *     进程退出那一刻队列由 `drainOnExit` 兜底（同步跑完；跑不掉才记一行可见日志，t9 F3）；
  *   * 测试注入一个手动调度器，于是「回复返回时还没提取、`flush()` 之后才提取」是可断言的事实，
  *     而不是靠掐秒表。
  *
@@ -43,7 +44,13 @@ export interface PostTurnJob {
   readonly at: Date;
   /** 用户那条 `conversation.turn` 的事件 id：所有派生记忆都指回它。 */
   readonly userEventId: string | null;
-  /** 读空气时模型给出的白名单码（可选）：显式反馈不存在时才用（权重 0.4）。 */
+  /**
+   * 读空气时模型给出的白名单码（可选）：显式反馈不存在时才用（权重 0.4）。
+   *
+   * 生产由 `ConversationEngine` 从 `proactive.decision.model_reason_code` 取（归属边界见它的
+   * `#inferredCodeForTurn`）；这里是纯粹的搬运 —— 白名单校验与偏移表都在
+   * `interpretInference`，认不出来的码什么也不写。
+   */
   readonly inferredCode?: string | null | undefined;
 }
 
@@ -69,11 +76,45 @@ export interface TurnMemoryExtractorOptions {
   readonly onError?: ((error: unknown) => void) | undefined;
 }
 
-/** 默认调度器：宏任务 + `unref`，既不阻塞回复，也不会让脚本因为一个待办而无法退出。 */
+/**
+ * 默认调度器：宏任务 + `unref`，既不阻塞回复，也不会让脚本因为一个待办而无法退出。
+ *
+ * 「可以随时退出」不等于「可以随手丢」：排队中的轮次由 {@link TurnMemoryExtractor} 的
+ * `drainOnExit` 兜底 —— 进程退出的那一刻把它同步跑完，跑不掉（库已经关了）才记一行可见日志。
+ */
 export const DEFAULT_EXTRACTION_SCHEDULER: ExtractionScheduler = (run) => {
   const timer = setTimeout(run, 0);
   timer.unref?.();
 };
+
+/**
+ * 「退出时还有活没跑」的提取器（模块级，只登记真的排着队的那几个）。
+ *
+ * 数据丢失不能是无声的（t9 评审 T9-F3 / AGENTS §3）：上面那个定时器是 `unref` 的，进程想退就退 ——
+ * 于是「回复说完 → 脚本结束」这一瞬间，队列里那一轮会**悄悄消失**，日志里什么也看不出来。
+ * 这里的钩子就是那个瞬间的兜底：先把队列**同步**跑完（`runJob` 是同步的，`exit` 里也能跑），
+ * 真的跑不掉（库已经关了）才往 stderr 写清丢了几轮、是哪几轮。
+ *
+ * 只装一个钩子（`process` 上的监听器不随实例增长），登记集合在队列清空时就删掉自己。
+ * 强杀 / 断电仍然来不及 —— 那种时刻只能靠持久化待办，而持久化需要新的事件类型与表（不在本任务范围）。
+ */
+const pendingAtExit = new Set<TurnMemoryExtractor>();
+let exitHookInstalled = false;
+
+function installExitHook(): void {
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  process.once('exit', () => {
+    for (const extractor of [...pendingAtExit]) {
+      // 退出路径上不能再抛：能跑就跑，跑不掉由 `drainOnExit` 写那一行日志。
+      try {
+        extractor.drainOnExit();
+      } catch {
+        /* 已经尽力了 */
+      }
+    }
+  });
+}
 
 /** 稳定的偏好/事实（semantic memory）的识别规则：短句、第一人称、非疑问。 */
 const SEMANTIC_RULES: readonly { readonly property: string; readonly pattern: RegExp }[] = Object.freeze([
@@ -119,6 +160,9 @@ export class TurnMemoryExtractor {
   /** 把一轮排进后台队列。**立即返回**，不做任何规则匹配，更不写库。 */
   enqueue(job: PostTurnJob): void {
     this.#queue.push(job);
+    // 排队期间进程若退出，这一轮就是「可能丢」的那一轮：装兜底钩子并登记自己。
+    installExitHook();
+    pendingAtExit.add(this);
     this.#scheduler(() => this.#drain());
   }
 
@@ -129,6 +173,31 @@ export class TurnMemoryExtractor {
       if (job === undefined) break;
       this.#runSafely(job);
     }
+    pendingAtExit.delete(this);
+  }
+
+  /**
+   * 退出兜底：把还排着队的活**同步**跑掉（`runJob` 是同步的，所以 `process.once('exit')` 里也能跑）；
+   * 跑不掉的（库已经关了、规则抛错）往 stderr 写一行，说清丢了几轮、是哪几轮 —— 每一轮都带着
+   * `sourceEventId`，可以回到事件日志重放。返回没能跑掉的轮数。
+   *
+   * 模块级的 `exit` 钩子会自动调它；调用方也可以在任何「准备关库」的地方显式调一次。
+   */
+  drainOnExit(): number {
+    const lost: PostTurnJob[] = [];
+    while (this.#queue.length > 0) {
+      const job = this.#queue.shift();
+      if (job === undefined) break;
+      if (!this.#runSafely(job)) lost.push(job);
+    }
+    pendingAtExit.delete(this);
+    if (lost.length > 0) {
+      const rounds = lost.map((job) => `${job.sessionId}/${job.userEventId ?? '（无轮次事件）'}`).join('、');
+      process.stderr.write(
+        `[xixi] 退出时丢了 ${lost.length} 轮后台提取（${rounds}）：库可能已经关了，这些轮次可在事件日志里重放\n`,
+      );
+    }
+    return lost.length;
   }
 
   /**
@@ -145,7 +214,9 @@ export class TurnMemoryExtractor {
     const notes: RelationshipNote[] = [];
 
     if (feedback !== null) {
-      for (const [property, delta] of Object.entries(feedback.deltas)) {
+      // 落库用**名义值**：权重由 `SelfModel.learn` 按 `sourceType` 乘一次（显式 1.0 / 推断 0.4）。
+      // `feedback.deltas` 是已乘权重的视图，拿它落库会把推断乘两遍（0.4 × 0.4）。
+      for (const [property, delta] of Object.entries(feedback.nominalDeltas)) {
         learned.push(
           this.#selfModel.learn({
             property,
@@ -270,15 +341,23 @@ export class TurnMemoryExtractor {
       if (job === undefined) break;
       this.#runSafely(job);
     }
+    pendingAtExit.delete(this);
   }
 
-  #runSafely(job: PostTurnJob): void {
+  /** 跑一轮；出错只计数并交给 `onError`（调用方要不要抛出由它决定）。返回值 = 这一轮跑成了没有。 */
+  #runSafely(job: PostTurnJob): boolean {
     try {
       this.runJob(job);
       this.#processed += 1;
+      return true;
     } catch (error) {
       this.#errors += 1;
-      this.#onError?.(error);
+      try {
+        this.#onError?.(error);
+      } catch {
+        // 上报自己炸了也不能把「这一轮失败」变成「整个进程崩」。
+      }
+      return false;
     }
   }
 }

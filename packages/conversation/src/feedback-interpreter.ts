@@ -7,7 +7,10 @@
  *      「你可以主动一点」「你话太多了」「今天想安静点」。规则是**确定的模式**，不经过模型。
  *   2. **模型推断**（`model_inference`，权重 0.4）：模型在读空气时给出的**结构化白名单码**
  *      （`user_quiet` / `user_busy` / `already_said`，见 `PROACTIVE_MODEL_REASON_CODES`）。
- *      永远不读模型自由文本（铁律 5）。
+ *      永远不读模型自由文本（铁律 5）。生产里的来源是 `proactive.decision` 事件上的
+ *      `model_reason_code`：`ConversationEngine` 每一轮去日志里取「他上一条轮次之后、
+ *      这一条轮次之前」的那一条判断，随 `PostTurnJob.inferredCode` 交给提取器
+ *      （归属边界与理由见 `ConversationEngine` 的 `#inferredCodeForTurn`）。
  *
  * 同一轮里两者都命中时**只取显式**：父亲说了就是说了，模型不必再猜。
  *
@@ -18,6 +21,10 @@
  *
  * 上限不在这里，而在 `SelfModel.learn`（单日累计 ±0.15 / 推断 ±0.03、漂移 ±0.30）：解释器只回答
  * 「他想让哪几个参数动、动多少」，能不能落库由自我模型那一层按 §7.4 决定。
+ *
+ * 权重也**只在自我模型那一层乘一次**（`SELF_MODEL_SOURCE_WEIGHTS`：显式 1.0 / 推断 0.4）。
+ * 这里的 `deltas` / `weight` 是「已乘权重」的**视图**（报告、断言、审计看它），
+ * 落库要用 `nominalDeltas`（名义值）——乘两遍会让推断变成名义值的 0.16 倍，与本文档的 0.4 不符。
  */
 
 import { PROACTIVE_MODEL_REASON_CODES, type ProactiveModelReasonCode } from './proactive.ts';
@@ -85,8 +92,17 @@ export interface FeedbackInterpretation {
   /** 命中的规则 id（显式）或白名单码（推断）——审计里存它，不存用户原话。 */
   readonly ruleId: string;
   readonly weight: number;
-  /** 学习到的偏移（已乘权重）。 */
+  /** 学习到的偏移（已乘权重；报告、断言与审计看的视图）。 */
   readonly deltas: Readonly<Record<string, number>>;
+  /**
+   * 同一组偏移的**名义值**（《方案》§13.1 里写的那些数字，没有乘权重）。
+   *
+   * **落库时用它**：权重由 `SelfModel.learn` 按 `sourceType` 施加一次
+   * （`SELF_MODEL_SOURCE_WEIGHTS`：显式 1.0 / 推断 0.4）。拿 `deltas` 去落库会把推断乘两遍
+   * （0.4 × 0.4 = 0.16），那就与「推断权重 0.4」的说法对不上了 —— 显式那侧因为权重是 1.0
+   * 看不出来，接线推断分支时才暴露。
+   */
+  readonly nominalDeltas: Readonly<Record<string, number>>;
   /** 会话覆盖（已乘权重），只对今天生效。 */
   readonly sessionDeltas: Readonly<Record<string, number>>;
   readonly confidence: number;
@@ -123,6 +139,7 @@ export function interpretFeedback(text: string): FeedbackInterpretation | null {
       ruleId: rule.id,
       weight,
       deltas: scale(rule.deltas, weight),
+      nominalDeltas: { ...rule.deltas },
       sessionDeltas: scale(rule.sessionDeltas ?? {}, weight),
       confidence: 1,
       evidence: `${rule.id}｜命中「${(hit[0] ?? '').slice(0, 20)}」`,
@@ -149,6 +166,7 @@ export function interpretInference(code: string | null | undefined): FeedbackInt
     ruleId: normalized as ProactiveModelReasonCode,
     weight: INFERRED_FEEDBACK_WEIGHT,
     deltas: scale(deltas, INFERRED_FEEDBACK_WEIGHT),
+    nominalDeltas: { ...deltas },
     sessionDeltas: {},
     confidence: INFERRED_FEEDBACK_WEIGHT,
     evidence: `inferred:${normalized}`,
