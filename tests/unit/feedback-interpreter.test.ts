@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { interpretFeedback, interpretFeedbackInput, interpretInference, proactiveThreshold } from '@xixi/conversation';
+import { interpretFeedback, interpretFeedbackInput, interpretInference, proactiveThreshold, TurnMemoryExtractor } from '@xixi/conversation';
 import { DEFAULT_SELF_MODEL_SETTINGS, openXixiStore, SelfModel, type XixiStore } from '@xixi/domain';
 
 const DAY1 = new Date(2026, 9, 1, 20, 0, 0);
@@ -31,30 +31,30 @@ function tempStore(): XixiStore {
 }
 
 /**
- * 把一次解释真正落到三层里（与 `TurnMemoryExtractor.runJob` 同一个顺序）。
+ * 把一次反馈真正落到三层里 —— 走**生产实现**（`TurnMemoryExtractor.runJob`），不在这里镜像它。
  *
- * 落库用**名义值**：权重由 `SelfModel.learn` 按 `sourceType` 乘一次（显式 1.0 / 推断 0.4），
- * 拿已经乘过权重的 `deltas` 去落库会把推断乘两遍 —— 那正是接线推断分支时要避免的事。
+ * 为什么必须走生产（t10 评审 N2）：这个文件早先自己抄了一遍 runJob 的循环，于是**生产被改坏时这里
+ * 仍然全绿** —— 反事实里把 extractor 的落库改回乘过权重的 `deltas`，红的只有集成用例，本文件的
+ * 镜像照常通过。现在落库交给真正的 runJob：权重乘几次、用名义值还是视图值，都由生产代码决定。
+ *
+ * 参数是**原始输入**（用户那句话 / 读空气的白名单码），解释也由 runJob 里的解释器做；调用方仍然
+ * 可以先单独断言纯解释器的输出，再拿同一句话走这条生产路径（两条链的结论必须一致）。
  */
-function apply(store: XixiStore, self: SelfModel, interpretation: NonNullable<ReturnType<typeof interpretFeedback>>): void {
-  for (const [property, delta] of Object.entries(interpretation.nominalDeltas)) {
-    self.learn({
-      property,
-      delta,
-      sourceType: interpretation.source,
-      evidence: interpretation.evidence,
-      confidence: interpretation.confidence,
-      at: DAY1,
-    });
-  }
-  if (Object.keys(interpretation.sessionDeltas).length > 0) {
-    self.overrideToday({
-      deltas: interpretation.sessionDeltas,
-      reason: interpretation.evidence,
-      sourceType: interpretation.source,
-      at: DAY1,
-    });
-  }
+function apply(
+  store: XixiStore,
+  self: SelfModel,
+  input: { readonly text?: string; readonly inferredCode?: string },
+): ReturnType<typeof interpretFeedback> {
+  const extractor = new TurnMemoryExtractor({ store, selfModel: self });
+  const result = extractor.runJob({
+    sessionId: store.createSession().sessionId,
+    userText: input.text ?? '',
+    replyText: null,
+    at: DAY1,
+    userEventId: null,
+    inferredCode: input.inferredCode ?? null,
+  });
+  return result.feedback;
 }
 
 test('离线用例①：「你可以主动一点」让学习到的主动性上升，主动阈值随之下降', () => {
@@ -68,8 +68,9 @@ test('离线用例①：「你可以主动一点」让学习到的主动性上�
     assert.ok((interpretation.deltas['proactivity'] ?? 0) > 0);
 
     const thresholdBefore = proactiveThreshold(store.selfProfile().proactivity);
-    apply(store, self, interpretation);
+    const applied = apply(store, self, { text: '你可以主动一点。' });
     const thresholdAfter = proactiveThreshold(store.selfProfile().proactivity);
+    assert.equal(applied?.ruleId, interpretation.ruleId, '同一句话走生产（runJob）必须落到同一条规则上');
 
     assert.equal(store.selfProfile().proactivity, 0.97, '0.85 + 0.12（《方案》§13.1 的 proactivity +0.12）');
     assert.ok(thresholdAfter < thresholdBefore, `阈值必须下降：${thresholdBefore} → ${thresholdAfter}`);
@@ -94,7 +95,7 @@ test('离线用例②：「你话太多了」优先降话痨相关参数，而�
     const interpretation = interpretFeedback('你话太多了。');
     assert.ok(interpretation !== null);
     assert.equal(interpretation.kind, 'too_talkative');
-    apply(store, self, interpretation);
+    apply(store, self, { text: '你话太多了。' });
 
     const effective = store.selfProfile();
     const drop = (before: number, after: number | undefined): number => Math.round((before - (after ?? 0)) * 10_000) / 10_000;
@@ -124,7 +125,7 @@ test('离线用例③：「今天想安静点」写会话覆盖，只对当天�
     assert.equal(interpretation.kind, 'quiet_today');
     assert.deepEqual(interpretation.deltas, {}, '这是**当天**的要求，不是长期人设：不该写学习层');
     assert.ok(Object.keys(interpretation.sessionDeltas).length > 0);
-    apply(store, self, interpretation);
+    apply(store, self, { text: '今天想安静点。' });
 
     const today = store.selfProfile({ now: DAY1 });
     assert.equal(today.proactivity, 0.55, '0.85 − 0.30（《方案》§13 的例子）');
@@ -179,7 +180,9 @@ test('推断落库只乘一次权重：名义 −0.05 → 落库 −0.02（不�
     const inferred = interpretFeedbackInput({ inferredCode: 'user_quiet' });
     assert.ok(inferred !== null);
     // 与生产（`TurnMemoryExtractor.runJob` → `SelfModel.learn`）同一条路：名义值进，权重在自我模型那层乘。
-    apply(store, self, inferred);
+    // 这一句现在是**生产路径本身**：把 extractor 的落库改回乘过权重的 `deltas`，下面两条断言会红
+    // （t10 评审 N2：改造之前这里本地镜像 runJob，那种改动它一条都抓不住）。
+    apply(store, self, { inferredCode: 'user_quiet' });
     assert.equal(self.learned().find((entry) => entry.property === 'proactivity')?.delta, -0.02, '0.05 × 0.4');
     assert.equal(self.learned().find((entry) => entry.property === 'talkativeness')?.delta, -0.012, '0.03 × 0.4');
     assert.equal(store.selfProfile().proactivity, 0.83);
