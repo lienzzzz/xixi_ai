@@ -224,6 +224,12 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    `npm test` 全绿，而另一个在跑的任务正在改这类文件，就要**把前者排在后者之后**（显式依赖），
    或者明确告诉它「本次红是 X 在途，按 §9.10 判读」。**按文件路径不重叠来串行化是不够的**——
    导入关系会让不重叠的路径也互相影响。
+   **⑤ 本机 `core.autocrlf=true` 且没有 `.gitattributes`——「按字节还原」不能用 `git checkout`**（第四轮 t7 评审实测）：
+   `git checkout -- <path>` 会把 LF 写成 CRLF（实测 sha256 从交付 blob 变成 `F622E449…`、CR 计数 668），
+   于是「还原后哈希一致」这句话就会变成假的。**正确做法：实验前把文件复制一份到 `%TEMP%`，还原时用副本拷回**，
+   再与交付 blob 的 sha256 比对；另外 `git checkout` 之后即使 `git diff` 为空，文件仍可能显示 stat-dirty「 M」，
+   用 `git update-index --really-refresh -- <path>` 刷新即可。**突变实验的宣告里要写清用哪种还原方式**，
+   并报**最终文件哈希**（不要报窗口中途的哈希——第四轮 t2 就因为报早了而出现过对不上的记录）。
 11. **`deliverables` 必须与「本次真正会改动的文件」一致**（不只是 `inScope` 允许改的集合）。
    反例：t26 为满足某条验收顺手改了 `docs/recon/camera-detector-choice-2026-09-30.md`，它写在 inScope 里但不在 deliverables，
    于是**没有进 changedPaths**，只能靠成员主动披露 + 评审逐处核对才被发现。派单时请把「验收会碰到的文件」全部列进 deliverables。
