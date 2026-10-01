@@ -2854,8 +2854,10 @@ export const PROACTIVE_GATE_LABELS: Readonly<Record<ProactiveReasonCode | Proact
   QUIET_HOURS: '静默时段（安全底线，不可放宽）',
   PRIVACY_BLOCKED: '隐私与同意（安全底线，不可放宽）',
   QUOTA_6H_EXCEEDED: '6 小时额度已用完',
-  QUOTA_DAY_EXCEEDED: '当日额度已用完（开口与问模型的次数一起算）',
+  QUOTA_DAY_EXCEEDED: '当日额度已用完（只算真正开口的次数，问模型另计）',
+  QUOTA_CONSULT_EXCEEDED: '当日问询额度已用完（问模型的次数单独计，不吃开口额度）',
   CONVERSATION_ACTIVE: '正在对话里（或还有一轮没结束）',
+  NEW_SESSION_FLOOR: '新会话速率下限：距上一条主动开口太近（热聊接话不受这条限制）',
   SCENE_UNAVAILABLE: '场景不合适（媒体播放中 / 通话中）',
   SPEECH_UNAVAILABLE: '语音输出不可用',
   BELOW_RECOMMENDATION: '社会预算建议这次不说（冷却/重复/未回应只是扣分，不是禁止）',
@@ -3463,7 +3465,7 @@ export async function proactiveDrill(options: {
         Object.entries(options.request.components as Record<string, unknown>).filter(([, value]) => typeof value === 'number'),
       ) as Record<string, number>)
     : { ...PROACTIVE_DRILL_COMPONENTS };
-  const topicRef = typeof options.request.topicRef === 'string' && options.request.topicRef.length > 0 ? options.request.topicRef : trigger;
+  const topicRef = typeof options.request.topicRef === 'string' && options.request.topicRef.length > 0 ? options.request.topicRef : null;
 
   const engine = new ProactiveEngine({
     store: options.store,
@@ -3545,8 +3547,10 @@ const PROACTIVE_GATE_NEXT_STEPS: Readonly<Record<ProactiveReasonCode, string>> =
   QUIET_HOURS: '现在在静默时段内（安全底线，接口不允许放宽）。把静默时段改到自己不在家的时段再试，或等过了这个时段。',
   PRIVACY_BLOCKED: '隐私与同意没给：这是安全底线，先去设置里明确允许，再试（模型与接口都不能越过它）。',
   QUOTA_6H_EXCEEDED: '6 小时额度用完了：等窗口滚动，或把 6 小时额度调大。',
-  QUOTA_DAY_EXCEEDED: '当日额度用完了（真正开口 + 问过模型的次数一起算）：等明天，或把当日额度调大。',
+  QUOTA_DAY_EXCEEDED: '当日额度用完了（只算真正开口的次数，问模型另计 max_consults_per_day）：等明天，或把 max_per_day 调大。',
+  QUOTA_CONSULT_EXCEEDED: '当日问模型的次数用完了（与开口额度分开计）：等明天，或把 max_consults_per_day 调大。',
   CONVERSATION_ACTIVE: '正在对话里：等这一轮结束（或 FSM 回到 IDLE）再试；热聊中接话用 conversation_continuation 这一类候选，不受这条限制。',
+  NEW_SESSION_FLOOR: '距上一条主动开口还不到速率下限（new_session_min_gap_min）：等过了这个间隔再试；热聊中接话不受这条限制。',
   SCENE_UNAVAILABLE: '场景不合适：等媒体播完 / 通话结束再试。',
   SPEECH_UNAVAILABLE: '语音输出不可用：检查 TTS/扬声器，或先只看文字。',
   BELOW_RECOMMENDATION:
@@ -4472,7 +4476,7 @@ export interface ProactiveCandidateContext {
   } | null;
   /** When the last user turn happened (from the event log); `null` = this store has no turns. */
   readonly lastUserTurnAt: Date | null;
-  /** True when a conversation is open right now (the engine blocks it anyway; this only orders). */
+  /** True when a conversation is open right now: orders the plans **and** (t9 F5) turns the 话题池 candidate into a `conversation_continuation`, the production path for 「热聊中接话」. */
   readonly inConversation: boolean;
   /** Recent *user* utterances (newest first) — the fact behind 「话题池」 (t74). */
   readonly recentUserTopics?: readonly string[] | undefined;
@@ -4528,7 +4532,13 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
     plans.push(
       planFor(
         'conversation_dangling',
-        `${day}-dangling-${Math.floor(minutes / 30)}`,
+        // One check-in per local day, exactly like `presence_arrived`'s `${day}-presence`. Two
+        // reasons (t9 F1/F3 + the Phase-5 timeline): the old 30-minute-rotating id meant this
+        // candidate *never* turned into `ALREADY_DELIVERED` (it kept re-occupying ticks), and a
+        // generic line that can re-fire every half hour makes 「generic ≤ 20%」 arithmetically
+        // unreachable next to a budget of at most a dozen messages a day. The 24 h generic window
+        // still grades any *other* generic line (ADR-0011: the rest stays a score, not a veto).
+        `${day}-dangling`,
         line,
         `事件日志：上一条 user 轮次在 ${context.lastUserTurnAt?.toISOString() ?? '（这个库还没有轮次）'}`,
         // t74: this used to sum to 0.30 — below the old 0.45 floor, so 「对话悬着」 could *never*
@@ -4564,7 +4574,7 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
           receptivity: 0.85,
           engagement: 0.6,
         },
-        hook.intent,
+        { intent: hook.intent, topicRef: hook.intent },
       ),
     );
   }
@@ -4588,6 +4598,14 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
           freshness: 0.5,
           receptivity: 0.8,
           engagement: 0.7,
+        },
+        {
+          // t9 F3: the topic text itself is the topic (≤120 chars — the event schema's cap).
+          topicRef: snippet,
+          // t9 F5: while a conversation is still open this same fact is 「热聊中接话」, not a new
+          // external sharing — that is the production path pack §14.3 asks for (the engine lets a
+          // continuation past CONVERSATION_ACTIVE and charges it no interruption cost).
+          ...(context.inConversation ? { initiativeKind: 'conversation_continuation' as const } : {}),
         },
       ),
     );
@@ -4693,11 +4711,29 @@ function planFor(
   line: string,
   fact: string,
   components: Readonly<Record<string, number>>,
-  intent?: string,
+  options: {
+    readonly intent?: string;
+    /**
+     * The candidate's real topic, or `null` for a generic line (t9 F3: `topicRef` used to be the
+     * **trigger name**, which made 「generic 占比」 structurally unable to fail and let two
+     * different 沉默跟进 look like 「the same topic」. Only 话题池 / 时间钩子 carry a topic now;
+     * 到家打招呼、沉默跟进、随机闲聊 are generic → `null`).
+     */
+    readonly topicRef?: string | null;
+    /** Overrides the trigger's default kind (t9 F5: a live chat turns 话题池 into 热聊接话). */
+    readonly initiativeKind?: ProactiveInitiativeKind;
+  } = {},
 ): ProactiveCandidatePlan {
   const split = splitReplyIntoSegments(line);
   return {
-    candidate: { candidateId: `loop-${trigger}-${slug}`, trigger, components, topicRef: trigger, intent: intent ?? trigger },
+    candidate: {
+      candidateId: `loop-${trigger}-${slug}`,
+      trigger,
+      components,
+      topicRef: options.topicRef ?? null,
+      intent: options.intent ?? trigger,
+      ...(options.initiativeKind === undefined ? {} : { initiativeKind: options.initiativeKind }),
+    },
     line,
     fact,
     segments: split.segments,
@@ -4799,6 +4835,12 @@ export interface ProactiveLoopOptions {
   readonly decide?: ProactiveDecider | undefined;
   readonly intervalMs?: number | undefined;
   readonly now?: (() => Date) | undefined;
+  /**
+   * Local UTC offset for the engine's quiet-hours and day-boundary maths. Unset in production
+   * (local wall clock is the truth); the 12-hour timeline passes one so a simulated day judges
+   * exactly the same window regardless of the machine's own timezone.
+   */
+  readonly offsetMinutes?: number | undefined;
   readonly log?: ((line: string) => void) | undefined;
 }
 
@@ -4807,6 +4849,20 @@ export const MIN_LOOP_INTERVAL_MS = 5_000;
 export const DEFAULT_LOOP_INTERVAL_MS = 30_000;
 /** How many entries the pages keep (memory only; the event log is the durable record). */
 const LOOP_HISTORY_LIMIT = 40;
+
+/**
+ * Outcomes that answer a question about **this candidate**, not about the tick (t9 F1): the walk
+ * keeps going so a held high-priority plan cannot starve the sources below it. Deliberately not in
+ * this set: `PASSED` (a delivery ends the tick), the hard floors that block every plan equally
+ * (quiet hours, DND, privacy, quotas, scene, speech) and `MODEL_DECLINED` (the model just read the
+ * room — a second paid consultation in the same instant would buy nothing).
+ */
+const TICK_WALK_CODES: ReadonlySet<ProactiveReasonCode> = new Set<ProactiveReasonCode>([
+  'TRIGGER_DISABLED',
+  'BELOW_RECOMMENDATION',
+  'CONVERSATION_ACTIVE',
+  'NEW_SESSION_FLOOR',
+]);
 
 /**
  * A resident consideration loop for the console (t70).
@@ -4881,6 +4937,15 @@ export class ProactiveLoop {
    * One consideration, exposed for the page's 「立刻考虑一次」 button and for tests.
    *
    * Returns the entry (spoken or blocked), or `null` when no candidate could be built.
+   *
+   * t9 F1 (tick starvation): the walk stops only on an outcome that answers **this tick** — a
+   * delivery, a hard floor that would block every plan anyway, or the model's own 「不说」. A
+   * candidate that merely cleared the floor but scored below the recommendation line (or is
+   * blocked for *its* kind only) no longer ends the tick: the old loop returned on the first
+   * non-`ALREADY_DELIVERED` result, so the 30-minute-rotating 沉默跟进 held every single tick and
+   * the clock hooks below it never even got considered (t9 measured hooks speaking 0 times in 12 h).
+   * `ALREADY_DELIVERED` still walks on silently; only the entry this tick *reports* reaches the
+   * page (every consideration is in the event log regardless — 铁律 5).
    */
   async tickOnce(): Promise<ProactiveLoopEntry | null> {
     if (this.#ticking) return null; // a slow TTS call must not overlap the next tick
@@ -4903,18 +4968,23 @@ export class ProactiveLoop {
         this.#options.log?.('[proactive-loop] 这一次没有可说的候选（没有事实支撑就不开口）');
         return null;
       }
+      let outcome: ProactiveLoopEntry | null = null;
       for (const plan of plans) {
         const entry = await this.#consider(plan, now);
         if (entry.reasonCode === 'ALREADY_DELIVERED') continue; // this source was used: try the next
-        this.#push(entry);
-        this.#options.log?.(
-          entry.speak
-            ? `[proactive-loop] 开口：${entry.triggerLabel}（分数 ${entry.score} ≥ ${entry.threshold}）「${entry.text ?? ''}」`
-            : `[proactive-loop] 被拦：${entry.triggerLabel} → ${entry.reasonCode}（${entry.reasonLabel}）`,
-        );
-        return entry;
+        outcome = entry;
+        // A global floor (quiet hours, budgets, DND, …) would block every remaining plan too, and
+        // `MODEL_DECLINED` just spent a paid call reading the room — neither buys from walking on.
+        if (!TICK_WALK_CODES.has(entry.reasonCode)) break;
       }
-      return null;
+      if (outcome === null) return null;
+      this.#push(outcome);
+      this.#options.log?.(
+        outcome.speak
+          ? `[proactive-loop] 开口：${outcome.triggerLabel}（分数 ${outcome.score} ≥ ${outcome.threshold}）「${outcome.text ?? ''}」`
+          : `[proactive-loop] 被拦：${outcome.triggerLabel} → ${outcome.reasonCode}（${outcome.reasonLabel}）`,
+      );
+      return outcome;
     } finally {
       this.#ticking = false;
     }
@@ -4936,6 +5006,7 @@ export class ProactiveLoop {
       store: this.#options.store,
       settings,
       clock: () => now,
+      offsetMinutes: this.#options.offsetMinutes,
       /**
        * P5 读空气 (ADR-0011): above the hard floor the **model** decides whether to speak.
        * The seam is only reached for candidates the social budget already considers worth it

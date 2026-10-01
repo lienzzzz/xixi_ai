@@ -320,26 +320,60 @@ test('QUOTA_6H_EXCEEDED: fifteen in six hours by default', () => {
   const fifteen = [10, 25, 40, 55, 70, 85, 100, 115, 130, 145, 160, 175, 190, 205, 220].map((minutes) =>
     delivered(`old_${minutes}`, minutesBefore(AFTERNOON, minutes)),
   );
+  // Answer each delivery, so this test measures the *quota* and is not confounded by the
+  // unanswered-streak grade (t9 F2) stacking up over a fixture that never answers.
+  const answered = fifteen.map((record) => record.at.getTime() + 60_000);
   assert.equal(evaluateProactiveGates(candidate(), context({ history: fifteen })).reasonCode, 'QUOTA_6H_EXCEEDED');
   const fourteen = fifteen.slice(0, 14);
-  assert.equal(evaluateProactiveGates(candidate(), context({ history: fourteen })).reasonCode, 'PASSED');
+  assert.equal(evaluateProactiveGates(candidate(), context({ history: fourteen, userTurns: answered.slice(0, 14) })).reasonCode, 'PASSED');
   const old = [delivered('old_1', minutesBefore(AFTERNOON, 7 * 60))];
-  assert.equal(evaluateProactiveGates(candidate(), context({ history: old })).reasonCode, 'PASSED');
+  assert.equal(evaluateProactiveGates(candidate(), context({ history: old, userTurns: [old[0]!.at.getTime() + 60_000] })).reasonCode, 'PASSED');
 });
 
-test('QUOTA_DAY_EXCEEDED counts deliveries AND paid model consultations', () => {
+test('delivery and consultation budgets are separate, and both can end a day (t9 F4)', () => {
   const dayScoped = settings({ maxPer6h: 100, maxPerDay: 2 });
   const two = [delivered('a', minutesBefore(AFTERNOON, 30)), delivered('b', minutesBefore(AFTERNOON, 50))];
   assert.equal(evaluateProactiveGates(candidate(), context({ settings: dayScoped, history: two })).reasonCode, 'QUOTA_DAY_EXCEEDED');
   assert.equal(evaluateProactiveGates(candidate(), context({ settings: dayScoped, history: two.slice(0, 1) })).reasonCode, 'PASSED');
-  // One delivery + one consultation already spends the day.
+  // One delivery + one consultation: the consultation no longer spends the *delivery* budget…
   assert.equal(
     evaluateProactiveGates(candidate(), context({ settings: dayScoped, history: two.slice(0, 1), consultsToday: 1 })).reasonCode,
-    'QUOTA_DAY_EXCEEDED',
-    'asking the model is a paid call, so it is charged too',
+    'PASSED',
+    't9 F4: 「不说」的问询不能吃掉开口额度',
   );
+  // …but the paid calls have their own daily count, so a hot loop still cannot ask forever.
+  const consultScoped = settings({ maxPer6h: 100, maxConsultsPerDay: 1 });
+  assert.equal(
+    evaluateProactiveGates(candidate(), context({ settings: consultScoped, consultsToday: 1 })).reasonCode,
+    'QUOTA_CONSULT_EXCEEDED',
+  );
+  assert.equal(evaluateProactiveGates(candidate(), context({ settings: consultScoped, consultsToday: 0 })).reasonCode, 'PASSED');
   const yesterday = [delivered('a', new Date('2026-09-29T20:00:00+08:00')), delivered('b', minutesBefore(AFTERNOON, 50))];
   assert.equal(evaluateProactiveGates(candidate(), context({ settings: dayScoped, history: yesterday })).reasonCode, 'PASSED');
+});
+
+test('the new-session rate floor blocks a too-soon new thread and spares 热聊接话 (t9 F6)', () => {
+  const recent = [delivered('just_spoke', minutesBefore(AFTERNOON, 1))];
+  // A non-continuation candidate inside the floor's window is blocked, with its own auditable code.
+  const blocked = evaluateProactiveGates(candidate(), context({ history: recent }));
+  assert.equal(blocked.reasonCode, 'NEW_SESSION_FLOOR');
+  assert.equal(blocked.pass, false);
+  // Exactly on the boundary the floor does not fire (strictly-less-than): the pack's golden
+  // G12 「同一个 2 分钟窗口里强候选照样开口」 case is the contract that pins this edge.
+  const atBoundary = evaluateProactiveGates(candidate(), context({ history: [delivered('just_spoke', minutesBefore(AFTERNOON, 2))] }));
+  assert.equal(atBoundary.reasonCode, 'PASSED', 'the 2-minute boundary itself is outside the floor');
+  // 热聊中接话 is exempt (pack §14.3 / Phase 5 goal: not受限 by the new-session cooldown).
+  const continuation = evaluateProactiveGates(
+    candidate({ trigger: 'conversation_dangling' }),
+    context({ history: recent }),
+  );
+  assert.equal(continuation.pass, true, 'a continuation may speak immediately after another message');
+  // …and the floor disappears entirely when it is switched off.
+  assert.equal(
+    evaluateProactiveGates(candidate(), context({ history: recent, settings: settings({ newSessionMinGapMinutes: 0 }) })).reasonCode,
+    'PASSED',
+    '0 disables the floor',
+  );
 });
 
 test('CONVERSATION_ACTIVE stops new sessions but lets a continuation join a live chat', () => {
@@ -433,8 +467,20 @@ test('a generic line pays the longer generic window (no topic at all is not "fre
 test('unanswered proactive messages become a grade, never a silent ban', () => {
   const history = [60, 50, 40].map((minutes) => delivered(`old_${minutes}`, minutesBefore(AFTERNOON, minutes)));
   const ignored = evaluateProactiveGates(candidate(), context({ history, userTurns: [] }));
-  assert.equal(ignored.signals.recent_unanswered_penalty, 0.45, 'the pack’s unanswered penalty, all three unanswered');
+  // t9 F2: the streak escalates — 3 consecutive non-answers cost 0.45 × (1 + 0.5 × 2) = 0.90,
+  // where the old ratio alone saturated at 0.45 for 1/2/3 non-answers alike.
+  assert.equal(ignored.signals.recent_unanswered_penalty, 0.9, 'streak 3: base + 2 × half-base');
   assert.ok(ignored.basis.some((line) => line.includes(PROACTIVE_SIGNAL_LABELS.recent_unanswered_penalty)));
+
+  // Escalation is strict and auditable: 1 → 0.45, 2 → 0.675, 3 → 0.90 (the pack's base 0.45).
+  const penalties = [1, 2, 3].map(
+    (count) =>
+      evaluateProactiveGates(
+        candidate(),
+        context({ history: history.slice(-count), userTurns: [] }),
+      ).signals.recent_unanswered_penalty,
+  );
+  assert.deepEqual(penalties, [0.45, 0.675, 0.9], 'consecutive unanswered must keep climbing');
 
   // Answered inside the 10-minute window counts as a response.
   const answered = history.map((record) => record.at.getTime() + 60_000);

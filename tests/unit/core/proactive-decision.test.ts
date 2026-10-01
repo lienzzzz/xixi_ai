@@ -218,16 +218,59 @@ test('a free-text model reason is normalised onto the allowlist', async () => {
   }
 });
 
-test('a consultation is charged to the daily budget, so "不说" cannot be free forever', async () => {
+test('consultations spend their own daily budget — a refusal never eats the speaking day (t9 F4)', async () => {
   const root = dir();
   const store = open(root);
   try {
+    const { DEFAULT_PROACTIVE_SETTINGS } = await import('@xixi/conversation');
     let asked = 0;
     const engine = new ProactiveEngine({
       store,
       clock: () => new Date(T0),
       offsetMinutes: OFFSET,
-      settings: { ...(await import('@xixi/conversation')).DEFAULT_PROACTIVE_SETTINGS, maxPerDay: 1 },
+      settings: { ...DEFAULT_PROACTIVE_SETTINGS, maxPerDay: 1, maxConsultsPerDay: 120 },
+      decide: () => {
+        asked += 1;
+        return asked === 1 ? { speak: false, reasonCode: 'user_busy' } : { speak: true, reasonCode: 'good_moment' };
+      },
+    });
+    const first = await engine.consider({ candidate: candidate('cand_1'), at: T0, conversationState: 'IDLE' });
+    assert.equal(first.modelConsulted, true);
+    assert.equal(first.speak, false);
+    assert.equal(asked, 1);
+
+    // t9 F4: the refusal spent one *consultation*, not the day's speaking quota — the next good
+    // moment still gets through (the old behaviour charged both to `max_per_day`, so a polite
+    // model could talk the whole day into silence with its 「不说」s).
+    const second = await engine.consider({ candidate: candidate('cand_2'), at: new Date(T0.getTime() + 60_000), conversationState: 'IDLE' });
+    assert.equal(second.reasonCode, 'PASSED', 'the speaking day is intact after a refusal');
+    assert.equal(second.speak, true);
+    assert.equal(asked, 2);
+    assert.equal(readProactiveConsultations(store).length, 2, 'both paid calls stay visible in the log');
+    assert.equal(readProactiveHistory(store).length, 1, 'but only the delivery is a delivery');
+
+    // …and the speaking quota still ends the day once the delivery budget itself is spent.
+    const third = await engine.consider({ candidate: candidate('cand_3'), at: new Date(T0.getTime() + 120_000), conversationState: 'IDLE' });
+    assert.equal(third.reasonCode, 'QUOTA_DAY_EXCEEDED');
+    assert.equal(third.modelConsulted, false, 'a hard floor never spends a paid call');
+    assert.equal(asked, 2);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('the consultation budget can run out too, under its own auditable code (t9 F4)', async () => {
+  const root = dir();
+  const store = open(root);
+  try {
+    const { DEFAULT_PROACTIVE_SETTINGS } = await import('@xixi/conversation');
+    let asked = 0;
+    const engine = new ProactiveEngine({
+      store,
+      clock: () => new Date(T0),
+      offsetMinutes: OFFSET,
+      settings: { ...DEFAULT_PROACTIVE_SETTINGS, maxConsultsPerDay: 1 },
       decide: () => {
         asked += 1;
         return { speak: false, reasonCode: 'user_busy' };
@@ -237,9 +280,10 @@ test('a consultation is charged to the daily budget, so "不说" cannot be free 
     assert.equal(first.modelConsulted, true);
     assert.equal(asked, 1);
 
-    // The day is spent (one consultation), so the second consideration never reaches the model.
+    // The day's paid calls are spent, so the second consideration never reaches the model —
+    // the count quota stays the cost proxy (this repo has no monetary cap, 铁律 3).
     const second = await engine.consider({ candidate: candidate('cand_2'), at: new Date(T0.getTime() + 60_000), conversationState: 'IDLE' });
-    assert.equal(second.reasonCode, 'QUOTA_DAY_EXCEEDED');
+    assert.equal(second.reasonCode, 'QUOTA_CONSULT_EXCEEDED');
     assert.equal(second.modelConsulted, false);
     assert.equal(asked, 1, 'the budget must cap paid calls');
   } finally {

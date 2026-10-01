@@ -114,10 +114,20 @@ export const PROACTIVE_REASON_CODES = Object.freeze([
   'PRIVACY_BLOCKED',
   /** The rolling 6-hour budget is spent. */
   'QUOTA_6H_EXCEEDED',
-  /** Today's budget is spent (local natural day). */
+  /** Today's **delivery** budget is spent (local natural day; consultations are charged separately). */
   'QUOTA_DAY_EXCEEDED',
+  /** Today's **consultation** budget is spent — the model can no longer be asked today (t9 F4). */
+  'QUOTA_CONSULT_EXCEEDED',
   /** A conversation is open (a continuation may still speak) or a turn is in flight. */
   'CONVERSATION_ACTIVE',
+  /**
+   * The new-session **rate floor** (t9 F6): a non-continuation proactive message spoke less than
+   * `new_session_min_gap_min` ago. This is the one temporal rule that still *blocks* — deliberately
+   * much narrower than ADR-0011 retired: it covers only 「不是热聊接话」的主动, its window is a
+   * couple of minutes (the pack's 18-minute cooldown stays a grade), and 热聊中接话 is exempt
+   * (pack §14.3, the Phase-5 goal 「不受 18 分钟 new-session cooldown 限制」).
+   */
+  'NEW_SESSION_FLOOR',
   /** Media is playing, a call is up, or the room is otherwise unsuitable. */
   'SCENE_UNAVAILABLE',
   /** The voice output path is not usable. */
@@ -301,6 +311,22 @@ export interface ProactiveSettings {
   readonly continuationCooldownMinutes: number;
   readonly maxPer6h: number;
   readonly maxPerDay: number;
+  /**
+   * How many paid 读空气 consultations one local day may spend (t9 F4).
+   *
+   * Consultations used to be charged to `maxPerDay` together with delivered messages, so a model
+   * that kept answering 「不说」 ate the whole speaking budget and the day went silent even when the
+   * moment was good. The two budgets are separate now: deliveries spend `maxPerDay`, consultations
+   * spend this one — it is the count-based cost proxy for the paid calls (铁律 3, no monetary cap
+   * exists in this repo).
+   */
+  readonly maxConsultsPerDay: number;
+  /**
+   * The new-session **rate floor** in minutes (t9 F6): a non-continuation proactive message may
+   * not be delivered sooner than this after the previous delivery. `0` disables the floor.
+   * 热聊中接话 (`conversation_continuation`) is exempt — pack §14.3 keeps that path free.
+   */
+  readonly newSessionMinGapMinutes: number;
   /** How long "the same topic" keeps its repetition penalty. */
   readonly topicRepeatWindowHours: number;
   /** A generic line (no `topicRef`) pays its own, longer window (pack: 24 h). */
@@ -321,12 +347,13 @@ export interface ProactiveSettings {
 
 /**
  * Exactly the factory defaults declared in `config/xixi.example.yaml`:
- * 18 min interruption window / 0 min for continuations / 15 per 6 h / 40 per day /
- * 12 h same-topic window / 24 h generic window, quiet hours 23:30–07:30. The penalty
- * values are the pack's `config/xixi.v02.example.yaml` (`unanswered: 0.45`,
- * `explicit_reject: 0.80`, `same_topic: 0.55`). It is only the fallback for a config that
- * has no `proactive` section at all, so it must stay numerically identical to the shipped
- * config — a test compares both against the same hand-written example object.
+ * 18 min interruption window / 0 min for continuations / 15 per 6 h / 40 deliveries per day /
+ * 120 consultations per day (t9 F4: a separate budget) / a 2-minute new-session rate floor
+ * (t9 F6, 热聊接话 exempt) / 12 h same-topic window / 24 h generic window, quiet hours
+ * 23:30–07:30. The penalty values are the pack's `config/xixi.v02.example.yaml`
+ * (`unanswered: 0.45`, `explicit_reject: 0.80`, `same_topic: 0.55`). It is only the fallback for a
+ * config that has no `proactive` section at all, so it must stay numerically identical to the
+ * shipped config — a test compares both against the same hand-written example object.
  */
 export const DEFAULT_PROACTIVE_SETTINGS: ProactiveSettings = Object.freeze({
   enabled: true,
@@ -334,6 +361,11 @@ export const DEFAULT_PROACTIVE_SETTINGS: ProactiveSettings = Object.freeze({
   continuationCooldownMinutes: 0,
   maxPer6h: 15,
   maxPerDay: 40,
+  // t9 F4: consultations get their own daily count — three times the delivery budget leaves room
+  // for every delivery to be preceded by a 读空气 call plus a margin of 「不说」 decisions.
+  maxConsultsPerDay: 120,
+  // t9 F6: a narrow, auditable floor for starting a new thread (热聊接话 is exempt).
+  newSessionMinGapMinutes: 2,
   topicRepeatWindowHours: 12,
   genericTopicCooldownHours: 24,
   unansweredPenalty: 0.45,
@@ -374,6 +406,8 @@ export function parseProactiveSettings(source?: Readonly<Record<string, unknown>
     continuationCooldownMinutes: numberField(source, 'continuation_cooldown_min', fallback.continuationCooldownMinutes, 0, 24 * 60),
     maxPer6h: numberField(source, 'max_per_6h', fallback.maxPer6h, 0, 100),
     maxPerDay: numberField(source, 'max_per_day', fallback.maxPerDay, 0, 100),
+    maxConsultsPerDay: numberField(source, 'max_consults_per_day', fallback.maxConsultsPerDay, 0, 1000),
+    newSessionMinGapMinutes: numberField(source, 'new_session_min_gap_min', fallback.newSessionMinGapMinutes, 0, 240),
     topicRepeatWindowHours: numberField(source, 'topic_repeat_window_h', fallback.topicRepeatWindowHours, 0, 24 * 30),
     genericTopicCooldownHours: numberField(
       source,
@@ -501,10 +535,12 @@ export function readUserTurnTimes(store: XixiStore): number[] {
 /**
  * When the model was consulted about a candidate, from the log.
  *
- * "读空气" costs a real call, so it is accounted for like a delivered message: the daily budget is
- * `deliveries + consultations`, and `model_consulted: true` on the audit record is what makes the
- * cost visible. The budget is a **count** quota — this repo has no monetary cap, so the count is
- * the cost proxy (铁律 3, ADR-0011 代价一节).
+ * "读空气" costs a real call, so it is accounted for with its own daily **count** budget
+ * (`max_consults_per_day`) — separate from the delivery budget `max_per_day` (t9 F4: charging both
+ * to one number let a model that kept answering 「不说」 eat the day's speaking quota, and the day
+ * went silent even when the moment was good). The count is the cost proxy: this repo has no
+ * monetary cap (铁律 3, ADR-0011 代价一节). `model_consulted: true` on the audit record is what makes
+ * the cost visible.
  */
 export function readProactiveConsultations(store: XixiStore): Date[] {
   const times: Date[] = [];
@@ -556,10 +592,10 @@ export interface ProactiveGateContext {
   readonly userTurns?: readonly number[] | undefined;
   /**
    * How many times today the model was already consulted (see
-   * `readProactiveConsultations`). Asking the model is a real call, so it is spent from the same
-   * daily **count** budget as a delivered message — otherwise a hot loop could pay for hundreds of
-   * "不说" decisions. Note what this budget is: the project has no monetary cost cap, so the
-   * message-count quota is the cost proxy (铁律 3).
+   * `readProactiveConsultations`). Asking the model is a real call, so it is spent from its own
+   * daily **count** budget (`max_consults_per_day`), never from the delivery budget — t9 F4:
+   * refusals must not eat the day's speaking quota. Note what this budget is: the project has no
+   * monetary cost cap, so the message-count quota is the cost proxy (铁律 3).
    */
   readonly consultsToday?: number | undefined;
 }
@@ -674,18 +710,41 @@ function topicGrade(
   return grade * context.settings.sameTopicPenalty;
 }
 
-/** How many of the last few proactive messages were never answered. */
+/**
+ * How hard the 未回应惩罚 presses right now (t9 F2 fixed the saturation here).
+ *
+ * Two parts, added together and clamped into `[0, 1]`:
+ *
+ *   1. **ratio** — the unanswered share of the last {@link UNANSWERED_LOOKBACK} deliveries
+ *      (unchanged from P5: one stale non-answer among recent messages still costs something);
+ *   2. **streak escalation** — `unansweredPenalty × 0.5 × (consecutive − 1)` for the trailing run
+ *      of deliveries nobody ever answered. 1 → base, 2 → 1.5×, 3 → 2× (0.45 / 0.675 / 0.90 with
+ *      the pack default): 「连续两次没人回应」 is now a strictly heavier grade than 「一条」, which
+ *      is what makes 显著降频 reachable on the timeline — the old ratio alone was saturated
+ *      (1/3/5 non-answers all yielded the same number when the ratio already sat at 1).
+ */
 function unansweredGrade(context: ProactiveGateContext, past: readonly ProactiveDeliveryRecord[]): number {
-  const recent = past.slice(-UNANSWERED_LOOKBACK);
-  if (recent.length === 0) return 0;
+  if (past.length === 0) return 0;
   const windowMs = context.settings.unansweredWindowMinutes * 60_000;
   const userTurns = context.userTurns ?? [];
+  const answered = (record: ProactiveDeliveryRecord): boolean =>
+    userTurns.some((at) => at > record.at.getTime() && at <= record.at.getTime() + windowMs);
+  const recent = past.slice(-UNANSWERED_LOOKBACK);
   let unanswered = 0;
   for (const record of recent) {
-    const answered = userTurns.some((at) => at > record.at.getTime() && at <= record.at.getTime() + windowMs);
-    if (!answered) unanswered += 1;
+    if (!answered(record)) unanswered += 1;
   }
-  return (unanswered / recent.length) * context.settings.unansweredPenalty;
+  if (unanswered === 0) return 0;
+  let streak = 0;
+  for (let index = past.length - 1; index >= 0; index -= 1) {
+    const record = past[index];
+    if (record === undefined || answered(record)) break;
+    streak += 1;
+  }
+  const base = context.settings.unansweredPenalty;
+  const ratioPart = (unanswered / recent.length) * base;
+  const streakPart = streak >= 1 ? base * 0.5 * (streak - 1) : 0;
+  return clamp01(ratioPart + streakPart);
 }
 
 /**
@@ -798,11 +857,15 @@ export function evaluateProactiveGates(
 
   const day = localDayOf(context.now, context.offsetMinutes);
   const today = past.filter((record) => localDayOf(record.at, context.offsetMinutes) === day).length;
-  // The daily budget covers delivered messages **and** the "读空气" consultations: a hot loop that
-  // keeps asking the model and hearing "不说" would otherwise be free. It is a count quota — the
-  // project has no monetary cost cap, so the count is what stands in for cost (铁律 3).
-  const spentToday = today + (context.consultsToday ?? 0);
-  if (spentToday >= tightenBudget(settings.maxPerDay, multiplierOf(context))) return block('QUOTA_DAY_EXCEEDED');
+  if (today >= tightenBudget(settings.maxPerDay, multiplierOf(context))) return block('QUOTA_DAY_EXCEEDED');
+
+  // t9 F4: the two budgets are separate. Deliveries spend `maxPerDay`; the paid 读空气 calls spend
+  // `maxConsultsPerDay`, so a conservative model answering 「说」/「不说」 can no longer eat the day's
+  // speaking quota with its refusals. Both are count quotas — the project has no monetary cap, so
+  // counts stand in for cost (铁律 3).
+  if ((context.consultsToday ?? 0) >= tightenBudget(settings.maxConsultsPerDay, multiplierOf(context))) {
+    return block('QUOTA_CONSULT_EXCEEDED');
+  }
 
   // A turn in flight always waits. An open conversation only stops *new sessions*: the pack's
   // whole point is that a welcomed chat may continue without re-passing a cooldown (§14.3).
@@ -810,6 +873,16 @@ export function evaluateProactiveGates(
   if (context.inFlightTurn) return block('CONVERSATION_ACTIVE');
   if (context.conversationState !== 'IDLE' && kind !== 'conversation_continuation') {
     return block('CONVERSATION_ACTIVE');
+  }
+
+  // t9 F6: the new-session **rate floor** — before this, no temporal lower bound existed at all
+  // (the 18-minute cooldown is only a score grade, ADR-0011). Deliberately narrow: only
+  // non-continuation messages, only inside `new_session_min_gap_min`, auditable as its own code.
+  if (kind !== 'conversation_continuation' && settings.newSessionMinGapMinutes > 0) {
+    const last = past.at(-1);
+    if (last !== undefined && nowMs - last.at.getTime() < settings.newSessionMinGapMinutes * 60_000) {
+      return block('NEW_SESSION_FLOOR');
+    }
   }
 
   if (!context.sceneAvailable) return block('SCENE_UNAVAILABLE');
@@ -852,7 +925,7 @@ export interface ProactiveModelInput {
   readonly recommendation: 'speak' | 'hold';
   readonly primarySignal: ProactivePrimarySignal;
   readonly basis: readonly string[];
-  /** How many of the last few proactive messages went unanswered (0..1). */
+  /** How heavily the recent proactive messages went unanswered (0..1; the escalated grade divided back by the base penalty, clamped). */
   readonly unansweredRatio: number;
   readonly now: Date;
 }
@@ -1057,8 +1130,8 @@ export class ProactiveEngine {
     }
 
     // Above the floor, only a candidate the social budget already considers worth it is put to the
-    // model: "obviously not now" never costs a paid call, and the daily budget counts the
-    // consultations that do happen (see `readProactiveConsultations`). A missing or failing model
+    // model: "obviously not now" never costs a paid call, and the paid calls are counted against
+    // their own daily budget (see `readProactiveConsultations`). A missing or failing model
     // never *becomes* a yes — it degrades to the deterministic recommendation.
     const decider = input.decide ?? this.#decide;
     let decidedBy: 'program' | 'model' = 'program';
@@ -1078,7 +1151,7 @@ export class ProactiveEngine {
         recommendation: result.recommendation,
         primarySignal: result.primarySignal,
         basis: result.basis,
-        unansweredRatio: round4(result.signals.recent_unanswered_penalty / (this.#settings.unansweredPenalty || 1)),
+        unansweredRatio: clamp01(round4(result.signals.recent_unanswered_penalty / (this.#settings.unansweredPenalty || 1))),
         now: at,
       };
       try {

@@ -20,7 +20,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { buildEvent, toOffsetIso } from '@xixi/contracts';
-import { parseProactiveSettings, proactiveThreshold } from '@xixi/conversation';
+import { DEFAULT_PROACTIVE_SETTINGS, evaluateProactiveGates, parseProactiveSettings, proactiveThreshold } from '@xixi/conversation';
 import { openXixiStore } from '@xixi/domain';
 
 import { REPO_ROOT } from '../../scripts/lib/harness.ts';
@@ -62,6 +62,7 @@ function makeLoop(options: {
   readonly compose?: ((input: { readonly plan: { readonly line: string }; readonly delivery: unknown }) => Promise<{ readonly text: string; readonly source: 'model' | 'fixed'; readonly note: string | null }>) | undefined;
   readonly sessionId?: string | null;
   readonly intervalMs?: number;
+  readonly recentUserTopics?: readonly string[] | undefined;
 }): ProactiveLoop {
   const settings =
     options.settings ??
@@ -80,6 +81,7 @@ function makeLoop(options: {
       source: 'test',
     }),
     readLastUserTurnAt: () => options.lastUserTurnAt ?? null,
+    readRecentUserTopics: () => options.recentUserTopics,
     readSessionId: () => options.sessionId ?? null,
     synthesize: options.synthesize,
     compose: options.compose,
@@ -405,6 +407,121 @@ test('a tick speaks when the gates allow it, and reports the auditable path', as
     rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
   }
 });
+
+test('a held candidate no longer eats the tick: the source below it still speaks (t9 F1)', async () => {
+  const root = tempDir('xixi-t9-f1-');
+  const store = openXixiStore({ dataDir: root });
+  try {
+    // 18:30 is a documented clock hook, and the silence candidate exists too (last turn 20 min ago).
+    const now = new Date(2026, 8, 30, 18, 30, 0);
+    // One delivered, generic, *unanswered* message half an hour earlier: the generic-repeat grade
+    // plus the unanswered grade now hold the 沉默跟进 below the recommendation line — exactly the
+    // candidate that used to terminate every tick while the hook under it never got considered
+    // (t9 measured hooks speaking 0 times in a 12-hour day).
+    store.appendEvent(
+      buildEvent({
+        event_type: 'proactive.decision',
+        source: 'test',
+        actor: 'system',
+        confidence: 1,
+        timestamp: toOffsetIso(new Date(2026, 8, 30, 18, 0, 0)),
+        payload: { candidate_id: 'seeded-old-message', trigger: 'conversation_dangling', speak: true, reason_code: 'PASSED', delivered: true, topic_ref: null },
+      }),
+    );
+    const loop = makeLoop({ store, now, present: false, lastUserTurnAt: new Date(now.getTime() - 20 * 60_000) });
+    const entry = await loop.tickOnce();
+    assert.equal(entry?.trigger, 'future_hook_due', 'the walk continues past the held 沉默跟进 to the hook');
+    assert.equal(entry?.speak, true, `expected the hook to speak, got ${entry?.reasonCode}`);
+    assert.equal(entry?.reasonCode, 'PASSED');
+    // Both considerations are auditable: the held one explains itself, the hook delivered.
+    const decisions = store
+      .readEvents({ type: 'proactive.decision', limit: 20 })
+      .map((event) => event.payload as Record<string, unknown>);
+    assert.ok(
+      decisions.some((payload) => payload['reason_code'] === 'BELOW_RECOMMENDATION' && payload['trigger'] === 'conversation_dangling'),
+      'the held candidate is still in the log with its reason',
+    );
+    assert.ok(
+      decisions.some((payload) => payload['reason_code'] === 'PASSED' && payload['trigger'] === 'future_hook_due'),
+      'and the hook below it really delivered',
+    );
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('topicRef carries the real topic; generic lines stay null (t9 F3)', () => {
+  const noon = new Date(2026, 8, 30, 12, 30, 0); // inside the 12:30 clock-hook window
+  const plans = buildProactiveCandidates({
+    now: noon,
+    presence: { present: true, updatedAt: noon.toISOString(), ttlSeconds: 60 },
+    lastUserTurnAt: new Date(noon.getTime() - 20 * 60_000),
+    inConversation: false,
+    recentUserTopics: ['明天得去把车修一下'],
+    random: () => 1,
+    limit: 8,
+  });
+  const byTrigger = new Map(plans.map((plan) => [plan.candidate.trigger, plan]));
+  assert.equal(byTrigger.get('presence_arrived')?.candidate.topicRef, null, '到家招呼是泛泛的');
+  assert.equal(byTrigger.get('conversation_dangling')?.candidate.topicRef, null, '沉默跟进是泛泛的');
+  assert.equal(byTrigger.get('future_hook_due')?.candidate.topicRef, 'lunch_hook', '时间钩子是「没聊完的事」，有话题');
+  assert.equal(byTrigger.get('topic_pool')?.candidate.topicRef, '明天得去把车修一下', '话题池就是用户自己说的话');
+  // Before t9 F3 every plan carried `topicRef: trigger`, so the engine's generic metric
+  // (`topicRef === null`) was structurally 0% and the same-topic window saw two different
+  // 沉默跟进 as "the same topic".
+  assert.ok(plans.every((plan) => plan.candidate.topicRef !== plan.candidate.trigger), 'never the trigger name');
+});
+
+test('a live conversation turns 话题池 into 热聊接话 — the production path (t9 F5)', async () => {
+  const now = new Date(2026, 8, 30, 15, 0, 0);
+  const base = {
+    now,
+    presence: null,
+    lastUserTurnAt: new Date(now.getTime() - 60_000),
+    recentUserTopics: ['周末请老李来家里坐坐'],
+    random: () => 1,
+  };
+  const idleTopic = buildProactiveCandidates({ ...base, inConversation: false }).find((plan) => plan.candidate.trigger === 'topic_pool');
+  assert.equal(idleTopic?.candidate.initiativeKind, undefined, '闲着时按触发源默认（external_sharing）');
+
+  const liveTopic = buildProactiveCandidates({ ...base, inConversation: true }).find((plan) => plan.candidate.trigger === 'topic_pool');
+  assert.equal(liveTopic?.candidate.initiativeKind, 'conversation_continuation', '对话还开着时，同一个事实是「热聊接话」');
+  assert.ok(liveTopic !== undefined);
+  // The engine honours it: a continuation clears CONVERSATION_ACTIVE and pays no interruption
+  // cost (pack §14.3 / Phase 5 的第五项目标).
+  const judged = evaluateProactiveGates(liveTopic.candidate, {
+    settings: DEFAULT_PROACTIVE_SETTINGS,
+    now,
+    offsetMinutes: undefined,
+    proactivity: 0.7,
+    conversationState: 'ACTIVE',
+    inFlightTurn: false,
+    negativeFeedback: false,
+    sceneAvailable: true,
+    speechAvailable: true,
+    privacyAllowed: true,
+    history: [],
+    userTurns: [],
+  });
+  assert.equal(judged.pass, true, `a live chat must not block the continuation: ${judged.reasonCode}`);
+  assert.equal(judged.signals.interruption_cost, 0, 'pack §14.3: continuation cooldown = 0');
+
+  // …and end to end through the loop: while the FSM is ACTIVE, the tick speaks it.
+  const root = tempDir('xixi-t9-f5-');
+  const store = openXixiStore({ dataDir: root });
+  try {
+    const loop = makeLoop({ store, now, present: null, lastUserTurnAt: new Date(now.getTime() - 60_000), state: 'ACTIVE', recentUserTopics: ['周末请老李来家里坐坐'] });
+    const entry = await loop.tickOnce();
+    assert.equal(entry?.speak, true, `expected the continuation to speak, got ${entry?.reasonCode}`);
+    assert.equal(entry?.trigger, 'topic_pool');
+    assert.equal(entry?.recommendation, 'speak');
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
 
 test('a blocked tick names the first gate that fired, in Chinese', async () => {
   const root = tempDir('xixi-t70-blocked-');

@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { DEFAULT_PROACTIVITY, parseProactiveSettings, proactiveThreshold } from '@xixi/conversation';
+import { DEFAULT_PROACTIVITY, PROACTIVE_REASON_CODES, parseProactiveSettings, proactiveThreshold } from '@xixi/conversation';
 
 import { REPO_ROOT, loadConfig } from '../../scripts/lib/harness.ts';
 import { startTrialPage } from './serve-chat-fixture.ts';
@@ -70,7 +70,7 @@ test('a reply longer than one segment is planned as N pieces with the documented
 
 test('the gate table marks passed / blocked / skipped from the single reason code', () => {
   const passed = proactiveGateRows('PASSED');
-  assert.equal(passed.length, 14, 'every reason code has a row');
+  assert.equal(passed.length, PROACTIVE_REASON_CODES.length, 'every reason code has a row');
   assert.ok(passed.every((row) => row.status === 'passed'), 'PASSED means every gate let it through');
 
   const quiet = proactiveGateRows('QUIET_HOURS');
@@ -314,7 +314,7 @@ test('the console serves the proactive card, its state, and obeys the switch ove
 
     const state = (await (await fetch(`${handle.url}/api/field/proactive`)).json()) as Record<string, any>;
     assert.equal(state.ok, true);
-    assert.equal(state.gateOrder.length, 14);
+    assert.equal(state.gateOrder.length, PROACTIVE_REASON_CODES.length);
     assert.equal(state.triggerLabels.length, 6);
     assert.equal(state.source, 'config');
     assert.equal(state.enabled, true);

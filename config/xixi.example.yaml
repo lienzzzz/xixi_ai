@@ -37,8 +37,9 @@ xixi:
 
   proactive:
     # 主动行为（方案 §15、ADR-0009 → P5/ADR-0011）。分两层：
-    # ① 硬底线由程序判定、模型不能绕过：静默时段（quiet_hours）、6 小时与当日额度（含「问模型」的次数）、
-    #    DND、隐私与同意；② 底线之上「要不要说」由模型读空气决定，下面的分数只提供候选与依据。
+    # ① 硬底线由程序判定、模型不能绕过：静默时段（quiet_hours）、6 小时与当日开口额度、当日问询额度、
+    #    新会话速率下限（new_session_min_gap_min）、DND、隐私与同意；② 底线之上「要不要说」由模型读空气决定，
+    #    下面的分数只提供候选与依据。
     # P5 之前这里是「单一冷却 + 单一阈值一票否决」，实测像定时播报；现在冷却/话题重复/未回应都只是
     # **扣分信号**（见 base_cooldown_min / same_topic_penalty / unanswered_penalty），不再单独拦人。
     # 安全底线不动：quiet_hours 仍是硬门禁，人格与模型都不能放宽它。
@@ -50,7 +51,9 @@ xixi:
     base_cooldown_min: 18          # 「刚开口过」的打扰代价衰减窗口（P5 起不再是禁止窗口；pack v02 的 new_session.cooldown_min）
     continuation_cooldown_min: 0   # 热聊中接话不付打扰代价（pack §14.3：conversation continuation cooldown = 0）
     max_per_6h: 15                 # 6 小时滑动窗口上限
-    max_per_day: 40                # 本地自然日上限（算「真正开口 + 问过模型的次数」；次数额度是费用代理——本项目没有金额级费用上限）
+    max_per_day: 40                # 本地自然日开口上限（只算真正说出口的次数）
+    max_consults_per_day: 120      # 「问模型说还是不说」的当日次数上限（与开口额度分开计——t9 F4：问询不吃开口额度；仍是费用代理，本项目没有金额级费用上限）
+    new_session_min_gap_min: 2     # 新会话速率下限：非「热聊接话」的主动与上一条开口至少隔这么久（t9 F6；热聊接话不受限，pack §14.3）
     topic_repeat_window_h: 12      # 同主题重复惩罚的窗口（pack v02：same_topic_cooldown_hours 12）
     generic_topic_cooldown_h: 24   # 没带具体话题的泛泛开口，用更长的窗口扣分（pack v02：generic 24）
     unanswered_penalty: 0.45       # 最近几条主动没人回应时的扣分（pack v02：unanswered 0.45）

@@ -4,6 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { buildEvent, toOffsetIso } from '@xixi/contracts';
 import {
   DEFAULT_PROACTIVE_SETTINGS,
   PROACTIVE_SIGNALS,
@@ -61,6 +62,27 @@ function candidate(id: string, overrides: Partial<ProactiveCandidate> = {}): Pro
 
 function minutesBefore(base: Date, minutes: number): Date {
   return new Date(base.getTime() - minutes * 60_000);
+}
+
+/**
+ * One answering user turn at `at`, straight into the log.
+ *
+ * These fixtures ask "does the *score* still hold", and an unanswered fixture would quietly turn
+ * those assertions into unanswered-streak assertions (t9 F2 escalates consecutive non-answers), so
+ * a test that is not about 未回应 answers its own deliveries here.
+ */
+function answeringTurn(store: XixiStore, sessionId: string, at: Date, turnIndex: number): void {
+  store.appendEvent(
+    buildEvent({
+      event_type: 'conversation.turn',
+      source: 'test',
+      actor: 'father',
+      confidence: 1,
+      session_id: sessionId,
+      timestamp: toOffsetIso(at),
+      payload: { session_id: sessionId, turn_index: turnIndex, role: 'user', text: '嗯，听到了。', action: 'SPEAK' },
+    }),
+  );
 }
 
 function open(dir: string): XixiStore {
@@ -262,6 +284,12 @@ test('restart: a delivered candidate is never delivered twice, and the budget co
     assert.equal(fresh.reasonCode, 'PASSED', 'a different topic right after a delivery is allowed');
     assert.ok(fresh.signals.interruption_cost > 0.8, 'it still pays the interruption grade');
 
+    // The household answers both messages (this is the "answered" part the comment above promises);
+    // without it t9 F2's consecutive-unanswered escalation — a deliberate design change — would be
+    // what holds the next candidate, not the interruption/repeat grades this test is about.
+    const session = second.createSession();
+    answeringTurn(second, session.sessionId, new Date(T0.getTime() + 4 * 60_000), 0);
+
     // Well past the window the same history costs nothing, so the grade — not a veto — was in play.
     const muchLater = new Date(T0.getTime() + 40 * 60_000);
     const relaxed = await engine.consider({ candidate: candidate('cand_3'), at: muchLater, conversationState: 'IDLE', deliver: spy.deliver });
@@ -280,6 +308,7 @@ test('quotas are recomputed from the log, so a restart cannot reset the daily bu
   try {
     const engine = engineFor(store);
     const spy = deliveries();
+    const session = store.createSession();
     // Fifteen deliveries inside the 6-hour window, 20 min apart, all with a strong candidate: the
     // rolling 6-hour quota is exactly saturated.
     const times = [5, 25, 45, 65, 85, 105, 125, 145, 165, 185, 205, 225, 245, 265, 285].map(
@@ -293,6 +322,8 @@ test('quotas are recomputed from the log, so a restart cannot reset the daily bu
         deliver: spy.deliver,
       });
       assert.equal(outcome.speak, true, `delivery ${index + 1} should pass (reason ${outcome.reasonCode})`);
+      // Answered one minute later: this test measures the rolling quota, not the unanswered streak.
+      answeringTurn(store, session.sessionId, new Date(at.getTime() + 60_000), index);
     }
     assert.equal(spy.log.length, 15);
 
@@ -359,7 +390,11 @@ test('the engine reads config.proactive instead of inventing its own defaults', 
     assert.equal(relaxed.signals.interruption_cost, 0);
     const tightened = await feedback.consider({
       candidate: candidate('cand_4'),
-      at: new Date(after.getTime() + 60_000),
+      // 3 minutes, not 1: one minute after a delivery sits inside the new-session **rate floor**
+      // (t9 F6, `new_session_min_gap_min: 2`), which would answer with `NEW_SESSION_FLOOR` instead
+      // of exercising the stacked grades this assertion is about. Three minutes is past the floor
+      // and still well inside the 18-minute interruption window.
+      at: new Date(after.getTime() + 3 * 60_000),
       conversationState: 'IDLE',
       negativeFeedback: true,
       deliver: spy.deliver,
