@@ -275,3 +275,12 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    取消态任务，就是冻结。
    本轮修法：把 t13 与 t15 合并成一条「回复管道」任务（同一位成员、同一批文件），
    再按正确依赖重建下游（t21→t22→t23/t24/t25），内容一字未丢。
+23. **运行中的团队改不了成员模型——要换模型只能归档重建**（2026-10-01 第三轮换队的真实原因）：
+   运行中的团队 `agent_teams_edit_plan` **只允许改 pending 且无 attempt 的任务**（依赖/描述/assignee），
+   `update_member` 会被拒；成员模型只在 `add_member`（或 `create({plan})`）那一刻生效，**建完就固定**。
+   因此用户要求换成员模型时：① 先确认在途工作已提交（本轮是快照 `23248f3`）——
+   归档不会丢 git 里的东西，但**工作区里没提交的改动要自己先处理**；② `agent_teams_delete` 归档当前团队
+   （任务与邮箱留档可查，不是删除）；③ 用同一套契约新建团队，**在 `add_member` 时显式给 `provider` 与 `model`**
+   （本轮是 `opencode-go` + `deepseek-v4.1-flash`，取自 `.dsh/settings.yaml.imported` 的 `agent-default-model`），
+   省略时会继承 captain 当时的模型。④ 新团队的任务编号会从 t1 重新开始，**别把两轮的 t1/t3 混为一谈**——
+   引用时写清「第几轮」。

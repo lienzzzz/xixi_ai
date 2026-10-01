@@ -1,6 +1,6 @@
 # 接手交接书（Handoff）
 
-> 最后更新：2026-10-01（第二次暂停见下面 §0）
+> 最后更新：2026-10-01（第三轮运行中见下面 §0）
 > 权威来源：`docs/progress.md`（结论与数字）、`docs/recon/*`（外部系统实测）、代码与测试
 > 若与代码不一致，以代码为准，并请立即修正本文件
 
@@ -9,54 +9,58 @@
 
 ---
 
-## 0. 本次暂停状态（2026-10-01 第二次：用户指示「暂停所有任务，一会换个模型重新开始」）
+## 0. 当前状态（2026-10-01 第三轮：成员模型换成 opencode-go/deepseek-v4.1-flash，团队 `xixi-v02-round3` 运行中）
 
-**怎么停的**：captain 中断了在途成员的会话（proactive-eng 停在 t3 中途），**t3 保持 in_progress 作为冻结点**——
-t4 到 t12 全被依赖挡住，全队没有任何可派任务。团队 `xixi-v02-round2`（6 成员、12 任务）**未归档、未删除**，
-状态与契约文件在 `.agent-teams/xixi-v02-round2`（gitignored、在本机盘上）；第一轮的 `xixi-v02-p0p1` 仍是归档态。
-上一次用户叫停（第一轮）时 t21 的工作区成了在途快照 `d6d8db7`（310/310 绿、未经验收），
-本轮 t1 已把它核对收口（见下表）。
+**怎么走到这里的**：用户先指示暂停（captain 中断了在途成员，t3 保持 in_progress 当冻结点），随后要求把成员模型
+换成 `opencode-go/deepseek-v4.1-flash`。运行中的团队**改不了成员模型**（运行中只允许改 pending 任务的依赖/描述），
+所以归档了 `xixi-v02-round2`，新建 **`xixi-v02-round3`**（6 成员全部 deepseek-v4.1-flash、12 任务，
+契约在 `.agent-teams/xixi-v02-round3`），从第二轮的在途快照 **`23248f3`** 继续。
+`xixi-v02-p0p1` 与 `xixi-v02-round2` 都是归档态（任务与邮箱留档可查）。
 
 **已经做完并验证过的（可以放心用）**：
 - **P0 基线**（`docs/benchmarks/v01-baseline.md`）：改造前的提问率、长度分布、语音四段延迟（首个可听 **P50 6.8s**）
 - **P1 提示词与上下文重写 + 回复长度分布**：跨轮复述归零、长度有分布、容量 180→480 字（`docs/progress.md` §2.18）
 - **真人感指标与黄金对话评测**：`node scripts/eval-realism.ts`（口径与局限见 `docs/benchmarks/realism-metrics.md`）
 - **回复卫生**：工具调用标记与英文思维链不再进正文（真实 MiMo 复现缺陷现场并验证清除）
-- **主动性 V2**：社会预算 + 读空气 + 模型决定是否开口；机制成立，**但 Phase 5 两项验收未达标**
+- **主动性 V2 机制**：社会预算 + 读空气 + 模型决定是否开口；六条缺陷的修复**已交付**（见下表 t1）
 - **文档收口**：README / progress / handoff / ADR / 两份评测报告
 
-**第二轮进展（团队 `xixi-v02-round2`，契约与状态在 `.agent-teams/xixi-v02-round2`）**：
+**第三轮任务（团队 `xixi-v02-round3`，契约与状态在 `.agent-teams/xixi-v02-round3`）**：
 
 | 任务 | 状态 |
 |---|---|
-| t1 核对并补完 t21 在途快照 | ✅ 完成、t2 评审 **pass**；交付 **`df294b7`**（补完时间闸门时段词误拦与适配器无测试两条缺口；`npm test` 314/314、check:docs 92 份；**已推送**） |
-| t3 修 Phase 5 六条缺陷 + 交付时间线命令 | ⏸ **在途暂停**（成员会话已中断，attempt 仍归 proactive-eng）；工作区已作在途快照 **`23248f3`**（`npm test` 319/319、check:docs 92 份——**绿但未经验收**） |
-| t4 独立复验 Phase 5 时间线（五项目标判定报告） | ⏸ pending，依赖 t3 |
-| t5 评审 t3 | ⏸ pending，依赖 t4 |
-| t6 / t7 pack **Phase 2** 工具注册表与语音接工具 + 评审 | ⏸ pending |
-| t8 / t9 pack **Phase 3** 未完话题与话题引擎 + 评审 | ⏸ pending |
-| t10 / t11 pack **Phase 4** 记忆关系自我反馈 + 评审 | ⏸ pending |
-| t12 集成收口（文档同步 + 全量门禁） | ⏸ pending，依赖 t11、t4 |
+| t1 修 Phase 5 六条缺陷 + 交付时间线命令 | ✅ 完成、captain 已提交 **`626c201`**（时间线命令五项目标全过：11 次／18.2%／81.8%／11 比 5 降 54.5%／热聊接话 8 次；`npm test` 320/320、check:docs 92 份）——**独立复验与评审尚未做** |
+| t2 独立复验 Phase 5 五项目标（判定报告） | ⏳ pending，依赖 t1 |
+| t3 评审 t1 | ⏳ pending，依赖 t2 |
+| t4 / t5 pack **Phase 2** 工具注册表与语音接工具 + 评审 | ⏳ pending |
+| t6 / t7 pack **Phase 3** 未完话题与话题引擎 + 评审 | ⏳ pending |
+| t8 / t9 pack **Phase 4** 记忆关系自我反馈 + 评审 | ⏳ pending |
+| t10 / t11 收尾微任务：engine.ts 分钟令牌按真实分钟数折进读数 + 评审 | ⏳ pending |
+| t12 集成收口（文档同步 + 全量门禁） | ⏳ pending，依赖 t11、t2 |
+| 更早的交付 | t21 快照核对收口 → **`df294b7`**（第二轮 t1，评审 pass、已推送）；在途快照 **`23248f3`** |
 
-**恢复方式（换模型后二选一）**：
-1. **续用本团队**：用户明确要求恢复时用 `agent_teams_resume`（理由必填，见 AGENTS 队长协议第 9 条）；
-   t3 的 attempt 还在，给 proactive-eng 发消息即可续跑同一尝试；接手的 captain 先读本节与 `.agent-teams` 里的 t3 契约。
-2. **换模型重建**：现有 6 名成员的模型路线固定为 `opencode-go/mimo-v2.6-flash` 且运行中不可改——
-   若要换成员模型，就归档本团队，照上表与状态文件里的契约新建团队（改依赖在前、取消在后，AGENTS §9.22）。
+**恢复方式**：若再次暂停，用户明确要求后用 `agent_teams_resume`（理由必填）；t1 已交付，续跑就是让调度器继续派单。
+成员模型固定为 `opencode-go/deepseek-v4.1-flash`（运行中不可改，要换就再归档重建）。
 改造包在 `E:\worker2\xixi_v02_refactor_pack`（**未跟踪**，是否入库由用户决定）。
 
-**两件排队的事（恢复后处理）**：
+**两件排队的事（都已进第三轮 DAG）**：
 1. **3 处文档漂移** → 归 t12：README、`docs/design/conversation.md`、`docs/README.md` 仍写「产线未订阅
    onNotice / 页面不可区分 / SILENCE_ARTIFACT_ONLY 不存在」，实际产线已订阅并区分沉默原因、代码名 `ARTIFACT_ONLY_REPLY`；
-2. **engine.ts 中文分钟令牌恒按 30 分**（快照既有、45 分钟容差下的窄假阴性，t2 评审观察）→
-   在 **t11 之后、t12 之前**插一个收尾微任务：先 `edit_plan` 给 pending 的 t12 补依赖、再建任务（AGENTS §9.22）。
+2. **engine.ts 中文分钟令牌恒按 30 分**（快照既有、45 分钟容差下的窄假阴性，t2 评审观察）→ 已成第三轮 **t10**。
 
-**不得声称已通过的**：pack Phase 5 的 12 小时时间线验收（generic 占比 33.3% 高于 20%、两次未回应不降频）。
-证据与六条缺陷见 `docs/verification/t9-proactive-v2-verification-2026-10-01.md` 与
+**t12 还要如实记录两处已知问题（只记录、不在本轮修）**：
+- 控制台 `proactiveSettingsToConfig` 不回写部分设置（t63 既有；本轮新增的 `max_consults_per_day`、
+  `new_session_min_gap_min`、`hot_chat_*` 同此）——若私有配置覆盖文件里调过这些键，再用页面保存任一参数就会回落默认
+  （配置模板见 `config/xixi.example.yaml`，本机没有私有覆盖文件）；
+- 黄金语料仍缺 quiet-hours 硬底线用例（t9 §4.3 建议；动语料会连带改真人感报告数字）。
+
+**不得声称已通过的**：pack Phase 5 的 12 小时时间线验收——t1 的实现**已交付并自证五项目标全过**，
+但**独立复验（t2）与评审（t3）还没做**，在它们给出 pass 之前不得宣布通过。上一轮未达标的证据与六条缺陷见
+`docs/verification/t9-proactive-v2-verification-2026-10-01.md` 与
 [`docs/adr/0011-proactive-decision-ownership.md`](adr/0011-proactive-decision-ownership.md)。
 
-**坑（本轮新记的，都在 `AGENTS.md` §9）**：取消被依赖的任务会让下游永久卡死（§9.22）；
-提交要按文件不要按目录（§9.7）；文档里的命令必须原样可跑（§9.8）。
+**坑（都在 `AGENTS.md` §9）**：取消被依赖的任务会让下游永久卡死（§9.22）；提交要按文件不要按目录（§9.7）；
+文档里的命令必须原样可跑（§9.8）；运行中的团队改不了成员模型，要换模型只能归档重建（§9.23）。
 
 ---
 
