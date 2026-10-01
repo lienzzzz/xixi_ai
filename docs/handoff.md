@@ -29,15 +29,23 @@
 
 | 任务 | 状态 |
 |---|---|
-| t1 修 Phase 5 六条缺陷 + 交付时间线命令 | ✅ 完成、captain 已提交 **`626c201`**（时间线命令五项目标全过：11 次／18.2%／81.8%／11 比 5 降 54.5%／热聊接话 8 次；`npm test` 320/320、check:docs 92 份）——**独立复验与评审尚未做** |
-| t2 独立复验 Phase 5 五项目标（判定报告） | ⏳ pending，依赖 t1 |
-| t3 评审 t1 | ⏳ pending，依赖 t2 |
-| t4 / t5 pack **Phase 2** 工具注册表与语音接工具 + 评审 | ⏳ pending |
+| t1 修 Phase 5 六条缺陷 + 交付时间线命令 | ✅ 完成 → **`626c201`**（时间线命令五项目标全过） |
+| t2 独立复验 Phase 5 | ✅ 完成 → **`38a0528`**（报告 `docs/verification/t2-timeline-independent-verification-2026-10-01.md`；五项目标独立复算成立，三处偏差见下） |
+| t3 评审 t1 | ✅ **pass**（未删弱断言、未把测试挪出默认门禁；四条 low 观察见下） |
+| t4 pack **Phase 2** 工具注册表与语音接工具 | ✅ 完成 → **`87b147c`**（`npm test` 336/336、自检 32/32；语音入口与 console 共用同一注册表） |
+| t5 评审 t4 | ✅ **pass**（独立探针实测：第 5 轮 `tools=undefined`、dangerous 工具不暴露且执行 0 次、guest 与 proactive 下 write 一律 deny） |
 | t6 / t7 pack **Phase 3** 未完话题与话题引擎 + 评审 | ⏳ pending |
 | t8 / t9 pack **Phase 4** 记忆关系自我反馈 + 评审 | ⏳ pending |
-| t10 / t11 收尾微任务：engine.ts 分钟令牌按真实分钟数折进读数 + 评审 | ⏳ pending |
-| t12 集成收口（文档同步 + 全量门禁） | ⏳ pending，依赖 t11、t2 |
+| t10 / t11 收尾微任务：engine.ts 分钟令牌 + 评审 | ⏳ pending |
+| t13 收尾质量微任务：理由码断言强度 + 时间线覆盖问询额度路径 | ⏳ pending |
+| t14 收尾：把工具链与语言接线推及全部 live 入口（t5-F1/F3） | ⏳ pending |
+| t12 集成收口（文档同步 + 全量门禁） | ⏳ pending，依赖 t11、t2、t13、t14 |
 | 更早的交付 | t21 快照核对收口 → **`df294b7`**（第二轮 t1，评审 pass、已推送）；在途快照 **`23248f3`** |
+
+**t5 评审的四条观察处置**：T5-F1（medium：文字 CLI、设备自检、真人感评测、对话评测四个 live 入口还没接入同一工具链）
+与 T5-F3（low：文字 CLI 未传 language，英文推理可能进 TUI）→ 已成 **t14**；
+T5-F2（low：agent-loop 的 now 是回合开始快照）与 T5-F4（low：两处内部字样正则不一致）→ 归 t12 记录为已知缺口。
+**文档里不得笼统写「语音与文字共用同一条工具链」**，必须逐入口写明（t12 负责）。
 
 **恢复方式**：若再次暂停，用户明确要求后用 `agent_teams_resume`（理由必填）；t1 已交付，续跑就是让调度器继续派单。
 成员模型固定为 `opencode-go/deepseek-v4.1-flash`（运行中不可改，要换就再归档重建）。
