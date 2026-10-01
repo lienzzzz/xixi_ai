@@ -122,6 +122,12 @@ npm run voice:noise            # 噪声鲁棒性回归：干净+噪声夹具 →
 # 调试与文档
 npm run turns -- data/chat/xixi.sqlite 6   # 看事件日志里的最近轮次（含 tool_name）
 node scripts/probe-tools.ts                # 诊断实时工具路径
+node scripts/chat.ts --print-wiring        # 四个 live 入口都支持（离线、不调模型、不建库）：
+                                           #   打印该入口交给模型的工具链（language / maxToolRounds / 工具与权限），
+                                           #   用来证明「同一套工具与权限」在入口之间逐字段相同。
+                                           #   另有 scripts/voice-device-check.ts、scripts/eval-realism.ts、
+                                           #   scripts/eval-conversation.ts 同样支持；设备自检入口没有离线端到端
+                                           #   证据（端到端需真实 WAV + 硬件 + 真实 ASR），见 docs/progress.md §4
 npm run check:docs                         # 文档一致性检查（链接/文件引用/新鲜度），提交前应跑
 ```
 
