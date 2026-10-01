@@ -35,7 +35,8 @@
 | t4 pack **Phase 2** 工具注册表与语音接工具 | ✅ 完成 → **`87b147c`**（`npm test` 336/336、自检 32/32；语音入口与 console 共用同一注册表） |
 | t5 评审 t4 | ✅ **pass**（独立探针实测：第 5 轮 `tools=undefined`、dangerous 工具不暴露且执行 0 次、guest 与 proactive 下 write 一律 deny） |
 | t6 pack **Phase 3** 未完话题与话题引擎 | ✅ 完成 → **`8ee01ba`**（`npm test` 353/353、自检 32/32；Day1 说去办证 → Day2 主动追问 → 回应后 resolve 不再重复；含两处契约外必要配套） |
-| t7 评审 t6 | ⏳ pending（契约已写明：必须逐处核对 envelope 事件枚举与 world-state 迁移列表这两处披露） |
+| t7 评审 t6 | ✅ **pass**（独立探针复现「追问→收口→不再重复」；两处契约外披露判为必要配套；三条观察全部属实） |
+| t15 修复 t7-F1：收口不与被问的事挂钩（无关内容会静默关掉话题） | ⏳ pending |
 | t8 / t9 pack **Phase 4** 记忆关系自我反馈 + 评审 | ⏳ pending |
 | t10 / t11 收尾微任务：engine.ts 分钟令牌 + 评审 | ⏳ pending |
 | t13 收尾质量微任务：理由码断言强度 + 时间线覆盖问询额度路径 | ⏳ pending |
