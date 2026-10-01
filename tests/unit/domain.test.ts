@@ -11,6 +11,7 @@ import {
   listMigrationFiles,
   loadXixiConfig,
   migrate,
+  OpenThreadStore,
   openXixiStore,
   parseXixiConfig,
   personalityProperty,
@@ -186,6 +187,95 @@ test('the shipped example configuration loads and validates', () => {
   // The shipped default is 0.85 (ADR-0009 raised it twice: 0.55 → 0.70 → 0.85); it is what moves
   // the proactive threshold from 0.585 down to 0.45 + 0.30 × 0.15 = 0.495.
   assert.equal(config.personality.base.proactivity, 0.85);
+  // pack Phase 3 的 `open_threads` 段（可选段；数值与代码默认的一致性在
+  // tests/unit/core/topic-engine.test.ts 里逐字比较）。
+  assert.equal(config.openThreads?.max_attempts, 2);
+  assert.equal(config.openThreads?.followup_window_h, 48);
+});
+
+test('未完话题：状态机、投影与日志在同一个事务里保持一致', () => {
+  const store = tempStore();
+  try {
+    const threads = new OpenThreadStore(store);
+    const created = threads.create({
+      threadId: 'thread_test01',
+      summary: '明天下午我要去镇上办证',
+      subject: '去镇上办证',
+      followAfter: '2026-09-30T14:00:00+08:00',
+      expireAt: '2026-10-02T14:00:00+08:00',
+      followUpHint: '你之前说过要去镇上办证，后来怎么样了？',
+      importance: 0.85,
+      sourceEventId: 'evt_00000000-0000-4000-8000-000000000001',
+    });
+    assert.equal(created.created, true);
+    assert.equal(created.thread.status, 'candidate');
+    assert.equal(created.event?.event_type, 'open_thread.changed');
+    assert.equal(created.event?.schema_version, 1);
+    assert.equal((created.event?.payload as { status: string }).status, 'candidate');
+    assert.equal((created.event?.payload as { previous_status: string | null }).previous_status, null);
+
+    // 幂等：同一个 id 再建一次不会写第二条事件，也不会覆盖已存在的那条。
+    const again = threads.create({ threadId: 'thread_test01', summary: '换一句别的说法' });
+    assert.equal(again.created, false);
+    assert.equal(again.event, null);
+    assert.equal(again.thread.summary, '明天下午我要去镇上办证');
+    // 话题去重：归一化后同一句话不再记第二遍（句末标点不算区别）。
+    const duplicate = threads.create({ threadId: 'thread_test02', summary: '明天下午我要去镇上办证。' });
+    assert.equal(duplicate.created, false);
+    assert.equal(duplicate.thread.threadId, 'thread_test01');
+    assert.equal(store.readEvents({ type: 'open_thread.changed', limit: Number.MAX_SAFE_INTEGER }).length, 1);
+
+    // 「到点了」是严格的时间比较：14:00 之前不问，14:00 起可以问。
+    assert.equal(threads.due(new Date('2026-09-30T13:59:00+08:00')).length, 0);
+    assert.equal(threads.due(new Date('2026-09-30T14:00:00+08:00')).length, 1);
+
+    // 说出口 → offered，次数加一，事件里留着上一个状态。
+    const offered = threads.transition('thread_test01', 'offered', {
+      offered: true,
+      at: new Date('2026-09-30T15:00:00+08:00'),
+      note: '主动追问了',
+    });
+    assert.equal(offered?.thread.attempts, 1);
+    assert.equal(offered?.thread.lastOfferedAt, '2026-09-30T15:00:00.000+08:00');
+    assert.equal((offered?.event?.payload as { previous_status: string }).previous_status, 'candidate');
+    // 幂等：已经是这个状态就不再写事件。
+    assert.equal(threads.transition('thread_test01', 'offered'), null);
+    assert.equal(store.readEvents({ type: 'open_thread.changed', limit: Number.MAX_SAFE_INTEGER }).length, 2);
+
+    // 收口之后**不允许**被重新打开（「被回应后不再重复问」靠这里兜底）。
+    threads.transition('thread_test01', 'resolved', { at: new Date('2026-09-30T15:05:00+08:00'), note: '用户回答：办好了' });
+    expectCode('INVALID_OPEN_THREAD', () => threads.transition('thread_test01', 'candidate'));
+    expectCode('UNKNOWN_OPEN_THREAD', () => threads.transition('thread_nope', 'resolved'));
+
+    assert.equal(store.openThreadHistory('thread_test01').length, 3, 'candidate → offered → resolved');
+    assert.deepEqual(
+      store.openThreads().map((thread) => [thread.threadId, thread.status]),
+      [['thread_test01', 'resolved']],
+    );
+    assert.equal(store.openThreads({ status: 'candidate' }).length, 0);
+    assert.equal(store.openThread('thread_nope'), null);
+  } finally {
+    store.close();
+  }
+});
+
+test('配置里的 open_threads 段是可选的：没有它的旧配置照旧加载', () => {
+  const legacy = parseXixiConfig(
+    `xixi:
+  identity: {name: 西西, language: zh-CN, timezone: Asia/Shanghai}
+  models:
+    llm: {provider: mimo, model: mimo-v2.6-flash, thinking_realtime: false}
+    asr: {provider: mimo, model: mimo-v2.5-asr}
+    tts: {provider: mimo, model: mimo-v2.5-tts}
+  personality: {base: {proactivity: 0.85}}
+  proactive: {}
+  memory: {}
+  privacy: {}
+  features: {}
+`,
+    'legacy.yaml',
+  );
+  assert.equal(legacy.openThreads, undefined, '缺段 = 出厂默认，不是加载失败');
 });
 
 test('malformed configuration is refused with a named path', () => {

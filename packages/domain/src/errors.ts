@@ -8,6 +8,8 @@ export type DomainErrorCode =
   | 'UNKNOWN_PERSONALITY_PROPERTY'
   | 'PROPERTY_OUT_OF_RANGE'
   | 'INVALID_WORLD_STATE'
+  | 'UNKNOWN_OPEN_THREAD'
+  | 'INVALID_OPEN_THREAD'
   | 'INVALID_CONFIG';
 
 export class DomainError extends Error {

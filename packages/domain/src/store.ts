@@ -16,6 +16,15 @@ import {
 import { type Clock, systemClock } from './clock.ts';
 import { DomainError } from './errors.ts';
 import { migrate, type AppliedMigration } from './migrations.ts';
+import {
+  OPEN_THREAD_SETTLED_STATUSES,
+  type NewOpenThread,
+  type OpenThread,
+  type OpenThreadChange,
+  type OpenThreadQuery,
+  type OpenThreadStatus,
+  type TransitionOpenThreadOptions,
+} from './open-threads.ts';
 import { clampPersonality, personalityProperty } from './personality.ts';
 
 export const DEFAULT_DATA_DIR = 'data';
@@ -211,6 +220,23 @@ interface WorldStateRow {
   updated_at: string;
   confidence: number;
   ttl_seconds: number;
+}
+
+interface OpenThreadRow {
+  thread_id: string;
+  summary: string;
+  subject: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  follow_after: string | null;
+  expire_at: string | null;
+  follow_up_hint: string | null;
+  importance: number;
+  attempts: number;
+  last_offered_at: string | null;
+  source_event_id: string | null;
+  note: string | null;
 }
 
 /**
@@ -842,6 +868,174 @@ export class XixiStore {
       | undefined;
     return row?.version ?? 1;
   }
+
+  // ------------------------------------------------------- open threads (pack Phase 3)
+  //
+  // 未完话题（《方案》§10）：每条状态变化都在**同一个事务**里写表 + 写一条
+  // `open_thread.changed` 事件（同 `recordTurn`/`recordPresenceChanged` 的理由：投影是派生的，
+  // 不能与日志不一致）。表可以被日志重建，所以重启后「惦记着什么」不丢、也不会重复问。
+
+  /**
+   * 插入一条话题。
+   *
+   * 幂等：同 `thread_id` 已存在时**不覆盖**（返回 `created: false`，不写事件）。话题去重由
+   * 调用方（`OpenThreadStore.create` 的归一化 `summary` 比较）负责，这里只管 id。
+   */
+  insertOpenThread(input: NewOpenThread): OpenThreadChange {
+    this.#assertOpen();
+    const at = input.createdAt ?? this.#now();
+    const thread: OpenThread = {
+      threadId: input.threadId,
+      summary: input.summary,
+      subject: input.subject ?? null,
+      status: 'candidate',
+      createdAt: at,
+      updatedAt: at,
+      followAfter: input.followAfter ?? null,
+      expireAt: input.expireAt ?? null,
+      followUpHint: input.followUpHint ?? null,
+      importance: clamp01(input.importance ?? 0.5),
+      attempts: 0,
+      lastOfferedAt: null,
+      sourceEventId: input.sourceEventId ?? null,
+      note: input.note ?? null,
+    };
+    return this.#transaction(() => {
+      const inserted = this.#db
+        .prepare(
+          `INSERT INTO open_threads (
+             thread_id, schema_version, summary, subject, status, created_at, updated_at,
+             follow_after, expire_at, follow_up_hint, importance, attempts, last_offered_at,
+             source_event_id, note
+           ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+           ON CONFLICT(thread_id) DO NOTHING`,
+        )
+        .run(
+          thread.threadId,
+          thread.summary,
+          thread.subject,
+          thread.status,
+          thread.createdAt,
+          thread.updatedAt,
+          thread.followAfter,
+          thread.expireAt,
+          thread.followUpHint,
+          thread.importance,
+          thread.sourceEventId,
+          thread.note,
+        );
+      if (Number(inserted.changes) === 0) {
+        const existing = this.openThread(thread.threadId);
+        if (existing === null) {
+          throw new DomainError('INVALID_OPEN_THREAD', `thread ${thread.threadId} vanished right after a no-op insert`);
+        }
+        return { thread: existing, event: null, created: false };
+      }
+      const event = this.appendEvent(
+        buildEvent({
+          event_type: 'open_thread.changed',
+          source: input.source ?? 'conversation',
+          actor: 'system',
+          confidence: 1,
+          timestamp: at,
+          payload: openThreadPayload(thread, null),
+        }),
+      );
+      return { thread, event, created: true };
+    });
+  }
+
+  /**
+   * 迁移一条话题的状态。已经是目标状态时返回 `null`（幂等，不写事件）。
+   *
+   * 不允许把已收口（`resolved`/`snoozed`/`exhausted`）的话题重新打开：收口之后不再重复问，
+   * 这正是 Phase 3 验收要求的行为，所以这里靠错误而不是靠调用方自觉。
+   */
+  transitionOpenThread(
+    threadId: string,
+    status: OpenThreadStatus,
+    options: TransitionOpenThreadOptions = {},
+  ): OpenThreadChange | null {
+    this.#assertOpen();
+    const current = this.openThread(threadId);
+    if (current === null) {
+      throw new DomainError('UNKNOWN_OPEN_THREAD', `no open thread ${threadId}`);
+    }
+    if (current.status === status) return null;
+    if (OPEN_THREAD_SETTLED_STATUSES.includes(current.status) && !OPEN_THREAD_SETTLED_STATUSES.includes(status)) {
+      throw new DomainError(
+        'INVALID_OPEN_THREAD',
+        `thread ${threadId} is already ${current.status}; a settled thread must not be reopened`,
+      );
+    }
+    const at = options.at ?? this.#now();
+    const updatedAt = toOffsetIso(at);
+    const next: OpenThread = {
+      ...current,
+      status,
+      updatedAt,
+      note: options.note ?? null,
+      attempts: options.offered === true ? current.attempts + 1 : current.attempts,
+      lastOfferedAt: options.offered === true ? updatedAt : current.lastOfferedAt,
+    };
+    return this.#transaction(() => {
+      this.#db
+        .prepare(
+          `UPDATE open_threads
+             SET status = ?, updated_at = ?, note = ?, attempts = ?, last_offered_at = ?
+           WHERE thread_id = ?`,
+        )
+        .run(next.status, next.updatedAt, next.note, next.attempts, next.lastOfferedAt, next.threadId);
+      const event = this.appendEvent(
+        buildEvent({
+          event_type: 'open_thread.changed',
+          source: 'conversation',
+          actor: 'system',
+          confidence: 1,
+          timestamp: updatedAt,
+          payload: openThreadPayload(next, current.status),
+        }),
+      );
+      return { thread: next, event, created: false };
+    });
+  }
+
+  openThread(threadId: string): OpenThread | null {
+    this.#assertOpen();
+    const row = this.#db.prepare('SELECT * FROM open_threads WHERE thread_id = ?').get(threadId) as unknown;
+    return row === undefined ? null : toOpenThread(row as OpenThreadRow);
+  }
+
+  /** 一条或多条状态过滤；默认按「该追问的时间」排序（最该问的在前）。 */
+  openThreads(query: OpenThreadQuery = {}): OpenThread[] {
+    this.#assertOpen();
+    const wanted: OpenThreadStatus[] =
+      query.status === undefined ? [] : typeof query.status === 'string' ? [query.status] : [...query.status];
+    const params: Array<string | number> = [];
+    const where =
+      wanted.length === 0
+        ? ''
+        : `WHERE status IN (${wanted.map(() => '?').join(', ')})`;
+    params.push(...wanted);
+    params.push(query.limit ?? Number.MAX_SAFE_INTEGER);
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM open_threads ${where}
+         ORDER BY (follow_after IS NULL), follow_after ASC, created_at ASC, thread_id ASC
+         LIMIT ?`,
+      )
+      .all(...params) as unknown as OpenThreadRow[];
+    return rows.map(toOpenThread);
+  }
+
+  /** 这条话题写过的所有状态变化，按日志顺序（审计与「重放能不能重建」的对照）。 */
+  openThreadHistory(threadId: string): StoredEvent[] {
+    this.#assertOpen();
+    return this.readEvents({ type: 'open_thread.changed', limit: Number.MAX_SAFE_INTEGER }).filter((event) => {
+      const payload = event.payload as Record<string, unknown>;
+      return payload['thread_id'] === threadId;
+    });
+  }
 }
 
 /**
@@ -868,6 +1062,51 @@ function toWorldStateEntry(row: WorldStateRow): WorldStateEntry {
     confidence: row.confidence,
     ttlSeconds: row.ttl_seconds,
   };
+}
+
+function toOpenThread(row: OpenThreadRow): OpenThread {
+  return {
+    threadId: row.thread_id,
+    summary: row.summary,
+    subject: row.subject,
+    status: row.status as OpenThreadStatus,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    followAfter: row.follow_after,
+    expireAt: row.expire_at,
+    followUpHint: row.follow_up_hint,
+    importance: row.importance,
+    attempts: row.attempts,
+    lastOfferedAt: row.last_offered_at,
+    sourceEventId: row.source_event_id,
+    note: row.note,
+  };
+}
+
+/**
+ * `open_thread.changed` 的 payload：**每个字段都写**（可选的写 null），这样一条事件自带全部事实，
+ * 不需要再去查表才能读懂它；旧事件（字段更少）仍然合法 —— 新字段在 schema 里是可选的。
+ */
+function openThreadPayload(thread: OpenThread, previousStatus: OpenThreadStatus | null): Record<string, JsonValue> {
+  return {
+    thread_id: thread.threadId,
+    status: thread.status,
+    previous_status: previousStatus,
+    summary: thread.summary,
+    subject: thread.subject,
+    follow_after: thread.followAfter,
+    expire_at: thread.expireAt,
+    follow_up_hint: thread.followUpHint,
+    importance: thread.importance,
+    attempts: thread.attempts,
+    source_event_id: thread.sourceEventId,
+    note: thread.note,
+  };
+}
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(0, value));
 }
 
 function sessionIdOf(event: EventEnvelope): string | null {  const payload = event.payload as JsonValue;

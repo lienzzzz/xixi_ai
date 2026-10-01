@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "xixi.event.v1/open_thread.changed",
+  "title": "open_thread.changed payload v1",
+  "description": "一条「没聊完的事」（OpenThread，pack Phase 3 / 方案 §10）的状态变化：候选、说出口、被回应后收口。只存程序提取出的事实、状态与计数，不存模型私有推理（铁律 5）。这是**加法**：新事件类型，schema_version 仍是 1，旧事件照旧校验。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["thread_id", "status", "summary"],
+  "properties": {
+    "thread_id": { "type": "string", "pattern": "^thread_[a-z0-9]{4,32}$" },
+    "status": {
+      "type": "string",
+      "enum": ["candidate", "offered", "engaged", "resolved", "snoozed", "exhausted"]
+    },
+    "previous_status": { "type": ["string", "null"], "maxLength": 20 },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "subject": { "type": ["string", "null"], "maxLength": 60 },
+    "follow_after": { "type": ["string", "null"], "maxLength": 40 },
+    "expire_at": { "type": ["string", "null"], "maxLength": 40 },
+    "follow_up_hint": { "type": ["string", "null"], "maxLength": 120 },
+    "importance": { "type": "number", "minimum": 0, "maximum": 1 },
+    "attempts": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "source_event_id": { "type": ["string", "null"], "maxLength": 80 },
+    "note": { "type": ["string", "null"], "maxLength": 200 }
+  }
+}

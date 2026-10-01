@@ -50,6 +50,33 @@ export {
   type SegmentedReply,
 } from './segments.ts';
 export {
+  classifyThreadAnswer,
+  DEFAULT_TOPIC_ENGINE_SETTINGS,
+  extractOpenThreads,
+  followUpHintFor,
+  openThreadFollowUpComponents,
+  parseTopicEngineSettings,
+  TOPIC_SOURCES,
+  TopicEngine,
+  type ExtractOpenThreadInput,
+  type OpenThreadFollowUp,
+  type OpenThreadView,
+  type ReconcileResult,
+  type ThreadAnswerKind,
+  type TopicCandidate,
+  type TopicEngineOptions,
+  type TopicEngineSettings,
+  type TopicEngineStatus,
+  type TopicSource,
+} from './topic-engine.ts';
+export {
+  readTopicHistory,
+  TopicHistory,
+  topicOfferedWithin,
+  topicOutcome,
+  type TopicHistoryEntry,
+} from './topic-history.ts';
+export {
   DEFAULT_PROACTIVE_SETTINGS,
   DEFAULT_PROACTIVITY,
   deriveProactiveSignals,

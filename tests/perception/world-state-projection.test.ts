@@ -37,15 +37,18 @@ function tempStore(stepMs = 0) {
 
 test('002_world_state is a new, additive migration', () => {
   const files = listMigrationFiles();
+  // 契约外的必要改动（pack Phase 3 的 t6）：未完话题要一张新表，所以多了一个**新增**的迁移
+  // `003_open_threads.sql`。这条断言的用意是「已发布的迁移只能新增、不能改写」，因此列表必须把
+  // 每一个已发布文件都写出来（改写 001/002 仍然会被抓住），新迁移就把它加进来。
   assert.deepEqual(
     files.map((file) => file.name),
-    ['001_initial.sql', '002_world_state.sql'],
+    ['001_initial.sql', '002_world_state.sql', '003_open_threads.sql'],
     '已发布的迁移只能新增，不能改写',
   );
   const store = tempStore();
   try {
-    // 打开一个空库会把两个迁移都跑掉；第二次打开不重跑（checksum 守护见 domain.test.ts）。
-    assert.equal(store.appliedMigrations.length, 2);
+    // 打开一个空库会把所有迁移都跑掉；第二次打开不重跑（checksum 守护见 domain.test.ts）。
+    assert.equal(store.appliedMigrations.length, files.length);
     assert.equal(store.worldStateSchemaVersion(), 1, '投影也带 schema_version（铁律 10）');
   } finally {
     store.close();

@@ -87,10 +87,17 @@ import {
   scoreProactiveCandidate,
   SILENCE_TOKEN,
   splitReplyIntoSegments,
+  TOPIC_SOURCES,
+  TopicEngine,
+  openThreadFollowUpComponents,
+  type OpenThreadFollowUp,
+  type TopicEngineStatus,
+  type TopicSource,
   type ProactiveDelivery,
   type ProactiveDecider,
   type ProactiveModelInput,
   type ProactiveModelReasonCode,
+  type ProactiveInitiativeKind,
   type ProactiveReasonCode,
   type ProactiveRetiredReasonCode,
   type ProactiveSettings,
@@ -2046,7 +2053,21 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   if (proactiveSnapshot.source === 'console') {
     log(`[proactive] 已从审计记录恢复设置（${proactiveSnapshot.updatedAt ?? '?'}）：${proactiveSnapshot.settings.enabled ? '允许主动开口' : '已关闭'}`);
   }
+  /**
+   * 话题引擎（pack Phase 3）：未完话题的提取与追问候选。
+   *
+   * 它读的是用户自己的轮次与话题日志，**不阻塞任何一次回复**：提取与收口都发生在考虑循环的
+   * 下一次 tick（《方案》§11.1 的异步提取）。`config.open_threads` 段控制窗口与次数上限。
+   */
+  const topicEngine = new TopicEngine({ store, config: config.openThreads, clock: () => new Date() });
   function proactivePayload(): ProactiveConsoleState & { readonly ok: true } {
+    const at = new Date();
+    /**
+     * 面板**先与日志对齐，再报告**：话题表是投影，而「已经问过了」这件事只有日志知道 ——
+     * 不对齐的话，刚说出口的那条会在面板上显示成「还没问」（下一次 tick 才补上）。
+     * 对齐是幂等的，所以刷新页面多少次都不会多记一件事。
+     */
+    topicEngine.reconcile(at);
     return {
       ok: true,
       ...proactiveConsoleState({
@@ -2055,8 +2076,9 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
         source: proactiveSnapshot.source,
         updatedAt: proactiveSnapshot.updatedAt,
         changes: proactiveSnapshot.changes,
-        now: new Date(),
+        now: at,
         personality: store.selfProfile(),
+        topicEngine,
       }),
     };
   }
@@ -2091,6 +2113,21 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
     },
     readLastUserTurnAt: () => lastUserTurnAt(store, session.sessionId),
     readRecentUserTopics: () => recentUserTopics(store, session.sessionId),
+    /**
+     * pack Phase 3：先对齐（提取新话题、把已说出口的标成 offered、按用户的回答收口），
+     * 再取「现在该追问的」。两步都幂等，所以每个 tick 都跑一遍是安全的。
+     */
+    readOpenThreads: () => {
+      const at = new Date();
+      const reconciled = topicEngine.reconcile(at);
+      if (reconciled.created.length > 0) {
+        log(`[topic] 记下 ${reconciled.created.length} 件未完的事：${reconciled.created.map((thread) => thread.summary).join('｜')}`);
+      }
+      if (reconciled.settled.length > 0) {
+        log(`[topic] 收口 ${reconciled.settled.length} 件：${reconciled.settled.map((thread) => `${thread.summary} → ${thread.status}`).join('｜')}`);
+      }
+      return topicEngine.followUps(at);
+    },
     readSessionId: () => session.sessionId,
     replyLimits: config.reply,
     synthesizeProvider: loopSynthesizeProvider,
@@ -3716,6 +3753,17 @@ export interface ProactiveConsoleState {
   readonly audit: readonly { readonly at: string; readonly sequence: number; readonly changes: readonly string[] }[];
   /** `true` when the engine would consider a candidate at all (the switch, in one word). */
   readonly enabled: boolean;
+  /**
+   * pack Phase 3：现在记着哪些未完话题、哪些该追问了、说过的话题后来怎么样。
+   *
+   * 有话题引擎时才有（控制台装配处会传）；没有它时是 `null`，而不是假装「没有惦记的事」。
+   */
+  readonly openThreads?: TopicEngineStatus | null;
+  /**
+   * 《方案》§9 的话题来源，以及**这个控制台今天真能产出哪些**（Phase 3 只实现 `open_thread`）。
+   * 与 `triggerLabels.live` 同一个原则：声明了却没有生产者的来源必须如实标成 `false`，不能装作能用。
+   */
+  readonly topicSources?: readonly { readonly source: TopicSource; readonly live: boolean }[];
 }
 
 /**
@@ -3735,6 +3783,8 @@ export function proactiveConsoleState(options: {
   readonly personality: Readonly<Record<string, number>>;
   readonly offsetMinutes?: number;
   readonly historyLimit?: number;
+  /** pack Phase 3 的话题引擎；传了就在面板里如实报出未完话题与话题历史。 */
+  readonly topicEngine?: TopicEngine;
 }): ProactiveConsoleState {
   const decisions = proactiveDecisionHistory(options.store, options.historyLimit ?? 8);
   const last = decisions[decisions.length - 1] ?? null;
@@ -3765,6 +3815,8 @@ export function proactiveConsoleState(options: {
     decisions,
     audit: proactiveSettingsAuditRows(options.store).map((row) => ({ at: row.at, sequence: row.sequence, changes: row.changes })),
     enabled: options.settings.enabled,
+    openThreads: options.topicEngine === undefined ? null : options.topicEngine.statusReport(options.now),
+    topicSources: TOPIC_SOURCES.map((source) => ({ source, live: source === 'open_thread' })),
   };
 }
 
@@ -4580,6 +4632,13 @@ export interface ProactiveCandidateContext {
   readonly spokenCount?: number | undefined;
   /** Lines already said (newest last) — they are avoided, so two messages never repeat. */
   readonly recentLines?: readonly string[] | undefined;
+  /**
+   * 该追问的未完话题（pack Phase 3，来自 `TopicEngine.followUps`）。
+   *
+   * 这些是**优先级最高的候选**（pack §9：OpenThread 1.00 排第一），因为它们正是「她惦记着的事」：
+   * 「昨天你说要去镇上办证」。事实由引擎从用户自己的轮次里提取，调用方只负责问一遍。
+   */
+  readonly openThreads?: readonly OpenThreadFollowUp[] | undefined;
   readonly limit?: number;
 }
 
@@ -4593,6 +4652,24 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
   const day = localDayOf(context.now);
   const minutes = context.now.getHours() * 60 + context.now.getMinutes();
   const limit = context.limit ?? 3;
+
+  // 0. open_thread — 「没办完的那件事」（pack Phase 3 / §9 §10）。排在所有来源之前：
+  // pack §9 的来源优先级里 OpenThread 是 1.00（第一），比「刚发生的生活事件」还高，因为这句话是
+  // 父亲**自己说出口**、而且还没办完。候选 id 带上追问次数，所以「问过一次没人答」之后还能再问一次
+  // （`ALREADY_DELIVERED` 挡的是同一个 id，不是同一件事）；`topic_ref` 是话题 id，
+  // 引擎据此从日志里认出「已经问过了」，并在用户回答后收口、不再重复（TopicEngine.reconcile）。
+  for (const followUp of context.openThreads ?? []) {
+    plans.push(
+      planFor(
+        'future_hook_due',
+        `open-thread-${followUp.threadId}-a${followUp.attempts + 1}`,
+        followUp.line,
+        followUp.fact,
+        openThreadFollowUpComponents(),
+        { intent: 'open_thread_followup', topicRef: followUp.threadId, initiativeKind: 'open_loop_followup' },
+      ),
+    );
+  }
 
   // 1. presence_arrived — the projection says someone is home **and the projection is still fresh**
   // (t98: a row left over from when the camera stopped used to greet an empty room).
@@ -4733,6 +4810,21 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
   return plans.slice(0, limit);
 }
 
+/**
+ * 离线（或无密钥、模型失败）时的兜底内容。
+ *
+ * 两个来源，优先级不同：
+ *
+ *   * **未完话题**（`initiative_kind = open_loop_followup`，pack Phase 3）：用候选自己那句
+ *     「你之前说过要去镇上办证，后来怎么样了？」——泛泛的钩子句会把「惦记的是哪件事」丢掉，
+ *     而这正是这条候选存在的理由。
+ *   * 其它来源：继续用轮换的固定短句（t74：同一个来源也不该每次说一模一样的话）。
+ */
+function offlineLineFor(plan: ProactiveCandidatePlan, spoken: readonly string[]): string {
+  if (plan.candidate.initiativeKind === 'open_loop_followup' && plan.line.trim().length > 0) return plan.line;
+  return pickOfflineLine(plan.candidate.trigger, { recentLines: spoken, spokenCount: spoken.length });
+}
+
 /** Pick an offline line that has not been said recently, rotating with the message count. */
 function pickOfflineLine(trigger: ProactiveTrigger, context: ProactiveCandidateContext): string {
   const lines = PROACTIVE_OFFLINE_LINES[trigger];
@@ -4839,6 +4931,9 @@ export interface ProactiveLoopEntry {  readonly at: string;
   readonly candidateId: string;
   readonly trigger: string;
   readonly triggerLabel: string;
+  /** pack §14.1 的主动性质（`new_session`/`conversation_continuation`/`open_loop_followup`/…）。 */
+  readonly initiativeKind: ProactiveInitiativeKind;
+  readonly initiativeLabel: string;
   readonly speak: boolean;
   readonly reasonCode: string;
   readonly reasonLabel: string;
@@ -4904,6 +4999,11 @@ export interface ProactiveLoopOptions {
   readonly readLastUserTurnAt: () => Date | null;
   /** Recent user utterances (newest first) — the fact behind 「话题池」 (t74). */
   readonly readRecentUserTopics?: (() => readonly string[] | undefined) | undefined;
+  /**
+   * 该追问的未完话题（pack Phase 3）。生产实现应当**先对齐再取**：
+   * `topicEngine.reconcile(now); return topicEngine.followUps(now);`（见 scripts/field-test.ts 的装配处）。
+   */
+  readonly readOpenThreads?: (() => readonly OpenThreadFollowUp[]) | undefined;
   /** Injected for tests; 「随机闲聊」 only fires below `PROACTIVE_RANDOM_SMALLTALK_CHANCE`. */
   readonly random?: (() => number) | undefined;
   readonly readSessionId: () => string | null;
@@ -5054,6 +5154,7 @@ export class ProactiveLoop {
         lastUserTurnAt: this.#options.readLastUserTurnAt(),
         inConversation: this.#options.readState() !== 'IDLE' || (this.#options.readInFlightTurn?.() ?? false),
         recentUserTopics: this.#options.readRecentUserTopics?.(),
+        openThreads: this.#options.readOpenThreads?.(),
         random: this.#options.random,
         spokenCount: this.#spoken.length,
         recentLines: this.#spoken.slice(-4),
@@ -5126,13 +5227,13 @@ export class ProactiveLoop {
       deliver: async (delivery) => {
         let composed: ProactiveComposedContent;
         if (this.#options.compose === undefined) {
-          composed = { text: pickOfflineLine(plan.candidate.trigger, { recentLines: this.#spoken, spokenCount: this.#spoken.length }), source: 'fixed', note: '离线/无密钥：用固定短句兜底（内容不经过模型）。' };
+          composed = { text: offlineLineFor(plan, this.#spoken), source: 'fixed', note: '离线/无密钥：用固定短句兜底（内容不经过模型）。' };
         } else {
           try {
             composed = await this.#options.compose({ plan, delivery });
           } catch (error) {
             composed = {
-              text: pickOfflineLine(plan.candidate.trigger, { recentLines: this.#spoken, spokenCount: this.#spoken.length }),
+              text: offlineLineFor(plan, this.#spoken),
               source: 'fixed',
               note: `内容生成失败（${error instanceof Error ? error.message : String(error)}）：用固定短句兜底。`,
             };
@@ -5141,7 +5242,7 @@ export class ProactiveLoop {
         const text = composed.text.trim();
         if (text.length === 0 || text === SILENCE_TOKEN || text.includes(SILENCE_TOKEN)) {
           composed = {
-            text: pickOfflineLine(plan.candidate.trigger, { recentLines: this.#spoken, spokenCount: this.#spoken.length }),
+            text: offlineLineFor(plan, this.#spoken),
             source: 'fixed',
             note: '模型这次没有给出可用内容（或返回了沉默标记）：用固定短句兜底。',
           };
@@ -5150,7 +5251,7 @@ export class ProactiveLoop {
           // of the trigger's lines (a model that echoes itself is not going to be more creative on
           // a second try, and the user should never hear the same sentence twice in a row).
           composed = {
-            text: pickOfflineLine(plan.candidate.trigger, { recentLines: this.#spoken, spokenCount: this.#spoken.length }),
+            text: offlineLineFor(plan, this.#spoken),
             source: 'fixed',
             note: '内容与最近说过的一句重复：换成这个触发源下的另一句。',
           };
@@ -5212,6 +5313,10 @@ export class ProactiveLoop {
       candidateId: plan.candidate.candidateId,
       trigger: plan.candidate.trigger,
       triggerLabel: PROACTIVE_TRIGGER_LABELS[plan.candidate.trigger],
+      // pack §14.1 的 `initiativeKind`（新会话 / 热聊接话 / 接着没聊完的事 …）：页面与测试都靠它
+      // 区分「这条主动是什么性质」，而不是从 trigger 猜。
+      initiativeKind: outcome.initiativeKind,
+      initiativeLabel: PROACTIVE_INITIATIVE_LABELS[outcome.initiativeKind],
       speak: outcome.speak,
       reasonCode: outcome.reasonCode,
       reasonLabel: PROACTIVE_GATE_LABELS[outcome.reasonCode],
@@ -5652,7 +5757,15 @@ function pxRender(state) {
       return '<label style="margin-right:10px" title="' + (row.live ? '会自己产生候选' : '已登记，但这一轮还不会自己产生候选（缺事实来源）') + '">'
         + '<input type="checkbox" data-trigger="' + row.trigger + '"' + (row.enabled ? ' checked' : '') + ' /> '
         + row.label + (row.live ? '' : '（这一轮还不会自己产生候选）') + '</label>';
-    }).join('');
+    }).join('')
+      // pack Phase 3：话题来源与「现在记着哪些没办完的事」。来源里只有 open_thread 会自己产生候选，
+      // 其余（新闻/日历/共同记忆…）还没事实来源 —— 如实标出来，不假装能用。
+      + '<div class="muted" style="margin-top:6px">话题来源：' + (state.topicSources || []).map(function (row) {
+          return row.source + (row.live ? '（会自己产生候选）' : '（已登记，还没有事实来源）');
+        }).join('、') + '</div>'
+      + (state.openThreads ? '<div class="muted">没办完的事：' + (state.openThreads.threads.length === 0 ? '暂时没有' : state.openThreads.threads.map(function (row) {
+          return row.summary + '（' + row.status + (row.attempts > 0 ? '，已问 ' + row.attempts + ' 次' : '') + '）';
+        }).join('；')) + '</div>' : '');
   }
   var gates = document.getElementById(PX.ids.gates);
   if (gates) {

@@ -14,7 +14,7 @@ import { join } from 'node:path';
 
 import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
-import { ConversationEngine } from '@xixi/conversation';
+import { ConversationEngine, TopicEngine } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
 import { openXixiStore } from '@xixi/domain';
 
@@ -125,7 +125,17 @@ let session = store.latestSession() ?? store.createSession();
 // Same core as the field-test console (imported from `scripts/field-test.ts`), its own store
 // (`data/web-chat`): tuning this page does not silently retune the console's dataset.
 let proactiveSnapshot = restoreProactiveSettings(store, config.proactive as unknown as Record<string, unknown>);
+/**
+ * 话题引擎（pack Phase 3）：与现场测试控制台共用同一个实现，只是各自的库不同。
+ *
+ * 试用页也要能「第二天追问昨天说的事」，否则同一个机制在两个入口行为不一致 —— 用户会以为
+ * 「这页不会惦记」。`config.open_threads` 段控制窗口与次数上限。
+ */
+const topicEngine = new TopicEngine({ store, config: config.openThreads, clock: () => new Date() });
 function proactivePayload(): ProactiveConsoleState & { readonly ok: true } {
+  const at = new Date();
+  // 先与日志对齐再报告（同现场测试控制台）：话题表是投影，「已经问过了」只有日志知道。
+  topicEngine.reconcile(at);
   return {
     ok: true,
     ...proactiveConsoleState({
@@ -134,8 +144,9 @@ function proactivePayload(): ProactiveConsoleState & { readonly ok: true } {
       source: proactiveSnapshot.source,
       updatedAt: proactiveSnapshot.updatedAt,
       changes: proactiveSnapshot.changes,
-      now: new Date(),
+      now: at,
       personality: store.selfProfile(),
+      topicEngine,
     }),
   };
 }
@@ -157,6 +168,12 @@ const proactiveLoop = new ProactiveLoop({
   },
   readLastUserTurnAt: () => lastUserTurnAt(store, session.sessionId),
   readRecentUserTopics: () => recentUserTopics(store, session.sessionId),
+  // pack Phase 3：先对齐（提取 / 标记已说过 / 按回答收口），再取「现在该追问的」。
+  readOpenThreads: () => {
+    const at = new Date();
+    topicEngine.reconcile(at);
+    return topicEngine.followUps(at);
+  },
   readSessionId: () => session.sessionId,
   replyLimits: config.reply,
   synthesizeProvider: loopSynthesizeProvider,

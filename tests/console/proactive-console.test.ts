@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { DEFAULT_PROACTIVITY, PROACTIVE_REASON_CODES, parseProactiveSettings, proactiveThreshold } from '@xixi/conversation';
+import { DEFAULT_PROACTIVITY, PROACTIVE_REASON_CODES, TOPIC_SOURCES, parseProactiveSettings, proactiveThreshold } from '@xixi/conversation';
 
 import { REPO_ROOT, loadConfig } from '../../scripts/lib/harness.ts';
 import { startTrialPage } from './serve-chat-fixture.ts';
@@ -283,6 +283,12 @@ test('the panel markup and script expose every knob, the gate table and the segm
   // The panel evaluates the *engine's* reason codes: a code the engine can emit but the page
   // does not know how to explain would silently show an empty next-step.
   assert.match(proactivePanelScript('/api'), /reasonCode/);
+
+  // pack Phase 3：面板把话题来源与未完话题渲染出来（不是只在 API 里躺着）。
+  const panelScript = proactivePanelScript('/api');
+  assert.match(panelScript, /state\.topicSources/);
+  assert.match(panelScript, /state\.openThreads/);
+  assert.match(panelScript, /没办完的事/);
 });
 
 test('the console serves the proactive card, its state, and obeys the switch over HTTP', { timeout: HTTP_TIMEOUT_MS * 3 }, async () => {
@@ -318,6 +324,14 @@ test('the console serves the proactive card, its state, and obeys the switch ove
     assert.equal(state.triggerLabels.length, 6);
     assert.equal(state.source, 'config');
     assert.equal(state.enabled, true);
+    // pack Phase 3：状态接口如实报出话题来源，以及「现在记着哪些没办完的事」。
+    // 声明了却没有生产者的来源必须标成 live=false（《方案》§9 的九个来源里，Phase 3 只实现 open_thread）。
+    assert.equal(state.topicSources.length, TOPIC_SOURCES.length);
+    assert.deepEqual(
+      state.topicSources.filter((row: { live: boolean }) => row.live).map((row: { source: string }) => row.source),
+      ['open_thread'],
+    );
+    assert.deepEqual(state.openThreads, { threads: [], candidates: [], history: [] }, '库里还没有话题时如实报空，不编造');
 
     // t42 acceptance item 3: the page must say which database it uses, that the four entry
     // points do not share one, and that TTS is still whole-reply (text is what is segmented).
@@ -417,6 +431,12 @@ test('the trial page shows segments in order, labels the source, and carries the
     // drill below fail every night, i.e. the assertion would depend on the wall clock.
     const tuned = await post('/api/proactive/settings', { baseCooldownMinutes: 0, quietStart: '00:00', quietEnd: '00:00' });
     assert.equal(tuned.state.settings.baseCooldownMinutes, 0, 'the new cooldown is in effect without a restart');
+    // pack Phase 3：试用页也接了同一个话题引擎（各自的库），所以状态里如实报出未完话题与话题来源。
+    assert.deepEqual(tuned.state.openThreads, { threads: [], candidates: [], history: [] }, '还没有话题时如实报空');
+    assert.deepEqual(
+      tuned.state.topicSources.filter((row: { live: boolean }) => row.live).map((row: { source: string }) => row.source),
+      ['open_thread'],
+    );
 
     // With the engine on and the session idle, a drill is deliverable.
     const fresh = await post('/api/proactive/drill', { trigger: 'presence_arrived' });

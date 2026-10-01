@@ -5,6 +5,21 @@
 export { type Clock, fixedClock, systemClock } from './clock.ts';
 export { loadXixiConfig, parseXixiConfig, type XixiConfig } from './config.ts';
 export { DomainError, type DomainErrorCode } from './errors.ts';
+export {
+  isFollowUpDue,
+  normalizeThreadSummary,
+  OPEN_THREAD_ACTIVE_STATUSES,
+  OPEN_THREAD_SETTLED_STATUSES,
+  OPEN_THREAD_STATUSES,
+  OpenThreadStore,
+  threadIdFromSourceEvent,
+  type NewOpenThread,
+  type OpenThread,
+  type OpenThreadChange,
+  type OpenThreadQuery,
+  type OpenThreadStatus,
+  type TransitionOpenThreadOptions,
+} from './open-threads.ts';
 export { appliedMigrations, listMigrationFiles, migrate, type AppliedMigration, type MigrationFile } from './migrations.ts';
 export {
   clampPersonality,

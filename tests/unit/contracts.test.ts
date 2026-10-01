@@ -11,6 +11,7 @@ import {
   ENVELOPE_SCHEMA,
   EVENT_SCHEMA,
   EVENT_TYPES,
+  getEventType,
   isEventEnvelope,
   SCHEMA_VERSION,
   SUPPORTED_KEYWORDS,
@@ -192,4 +193,91 @@ test('registry, envelope enum and actor list stay in sync', () => {
 
   const actorEnum = (ENVELOPE_SCHEMA.properties as Record<string, { enum?: string[] }>).actor.enum ?? [];
   assert.deepEqual([...actorEnum].sort(), [...ACTORS].sort());
+});
+
+/**
+ * pack Phase 3 的加法：新事件类型 `open_thread.changed`。
+ *
+ * 这一组断言要钉住的正是「加法」三个字：**没有升版本**（`SCHEMA_VERSION` 仍是 1）、
+ * **只有必要字段**的事件也合法（新字段都是可选的）、**旧事件照旧通过校验**（历史不用迁移），
+ * 而非法状态仍然被拒。
+ */
+test('open_thread.changed is an additive event type at the same schema version', () => {
+  const definition = getEventType('open_thread.changed');
+  assert.equal(definition.payloadVersion, SCHEMA_VERSION);
+  assert.equal(SCHEMA_VERSION, 1, '加法不升版本：已发布的事件与 schema 都还在用 v1');
+
+  // 最少字段：thread_id + status + summary（其余都是可选的，旧写入方不需要知道它们）。
+  const minimal = buildEvent({
+    event_type: 'open_thread.changed',
+    source: 'conversation',
+    actor: 'system',
+    confidence: 1,
+    payload: { thread_id: 'thread_abc1234', status: 'candidate', summary: '明天下午我要去镇上办证' },
+  });
+  assert.equal(validateEvent(JSON.parse(JSON.stringify(minimal))).payload.status, 'candidate');
+
+  // 全部字段（生产写入方就是这么写的：可选字段写 null 而不是省略）。
+  const full = buildEvent({
+    event_type: 'open_thread.changed',
+    source: 'conversation',
+    actor: 'system',
+    confidence: 1,
+    payload: {
+      thread_id: 'thread_abc1234',
+      status: 'resolved',
+      previous_status: 'offered',
+      summary: '明天下午我要去镇上办证',
+      subject: '去镇上办证',
+      follow_after: '2026-10-02T14:00:00.000+08:00',
+      expire_at: '2026-10-04T14:00:00.000+08:00',
+      follow_up_hint: '你之前说过要去镇上办证，后来怎么样了？',
+      importance: 0.85,
+      attempts: 1,
+      source_event_id: 'evt_00000000-0000-4000-8000-000000000001',
+      note: '用户回答：办好了',
+    },
+  });
+  assert.equal(validateEvent(JSON.parse(JSON.stringify(full))).payload.attempts, 1);
+
+  // 六个状态都在枚举里；别的取值被拒。
+  for (const status of ['candidate', 'offered', 'engaged', 'resolved', 'snoozed', 'exhausted']) {
+    assert.equal(
+      validateEvent(
+        JSON.parse(
+          JSON.stringify(
+            buildEvent({
+              event_type: 'open_thread.changed',
+              source: 'conversation',
+              actor: 'system',
+              confidence: 1,
+              payload: { thread_id: 'thread_abc1234', status, summary: '一件事' },
+            }),
+          ),
+        ),
+      ).payload.status,
+      status,
+    );
+  }
+  expectCode('INVALID_PAYLOAD', () =>
+    buildEvent({
+      event_type: 'open_thread.changed',
+      source: 'conversation',
+      actor: 'system',
+      confidence: 1,
+      payload: { thread_id: 'thread_abc1234', status: 'done', summary: '一件事' } as never,
+    }),
+  );
+  expectCode('INVALID_PAYLOAD', () =>
+    buildEvent({
+      event_type: 'open_thread.changed',
+      source: 'conversation',
+      actor: 'system',
+      confidence: 1,
+      payload: { thread_id: 'thread-not-valid', status: 'candidate', summary: '一件事' } as never,
+    }),
+  );
+
+  // 历史事件仍然通过校验：一个 v1 的旧事件（本轮之前就有的类型）不需要任何迁移。
+  assert.equal(validateEvent(JSON.parse(JSON.stringify(presenceEvent()))).event_type, 'presence.changed');
 });

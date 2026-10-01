@@ -20,7 +20,14 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { buildEvent, toOffsetIso } from '@xixi/contracts';
-import { DEFAULT_PROACTIVE_SETTINGS, evaluateProactiveGates, parseProactiveSettings, proactiveThreshold } from '@xixi/conversation';
+import {
+  DEFAULT_PROACTIVE_SETTINGS,
+  evaluateProactiveGates,
+  parseProactiveSettings,
+  proactiveThreshold,
+  TopicEngine,
+  type OpenThreadFollowUp,
+} from '@xixi/conversation';
 import { openXixiStore } from '@xixi/domain';
 
 import { REPO_ROOT } from '../../scripts/lib/harness.ts';
@@ -63,6 +70,7 @@ function makeLoop(options: {
   readonly sessionId?: string | null;
   readonly intervalMs?: number;
   readonly recentUserTopics?: readonly string[] | undefined;
+  readonly readOpenThreads?: (() => readonly OpenThreadFollowUp[]) | undefined;
 }): ProactiveLoop {
   const settings =
     options.settings ??
@@ -82,6 +90,7 @@ function makeLoop(options: {
     }),
     readLastUserTurnAt: () => options.lastUserTurnAt ?? null,
     readRecentUserTopics: () => options.recentUserTopics,
+    readOpenThreads: options.readOpenThreads,
     readSessionId: () => options.sessionId ?? null,
     synthesize: options.synthesize,
     compose: options.compose,
@@ -737,5 +746,73 @@ test('the console serves the loop over HTTP, off by default, with a readable act
   } finally {
     await handle.close();
     rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+  }
+});
+
+test('未完话题进考虑循环：说出口就等回答，回答之后不再重复（pack Phase 3）', async () => {
+  const root = tempDir('xixi-open-thread-loop-');
+  const DAY1 = new Date(2026, 9, 1, 20, 0, 0);
+  const DAY2 = new Date(2026, 9, 2, 15, 0, 0);
+  const DAY2_ANSWER = new Date(2026, 9, 2, 15, 10, 0);
+  const DAY3 = new Date(2026, 9, 3, 15, 0, 0);
+  let now = DAY1;
+  const store = openXixiStore({ dataDir: join(root, 'main'), clock: () => now });
+  try {
+    const session = store.createSession();
+    // Day 1：父亲说了明天要去办的事。
+    store.recordTurn({ sessionId: session.sessionId, role: 'user', action: 'SPEAK', text: '明天下午我要去镇上办证。' });
+
+    // 生产装配就是这样：每次取候选之前先对齐，再取「现在该追问的」。
+    const topicEngine = new TopicEngine({ store, clock: () => now });
+    const readOpenThreads = (): readonly OpenThreadFollowUp[] => {
+      topicEngine.reconcile(now);
+      return topicEngine.followUps(now);
+    };
+    const loopAt = (at: Date): ProactiveLoop =>
+      makeLoop({
+        store,
+        now: at,
+        // 没有在场投影、最后一次用户轮次就是「现在」：这些 tick 里唯一的来源只能是未完话题。
+        lastUserTurnAt: at,
+        readOpenThreads,
+        sessionId: session.sessionId,
+      });
+
+    // Day 2：到点了，主动问一句。
+    now = DAY2;
+    const entry = await loopAt(DAY2).tickOnce();
+    assert.equal(entry?.speak, true, `应当开口：${entry?.reasonCode} ${entry?.score}`);
+    assert.equal(entry?.trigger, 'future_hook_due');
+    assert.equal(entry?.initiativeKind, 'open_loop_followup');
+    assert.match(entry?.text ?? '', /办证/, '离线兜底也必须说出是哪件事，而不是泛泛的钩子句');
+    assert.match(entry?.fact ?? '', /未完话题/);
+
+    // 主动记录带着话题 id —— 话题引擎据此把这件事标成「已经问过」，不再重复摆出来。
+    const spoken = store
+      .readEvents({ type: 'proactive.decision', limit: Number.MAX_SAFE_INTEGER })
+      .filter((event) => (event.payload as { speak: boolean }).speak);
+    assert.equal(spoken.length, 1);
+    const threadId = String((spoken[0]?.payload as { topic_ref: string }).topic_ref);
+    assert.match(threadId, /^thread_/);
+    // 下一次取候选时对齐（生产里就是下一个 tick 的第一步）：日志里那条主动记录把这件事标成 offered。
+    readOpenThreads();
+    assert.equal(store.openThread(threadId)?.status, 'offered', '说出口 = offered，接下来等回答');
+
+    // 再 tick 一次：这件事不会作为候选重复摆出来（其它来源不算）。
+    const second = await loopAt(DAY2).tickOnce();
+    assert.notEqual(second?.initiativeKind, 'open_loop_followup', '问过了就不再重复摆出同一个候选');
+
+    // 父亲回答「办好了」→ 收口成 resolved；第二天也不再问。
+    now = DAY2_ANSWER;
+    store.recordTurn({ sessionId: session.sessionId, role: 'user', action: 'SPEAK', text: '办好了。' });
+    readOpenThreads();
+    assert.equal(store.openThread(threadId)?.status, 'resolved');
+
+    now = DAY3;
+    const third = await loopAt(DAY3).tickOnce();
+    assert.notEqual(third?.initiativeKind, 'open_loop_followup', '收口之后不再重复问同一件事');
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });

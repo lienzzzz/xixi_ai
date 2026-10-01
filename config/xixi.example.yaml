@@ -74,6 +74,18 @@ xixi:
       topic_pool: true
       random_smalltalk: false      # §16：没有合适的话题就不要为了主动而主动
 
+  # 未完话题（pack Phase 3，《方案》§9 §10）。「惦记着没办完的事」是主动开口里优先级最高的来源
+  # （pack §9 的 OpenThread = 1.00）：父亲自己说过「明天下午我要去镇上办证」，第二天到点后就该问一句。
+  # 本段**已被代码读取**：`packages/conversation/src/topic-engine.ts` 的 `parseTopicEngineSettings`
+  # 读它，现场测试控制台按它装配 `TopicEngine`（scripts/field-test.ts）。提取与收口全靠规则，
+  # 不经过模型（铁律 1）：只有「时间词 + 意愿 + 动作」三者齐备才记一件事。
+  open_threads:
+    enabled: true               # 关掉后不再提取、也不再出追问候选（库里已有的话题保持原样）
+    reoffer_after_min: 180      # 问过一次没人回答，隔这么久才允许再问一次（默认最多问 2 次）
+    max_attempts: 2             # 同一件事最多主动问几次；超过就作废，不再打扰
+    followup_window_h: 48       # 追问窗口：到点之后这么久还没收口就作废（exhausted）
+    topic_dedupe_h: 12          # 同一话题在候选里的抑制窗口（与 proactive.topic_repeat_window_h 同口径）
+
   # 多段回复（ADR-0010）。一轮最多 8 段；这里只能在上限内收紧，不能突破。
   # 本段**已被代码读取**：`ConversationEngine` 构造时 `resolveReplyLimits(config.reply)` 会把它们夹进
   # ADR-0010 的硬上限（packages/conversation/src/segments.ts），试用页与现场测试控制台也用它算分段展示。

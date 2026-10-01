@@ -39,6 +39,11 @@ export interface XixiConfig {
    * it is given, so a typo tightens or widens nothing beyond the ADR ceilings.
    */
   readonly reply?: Record<string, unknown>;
+  /**
+   * 未完话题（pack Phase 3）。可选：早于本段写下的配置必须照旧能加载，缺段就是出厂默认
+   * （`packages/conversation/src/topic-engine.ts` 的 `DEFAULT_TOPIC_ENGINE_SETTINGS`）。
+   */
+  readonly openThreads?: Record<string, unknown>;
   readonly memory: Record<string, unknown>;
   readonly privacy: Record<string, unknown>;
   readonly features: Record<string, unknown>;
@@ -135,6 +140,7 @@ export function parseXixiConfig(source: string, file = '<inline>'): XixiConfig {
     personality: { base: { ...base } as Record<string, number> },
     proactive: section(xixi, 'proactive', file),
     reply: optionalSection(xixi, 'reply'),
+    openThreads: optionalSection(xixi, 'open_threads'),
     memory: section(xixi, 'memory', file),
     privacy: section(xixi, 'privacy', file),
     features: section(xixi, 'features', file),
