@@ -1,6 +1,6 @@
 # 西西项目文档地图
 
-> 最后更新：2026-09-30
+> 最后更新：2026-10-01（第四轮集成收口 t5：文档与代码逐处对齐、全量门禁实跑）
 > 面向：接手本项目的编码 Agent / 维护者
 > 本文件告诉你「先读什么、什么最权威、改代码后必须更新哪些文档」。
 
@@ -92,7 +92,7 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | [`review/three-column-console-review-2026-09-30.md`](review/three-column-console-review-2026-09-30.md) | 三栏界面与一键启用的评审（子进程与隐私） |
 | [`benchmarks/realism-metrics.md`](benchmarks/realism-metrics.md) | 真人感指标（提问率 / 长度分布 / 禁用模板率）的唯一口径、黄金对话接入、改造前后对比与复现命令 |
 | [`review/p1-prompt-length-review-2026-10-01.md`](review/p1-prompt-length-review-2026-10-01.md) 与 [`…-rereview`](review/p1-prompt-length-rereview-2026-10-01.md) | P1 提示词与长度策略的评审与复审（F1 文档漂移 → 由本收口任务执行；F2 口径 / F3 安全措辞 / F4 claim 已修） |
-| [`review/reply-hygiene-review-2026-10-01.md`](review/reply-hygiene-review-2026-10-01.md) | 工具标记 / 英文推理清洗的评审（`REPLY_HYGIENE` 已实现但**产线尚无消费者**——见 `progress.md` §4） |
+| [`review/reply-hygiene-review-2026-10-01.md`](review/reply-hygiene-review-2026-10-01.md) | 工具标记 / 英文推理清洗的评审（`REPLY_HYGIENE` 已实现；两条 requiredFix 已落地——试用页与控制台订阅 `onNotice`、沉默原因码 `ARTIFACT_ONLY_REPLY` 上线，逐入口清单见 `progress.md` §4） |
 | [`verification/t4-realism-verification-2026-10-01.md`](verification/t4-realism-verification-2026-10-01.md) | 「真人感」改造的独立验证：三次输入、主口径提问率、铁律未削弱 |
 
 ## 2. 权威性排序（冲突时按这个判）

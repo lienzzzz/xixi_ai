@@ -287,7 +287,8 @@ manual audio hardware tests 三档；`AGENTS.md` 第 2 节也要求「联网验�
 | `npm run voice:turn -- --wav a.wav --wav b.wav` | ASR+N 轮对话+TTS | 语音闭环，只上传 VAD 检测到的语音段 |
 | `npm run voice:bargein` | 0 | 打断判定延迟；写出被截断的播放音频作为证据 |
 | `npm run verify:structured-output` | 3~4 次 | 结构化输出契约 + MiMo 缺陷金丝雀 |
-| `npm run chat` / `--fake` / `--dsh` | 每次一轮 | 交互式验证；`--fake` 完全离线 |
+| `npm run chat` / `--fake` / `--dsh` / `--print-wiring` | 每次一轮 | 交互式验证；`--fake` 完全离线（注入内存天气源）；`--print-wiring` **0 成本**：打印 `{entry,language,maxToolRounds,tools,permissions}` 后退出 |
+| 四个 live 入口的 `--print-wiring` | **0**（离线：不调模型、不建库） | **工具链覆盖的离线自证**（第四轮 t2）：`scripts/chat.ts` / `voice-device-check.ts` / `eval-realism.ts` / `eval-conversation.ts` 各打印一行，实测四行逐字相同（`language` 取自部署配置、`maxToolRounds: 4`、四个内置工具、四个 `allow`），并与 `scripts/field-test.ts` 的 `buildToolChain(loadConfig())` 逐字段相等（离线用例 `tests/console/live-entry-tool-chain.test.ts`）。**设备自检没有离线端到端证据**（要真实 WAV + 硬件 + 真实 ASR），它的证据就是这一行 + 与适配器共用一个 `deviceToolChain` 调用点 |
 | `npm run web` / `npm run web -- --dsh` | 每次一轮 | 浏览器试用页（http://127.0.0.1:8791）；`--dsh` 切到 Harness 路径 |
 | `POST /api/voice`（试用页的🎤） | ASR + 一轮 | 浏览器采集 → VAD 只取语音段 → ASR → 对话 → TTS；无语音时返回 `NO_SPEECH_DETECTED` 而不是假装听懂 |
 | `scripts/voice-device-check.ts` | ASR + 一轮 | 设备验收：对回环录音跑全链路并与原文比对字符级相似度（≥0.5 判 PASS） |

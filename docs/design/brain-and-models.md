@@ -114,11 +114,12 @@ resume 的两个硬约束（相同 cwd、相同 profile）在 `CliDshTransport` 
 产出的文本都过同一道闸；剔除量 > 0 时发一条审计通知
 `onNotice({code:'REPLY_HYGIENE', detail:'回复里剔除了…'})`。
 
-**已知缺口（文档只写现状）**：通知**发得出来，但没人接**——产线入口
-（`scripts/chat.ts` / `serve-chat.ts` / `field-test.ts` / `voice-turn.ts`）都还没传 `onNotice`，
-于是控制台/日志里「她本来想调工具、没有结果所以没说」与「她自己选择沉默」**同形**；
-评审建议的修法之一是给轮次加一个可区分的原因码，**候选名字 `SILENCE_ARTIFACT_ONLY` 在代码里并不存在**
-（它是方案，不是现状）。出处与要求的修法见 `docs/review/reply-hygiene-review-2026-10-01.md`，
+**订阅覆盖（逐入口，2026-10-01 第四轮重核）**：通知发得出来，**试用页（`scripts/serve-chat.ts`）与现场测试控制台
+（`scripts/field-test.ts`）已传 `onNotice`** 并把「沉默原因」显示出来；`scripts/chat.ts` 与 `scripts/voice-turn.ts`
+**仍未订阅**——那两处的「她本来想调工具、没有结果所以没说」与「她自己选择沉默」仍同形。
+沉默原因码**已经存在**：`ConversationTurn.silenceReason` = `MODEL_SILENCE` 或 **`ARTIFACT_ONLY_REPLY`**
+（见 `packages/conversation/src/engine.ts`）；评审提出的候选名 `SILENCE_ARTIFACT_ONLY` **从来没有进过代码**，不要把候选名当现状。
+出处与要求的修法见 `docs/review/reply-hygiene-review-2026-10-01.md`，
 未完成项记在 [`progress.md`](../progress.md) §4。
 
 ## 5. 工具层（§27）
@@ -127,18 +128,33 @@ resume 的两个硬约束（相同 cwd、相同 profile）在 `CliDshTransport` 
 
 - `XixiTool`：`name` / `description` / `parameters`（JSON Schema，原样交给 provider）/ `execute(args, {timezone, now})`。
 - `ToolCallRecord`：`{name, args, ok, result, error}`，通过 `onToolCall` 回调给上层写审计。
-- 注册表只有一处出口：`defaultTools({defaultPlace, now})` = 时间 + 天气两个工具（注释：`New tools join here and nowhere else`）。
+- 注册表只有一处出口：`defaultTools({defaultPlace, now, …})` = **Phase 2 的四个内置工具**（注释：`The four Phase 2 built-ins. New tools join here and nowhere else`）：
+  时间 / 天气 / 新闻桩 / 提醒桩；可见性再由 `listForAgent(scope)` 按 scope 过滤（不是「注册了就人人可见」）。
+- **逐入口覆盖（2026-10-01 第四轮 t2 实测，别写成「语音与文字共用同一条工具链」这种笼统话）**：
+  `scripts/field-test.ts` 的 `buildToolChain(config, options)` 是四个 live 入口共用的构造点——
+  文字 CLI `scripts/chat.ts`、设备自检 `scripts/voice-device-check.ts`、真人感评测 `scripts/eval-realism.ts`、
+  对话评测 `scripts/eval-conversation.ts`；控制台（`field-test.ts`）与试用页/语音（`serve-chat.ts` / `voice-turn.ts`）本来就走这条链。
+  离线自证：每个入口跑 `--print-wiring` 打印 `{entry,language,maxToolRounds,tools,permissions}` 后退出（不调模型、不建库），
+  实测四入口逐字相同：`language` 取自部署配置、`maxToolRounds: 4`、四个内置工具、四个 `allow`。
+  **设备自检没有离线端到端证据**（要真实 WAV + 硬件 + 真实 ASR），它的证据是 `--print-wiring` 与适配器共用一个 `deviceToolChain` 调用点。
 
 | 工具 | 权限 | 参数 | 行为 |
 |---|---|---|---|
-| `xixi_get_current_time` | L0（内部只读） | `{type:'object', properties:{}, additionalProperties:false}` | 返回 `iso` / `localDate` / `weekday`（`Asia/Shanghai`，代码内固定时区） |
-| `xixi_get_weather` | L1（外部只读） | `place`(string)、`day`(enum `today`/`tomorrow`/`day_after_tomorrow`)、**`additionalProperties:false`** | `place` 省略时用 `defaultPlace`；`day` 默认 `tomorrow`；返回 `place`/`day`/`date`/`summary`/`temperatureMaxC`/`temperatureMinC`/`precipitationChance`/`advice`/`daysUntil`/`requestedAt`/`timezone` |
+| `xixi_get_current_time` | L0（内部只读，`risk: read`） | `{type:'object', properties:{}, additionalProperties:false}` | 返回 `iso` / `localDate` / `weekday`（`Asia/Shanghai`，代码内固定时区） |
+| `xixi_get_weather` | L1（外部只读，`risk: read`） | `place`(string)、`day`(enum `today`/`tomorrow`/`day_after_tomorrow`)、**`additionalProperties:false`** | `place` 省略时用 `defaultPlace`；`day` 默认 `tomorrow`；返回 `place`/`day`/`date`/`summary`/`temperatureMaxC`/`temperatureMinC`/`precipitationChance`/`advice`/`daysUntil`/`requestedAt`/`timezone` |
+| `xixi_news_stub` | 外部只读（`risk: read`） | 见 `tools.ts` | 新闻源的**诚实占位**：没有 provider 时直说「现在看不到新闻」，不凭记忆编造 |
+| `xixi_set_reminder_stub` | **`risk: write`**（写的是内存 sink） | 见 `tools.ts` | 提醒的占位实现：只写进内存 sink，不落库、不触发外部动作 |
 
 - 天气来源是 **Open-Meteo，无需密钥**（`packages/model-adapters/src/weather.ts`）：geocoding + forecast 两个端点，
   超时 15s，WMO 天气码译成中文口语（`describeWeatherCode`），**30 分钟缓存**（`report(place, cacheMs = 30 * 60_000)`，按 trim 后的地名键控）。
   未知地名是 `ModelError('BAD_REQUEST')`，不是崩溃。
 - `place` 配置来自 `config.identity.place`（可选字段，`packages/domain/src/config.ts`）；
-  `scripts/serve-chat.ts` 用它构造 `defaultTools({defaultPlace: config.identity.place ?? ''})`。
+  四个 live 入口与控制台都经 `scripts/field-test.ts` 的 `buildToolChain(config)` 构造注册表（`defaultPlace` 取自同一配置）。
+- **语言接线（第四轮 t2 + §9.13 更正；不要写成「堵住了一条会泄漏的通道」）**：`MimoBrainAdapter` 的 `language` 来自部署配置
+  `config.identity.language`（四个 live 入口都传了它）；**省略时构造回落到 `zh-CN`**（`options.language ?? 'zh-CN'`），
+  中文清洗规则对每个部署照常生效——**省略不是直通**。这条接线的真实价值是**让过滤器跟随部署语言**：
+  非中文部署不再被中文规则改写（zh-CN 那一侧不传选项也通过，真正靠选项承重的是 en-US 那一侧，见
+  `tests/unit/core/mimo-markup-hygiene.test.ts` 的两侧断言与 `scripts/chat.ts --print-wiring` 打印的 `language`）。
 - **没有** shell / 文件系统 / 消息 / 高风险工具（§27 与铁律 7）；工具集合刻意最小且只读。
 - DSH 一侧另有一份工具实现：`plugins/xixi-tools/index.js`（插件包名 `dsh-xixi-tool`，由 profile 的
   `cordis.patch.yml` 挂载），用 `defineTool` 注册**同一套两个工具**：
@@ -254,12 +270,13 @@ FatherModel/RelationshipModel/FutureHooks 恢复（这些领域对象尚不存�
 - DSH 路径的提示词拼装是 `composeTask` 占位（§26 的正式拼装由 `packages/conversation` 的 `PromptAssembler` 负责，直连路径已用上）。
   （**DSH 路径的天气工具已在本轮补齐**，见 §5。）
 - 本地 ASR / TTS 兜底、模型私有推理之外的失败话术。
-- **`onNotice` 在产线上没有消费者**（`REPLY_HYGIENE` 与 `UNBACKED_FACT_CLAIM` 两条审计通知都发给调用方，
-  但 `scripts/chat.ts` / `serve-chat.ts` / `field-test.ts` / `voice-turn.ts` 都没订阅）——
-  于是「程序改写了她说的话」在页面与日志里与「模型本来就这么说」同形（见 §4.1 与
+- **`onNotice` 的订阅覆盖不齐**：`REPLY_HYGIENE` 与 `UNBACKED_FACT_CLAIM` 两条审计通知都发给调用方，
+  **试用页（`serve-chat.ts`）与控制台（`field-test.ts`）已订阅**，`scripts/chat.ts` 与 `scripts/voice-turn.ts` 未订阅——
+  后两处「程序改写了她说的话」在页面与日志里仍与「模型本来就这么说」同形（见 §4.1 与
   `docs/review/reply-hygiene-review-2026-10-01.md`）。
-- **`SILENCE_ARTIFACT_ONLY` 不存在**：那是评审提出的候选原因码（给「整轮只剩制品 → 沉默」一个可区分的原因），
-  代码里没有；轮次目前仍只报 `SILENCE`。
+- **`SILENCE_ARTIFACT_ONLY` 不存在**：那是评审提出的候选原因码（给「整轮只剩制品 → 沉默」一个可区分的原因）——
+  实际落地的名字是 **`ARTIFACT_ONLY_REPLY`**（`ConversationTurn.silenceReason`，与 `MODEL_SILENCE` 并列），
+  候选名从来没有进过代码。
 - `MimoClient.#post` 会把「缺密钥」误标成 `NETWORK`（§7 的 KNOWN GAP）。
 - `brain-adapter` 无 type check（无 `tsc --noEmit`），类型错误只在运行时暴露（progress §6）。
 

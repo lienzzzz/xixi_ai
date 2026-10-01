@@ -6,13 +6,16 @@
 
 **一句话**：西西能听（浏览器麦克风 → 抗噪前端 → VAD → ASR）、能判断该不该说话（确定性 FSM）、能说得像家里人（§26 提示词 + 人格指令）、能不说（§55 沉默）、能在重启后还是同一个西西（事件日志 + 人格基线 + Harness 会话映射），并且**能自己看到有人在不在**（M6 摄像头在场 → `presence.changed` → WorldState 投影）与**自己找话说**（M5-lite 主动循环，全部先过确定性硬门禁）。
 
-本文描述的是**现状**。方案原文 [`../xixi_ai_companion_project_plan.md`](../xixi_ai_companion_project_plan.md) 里的 Memory、FutureHook、唤醒词仍未实现；WorldState 只落了 `presence.home` 一个键，主动候选的模型侧生成（`evaluateProactiveCandidate`）也仍是 `NOT_IMPLEMENTED(M5)`。见 §7。
+本文描述的是**现状**。方案原文 [`../xixi_ai_companion_project_plan.md`](../xixi_ai_companion_project_plan.md) 里的
+**Memory 与 FutureHook 已由 pack Phase 3/4 落地**（未完话题 = `open_threads`；长期记忆 = `episodic_memory` / `semantic_memory` /
+`relationship_notes`；计划类钩子以 `open_threads` 实现）；**唤醒词仍未实现**；WorldState 只落了 `presence.home` 一个键，
+主动候选的模型侧生成（`evaluateProactiveCandidate`）也仍是 `NOT_IMPLEMENTED(M5)`。见 §7。
 
 ## 1. 仓库里真实存在的部分
 
 ```text
-packages/contracts/       事件信封 + 3 类 payload schema + fail-closed 校验器（唯一契约来源）
-packages/domain/          唯一写 SQLite 的包：events / 会话投影 / 人格基线 / 迁移执行器 / 配置 / 时钟
+packages/contracts/       事件信封 + 6 类 payload schema + fail-closed 校验器（唯一契约来源）
+packages/domain/          唯一写 SQLite 的包：events / 会话投影 / 人格基线与学习 / 未完话题 / 记忆 / 迁移执行器 / 配置 / 时钟
 packages/conversation/    FSM（§12/§13）+ PromptAssembler（§26）+ ConversationEngine（一轮的编排）
 packages/brain-adapter/   BrainAdapter 接口 + MimoBrainAdapter（实时）+ DshBrainAdapter + Fake/Scripted 替身 + 只读工具
 packages/model-adapters/  MimoClient（chat/chatStream/transcribe/synthesize/chatJson）+ WeatherClient（Open-Meteo）
@@ -172,16 +175,18 @@ flowchart LR
   可重跑核对：`node scripts/verify-camera-presence.ts --live --seconds 8`（自报磁盘图像文件 0 个）。
 - **门禁没有被放宽**：循环只提供候选与 `candidate_id`，判定全部走同一条 `ProactiveEngine.consider`
   （核对：`git grep -n "\.consider(" -- scripts packages`）；连续 5 次 tick 里只有 1 条放行（其余被 `QUOTA_DAY_EXCEEDED` 拦）。
-- **M5-lite 的边界**（诚实清单）：候选只来自**事实**（在场、会话悬置、固定时间钩子、话题池、随机闲聊），
-  `routine_expected` 目前没有事实源；长期记忆、FutureHook、`evaluateProactiveCandidate`（模型侧候选生成）
-  仍是 `NOT_IMPLEMENTED(M5)`。人格强度默认 `proactivity: 0.85`（阈值 `0.45 + 0.30 × (1 − 0.85) = 0.495`），
-  控制台可调、也可一键关闭循环。
+- **M5-lite 的边界**（诚实清单）：候选只来自**事实**（在场、会话悬置、固定时间钩子、话题池、随机闲聊）与
+  **未完话题**（`open_threads`，pack Phase 3：父亲自己说过、还没办完的那件事）；`routine_expected` 目前没有事实源；
+  `evaluateProactiveCandidate`（模型侧候选生成）仍是 `NOT_IMPLEMENTED(M5)`。
+  人格强度默认 `proactivity: 0.85`（阈值 `0.45 + 0.30 × (1 − 0.85) = 0.495`），控制台可调、也可一键关闭循环。
 
-## 5. 持久化：SQLite 里的五张表
+## 5. 持久化：SQLite 里的表
 
 唯一写库的包是 `packages/domain`（`node:sqlite`，`PRAGMA journal_mode=WAL`、`foreign_keys=ON`、`busy_timeout=5000`）。
-迁移文件是 [`001_initial.sql`](../packages/domain/src/migrations/001_initial.sql) 与
-[`002_world_state.sql`](../packages/domain/src/migrations/002_world_state.sql)，字段级说明见 [`design/domain-model.md`](design/domain-model.md)。
+迁移文件是 [`001_initial.sql`](../packages/domain/src/migrations/001_initial.sql)、
+[`002_world_state.sql`](../packages/domain/src/migrations/002_world_state.sql)、
+[`003_open_threads.sql`](../packages/domain/src/migrations/003_open_threads.sql) 与
+[`004_memory.sql`](../packages/domain/src/migrations/004_memory.sql)，字段级说明见 [`design/domain-model.md`](design/domain-model.md)。
 
 | 表 | 角色 | 关键列 |
 |---|---|---|
@@ -191,9 +196,15 @@ flowchart LR
 | `self_profile_history` | 人格变更历史（§7.5） | `change_id` PK、`before_value`、`after_value`、`source_type`、`source_event_id`、`summary`、`confidence`、`created_at` |
 | `world_state` | **当前状态投影**（M6 起有写入方） | `key` PK（点分命名空间，如 `presence.home`）、`schema_version`、`value`、`source`、`updated_at`、`confidence`、`ttl_seconds`（超过即 `stale`）；可由事件重放重建（`XixiStore.rebuildWorldState`） |
 
-事件类型注册在 `packages/contracts/src/events.ts`（4 类）：`presence.changed`、`conversation.turn`、
-`conversation.decision`、`system.health`——**新增事件类型不需要升 `SCHEMA_VERSION`**（信封仍是 `xixi.event.v1`，
-每个 payload 各自带版本；`conversation.decision` 就是新加的第 4 类）。
+**pack Phase 3/4 新增的六张表**（迁移 003 / 004；字段级说明见 [`design/domain-model.md`](design/domain-model.md) §5.4 起）：
+`open_threads`（未完话题的状态机 + 投影）、`episodic_memory`（发生过的事）、`semantic_memory`（稳定偏好）、
+`relationship_notes`（相处方式）、`self_profile_learned`（学习偏移的累计值）、`session_overrides`（只对当天生效的覆盖）。
+共同点：**都是推导、不是事实**——每行带 `source_event_id` 指回 `conversation.turn`（铁律 4），
+且写入**不新增事件类型**；可查看/编辑/删除目前只有领域 API、没有 UI（见 `progress.md` §4 第 21 条）。
+
+事件类型注册在 `packages/contracts/src/events.ts`（**6 类**）：`presence.changed`、`conversation.turn`、
+`conversation.decision`、`proactive.decision`、`open_thread.changed`、`system.health`——**新增事件类型不需要升 `SCHEMA_VERSION`**
+（信封仍是 `xixi.event.v1`，每个 payload 各自带版本；`proactive.decision` 与 `open_thread.changed` 就是后加的两类）。
 `conversation.decision` 里的 `acceptance_score` 是 **`accepted` 的 0/1 镜像**，不是校准过的分数
 （见 [`event-contracts.md`](event-contracts.md) 与 `design/domain-model.md`）。
 
@@ -210,7 +221,9 @@ flowchart LR
 另外两条不变量：
 
 - `seedSelfProfile` 只补缺（`ON CONFLICT(property) DO NOTHING`），重启是**恢复**而不是重置；
-  `overrideSelfProfile` 是管理员覆盖（写 history），**模型驱动的人格学习（M3）尚未实现**。
+  `overrideSelfProfile` 是管理员覆盖（写 history），**显式纠正与白名单推断码的人格学习已落地（pack Phase 4）**——
+  权重在 `SelfModel.learn` 里按 `sourceType` **只乘一次**（显式 1.0 / 推断 0.4），单日上限与漂移上限同时生效；
+  读模型自由文本做学习仍然不做（铁律 5）。
 - 已发布迁移被改写就拒绝启动：`migrate()` 记录每个文件的 sha256，内容变动抛 `MIGRATION_CHECKSUM_MISMATCH`（§47.3、铁律 10）。
 
 `XixiStore.resume()` 是恢复入口：`latestSession()` + `recentTurns(…, 8)` + `selfProfile()`。
@@ -235,16 +248,16 @@ flowchart LR
 | 未实现 | 现状证据 | 将来插在哪 |
 |---|---|---|
 | **WorldState 的其余部分** | `world_state` 表与 `presence.home` 一个键**已落地**（`002_world_state.sql`、`XixiStore.worldState()`）；其余领域状态（房间、活动、日程）无写入方 | M6 之后的里程碑：同一张表加点分命名空间即可，不需要改表结构 |
-| **Memory**（提取 / 检索 / 纠正） | 无表、无代码；`extractMemories` / `reflect` 调用即抛 `BrainError('NOT_IMPLEMENTED', milestone: 'M4')` | M4：新增 `003_*.sql`，保留 `sourceEventIds` 指回 `events`；`MemoryCandidate` 形状已固定 |
-| **FutureHook** | 无表、无代码；只存在于 `MemoryCandidate.type` 与 `ReflectionResult.futureHooks` 的类型里 | M4/M5，与 Memory 同一批迁移 |
-| **主动候选的模型侧生成**（`evaluateProactiveCandidate`） | **确定性门禁与投递已落地**（`packages/conversation/src/proactive.ts`）；模型侧 API 仍抛 `NOT_IMPLEMENTED(M5)`，全仓无调用方 | M5：候选目前只来自事实（在场 / 会话悬置 / 时间钩子 / 话题池 / 随机闲聊）；`routine_expected` 还没有事实源 |
+| **Memory 的模型侧**（`BrainAdapter.extractMemories` / `reflect`） | **确定性侧已落地**（pack Phase 4：`TurnMemoryExtractor` + `episodic_memory` / `semantic_memory` / `relationship_notes` / `self_profile_learned` / `session_overrides` 与 `open_threads`）；**模型侧那两个方法仍抛 `NOT_IMPLEMENTED(M4)`，全仓无调用方** | M4 的模型侧：`MemoryCandidate` / `ReflectionResult` 形状已固定；检索（memory search）与查看/编辑/删除的 UI 仍未做 |
+| **计划类钩子（FutureHook）** | 以 `open_threads`（pack Phase 3）实现：从父亲自己说的话里提取「将来要做的一件事」，收口判据与窗口见 `progress.md` §2.19 | 模型侧反思产出的 `futureHooks` 仍属未实现的 `reflect()` |
+| **主动候选的模型侧生成**（`evaluateProactiveCandidate`） | **确定性门禁与投递已落地**（`packages/conversation/src/proactive.ts`）；模型侧 API 仍抛 `NOT_IMPLEMENTED(M5)`，全仓无调用方 | M5：候选来自事实（在场 / 会话悬置 / 时间钩子 / 话题池 / 随机闲聊）与未完话题；`routine_expected` 还没有事实源 |
 | **唤醒词 / 搭话判定（§13 完整版）** | 无代码；`config/xixi.example.yaml` 的 `features.wake_word: false`，试用页用「发送 / 按住🎤」按钮当作直呼 | M2：ADR-0007 已实测两个语音框架**都无法区分电视与真人**，必须自己做（唤醒词 + 说话人相似度 + 会话状态 + 语义承接融合） |
-| **模型驱动的人格学习（§7.4）** | 只有管理员 `overrideSelfProfile`（控制台面板走的就是它）；`interpretFeedback` 抛 `NOT_IMPLEMENTED(M3)` | M3：Feedback Interpreter（结构化输出 + 受控增量 + history + 回滚） |
+| **人格学习里「读自由文本」那一路** | 显式纠正与白名单推断码的学习已落地（pack Phase 4，权重只乘一次）；**不读模型自由文本**（铁律 5） | 不计划做：白名单码就是设计上的边界 |
 | **事件回放（§22.3）** | `tests/replay/` 目录为空 | M5；因为轮次就是事件，不需要先做数据搬迁 |
 | **常驻语音服务** | **runner** 已有常驻 Python worker（`scripts/verify-voice-noise.ts`，回退 `XIXI_VAD_ONESHOT=1`）；**生产入口**仍是每次一进程 | 下一步：把生产入口也换成常驻进程，去掉冷启动 |
 | **`tsc --noEmit` 类型检查** | 无 `tsconfig.json`，类型错误只在运行时暴露 | M1 之前（[ADR-0006](adr/0006-runtime-and-dependency-choices.md)） |
 
-四个未实现能力的**签名已经固定**，调用时抛带 `milestone` 的类型化错误——诚实的缺口，不是静默的桩函数。
+未实现能力的**签名已经固定**，调用时抛带 `milestone` 的类型化错误——诚实的缺口，不是静默的桩函数。
 
 ## 维护规则
 

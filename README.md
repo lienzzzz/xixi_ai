@@ -72,7 +72,8 @@ npm run eval:conversation:judge            # 对话质量评测（含评审模�
 | **多段回复（ADR-0010）** | `segments.ts` 纯函数分段器（**最多 8 段、块长 ≤60 字 → 容量 480 字**，段间 250–1200ms 默认 450；容量内每段 ≤60，`>8` 组时尾段合并并置 `mergedOverflow`，**该段可超 60**——反例 279 字 → 8 段、最长 62）；文字与播放计划真按段，**TTS 仍整条合成** |
 | **主动开口（ADR-0009 + ADR-0011）** | **两层**：硬底线（静默时段 / 6h 与当日**次数**额度 / DND / 隐私与同意 / 场景与音频路径）由程序判定，模型不能绕过；底线之上**由模型读空气决定说不说**，确定性社会预算只给候选与建议（`BELOW_RECOMMENDATION` 是建议不是否决）+ `proactive.decision` 审计 + 先记后播。**金额级费用上限尚未实现**（次数额度是当前的费用代理） |
 | **不编造可核查的事实** | 提示词 `HARD_POLICY` 的「可核查的具体事实」那条（关键词锚点，不再按编号引用）+ 引擎层闸门（无工具却出现具体数值就扣住并改说修复句）；台账核对「含具体值的轮次都伴随工具调用」 |
-| **制品清洗（`REPLY_HYGIENE`）** | 工具调用标记与外文推理在进 TTS / 日志 / 工作记忆前被程序剔除（`sanitizeSpokenReply`）；整轮只剩制品 → 沉默，并发出 `REPLY_HYGIENE` 审计通知。**产线入口尚未订阅 `onNotice`**（见 `docs/progress.md` §4） |
+| **制品清洗（`REPLY_HYGIENE`）** | 工具调用标记与外文推理在进 TTS / 日志 / 工作记忆前被程序剔除（`sanitizeSpokenReply`）；整轮只剩制品 → 沉默，并写原因码 **`ARTIFACT_ONLY_REPLY`**（与「模型自己选择沉默」`MODEL_SILENCE` 可区分）。`REPLY_HYGIENE` / `UNBACKED_FACT_CLAIM` 两类 `onNotice` 审计通知已被**试用页（`serve-chat.ts`）与现场测试控制台（`field-test.ts`）**订阅并在页面显示；文字 CLI（`chat.ts`）与语音轮次（`voice-turn.ts`）未订阅（逐入口清单见 `docs/progress.md` §4） |
+| **工具链覆盖（逐入口）** | `scripts/field-test.ts` 的 `buildToolChain()` 是唯一出口（注册表默认四个内置工具：时间 / 天气 / 新闻桩 / 提醒桩——提醒桩是只写内存 sink 的 `risk: write`；同一权限策略、同一四轮上限、可见性再由 `listForAgent(scope)` 过滤）。四个 live 入口——文字 CLI `scripts/chat.ts`、设备自检 `scripts/voice-device-check.ts`、真人感评测 `scripts/eval-realism.ts`、对话评测 `scripts/eval-conversation.ts`——已改用它（此前只有控制台走这条链）；离线自证是每个入口的 `--print-wiring`（打印 `{entry,language,maxToolRounds,tools,permissions}` 后退出，不调模型、不建库）。设备自检没有离线端到端证据（需真实 WAV + 硬件 + 真实 ASR），见 `docs/progress.md` §2.10 |
 | **「看一眼」（视觉）** | `UserTurnInput.images` → OpenAI 风格 `image_url`（data URL）；真机实测能描述画面内容；DSH 路径发不了图时**明确报错**而不是静默丢图 |
 | 质量过程 | `npm test` 全绿（**项数以末行为准**）；[`docs/review/`](docs/review/) 有评审报告（含复审与再复审），[`docs/verification/`](docs/verification/) 有独立验证报告，[`docs/benchmarks/`](docs/benchmarks/realism-metrics.md) 有可重跑的基准与前后对比 |
 
@@ -109,8 +110,8 @@ node scripts/eval-realism.ts --corpus=all --repeat=3 --label v02                
 
 **还没到位的（别当成已完成）**：提问率主口径两次都在 46% 左右，**贴着 30–50% 的上沿**；
 把全部 10 次捕获算进来，主口径极差是 **15.8%–63.2%（跨带）**，跨带来自输入差异——
-**「落在 30–50%」只在「同语料重复」的前提下成立**；产线入口还没订阅 `onNotice`，
-所以「程序剔掉制品导致沉默」在页面上暂不可区分（见 [`docs/progress.md`](docs/progress.md) §4）。
+**「落在 30–50%」只在「同语料重复」的前提下成立**；「程序剔掉制品导致沉默」在试用页与控制台上已可区分
+（`ARTIFACT_ONLY_REPLY` vs `MODEL_SILENCE`），文字 CLI 与语音轮次仍未订阅 `onNotice`（见 [`docs/progress.md`](docs/progress.md) §4）。
 
 ## 现场测试前须知（已知限制，先说清楚）
 
@@ -177,13 +178,16 @@ docs/                     README（地图）、architecture、event-contracts、
 - **真人实测项（只有本机能做）**：真人站在镜头前能否被检出（`--require-transition`）、真人对着麦克风说话的实际识别率。
 - 现场验收的**扬声器**项在修正口径后判 FAIL：能量比 2.41 dB < 10 dB，测的是「笔记本扬声器→笔记本麦克风」的**回采余量**，
   **不代表用户对麦克风说话能否被听到**（口径说明见 [`docs/recon/field-test-report-2026-09-30.md`](docs/recon/field-test-report-2026-09-30.md) 顶部）。
-- 主动开口的内容目前只由「事实 + 模型现编」生成，**没有记忆驱动的长期话题**（M4 之后再补）。
-- **主动性 V2 的两项验收未达标**：pack Phase 5 的 12 小时时间线里，内容口径 generic 话题占比 **33.3%**（目标 ≤20%），
-  且**「连续两次没人回应后显著降频」不成立**（被忽视的一天与有人回应的一天都是 9 次）；t9 的独立验证判 failed，
-  六条缺陷（F1–F6）的修复任务是 t18（未开始）。**不要读成「Phase 5 已通过」**——
-  判定表与可重跑命令见 [`docs/verification/t9-proactive-v2-verification-2026-10-01.md`](docs/verification/t9-proactive-v2-verification-2026-10-01.md)。
-- **`onNotice` 没有产线消费者**：程序改写/剔除她说的话时（`UNBACKED_FACT_CLAIM` / `REPLY_HYGIENE`）
-  发出的审计通知，页面与日志都还没接；「为什么沉默」因此暂不可区分（`SILENCE_ARTIFACT_ONLY` 只是评审提出的候选名字，代码里不存在）。
+- **主动性 V2 的六条缺陷已修、并已独立复验**（第三轮 t1 修复 → t2 单独复验 → t3 评审 pass）：内容口径 generic 话题 **18.2%**（目标 ≤20%）、
+  热聊接话 8 次；**但 pack 更严的「连续两次没回应后继续主动 = 0」仍不成立**——实测是「显著降频」（被忽视的那一天在连续 ≥2 条未回应后仍开口 2 次），
+  「= 0 还是显著降频」是**待用户定的产品口径**，未定之前不得写成「Phase 5 全通过」。判定表与可重跑命令见
+  [`docs/verification/t2-timeline-independent-verification-2026-10-01.md`](docs/verification/t2-timeline-independent-verification-2026-10-01.md)。
+- **`onNotice` 已被两个产线入口消费**：`serve-chat.ts`（试用页）与 `field-test.ts`（现场测试控制台）订阅并显示
+  `REPLY_HYGIENE` / `UNBACKED_FACT_CLAIM` 与「沉默原因」（`ARTIFACT_ONLY_REPLY` vs `MODEL_SILENCE`）；
+  **文字 CLI（`chat.ts`）与语音轮次（`voice-turn.ts`）仍未订阅**。
+  （代码里从来没有 `SILENCE_ARTIFACT_ONLY` 这个名字——那是评审提出的候选名，见 `packages/conversation/src/engine.ts` 的 `SilenceReason`。）
+- **长期记忆与未完话题已落地，但入口覆盖不齐**：写记忆/学习的只有控制台（`field-test.ts`）与试用页（`serve-chat.ts`）；
+  `chat.ts` 与 `voice-turn.ts` 未接 `afterTurn`（那两个入口本轮只接了工具链与语言）——覆盖必须逐入口写，别写成「所有入口都写了记忆」。
 - **金额级费用上限未实现**：主动开口的额度是**次数**（6 小时 / 当日），它是当前的费用代理。
 
 ## 许可

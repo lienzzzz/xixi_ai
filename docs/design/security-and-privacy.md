@@ -28,16 +28,19 @@
 | 等级 | 方案举例 | 当前实现 |
 |---|---|---|
 | L0 内部只读 | 当前时间、WorldState、Memory search | 只有 `xixi_get_current_time`（`packages/brain-adapter/src/tools.ts` 注释标 L0；参数 `properties:{}` + `additionalProperties:false`）。**WorldState 投影已存在**（`world_state` 表，`002_world_state.sql`；由 `recordPresenceChanged` 与感知边维护）**但没有给模型读它的工具**；Memory search 未实现 |
-| L1 普通外部只读 | 天气、新闻、日历读取 | 只有 `xixi_get_weather`（注释标 L1）。新闻不可用（该密钥 `webSearchEnabled is false`，recon §3），日历未实现 |
-| L2 低风险可逆 | 提醒、播放音乐、开灯 | 未实现 |
+| L1 普通外部只读 | 天气、新闻、日历读取 | 只有 `xixi_get_weather`（注释标 L1）与 `xixi_news_stub`（新闻源的**诚实占位**：没有 provider 时直说「现在看不到新闻」，不凭记忆编造）。真新闻不可用（该密钥 `webSearchEnabled is false`，recon §3），日历未实现 |
+| L2 低风险可逆 | 提醒、播放音乐、开灯 | 未实现（提醒只有 `xixi_set_reminder_stub`：`risk: write`，只写进程内内存 sink，不落库、不触发外部动作） |
 | L3 外部通信 / 隐私 | 发消息、上传图片、改日历 | 未实现 |
 | L4 高风险 | 门锁、支付、紧急呼叫 | **一律不做**（`AGENTS.md` 铁律 7；`tools.ts` 顶部注释：`No shell, no filesystem, no messaging, no high-risk actions exist yet`） |
 
 权限在**模型之外**校验，机制是三件事：
 
-1. 工具注册表唯一出口 `defaultTools()`（`packages/brain-adapter/src/tools.ts`，注释 `New tools join here and nowhere else`）；
+1. 工具注册表唯一出口 `defaultTools()`（`packages/brain-adapter/src/tools.ts`，注释 `The four Phase 2 built-ins. New tools join here and nowhere else`）；
+   **四个内置**：`xixi_get_current_time`（read）、`xixi_get_weather`（read）、`xixi_news_stub`（read，新闻占位）、`xixi_set_reminder_stub`（**write**，只写内存 sink）。
+   可见性由 `listForAgent(scope)` 过滤（t5 评审实测：write 工具在 proactive scope 与 guest 角色下都是 deny、工具体执行 0 次）；
+   四个 live 入口（文字 CLI / 设备自检 / 真人感评测 / 对话评测）与控制台经 `scripts/field-test.ts` 的 `buildToolChain()` 共用同一构造点，离线自证见各自 `--print-wiring`；
 2. `MimoBrainAdapter.#executeTool` 只在本注册表里查找，**未知工具名 = 拒绝**（回 `{error:'没有这个工具，请直接用已有信息回答'}` 并记 `ok:false, error:'UNKNOWN_TOOL'`），不会执行任何东西；
-3. 参数封闭：两个工具的 `parameters` 都写了 `additionalProperties: false`（时间工具是空 `properties`）。
+3. 参数封闭：工具的 `parameters` 都写了 `additionalProperties: false`（时间工具是空 `properties`）。
 
 **但 `tool_choice` 无法强制**：`MimoClient.#body` 硬编码 `tool_choice: 'auto'`，实测 `required`/具名/`none` 全被静默忽略（recon §3），
 所以「必须调用工具」不能当硬门禁，只能提示词驱动 + 程序侧解析并校验 `tool_calls`（progress §2.10）。
@@ -48,6 +51,8 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
 同时 `includeHarnessIdentity: false` 并写入西西的 `personaPrefix`/`personaSuffix`。
 它只注册**两个**只读工具：`plugins/xixi-tools/index.js` 的 `xixi_get_current_time`（`parameters: {}`）与
 `xixi_get_weather`（`place` + `day`，`additionalProperties: false`；天气工具由 t5 补齐，此前 `--dsh` 路径问天气只能编造或回避）。
+**已知缺口（只记录、本轮不修）**：DSH 插件面仍只注册这两个，而直连路径的 `defaultTools()` 有四个（多出新闻桩与提醒桩）——
+两条路径的工具集合目前不一致，`plugins/xixi-tools/` 未同步。
 注意 DSH 的 `defineTool` 隐式参数根**不带** `additionalProperties: false`（实测 `@deepseek-ai/dsh-tools` 0.1.7-rc.2），
 所以天气工具的封闭性由工具体内的参数校验兜底，而不是靠注册表。
 

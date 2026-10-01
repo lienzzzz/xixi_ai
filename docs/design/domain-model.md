@@ -59,15 +59,17 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
   断言「注册表类型集合 == 信封 `event_type` 枚举」「`payloadVersion` == `SCHEMA_VERSION`」「`ACTORS` == 信封 `actor` 枚举」。
 - 新增类型的步骤见 [`../event-contracts.md`](../event-contracts.md) §9。
 
-## 4. 四类事件（当前全部）
+## 4. 事件类型（当前 **6** 类）
 
 注册表：`packages/contracts/src/events.ts`；schema：`packages/contracts/schemas/events/`。
 
 | `event_type` | 必填 payload | 取值约束 |
 |---|---|---|
-| `presence.changed` | `present`, `source_detail` | `present: boolean`；`source_detail: string \| null`（≤200）。**当前无生产者**，只为验证契约（摄像头属 M6） |
+| `presence.changed` | `present`, `source_detail` | `present: boolean`；`source_detail: string \| null`（≤200）。**生产者是 M6 感知边**（`recordPresenceChanged`，摄像头在 `services/perception-edge` 起子进程跑） |
 | `conversation.turn` | `session_id`, `turn_index`, `role`, `action`, `text` | `session_id` 必须 `sess_<uuid>`；`turn_index: integer ≥ 0`；`role: user \| assistant`；`action: SPEAK \| BACKCHANNEL \| WAIT \| SILENCE \| TOOL`；`text: string \| null`（≤8000）；可选 `tool_name: string \| null`（≤120） |
 | `conversation.decision` | `session_id`, `turn_index`, `accepted`, `reason`, `action`, `fsm_state` | `session_id` 同上；`turn_index: integer ≥ 0`；`accepted: boolean`；`reason: ACCEPTED_WAKE_OR_DIRECT \| ACCEPTED_CONTINUATION \| REJECTED_NOT_ADDRESSED \| REJECTED_SUSPENDED`；`action` 同 `conversation.turn`；`fsm_state` 五个状态；可选 `fsm_state_before`（string\|null）、`addressed`（boolean\|null）、`acceptance_score`（number\|null，**但不是分数**，见 §4.1）、`linger_ms`（integer\|null）、`silence_tolerance`（number\|null） |
+| `proactive.decision` | `candidate_id`, `trigger`, `speak`, `reason_code` | 其余字段**全部可选**（同一事件类型内新增字段一律可选，旧事件照旧校验）：`session_id`、`score` / `threshold`（number\|null，0–1）、`recommendation`、`primary_signal`、`signals`（9 个 0–1 信号）、`basis`（≤12 条中文依据）、`decided_by`（`program` / `model`）、`model_reason_code`（白名单码，≤40）、`model_consulted`、`topic_ref`、`intent`、`delivered`。**只存理由码与分数，不存用户原话与模型私有推理**（铁律 5） |
+| `open_thread.changed` | `thread_id`, `status`, `summary` | `thread_id` 形如 `thread_…`；`status: candidate \| offered \| engaged \| resolved \| snoozed \| exhausted`；可选 `previous_status`、`subject`、`follow_after`、`expire_at`、`follow_up_hint`、`importance`、`attempts`、`source_event_id`、`note`。写这条事件与写 `open_threads` 表在**同一事务**里，所以表可被日志重建（pack Phase 3） |
 | `system.health` | `service`, `status`, `detail` | `service` 1–120 字符；`status: ok \| degraded \| down`；`detail: string \| null`（≤500） |
 
 `conversation.turn` 的两个要点：
@@ -97,7 +99,7 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
   届时**必须升版**——在 `packages/contracts/schemas/events/` 下新增 `conversation.decision.v2.json`
   并升 `SCHEMA_VERSION`（见 §3 的版本策略），**不得就地放宽/改写 v1 的类型与范围**（铁律 10）。
 
-## 5. 四张表（`001_initial.sql` 的全部内容）
+## 5. `001_initial.sql` 的四张表（其余表见 §5.5）
 
 `packages/domain` 是唯一 `import { DatabaseSync } from 'node:sqlite'` 的包；打开时设
 `PRAGMA journal_mode=WAL`、`foreign_keys=ON`、`busy_timeout=5000`，并且**每次打开都先跑迁移**。
@@ -152,6 +154,28 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
 索引 `idx_self_history_property (property, created_at)`。
 
 `source_event_id` 目前**恒为 `NULL`**：只有 M3 的反馈解释器才会把变更指回触发它的事件。
+
+### 5.5 `002` / `003` / `004` 新增的表
+
+字段级细节以迁移文件为准（[`002_world_state.sql`](../../packages/domain/src/migrations/002_world_state.sql)、
+[`003_open_threads.sql`](../../packages/domain/src/migrations/003_open_threads.sql)、
+[`004_memory.sql`](../../packages/domain/src/migrations/004_memory.sql)）：
+
+| 表 | 迁移 | 角色 | 关键列 |
+|---|---|---|---|
+| `world_state` | 002 | 当前状态投影（M6 起有写入方） | `key` PK、`schema_version`、`value`、`source`、`updated_at`、`confidence`、`ttl_seconds` |
+| `open_threads` | 003 | 未完话题的状态机 + **可重建投影**（pack Phase 3） | `thread_id` PK、`summary`、`subject`、`status`（六个状态）、`created_at`、`updated_at`、`follow_after`、`expire_at`、`follow_up_hint`、`importance`、`attempts`、`last_offered_at`、`source_event_id`、`note`；索引 `(status, follow_after)`、`updated_at` |
+| `episodic_memory` | 004 | 发生过的事（明确的纠正、记下来的一件事） | `memory_id` PK、`occurred_at`、`summary`、`kind`、`source_type`、`source_event_id`、`session_id`、`importance`、`confidence`；索引 `occurred_at`、`(kind, occurred_at)` |
+| `semantic_memory` | 004 | 稳定的事实与偏好 | `memory_id` PK、`property`、`statement`、`source_type`、`source_event_id`、`confidence`；索引 `property` |
+| `relationship_notes` | 004 | 我们怎么相处 | `note_id` PK、`aspect`、`note`、`source_type`、`source_event_id`、`confidence`；索引 `aspect` |
+| `self_profile_learned` | 004 | 学习到的**累计偏移**（与 `self_profile` 基线分开） | `property` PK、`delta`、`source_type`（`learned:…`）、`evidence`、`confidence`、`updated_at` |
+| `session_overrides` | 004 | **只对 `valid_day` 这一本地自然日生效**的覆盖（次日自动失效） | `override_id` PK、`session_id`、`property`、`delta`、`reason`、`source_type`、`valid_day`；索引 `(valid_day, property)` |
+
+共同点：**都是推导，不是事实**——每行带 `source_event_id` 指回 `conversation.turn`（铁律 4）；
+记忆写入**不新增事件类型**（可以按 `source_event_id` 重放重建），唯一的例外是 `open_threads`：
+它的每一次状态变化同时写一条 `open_thread.changed` 事件（表与日志同事务，表可被日志重建）。
+有效人格 = `self_profile`（基线）+ `self_profile_learned`（学习偏移）+ `session_overrides`（当天覆盖）三层相加。
+可查看/编辑/删除目前**只有领域 API**（`MemoryStore` / `SelfModel` / `OpenThreadStore`），没有 UI。
 
 ## 6. 人格属性与两种写入方式
 
@@ -208,12 +232,14 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
   所以想让某个属性回到 `config:base` 的基线值，必须**再用 `--personality` 显式写回那个值**；
   想查/回滚逐条变更则读 `self_profile_history`（每条覆盖都带 `before_value` 与 `source_type`）。
 
-> **明确写清：模型驱动的学习（M3）尚未实现。**
-> `BrainAdapter.interpretFeedback()` 目前直接抛 `BrainError('NOT_IMPLEMENTED', milestone: 'M3')`
-> （`packages/brain-adapter/src/mimo.ts`、`dsh.ts`、`fake.ts` 三处一致）。
-> `overrideSelfProfile` 的注释里写明它「deliberately not the M3 learning engine」。
-> 方案 §7.4 的按来源增量上限、漂移限制与自动回滚**都不存在**；`self_profile_history` 目前只记录
-> 「种子」与「管理员覆盖」两类来源。
+> **学习已经有两条在跑的路，都不是「读模型自由文本」**（pack Phase 4，别再写成「M3 尚未实现」）：
+> 确定性侧 `interpretFeedback`（显式规则，权重 1.0）与 `interpretInference`（**只认** `PROACTIVE_MODEL_REASON_CODES`
+> 白名单码，权重 0.4）由 `TurnMemoryExtractor.runJob` 调用，**权重在 `SelfModel.learn` 里按 `sourceType` 只乘一次**；
+> `self_profile_history.source_type` 记 `learned:explicit_correction` / `learned:model_inference`，`confidence` 记同一个权重。
+> 方案 §7.4 的**按来源单日上限与漂移上限都已实现**（`dailyLimitExplicit` / `dailyLimitInferred` / `driftLimit`）；
+> **回滚是显式动作**（`SelfModel.rollback(property)` 清零学习偏移并写一条 `learned:rollback`），**没有自动回滚**。
+> `BrainAdapter.interpretFeedback()`（模型侧那个结构化反馈接口）**仍抛 `NOT_IMPLEMENTED(M3)`**——
+> 它与上面这条确定性管线**不是同一个东西**，别混为一谈。
 
 ## 7. 会话与 Harness 会话的映射
 

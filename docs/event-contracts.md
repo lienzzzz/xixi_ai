@@ -75,8 +75,11 @@ TS 类型在 [`src/envelope.ts`](../packages/contracts/src/envelope.ts)。
 - 闭区间校验；`1.4` 直接抛 `INVALID_EVENT`。
 - 它描述**这条事实本身有多可信**（例如模拟器产的 presence 事件给 0.9），
   不是「模型觉得这句话有多重要」。
-- 铁律 4 的「显式用户纠正权重高于模型推断」在将来靠 confidence + `source_type` 表达，
-  当前只有 `events.confidence` 与 `self_profile_history.confidence` 两处落库。
+- 铁律 4 的「显式用户纠正权重高于模型推断」**今天就是靠 `source_type` + `confidence` 表达的**（不是将来）：
+  `self_profile_history.source_type` 区分 `learned:explicit_correction`（权重 1.0）与 `learned:model_inference`
+  （权重 0.4），`self_profile_history.confidence` 记同一个权重；推断侧的来源是 `proactive.decision.model_reason_code`
+  （只认白名单码，不读模型自由文本）。当前落库的 confidence 有 `events.confidence` 与 `self_profile_history.confidence` 两处。
+  （权重只乘一次：解释器给名义值，`SelfModel.learn` 按 `sourceType` 乘一次——实测名义 −0.05 落库 −0.02；乘两次会变成 −0.008。）
 
 ## 6. Actor 列表（§19.1）
 

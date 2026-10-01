@@ -271,13 +271,15 @@ P1 把这段的**形式**从编号清单改成一段紧凑的散文（首行写�
 | `sanitizeSpokenReply(text, {language})` | 返回 `{text, removedChars, …}`：去掉工具调用标记与**非中文**的自我推理段；中文正文原样保留。 |
 | `ConversationEngine.respond()` | 清洗后的文本才是这一轮真正说的内容（`replyText`）；`removedChars > 0` 时发一条 `onNotice({code:'REPLY_HYGIENE', detail:'回复里剔除了…'})` 供审计；整轮只剩制品 → `SILENCE`。 |
 
-**已知缺口（不要把这两件事混为一谈）**：
-① `REPLY_HYGIENE` 通知**已经发出来**（`packages/conversation/src/engine.ts`），但产线入口
-（`scripts/chat.ts` / `serve-chat.ts` / `field-test.ts` / `voice-turn.ts`）**都还没订阅 `onNotice`**，
-所以「她本来想调工具、没有结果所以没说」在控制台与日志里暂时和「她自己选择沉默」同形；
-② 评审建议的修法之一是给轮次加一个可区分的原因码 **`SILENCE_ARTIFACT_ONLY`——这个名字在代码里还不存在**，
-它是候选方案，不是现状（出处：`docs/review/reply-hygiene-review-2026-10-01.md`）。
-两件事都记在 [`progress.md` §4 未完成项](../progress.md)。
+**逐入口现状（2026-10-01 第四轮收口后重核，别写成「所有产线入口都已订阅」）**：
+① `REPLY_HYGIENE` / `UNBACKED_FACT_CLAIM` 通知**发得出来**（`packages/conversation/src/engine.ts`），
+**试用页（`scripts/serve-chat.ts`）与现场测试控制台（`scripts/field-test.ts`）已订阅 `onNotice`**，并把「沉默原因」显示给用户；
+`scripts/chat.ts` 与 `scripts/voice-turn.ts` **仍未订阅**——那两处「她本来想调工具、没有结果所以没说」与「她自己选择沉默」仍同形。
+② 沉默原因**已经可区分**：`ConversationTurn.silenceReason` 是 `MODEL_SILENCE`（模型自己沉默）或
+**`ARTIFACT_ONLY_REPLY`**（整轮只剩制品），控制台显示「沉默原因：…」、试用页显示 `silenceReasonLabel(...)`。
+评审提出的候选名 `SILENCE_ARTIFACT_ONLY` **从来没有进过代码**，不要把候选名当现状
+（出处：[`review/reply-hygiene-review-2026-10-01.md`](../review/reply-hygiene-review-2026-10-01.md)）。
+剩余缺口与逐入口清单记在 [`progress.md` §4 未完成项](../progress.md)。
 
 **代价（写清楚，别当成没发生）**：流式路径下含未核实具体值的句子会被扣到本轮结束再决定，
 这类句子的音频因此延后（分段路径本来就在结束时才播，不受影响）。
@@ -423,7 +425,7 @@ decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值�
 | 唤醒词与搭话判定（§13 完整版） | §13 的 **POC 判定规则已实现**（`shouldAcceptTurn`，见 §1）；**唤醒词检测本身无代码**——`addressed` 由 UI 按钮/语料给出（M2） |
 | 主动开口（§15） | **两层，自 2026-10-01 起（[ADR-0011](../adr/0011-proactive-decision-ownership.md)）**：① **硬底线由程序判定，模型不能加宽**——静默时段 / 当日与 6 小时**次数**额度（次数是当前唯一的费用代理；**金额级费用上限尚未实现**）/ DND / 隐私与同意 / 场景与音频路径 / 同一候选重复 / 触发源关闭；② 底线之上**由模型读空气决定说不说**，确定性那一半只**提议**：社会预算分（话题质量分 / 相关性 / 新鲜度 / 读空气 / 互动度 / 基础主动性 − 打扰代价（冷却）/ 话题重复惩罚 / 未回应惩罚）+ 一个 `recommendation`（`speak` / `hold`）。**冷却、话题重复、未回应都是「打分」而不是一票否决**：强候选可以紧接着弱候选过线，热聊中的接话不受冷却限制（pack §14.3）。每次判定落一条 `proactive.decision`（`speak` / `reason_code` / 分数 / 阈值 / 每个信号 / `primary_signal` / 程序渲染的中文 `basis` / `decided_by`；模型拒绝时只从固定白名单取一个 code），**不存模型推理**（铁律 5）；投递「先记后播」，崩溃不重发。候选生成与两个**按需**调用方（控制台演练、常驻考虑循环 `ProactiveLoop`——控制台与试用页各一个实例，默认关闭）已落地；**仍缺**：无人值守的常驻守护进程（页面进程一退就停），以及模型侧候选评估（三个适配器的 `evaluateProactiveCandidate` 仍抛 `NOT_IMPLEMENTED(M5)`；「读空气」目前发生在调用方的模型路径上）。核对：`git grep -n "\.consider(" -- scripts packages`、`git grep -n "new ProactiveLoop" -- scripts` |
 | 多段回复（一轮说 1~8 段） | **引擎侧已落地（t41）**：`packages/conversation/src/segments.ts` 的确定性分段器 + `RespondHooks.onSegment` 逐段播放 + §5 的 ⑨′ 步，`config` 的 `reply` 段已被读取；契约与可测条款见 §7 与 [ADR-0010](../adr/0010-multi-segment-replies.md)（**上限 3 → 8、容量 180 → 480 字**，见其修订记录）。**已接的**：`scripts/chat.ts`（订正 2026-09-30）传 `onSegment`，终端里逐段打印、段间真等 `gapMs`。**未接的**：音频出口——试用页 `scripts/serve-chat.ts` 与 `scripts/voice-turn.ts` 仍只传 `onTextChunk` 并用 `synthesize(turn.text)` 一次合成整段，所以扬声器里目前仍是单段合成（核对：`git grep -n "onSegment" -- scripts packages`，生产入口只命中 `scripts/chat.ts`） |
-| 制品清洗（工具标记 / 英文推理） | **程序层已落地（t7）**：`sanitizeSpokenReply()` 在进 TTS / 日志 / 工作记忆前剔除 `<tool_call>…` 与外文自我推理，整轮只剩制品 → 沉默；剔除量 > 0 时发 `REPLY_HYGIENE` 通知（见 §3 的第二条闸门）。**仍缺**：产线入口都没订阅 `onNotice`，「为什么沉默」在页面上暂不可区分（`SILENCE_ARTIFACT_ONLY` 是评审提出的候选名字，代码里不存在） |
+| 制品清洗（工具标记 / 英文推理） | **程序层已落地（t7）**：`sanitizeSpokenReply()` 在进 TTS / 日志 / 工作记忆前剔除 `<tool_call>…` 与外文自我推理，整轮只剩制品 → 沉默（原因码 `ARTIFACT_ONLY_REPLY`，与 `MODEL_SILENCE` 可区分）；剔除量 > 0 时发 `REPLY_HYGIENE` 通知（见 §3 的第二条闸门）。**订阅覆盖（逐入口）**：试用页与控制台已订阅 `onNotice` 并显示沉默原因；文字 CLI 与语音轮次未订阅（见 `docs/progress.md` §4） |
 | 长期记忆与关系（§10/§18） | 工作记忆只有 `recentTurns(limit 8)`；长期记忆属 M4 |
 | 回溯打断时的语义截断 | 只有 VAD 判定层面的离线测量（`scripts/voice-bargein.ts`） |
 | 提示词与延迟进事件日志 | 刻意不存（铁律 5 的方向：只存事实与 `reason_code`）；接受判定已按同一原则落 `conversation.decision` |

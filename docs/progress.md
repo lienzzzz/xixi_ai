@@ -2,7 +2,7 @@
 
 > 更新规则：每完成一个可独立理解的步骤就立刻追加/更新本文，写清「做了什么、验证结果、下一步、已知问题」。
 > 这台机器偶发蓝屏，**本文是崩溃后恢复工作的唯一依据**。
-> 最后更新：2026-10-01（集成收口 t5）— **「真人感」改造落地并有同口径前后对比**（提示词＝身份与说话方式 + 紧凑安全段、回复容量 180→480 字、制品清洗、主动性改两层）；指标口径唯一化（主口径＝末句以问号收尾）
+> 最后更新：2026-10-01（第四轮集成收口 t5）— **pack Phase 2/3/4 的接线完成并逐入口写明**（工具链四个 live 入口共用 `buildToolChain` + `--print-wiring` 自证；未完话题收口改用内容字判据；长期记忆与推断学习权重只乘一次；提取队列退出兜底）。第四轮的口径、取舍与已知残余见 **§2.19**，全部已知问题（只记录、本轮不修）见 **§4 第 10 条起**
 > 权威来源：本文件的数字来自当次命令输出；与代码冲突时以代码为准，并立即修正本文。
 
 ## 0. 结论表（objective）
@@ -22,9 +22,10 @@
 | **主动开口（ADR-0009 + ADR-0011）** | **两层**：硬底线（静默时段 / 6h 与当日**次数**额度 / DND / 隐私与同意 / 场景与音频路径）由程序判定、模型不能绕；底线之上**由模型读空气决定说不说**，确定性社会预算只给建议（`BELOW_RECOMMENDATION`）；5 次 tick 只放行 1 条 | ✅ |
 | **多段回复** | `reply.max_segments=8 / segment_max_chars=60 / gap_ms=450`（**块长 60、容量 8×60=480 字**）；容量内每段 ≤60，`>8` 组时尾段合并 + `mergedOverflow`（该段可超 60）；字符零丢失；状态机一轮只推进一次 | ✅（终端已接分段播放） |
 | **「真人感」（P1，2026-10-01）** | 稳定前缀 = **身份与说话方式**（散文、0 编号）+ 紧凑安全段；容量 180→480 字；工具标记/英文推理在程序层剔除。同语料同口径：提问率主口径 45.8%→46.0%（各 n=1 次运行；三次重复均值 46.2% vs 46.0%）、单段最长 341→170 字、20 轮复述 0（详见 §2.18） | ✅（**提问率仍贴 30–50% 上沿**，见 §4） |
+| **pack Phase 2/3/4 接线 + 第四轮收尾** | **Phase 2**：工具链逐入口覆盖（四个 live 入口共用 `buildToolChain`，`--print-wiring` 离线自证）、语言取自部署配置；**Phase 3**：未完话题收口判据＝**内容字**（无关轮次进 `ignored`、不写事件、窗口内还能再问一次）；**Phase 4**：长期记忆 + 三层自我画像 + 推断学习真的接线（权重只乘一次：名义 −0.05 → 落库 −0.02）、提取队列退出兜底（只覆盖正常退出）。数字、边界与已知残余见 **§2.19** | ✅（已知缺口见 §4） |
 | **现场测试控制台（一条命令）** | `npm run field-test` → http://127.0.0.1:8792；三栏界面 + 一键启用 + 设备自检引导 | ✅ |
 | 真实麦克风 / 扬声器（人耳） | 回环「回采余量」实测能量比 **2.41 dB < 10 dB** → 判 FAIL；**这不代表用户对麦克风说话能否被听到**（见 §0 用户须知与 §2.14） | ⚠️ 需人耳确认 |
-| 唤醒词 / 长期记忆 / 模型侧主动候选 | 未实现（M2 / M4 / M5 的模型侧），本轮刻意不做 | ⛔ |
+| 唤醒词 / 事件回放 / 模型侧主动候选 | 未实现（M2 / M5 的模型侧）；**长期记忆与三层自我画像已落地（pack Phase 4）**，见 §2.19 | ⛔ / ✅ 见 §2.19 |
 | 主动问候的「真实用户价值」 | 主动开口已能发声，但**没有真人长期使用数据**；强度默认 0.85（阈值 0.495）只是当前取值 | ⚠️ 未验证 |
 
 综合延迟（干净环境）：对话总时长 P50 2.5s / P95 5.1s，首字 P50 1.2s / P95 2.9s；语音链路里 VAD 判定 ~192ms、ASR 0.34~0.73s、LLM 首字 1.7~2.3s、TTS 1.0~2.0s。
@@ -43,7 +44,8 @@
 
 即「输入文字 → DSH → MiMo → structured tool → answer；restart → session recover」成立，且不是同进程内的假恢复。
 另有 `npm run verify:provider`（一次真实调用）单独证明路由 + 工具调用可用。
-离线测试 `npm test`：**以末行为准**（最近一次实测点：2026-09-30、**223 项**、exit 0；更早的集成收口实测点是 209 项 / 19.1s）。
+离线测试 `npm test`：**以末行为准**（最近一次实测点：2026-10-01 第四轮收口、**398 项**、exit 0；
+更早的集成收口实测点是 223 项、209 项 / 19.1s）。
 **项数与文件数都不要抄**：本轮先后出现过 36 / 63 / 87 / 95 / 120 / 137 / 139 / 180 / 189 / 192 / 201 / 206 / 209 / 213 / 223，
 那些全是**当时快照**，留着只为了证明「这个数一直在动」——要现状就跑 `npm test` 看末行。
 **给后人的提醒：改这份文档时不要再写死测试总数或文件数**，只写「以 `npm test` 末行为准」加一个带日期的实测点
@@ -57,9 +59,9 @@
 | M1 前置 spike（Python + 语音框架选型） | **已完成**：ADR-0007 选 Pipecat，参数与结论均有实测支撑 |
 | M1 语音闭环（前端→VAD→ASR→对话→TTS + 打断） | **可用**：夹具链路通过 + 抗噪前端与成功边界已实测（§2.13）；真实麦克风的人耳确认仍未做 |
 | 对话层（会话 FSM + Prompt 组装 + 工具 + 多段回复） | **已完成（P1 改版）**：多轮连续性、沉默、人格可调、只读工具、多段回复（ADR-0010，**容量 480 字**）；提示词前缀＝身份与说话方式 + 紧凑安全段 |
-| **主动性 V2**（硬底线 + 模型读空气 + 真发声） | **已完成（部分，两项验收未达标）**：硬底线原样生效、底线之上由模型决定、内容由模型生成；**但 pack Phase 5 的 generic 占比 33.3%（≤20% 未达标）与「两次未回应后降频」不成立**（t9 判 failed，修复任务 t18 未开始）；模型侧候选评估、长期记忆、FutureHook、无人值守守护进程仍未做 |
+| **主动性 V2**（硬底线 + 模型读空气 + 真发声） | **已完成（第三轮修复 → t2 独立复验 → t3 评审 pass）**：硬底线原样生效、底线之上由模型决定；六条缺陷修完，generic 占比 **18.2%**（≤20%）、热聊接话 8 次；**但 pack 更严的「连续两次没回应后继续主动 = 0」不成立**——实测是「显著降频」（被忽视的那一天在连续 ≥2 条未回应后仍开口 2 次），「= 0 还是显著降频」**待用户定口径**。模型侧候选评估、无人值守守护进程仍未做 |
 | **M6 摄像头在场检测** | **已完成（部分）**：帧差动 + YuNet → `presence.changed` → `world_state` 投影 + 一键启用；**真人自测未跑**（§4） |
-| M2 唤醒词 / M3 人格学习 / M4 记忆 | 未开始 |
+| M2 唤醒词 / M5 回放 | 未开始（M3 人格反馈与 M4 记忆已由 pack Phase 4 落地，见 §2.19；计划类钩子以 `open_threads` 实现） |
 | 现场测试控制台（三栏 + 一键启用 + 设备自检） | **已完成**：`npm run field-test`（§2.15） |
 
 仓库：`E:\worker2`。独立项目，**不依赖** `E:\worker` 的「m」原型（其方向已偏离需求）。
@@ -407,6 +409,63 @@ node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v02-wip
 逐条口径与全部数字见 [`benchmarks/realism-metrics.md`](benchmarks/realism-metrics.md)；独立验证见
 [`verification/t4-realism-verification-2026-10-01.md`](verification/t4-realism-verification-2026-10-01.md)。
 
+### 2.19 pack Phase 2/3/4 的接线、逐入口覆盖与设计取舍（第四轮收口，2026-10-01）
+
+**第四轮交付台账**（团队 `xixi-v02-round4`；契约与状态在 `.agent-teams/xixi-v02-round4`，任务编号只在本轮内唯一）：
+
+| 任务 | 结果 |
+|---|---|
+| t1 理由码断言强度 + 时间线覆盖问询额度（承接第三轮 t13） | ✅ `b36ef15`：两次已宣告突变实验证明断言抓得住；时间线命令六行全过 exit 0 |
+| t2 工具链与语言接线推及全部 live 入口（承接第三轮 t14） | ✅ `dba60bc`：四个 live 入口共用 `buildToolChain`；新增离线开关 `--print-wiring`；三次已宣告突变实验各红 |
+| t3 未完话题收口不挂钩（承接第三轮 t15） | ✅ `37b8453` → 评审 **t7 = needs_revision**（R1「去」漏在通用字表、R2 弱证据路径太松）→ t8 修复 `ab61a98` → 复审 **t9 = pass** |
+| t4 推断学习接线 + 提取队列不丢数据（承接第三轮 t16） | ✅ `227fbd7` → 评审 **t10 = pass**（反事实：落库换回已乘权重的值 → 集成用例红 2、显式侧一字未变） |
+| t6 更正两处与事实不符的注释（§9.13 更正） | ✅ `f11d90c`（纯注释） |
+| t11 清掉「省略 language 即直通」最后一处注释残留 | ✅ `2fd3643`（纯注释；全仓 `is a pass-through` 命中 0） |
+| t12 更正 mimo-markup-hygiene 测试里的反向注释（t10 的 N3） | ✅ `2655fa3`（注释 + 用例名；突变实测 4 绿 1 红、唯一红的是 en-US 那条） |
+| t13 修正 extraction-queue 反向注释 + feedback 单测改走生产实现（t10 的 N1/N2） | ✅ 完成（产物在队长提交中；反事实让单测层红 1 例：actual −0.008 vs expected −0.02） |
+| t5 集成收口：文档同步 + 全量门禁 | ✅ 本文 §2.19/§4 就是它的产物；门禁数字见 §0b 与本次回报 |
+
+**Phase 2 —— 工具链逐入口覆盖（不要写「语音与文字共用同一条工具链」这种笼统话）**：
+`scripts/field-test.ts` 的 `buildToolChain(config)` 是唯一构造点，注册表默认**四个内置**工具
+（`xixi_get_current_time`、`xixi_get_weather`、`xixi_news_stub` 是 `risk: read`；`xixi_set_reminder_stub` 是 `risk: write`、只写内存 sink），
+可见性再由 `listForAgent(scope)` 过滤。**四个 live 入口**——文字 CLI `scripts/chat.ts`、设备自检 `scripts/voice-device-check.ts`、
+真人感评测 `scripts/eval-realism.ts`、对话评测 `scripts/eval-conversation.ts`——都改用它；控制台与试用页/语音本来就走这条链。
+离线自证（本轮实跑，四行逐字相同）：`node <入口> --print-wiring` → `language` 取自部署配置、`maxToolRounds: 4`、四个工具、四个 `allow`，不调模型、不建库。
+**设备自检没有离线端到端证据**（要真实 WAV + 硬件 + 真实 ASR）：它的证据是上面这行 + 与适配器共用一个 `deviceToolChain` 调用点。
+`--fake` 现在注入内存天气源，所以「完全离线」的承诺在接入工具后仍成立。
+
+**语言接线的口径（§9.13 更正，别再写成「堵住了一条会泄漏的通道」）**：`MimoBrainAdapter` 的 `language` 取自 `config.identity.language`，
+**省略时构造回落 `zh-CN`**（`options.language ?? 'zh-CN'`）——中文清洗规则对每个部署照常生效，省略不是直通。
+这条接线的价值是**让过滤器跟随部署语言**：非中文部署不再被中文规则改写（zh-CN 那侧不传选项也过，真正承重的是 en-US 那侧）。
+
+**Phase 3 —— 未完话题的设计取舍（第三轮 t7 评审 F3 要求的落档）**：
+① **收口判据**：被问过之后，只有**出现话题内容字**的那一轮才算回答（`isAnswerAboutThread`）；对不上的轮次进
+`ReconcileResult.ignored`，**不写事件、不改状态**，话题留在 `offered`，由既有的 `reofferAfterMinutes` / `maxAttempts` /
+`expireAt` 在窗口内放回候选——所以「他随口聊句别的」不会静默丢一件事。已知残余：判据是**字**级而不是理解，
+共享一个内容字仍可能误判（实测「明天我要去买药。」+「我去楼下买了点水果。」1/13；「明天我要去看孙子。」+「老李家的孙子回来了。」
+也 1/13——通用动词与常见名词都算），修好它要把规则升级到**词/对象**级，属下一轮工作量（已钉成一条显式标注「已知残余，不是期望行为」的用例）。
+代价是有意选的：不提那件事的真回答（「没去成，改天再说吧。」）会被当成不相关、过一阵子再问一次——多问一次有界可见，
+静默丢一件事无界（本轮实测：13 句无关句误判 **4/13 → 0/13**，真答案探针 9 句里 **7 → 6**，唯一新增漏判就是这一句）。
+② **来源只实现了一个**：`TOPIC_SOURCES` 列了 9 个来源，只有 `open_thread` 有真实生产者，其余是契约占位（`live=false`）。
+③ **面板的只读 GET 会推进状态**：`/api/field/proactive` 的 `proactivePayload()` 会先 `topicEngine.reconcile(at)` 再报告——
+刷新页面会写事件、推进话题状态（reconcile 幂等，重复刷新不会多记事情），但它与常驻考虑循环并发，见 §4 第 17 条。
+**ADR 状态：待定**——「收口判据」这一设计选择目前只记录在本节（判据下一轮还要从字升级到词/对象，现在写成 ADR 会立刻过期）；
+升级落地后应补一份 ADR 把它定死。
+
+**Phase 4 —— 逐入口覆盖与局限（第三轮 t9 评审 F4 要求的落档）**：
+① **哪些入口写记忆/学习**：现场测试控制台（`scripts/field-test.ts`）与试用页（`scripts/serve-chat.ts`）；
+`scripts/chat.ts` 与 `scripts/voice-turn.ts` **未接 `afterTurn`**（那两个入口不写记忆、不学习，本轮只给它们接了工具链与语言）。
+② **推断分支已接线**（第四轮 t4，此前是死代码）：`ConversationEngine` 每轮从同会话的 `proactive.decision.model_reason_code` 取
+「他上一条轮次之后、这一条轮次之前」**最新一条带码**的读法，取不到就 `null`（宁可不学，也不瞎归因）；
+只在白名单且偏移表里有定义的码才学（`good_moment` 取到也不学）。**权重只乘一次**：解释器给名义值、`SelfModel.learn` 按
+`sourceType` 乘一次（显式 1.0 / 推断 0.4）——实测名义 −0.05 落库 **−0.02**；乘两次会变成 −0.008（名义 ×0.16，接线前就是这样）。
+同轮里显式纠正压过推断码（不是叠加、不是平均）。
+③ **漂移上限让出厂 `talkativeness` 进不了提示词低档**（§7.4 的设计取舍）：低档阈值 0.4，而漂移到底只到 0.45。
+④ **提取队列的退出兜底**：`enqueue` 时装唯一一个 `process.once('exit')` 钩子，退出那一刻 `drainOnExit()` 同步跑完队列；
+跑不掉（库已关、规则抛错）才往 stderr 写一行，含丢几轮与会话/轮次事件 id（可回日志重放）。**它只覆盖正常退出**
+（`process.exit()` 与事件循环空了）；**强杀与断电仍会丢**——那种情况要持久化待办，而持久化需要新事件类型与表，本轮没做（如实标注）。
+⑤ **记忆只有领域 API**（可查看/编辑/删除），没有 UI。
+
 ## 2b. 评审与验证汇总（本轮）
 
 **四份实现评审的 verdict 与 findings 去向**（findings 编号与严重度取自各自报告；「闭环」= 复审已 pass）：
@@ -432,9 +491,17 @@ node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v02-wip
 |---|---|---|---|
 | t6 评审 P1 提示词与长度策略 | [`review/p1-prompt-length-review-2026-10-01.md`](review/p1-prompt-length-review-2026-10-01.md) | needs_revision | F2 口径 / F3 安全措辞 / F4 claim → **t16** 修复；**F1 文档漂移 → 本收口任务 t5** |
 | t17 复审 | [`review/p1-prompt-length-rereview-2026-10-01.md`](review/p1-prompt-length-rereview-2026-10-01.md) | **pass** | 三条 finding 独立复核成立且可复现；O1 更正了「8 次独立捕获」的措辞（已落 §2.18 与 benchmarks 文档） |
-| t7 评审制品清洗 | [`review/reply-hygiene-review-2026-10-01.md`](review/reply-hygiene-review-2026-10-01.md) | needs_revision | `REPLY_HYGIENE` 无产线消费者 → 记入 §4 未完成项（**未修**，文档如实写缺口） |
+| t7 评审制品清洗 | [`review/reply-hygiene-review-2026-10-01.md`](review/reply-hygiene-review-2026-10-01.md) | needs_revision | `REPLY_HYGIENE` 当时**没有产线消费者** → 2026-10-01 第四轮重核：试用页（`serve-chat.ts`）与控制台（`field-test.ts`）已订阅 `onNotice`、沉默原因码 `ARTIFACT_ONLY_REPLY` 上线；`chat.ts`/`voice-turn.ts` 仍未订阅（§4 第 10 条） |
 | t4 独立验证「真人感」 | [`verification/t4-realism-verification-2026-10-01.md`](verification/t4-realism-verification-2026-10-01.md) | **通过** | 三次输入独立复算、铁律未削弱；它自己的提问率主口径结论与 §2.18 同源 |
-| t9 独立验证主动性 V2 | [`verification/t9-proactive-v2-verification-2026-10-01.md`](verification/t9-proactive-v2-verification-2026-10-01.md) | **failed**（引擎机制成立，但 pack Phase 5 两项时间线验收未达标） | 两项未达标与六条缺陷已如实写入 §1/§2.15；修复任务 **t18**（pending）、复验 **t19**（pending）；ADR-0011 已记录（`efa6dbe`）——**不得写成已通过** |
+| t9 独立验证主动性 V2 | [`verification/t9-proactive-v2-verification-2026-10-01.md`](verification/t9-proactive-v2-verification-2026-10-01.md) | **failed**（引擎机制成立，但 pack Phase 5 两项时间线验收未达标） | 六条缺陷已由**第三轮 t1 修复、t2 独立复验、t3 评审 pass**（generic 18.2%、热聊接话 8 次）；**pack 更严的「连续两次没回应后继续主动 = 0」仍不成立**（实测显著降频），「= 0 还是显著降频」待用户定口径——**不得写成已全通过**。ADR-0011 已记录（`efa6dbe`） |
+
+**2026-10-01 第四轮（`xixi-v02-round4`：pack Phase 2/3/4 收尾 + 文档收口；台账见 §2.19）**：
+
+| 评审 | 结论 | 说明 |
+|---|---|---|
+| t7 评审 t3（未完话题收口挂钩） | **needs_revision** → t8 修复 → t9 复审 **pass** | R1（通用字表少「去」）与 R2（弱证据路径用未过滤字表比字）都由评审实测复现；修复后 13 句无关句误判 **6/13 → 0/13**（t9 用自己的探针独立复测成 **4/13 → 0/13**），代价是真答案探针 9 句里 **7 → 6**——唯一新增漏判正是被钉住的「没去成，改天再说吧。」（有意取舍：多问一次有界、静默丢一件事无界） |
+| t10 评审 t4（推断接线 + 权重只乘一次） | **pass** | 反事实：把落库换回「已乘权重」的值 → 集成用例红 2（actual **−0.008** vs expected **−0.02**），显式侧 −0.12 一字未变；「强杀与断电仍会丢」的诚实边界经核对属实（字段与命令见 §2.19 Phase 4 ④） |
+| t10 的三条非阻塞观察 N1/N2/N3 | 已由 t12、t13 收尾 | N3 → t12（`mimo-markup-hygiene` 的反向注释与用例名，突变实测唯一红的是 en-US 那条）；N1/N2 → t13（extraction-queue 反向注释；feedback 单测改走 `TurnMemoryExtractor.runJob`，反事实下它自己红 1 例） |
 
 **t29 负责的三份文件（`docs/testing.md` / `README.md` / `docs/handoff.md`）**：本轮只做**最终一致性核对**，
 未重复修改（遵守派单约束）。**核对结论（当时）：仍有漂移，需另派单订正**——（现已在 t90/t94 收尾，见下）
@@ -491,13 +558,39 @@ node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v02-wip
    当前只有管理员的 `overrideSelfProfile`（控制台面板走的就是它），**模型驱动的学习尚未实现**。
 8. **M4 Memory**：当前只有会话内工作记忆（最近 8 轮）；长期记忆、纠正优先级、FutureHook 都还没有。
 9. 已知待补：`tsc --noEmit` 类型检查、`tests/replay/`（§22.3 回放属 M5）。
-10. **`onNotice` 没有产线消费者（P1 遗留，2026-10-01）**：`REPLY_HYGIENE`（工具标记/英文推理被剔除）与
-    `UNBACKED_FACT_CLAIM`（未核实的具体值被扣住）两条审计通知都发给调用方，但
-    `scripts/chat.ts` / `serve-chat.ts` / `field-test.ts` / `voice-turn.ts` 都没传 `onNotice`——
-    于是「程序改写了她说的话」在页面与日志里与「模型本来就这么说」同形。评审建议的最小修法见
-    [`review/reply-hygiene-review-2026-10-01.md`](review/reply-hygiene-review-2026-10-01.md)（F，requiredFix 二选一）。
-11. **`SILENCE_ARTIFACT_ONLY` 只是候选名字**：给「整轮只剩制品 → 沉默」一个可区分的原因码是评审提的方案之一，
-    **代码里并不存在**；现在轮次仍只报 `SILENCE`。落文档时不要写成已实现。
+10. **`onNotice` 的订阅覆盖不齐（2026-10-01 第四轮重核，只记录）**：`REPLY_HYGIENE`（工具标记/英文推理被剔除）与
+    `UNBACKED_FACT_CLAIM`（未核实的具体值被扣住）两条审计通知**试用页（`scripts/serve-chat.ts`）与控制台（`scripts/field-test.ts`）
+    已订阅**并显示「沉默原因」；`scripts/chat.ts` 与 `scripts/voice-turn.ts` **仍未订阅**——那两处仍与「模型本来就这么说」同形。
+    评审的建议见 [`review/reply-hygiene-review-2026-10-01.md`](review/reply-hygiene-review-2026-10-01.md)。
+11. **`SILENCE_ARTIFACT_ONLY` 只是评审提出的候选名字**：实际落地的原因码是 **`ARTIFACT_ONLY_REPLY`**
+    （`ConversationTurn.silenceReason`，与 `MODEL_SILENCE` 并列，见 `packages/conversation/src/engine.ts`）；
+    候选名**从来没有进过代码**，落文档时不要把候选名当现状、也不要再写「轮次只报 SILENCE」。
+12. **控制台 `proactiveSettingsToConfig` 不回写部分设置**（t63 既有；本轮新增的 `max_consults_per_day`、
+    `new_session_min_gap_min`、`hot_chat_*` 同此）：私有配置覆盖文件里调过这些键后，再用页面保存任一参数会回落默认
+    （模板见 `config/xixi.example.yaml`；本机没有私有覆盖文件）。
+13. **黄金语料仍缺 quiet-hours 硬底线用例**（t9 §4.3 的建议）：动语料会连带改真人感报告的数字，所以留到有明确需要时再补。
+14. **DSH 插件面 `plugins/xixi-tools` 仍只注册两个工具**（时间、天气），而直连路径的 `defaultTools()` 有四个——
+    两条路径的工具集合目前不一致（[`design/security-and-privacy.md`](design/security-and-privacy.md) §2 已如实标注）。
+15. **`agent-loop` 的工具时钟是「回合开始快照」**（T5-F2）：`context.now` 在进入循环前求值一次并原样转给每个工具，
+    一次多轮工具调用里工具看到的是回合开始的时间（亚分钟级；修法见 finding 的 requiredFix）。
+16. **「内部字样」的断言词表有两份**（T5-F4）：`tests/console/field-test-console.test.ts` 与 `tests/unit/core/tool-loop.test.ts`
+    各持一份**重叠但不等**的正则；两处都不是 `createSpokenTextFilter` 的真实回归（那份在 `tests/unit/core/engine-reply-hygiene.test.ts`）。
+17. **只读 GET `/api/field/proactive` 会 `reconcile`**（t7-F2）：面板刷新会写事件、推进话题状态，且与常驻考虑循环并发。
+    reconcile 是幂等的（重复刷新不会多记），但「只读接口有写副作用」这件事必须知道。
+18. **`runJob` 共享一次 `try`**（T9-F2）：同一个 job 里只要有一个属性非法，整轮的学习与记忆都不落库
+    （`onError` 会收到，但那一轮的其它写入一起丢）。
+19. **时钟类假句在流式出口「先吐后撤」**（t10 + t21 定级）：流式路径下含未核实具体值的句子会先交给 `onTextChunk` 再被扣回——
+    **显示与延迟层面，不可听**（语音与文字都用最终 `turn.text` 调 TTS）。
+20. **「晚上八点一刻」「差十分八点」不在读数范围**（t11 评审）：属口语读法缺口，**不比修复前差**，评审不建议为此改容差。
+21. **记忆只有领域 API，没有 UI**（查看/编辑/删除）；写入不新增事件类型（记忆是推导，铁律 4，每行带 `source_event_id`）。
+22. **`packages/conversation/src/index.ts` 未登记 t3 的新导出**（`isAnswerAboutThread`、`IgnoredThreadTurn`；
+    `ReconcileResult` 已登记）：消费者能读到 `.ignored`，但叫不出它的元素类型；面板或脚本要用时需另派任务补一行。
+23. **`scripts/serve-chat.ts` 没有信号收尾**：Ctrl+C 不保证走到提取器的收尾；建议在收尾里显式调一次 `drainOnExit()`/`flush()`
+    （提取器自身的 `exit` 钩子已覆盖正常退出，见 §2.19 Phase 4 ④）。
+24. **推断读法每轮会全量读该会话的 `proactive.decision`**：`readEvents` 没有「读最近 N 条」的接口，要消掉得先在领域层加接口
+    （当前实测开销可忽略，只作为已知成本记录）。
+25. **未完话题判据的已知残余**（第三轮 t7-F1 / 第四轮 t8-t9）：共享**内容字**（通用动词与常见名词都算）的无关句仍可能被收口，
+    实测 1/13；已钉成显式标注「已知残余，不是期望行为」的用例，修法是把判据升级到词/对象级（见 §2.19 Phase 3）。
 12. **提问率口径缺单测（t17 的 O2）**：「修复句不进分母」「主口径 ≠ 辅口径时按主口径判带」这两条夹具建议补进
     `tests/scenarios/realism-metrics.test.ts`；现在删掉修复句排除也不会红。该文件不在本轮 inScope。
 13. **指标模块的跨包相对导入（t17 的 O3）**：`scripts/lib/realism-metrics.ts` 直接
@@ -536,6 +629,9 @@ node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v02-wip
   3. **`deliverables` 与 `inScope` 不一致时，编辑不会进 `changedPaths`**（t26 的实例）；
   4. **任何「全绿 / 已接入」声明必须带修订号与实测输出**；
   5. **全量测试结果要在成员在途编辑窗口之外判读**（`scripts/field-test.ts` 被测试 import，改它会让全队 `npm test` 变红）。
+- **第四轮记录的逐条已知缺口**（`onNotice` 覆盖不齐、控制台设置回写、DSH 工具面、agent-loop 时钟快照、内部字样词表两份、
+  只读 GET 的写副作用、`runJob` 共享一次 try、流式先吐后撤、口语读法范围、记忆无 UI、`index.ts` 导出、`serve-chat` 无信号收尾、
+  推断读法全量扫描、未完话题判据残余）见 **§4 第 10–25 条**——不在这里重复抄写。
 
 ## 7. 崩溃后如何恢复
 
