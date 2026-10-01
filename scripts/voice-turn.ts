@@ -32,7 +32,9 @@ import { REPO_ROOT, loadConfig, printEvidence, readDotEnv } from './lib/harness.
 import { concatWav, readWavInfo, readWav } from './lib/wav.ts';
 // Shared with the field-test console: the multi-segment planner and the
 // speech-only slicer, so "use every segment" lives in exactly one place.
-import { buildSpeechAudio, planSpeechSegments, type DroppedSegment } from './field-test.ts';
+// `buildToolChain`/`CONVERSATION_SCOPE` come from the same file for the same reason:
+// this voice entry and the console must not drift into two tool chains (pack Phase 2).
+import { buildSpeechAudio, buildToolChain, CONVERSATION_SCOPE, planSpeechSegments, type DroppedSegment } from './field-test.ts';
 
 for (const [key, value] of Object.entries(readDotEnv())) {
   if (process.env[key] === undefined) process.env[key] = value;
@@ -53,6 +55,8 @@ interface VoiceTurnResult {
   readonly transcript: string | null;
   readonly reply: string | null;
   readonly action: string;
+  /** Pack Phase 2: the tool that backed this voice turn, when one ran. */
+  readonly toolName: string | null;
   readonly accepted: boolean;
   readonly reason: string;
   readonly replyWav: string | null;
@@ -108,7 +112,24 @@ const client = useFake ? null : new MimoClient();
 const store = openXixiStore({ dataDir: join(REPO_ROOT, 'data', 'voice') });
 store.seedSelfProfile(config.personality.base);
 const session = store.latestSession() ?? store.createSession();
-const adapter: BrainAdapter = useFake ? new FakeBrainAdapter() : new (await import('@xixi/brain-adapter')).MimoBrainAdapter({ maxCompletionTokens: 400 });
+/**
+ * Pack Phase 2: the file-driven voice entry uses the *same* tool chain as the text
+ * entries (`buildToolChain` → one registry with the four built-ins). Before this, the
+ * voice path had no tools at all: asking about the weather by voice could only be
+ * answered from memory.
+ */
+const toolChain = buildToolChain(config, {
+  onToolCall: (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
+});
+const adapter: BrainAdapter = useFake
+  ? new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE })
+  : new (await import('@xixi/brain-adapter')).MimoBrainAdapter({
+      maxCompletionTokens: 400,
+      registry: toolChain,
+      scope: CONVERSATION_SCOPE,
+      timezone: config.identity.timezone,
+      language: config.identity.language,
+    });
 const engine = new ConversationEngine({ adapter, store, config, turnTimeoutMs: 60_000 });
 mkdirSync(OUT_DIR, { recursive: true });
 
@@ -141,6 +162,7 @@ for (const wavPath of wavs) {
       reply: null,
       action: 'SILENCE',
       accepted: false,
+      toolName: null,
       reason: 'NO_SPEECH_DETECTED',
       replyWav: null,
       timings: { vadMs, sourceDurationMs: Math.round(info.durationMs) },
@@ -198,6 +220,7 @@ for (const wavPath of wavs) {
     reply: turn.text,
     action: turn.action,
     accepted: turn.accepted,
+    toolName: turn.toolName,
     reason: turn.reason,
     replyWav,
     timings: {

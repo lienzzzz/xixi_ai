@@ -50,7 +50,19 @@ import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, defaultTools, type BrainAdapter } from '@xixi/brain-adapter';
+import {
+  DshBrainAdapter,
+  FakeBrainAdapter,
+  MimoBrainAdapter,
+  ToolRegistry,
+  createToolRegistry,
+  scriptedToolPlan,
+  type AgentScope,
+  type BrainAdapter,
+  type NewsProvider,
+  type ReminderSink,
+  type ToolCallRecord,
+} from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
 import {
   ConversationEngine,
@@ -85,7 +97,7 @@ import {
   type ProactiveTrigger,
   type ConversationState,
 } from '@xixi/conversation';
-import { MimoClient } from '@xixi/model-adapters';
+import { MimoClient, WeatherClient } from '@xixi/model-adapters';
 import { DEFAULT_PRESENCE_TTL_SECONDS, openXixiStore, type XixiConfig, type StoredEvent, type XixiStore } from '@xixi/domain';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
@@ -104,6 +116,45 @@ export const DEFAULT_PYTHON = process.env.XIXI_PYTHON ?? join(REPO_ROOT, '.venvs
 export const PROBE_PYTHON = process.env.XIXI_PROBE_PYTHON ?? join(REPO_ROOT, '.venvs', 'field-probe', 'Scripts', 'python.exe');
 /** The venv that has sounddevice + soundfile + soxr + soundcard. */
 export const AUDIO_PYTHON = process.env.XIXI_AUDIO_PYTHON ?? join(REPO_ROOT, '.venvs', 'voice-livekit', 'Scripts', 'python.exe');
+
+// --------------------------------------------------------------------------------------
+// One tool chain for every entry point (pack Phase 2)
+// --------------------------------------------------------------------------------------
+
+/** The console and the trial page serve a conversation; `proactive` is the loop's own scope. */
+export const CONVERSATION_SCOPE: AgentScope = 'conversation';
+
+/** Overrides on the built-in tool set. The data sources are injectable so an offline run needs no network. */
+export interface ToolChainOptions {
+  readonly defaultPlace?: string;
+  readonly now?: () => Date;
+  readonly weatherClient?: WeatherClient;
+  readonly newsProvider?: NewsProvider | null;
+  readonly reminderSink?: ReminderSink;
+  readonly onToolCall?: (record: ToolCallRecord) => void;
+  readonly maxToolRounds?: number;
+}
+
+/**
+ * The shared tool chain the text path and the voice path both use.
+ *
+ * This is the single assembly point: `scripts/field-test.ts` (console voice + text),
+ * `scripts/serve-chat.ts` (trial page voice + text) and `scripts/voice-turn.ts`
+ * (file-driven voice) all build their adapter from the registry this returns, so
+ * "语音和文字走同一条工具链" is a property of the code rather than of a call site,
+ * and the four built-ins are registered exactly once.
+ */
+export function buildToolChain(config: XixiConfig, options: ToolChainOptions = {}): ToolRegistry {
+  return createToolRegistry({
+    defaultPlace: options.defaultPlace ?? config.identity.place ?? '',
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.weatherClient === undefined ? {} : { weatherClient: options.weatherClient }),
+    ...(options.newsProvider === undefined ? {} : { newsProvider: options.newsProvider }),
+    ...(options.reminderSink === undefined ? {} : { reminderSink: options.reminderSink }),
+    ...(options.maxToolRounds === undefined ? {} : { maxToolRounds: options.maxToolRounds }),
+    ...(options.onToolCall === undefined ? {} : { onToolCall: options.onToolCall }),
+  });
+}
 
 /** Everything the console says is Chinese and aimed at a non-engineer. */
 export function explainAction(action: string): string {
@@ -667,6 +718,8 @@ export interface VoiceTurnPayload {
   readonly hygiene: { readonly removedMarkupChars: number; readonly removedMarkdownChars: number; readonly removedReasoningChars: number; readonly emptied: boolean } | null;
   /** t21 (t4 F5): the provider's stop reason — `length` means the reply was cut mid-sentence. */
   readonly finishReason: string | null;
+  /** Pack Phase 2: which tool backed this turn, or `null` when none ran. */
+  readonly toolName: string | null;
   /** t21: the engine's notices for this turn (`REPLY_HYGIENE` / `REPLY_TRUNCATED` / …). */
   readonly notices: readonly { readonly code: string; readonly detail: string }[];
   readonly audio: string | null;
@@ -689,6 +742,11 @@ export interface VoiceDeps {
   readonly policy: RetentionPolicy;
   /** Injected for offline runs (self-test, `--offline`): replaces the ASR call. */
   readonly asr?: (audio: Buffer) => Promise<string>;
+  /**
+   * Injected for offline runs: replaces the VAD child process. The voice entry is
+   * otherwise the only path in the default gate that needs a Python interpreter.
+   */
+  readonly vad?: (wavPath: string) => Promise<VadResult>;
   readonly log?: (line: string) => void;
 }
 
@@ -733,7 +791,8 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
   try {
     writeFileSync(scratchWav, raw);
     const vadStarted = Date.now();
-    vad = await runVad(deps.python, scratchWav);
+    const runVadFor = deps.vad ?? ((wavPath: string): Promise<VadResult> => runVad(deps.python, wavPath));
+    vad = await runVadFor(scratchWav);
     const vadMs = Date.now() - vadStarted;
     rmSync(scratch, { recursive: true, force: true });
     const plan = planSpeechSegments(vad.segments);
@@ -772,6 +831,7 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
         latencyMs: null,
         totalMs: Date.now() - totalStarted,
         model: null,
+        toolName: null,
         audio: null,
         at: new Date().toISOString(),
         privacy: {
@@ -875,6 +935,7 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
       silenceReasonText: explainSilenceReason(turn.silenceReason),
       hygiene: turn.hygiene,
       finishReason: turn.finishReason,
+      toolName: turn.toolName,
       notices: turnNotices,
       audio,
       at: new Date().toISOString(),
@@ -1881,6 +1942,8 @@ export interface ConsoleTurn {
   readonly hygiene?: { readonly removedMarkupChars: number; readonly removedMarkdownChars: number; readonly removedReasoningChars: number; readonly emptied: boolean } | null;
   /** t21 (t4 F5): the provider's stop reason; `length` means the reply was cut mid-sentence. */
   readonly finishReason?: string | null;
+  /** Pack Phase 2: the tool that backed this turn (`xixi_get_weather`…), when one ran. */
+  readonly toolName?: string | null;
 }
 
 export interface FieldServerOptions {
@@ -1898,6 +1961,15 @@ export interface FieldServerOptions {
   readonly liveRunner?: LiveCameraRunner;
   /** Test seam for the brain (t88): lets a test drive 「看一眼」 without a key or a network. */
   readonly adapterOverride?: BrainAdapter;
+  /**
+   * Test/offline seams for the voice entry (pack Phase 2): the VAD is the only Python
+   * dependency on that path, and the offline ASR double returns a fixed sentence, so
+   * a test that wants a *real* transcript supplies both.
+   */
+  readonly asrOverride?: (audio: Buffer) => Promise<string>;
+  readonly vadOverride?: (wavPath: string) => Promise<VadResult>;
+  /** Tool data sources (weather/news/reminders), injectable so an offline run stays offline. */
+  readonly toolOverrides?: ToolChainOptions;
   readonly log?: (line: string) => void;
 }
 
@@ -1928,19 +2000,27 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   }
   store.recordHealth('field-test', 'ok', `console started (offline=${offline})`);
 
+  // One chain for the console's text turns and its voice turns (pack Phase 2): the
+  // offline stand-in runs the same loop and registry as the real adapter, so both
+  // entry points share the four built-ins, the permission policy and the round cap.
+  const engineTools = buildToolChain(config, {
+    ...(options.toolOverrides ?? {}),
+    onToolCall: (record) => log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
+  });
+
   function buildAdapter(): BrainAdapter {
     if (options.adapterOverride !== undefined) return options.adapterOverride;
-    if (offline) return new FakeBrainAdapter();
+    if (offline) return new FakeBrainAdapter({ registry: engineTools, scope: CONVERSATION_SCOPE });
     if (!options.useDsh) {
       return new MimoBrainAdapter({
         client,
         maxCompletionTokens: 400,
-        tools: defaultTools({ defaultPlace: config.identity.place ?? '' }),
+        registry: engineTools,
+        scope: CONVERSATION_SCOPE,
         timezone: config.identity.timezone,
         // t21: the reply-hygiene filter needs the deployment language to tell English reasoning from
         // speech (t12 F1) — the same wiring the trial page uses.
         language: config.identity.language,
-        onToolCall: (record) => log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
       });
     }
     return new DshBrainAdapter({
@@ -2108,7 +2188,8 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
     currentSessionId: () => session.sessionId,
     ttsEnabled,
     policy,
-    asr: offline ? async (audio: Buffer): Promise<string> => `（离线自检）收到 ${audio.length} 字节语音` : undefined,
+    asr: options.asrOverride ?? (offline ? async (audio: Buffer): Promise<string> => `（离线自检）收到 ${audio.length} 字节语音` : undefined),
+    ...(options.vadOverride === undefined ? {} : { vad: options.vadOverride }),
     log,
   };
 
@@ -2219,6 +2300,14 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       database: { path: dataDir, presencePath: presenceDataDir, entries: XIXI_DB_ENTRIES, note: '四个入口各用不同的库；在别处设的人格与历史不会带到这里' },
       segmentPlayback: { textSegmented: true, ttsSegmented: false, note: SEGMENT_TTS_NOTE },
       model: { configured: client.hasKey, offline },
+      // Pack Phase 2: the console states which capabilities its conversation scope really
+      // offers, so "四个内置工具 + 最多四轮" is visible without reading the source.
+      tools: {
+        scope: CONVERSATION_SCOPE,
+        maxRounds: engineTools.maxToolRounds,
+        names: engineTools.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name),
+        note: '文字与语音共用这一条工具链；权限与轮数在模型之外判定（模型看不到被拒绝的工具）',
+      },
       calibration,
       presence,
       recent: turns,
@@ -2606,6 +2695,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
             privacyNote: payload.privacy.note,
             replySegments: segmentPlan(payload.reply, config.reply).segments,
             replyGapMs: segmentPlan(payload.reply, config.reply).gapMs,
+            toolName: payload.toolName,
             source: '回应你',
           });
           json(response, 200, payload);
@@ -2647,6 +2737,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
             segmentsUsed: 0,
             droppedSegments: [],
             privacyNote: '打字输入：没有音频，自然也没有录音落盘',
+            toolName: turn.toolName,
           });
           json(response, 200, {
             ok: true,
@@ -2667,6 +2758,9 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
             silenceReasonText: explainSilenceReason(turn.silenceReason),
             hygiene: turn.hygiene,
             finishReason: turn.finishReason,
+            // Pack Phase 2: the same fact the voice path reports, so a reader can see that the
+            // answer really came from a tool (and an offline test can assert it).
+            toolName: turn.toolName,
             notices,
             audio,
             at: new Date().toISOString(),
@@ -6856,6 +6950,31 @@ export function silenceWav(ms: number): Buffer {
  * retention policy, the acceptance renderer and the report writer. What it does
  * not: hardware. The device path is covered by `--acceptance` on the real machine.
  */
+/**
+ * The weather source the offline self-test uses: the same three days a real lookup would
+ * return, served from memory. A self-test must not need a network (nor spend money), and the
+ * point of that check is the tool *chain*, not the upstream service.
+ */
+function selfTestWeatherClient(): WeatherClient {
+  const fetchImpl = (async (input: string | URL | Request) => {
+    const url = String(input);
+    const body = url.includes('geocoding')
+      ? { results: [{ name: '成都', latitude: 30.66, longitude: 104.06, timezone: 'Asia/Shanghai', admin1: '四川省' }] }
+      : {
+          timezone: 'Asia/Shanghai',
+          daily: {
+            time: ['2026-10-01', '2026-10-02', '2026-10-03'],
+            weather_code: [61, 3, 0],
+            temperature_2m_max: [24.4, 25.1, 27.8],
+            temperature_2m_min: [18.2, 19.0, 20.1],
+            precipitation_probability_max: [80, 8, 0],
+          },
+        };
+    return { ok: true, status: 200, json: async () => body } as unknown as Response;
+  }) as unknown as typeof fetch;
+  return new WeatherClient({ fetchImpl });
+}
+
 export async function runSelfTest(options: { log?: (line: string) => void } = {}): Promise<SelfTestResult> {
   const log = options.log ?? ((): void => {});
   const lines: string[] = [];
@@ -6930,6 +7049,61 @@ export async function runSelfTest(options: { log?: (line: string) => void } = {}
     check('每轮都有延迟分段（VAD/ASR/首字/总时长）', voice.stages.vadMs > 0 && voice.stages.asrMs !== null && voice.stages.totalMs > 0 && voice.stages.llmFirstChunkMs !== null, JSON.stringify(voice.stages));
     check('每轮都有动作与原因的中文解释', typeof voice.actionText === 'string' && voice.actionText.length > 0 && typeof voice.reasonText === 'string' && voice.reasonText.length > 0, `${voice.action}｜${voice.reason}`);
     check('多段语音轮：磁盘上没有原始录音', readdirSync(voiceDir).length === 0, `voice-web 目录：${JSON.stringify(readdirSync(voiceDir))}`);
+
+    // ---- pack Phase 2: the voice entry really reaches the tools ----------------
+    // The offline stand-in runs the same registry and loop the real adapter does, so this
+    // proves the *chain* (voice → engine → tool → reply) without a key, a network or a
+    // microphone. The weather source is stubbed for the same reason the model is.
+    const toolHandle = await createFieldServer({
+      port: 0,
+      offline: true,
+      ttsEnabled: false,
+      voiceDir: join(root, 'voice-tools'),
+      dataDir: join(root, 'data-tools'),
+      presenceDataDir: join(root, 'presence-tools'),
+      reportDir: join(root, 'recon-tools'),
+      autoPrune: false,
+      probeRunner: createFakeProbeRunner(),
+      // The VAD is this path's only Python dependency, and the offline ASR double always
+      // says the same thing — a test that needs a real question supplies both.
+      vadOverride: async () => ({ segments: [{ startMs: 0, endMs: 1200, durationMs: 1200 }], durationMs: 1200 }),
+      asrOverride: async () => '明天成都天气怎么样？',
+      toolOverrides: { weatherClient: selfTestWeatherClient() },
+      log: () => {},
+    });
+    try {
+      const toolState = (await (await fetch(`${toolHandle.url}/api/field/state`)).json()) as Record<string, any>;
+      const toolWav = readWav(join(REPO_ROOT, 'tests', 'audio-fixtures', 'direct-question.wav'));
+      const toolVoice = (await (
+        await fetch(`${toolHandle.url}/api/voice`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ audioBase64: toolWav.toString('base64'), speak: false }),
+        })
+      ).json()) as Record<string, any>;
+      const toolText = (await (
+        await fetch(`${toolHandle.url}/api/turn`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text: '明天成都天气怎么样？', speak: false }),
+        })
+      ).json()) as Record<string, any>;
+      const internalWording = /xixi_[a-z_]+|tool_call|arguments|parameters|JSON|工具调用|不认识的参数/;
+      check(
+        '语音问天气真的调用了工具，回复没有工具内部字样；文字路径走的是同一条链',
+        Array.isArray(toolState.tools?.names) &&
+          toolState.tools.names.length === 4 &&
+          toolState.tools.maxRounds === 4 &&
+          toolVoice.toolName === 'xixi_get_weather' &&
+          toolText.toolName === 'xixi_get_weather' &&
+          String(toolVoice.reply).includes('明天成都') &&
+          !internalWording.test(String(toolVoice.reply)) &&
+          !internalWording.test(String(toolText.reply)),
+        `工具 ${String(toolState.tools?.names).slice(0, 80)}｜语音 ${String(toolVoice.toolName)}：${String(toolVoice.reply).slice(0, 40)}｜文字 ${String(toolText.toolName)}`,
+      );
+    } finally {
+      await toolHandle.close();
+    }
 
     // ---- no speech ------------------------------------------------------------
     const silentResponse = await fetch(`${base}/api/voice`, {

@@ -12,7 +12,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 
-import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, defaultTools, type BrainAdapter } from '@xixi/brain-adapter';
+import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
 import { ConversationEngine } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
@@ -21,6 +21,7 @@ import { openXixiStore } from '@xixi/domain';
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
 import {
   ConsoleError,
+  CONVERSATION_SCOPE,
   DEFAULT_LOOP_INTERVAL_MS,
   MIN_LOOP_INTERVAL_MS,
   PROACTIVE_PANEL_CSS,
@@ -28,6 +29,7 @@ import {
   SEGMENT_TTS_NOTE,
   XIXI_DB_ENTRIES,
   applyAndPersistProactivePatch,
+  buildToolChain,
   createModelComposer,
   databaseNoteHtml,
   effectiveProactivity,
@@ -86,17 +88,20 @@ if (pruned.removed.length > 0) {
 }
 
 function buildAdapter(): BrainAdapter {
-  if (USE_FAKE) return new FakeBrainAdapter();
+  // Pack Phase 2: the trial page builds the same chain as the console and the file-driven
+  // voice turn — one registry, four built-ins, permissions and the round cap outside the model.
+  const registry = buildToolChain(config, { onToolCall: (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`) });
+  if (USE_FAKE) return new FakeBrainAdapter({ registry, scope: CONVERSATION_SCOPE });
   if (!USE_DSH) {
     return new MimoBrainAdapter({
       client,
       maxCompletionTokens: 400,
-      tools: defaultTools({ defaultPlace: config.identity.place ?? '' }),
+      registry,
+      scope: CONVERSATION_SCOPE,
       timezone: config.identity.timezone,
       // t21: the reply-hygiene filter needs the deployment language to tell English reasoning from
       // speech. Without it the adapter's deltas are a pass-through (t12 F1).
       language: config.identity.language,
-      onToolCall: (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
     });
   }
   return new DshBrainAdapter({
@@ -271,6 +276,7 @@ async function handleTurn(body: TurnBody, response: ServerResponse): Promise<voi
     silenceReasonLabel: silenceReasonLabel(turn.silenceReason),
     hygiene: turn.hygiene,
     finishReason: turn.finishReason,
+    toolName: turn.toolName,
     notices,
     audio,
     at: toOffsetIso(),

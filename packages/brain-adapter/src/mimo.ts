@@ -1,7 +1,9 @@
-import { MimoClient, ModelError, createSpokenTextFilter, type MimoChatResult, type MimoMessage, type MimoToolDefinition } from '@xixi/model-adapters';
+import { MimoClient, ModelError, createSpokenTextFilter, type MimoChatResult, type MimoMessage } from '@xixi/model-adapters';
 
+import { runAgentLoop, type AgentLoopResult, type AgentStep, type AgentStepOutcome } from './agent-loop.ts';
 import { BrainError, brainErrorCodeFor } from './errors.ts';
-import type { ToolCallRecord, XixiTool } from './tools.ts';
+import { MAX_TOOL_ROUNDS, ToolRegistry } from './tool-registry.ts';
+import { asAgentTool, type AgentScope, type ToolCallRecord, type XixiTool } from './tools.ts';
 import {
   createBrainTurnStream,
   flattenPrompt,
@@ -36,12 +38,23 @@ export interface MimoBrainAdapterOptions {
   /** Read-only tools the model may request (§27). Empty means none. */
   readonly tools?: readonly XixiTool[];
   /**
+   * The tool chain to use instead of `tools` (pack Phase 2): the *same* registry the
+   * other entry points build, so text and voice run identical permissions and rounds.
+   * When supplied, the registry's own `onToolCall` (not this option's) reports calls.
+   */
+  readonly registry?: ToolRegistry;
+  /** Which agent surface this adapter is serving; the registry filters by it. */
+  readonly scope?: AgentScope;
+  /**
    * t21: the deployment's reply language (`config.identity.language`). The reply-hygiene filter needs
    * it to decide what counts as a foreign (reasoning) run; without it the filter is a pass-through and
    * the adapter's deltas leak English reasoning to a streaming TTS (t12 F1).
    */
   readonly language?: string;
-  /** How many tool rounds a single turn may use before the model must answer. */
+  /**
+   * How many tool rounds a single turn may use before the model must answer. Built from
+   * `tools`, it is clamped by the registry to `MAX_TOOL_ROUNDS` (= 4, pack Phase 2).
+   */
   readonly maxToolRounds?: number;
   readonly timezone?: string;
   readonly now?: () => Date;
@@ -104,13 +117,12 @@ export class MimoBrainAdapter implements BrainAdapter {
   readonly #maxCompletionTokens: number;
   readonly #temperature: number;
   readonly #stream: boolean;
-  readonly #tools: readonly XixiTool[];
-  readonly #maxToolRounds: number;
+  readonly #registry: ToolRegistry;
+  readonly #scope: AgentScope;
   readonly #timezone: string;
   /** t21: reply language, used by the hygiene filter on the streaming seam. */
   readonly #language: string;
   readonly #now: () => Date;
-  readonly #onToolCall: ((record: ToolCallRecord) => void) | undefined;
 
   constructor(options: MimoBrainAdapterOptions = {}) {
     this.#client = options.client ?? new MimoClient();
@@ -119,12 +131,20 @@ export class MimoBrainAdapter implements BrainAdapter {
     this.#maxCompletionTokens = options.maxCompletionTokens ?? 400;
     this.#temperature = options.temperature ?? 0.8;
     this.#stream = options.stream ?? true;
-    this.#tools = options.tools ?? [];
-    this.#maxToolRounds = options.maxToolRounds ?? 2;
+    this.#scope = options.scope ?? 'conversation';
+    // The program's tool chain: either injected (shared with the rest of the entry
+    // point) or built here from a plain tool list. Either way the round cap and the
+    // permission checks happen inside the registry, never in the model.
+    this.#registry =
+      options.registry ??
+      new ToolRegistry({
+        tools: (options.tools ?? []).map((tool) => asAgentTool(tool)),
+        maxToolRounds: options.maxToolRounds ?? MAX_TOOL_ROUNDS,
+        ...(options.onToolCall === undefined ? {} : { onToolCall: options.onToolCall }),
+      });
     this.#timezone = options.timezone ?? 'Asia/Shanghai';
     this.#language = options.language ?? 'zh-CN';
     this.#now = options.now ?? (() => new Date());
-    this.#onToolCall = options.onToolCall;
   }
 
   describe(): BrainDescription {
@@ -238,71 +258,75 @@ export class MimoBrainAdapter implements BrainAdapter {
     result.catch(() => {});
 
     async function* run(): AsyncGenerator<BrainTurnChunk> {
-      let model = adapter.#model;
-      let usedTool: string | null = null;
-      /** t21 (t4 F5): the provider's own stop reason, so a reply cut mid-word can be attributed. */
-      let finishReason: string | null = null;
-      // The model may (and does) emit a spoken preamble together with tool_calls
-      // ("明天成都的天气我帮你查一下。" + xixi_get_weather). Text is therefore not
-      // proof that the turn is answered: only the absence of tool_calls is.
-      let latestText = '';
       try {
-        for (let round = 1; ; round += 1) {
-          const tools = adapter.#toolDefinitions(round);
-          const generator = adapter.#client.chatStream({
-            ...adapter.#requestOptions(input),
-            messages: [...messages],
-            ...(tools === undefined ? {} : { tools }),
-          });
+        /**
+         * One streaming model round. The provider's deltas go through the reply-hygiene hold
+         * *inside* the step, so nothing a mouth should not hear ever leaves it; the loop above
+         * only decides how many rounds there are and which tools run.
+         */
+        const step: AgentStep = {
+          call: async function* (roundMessages, tools): AsyncGenerator<BrainTurnChunk, AgentStepOutcome, void> {
+            const generator = adapter.#client.chatStream({
+              ...adapter.#requestOptions(input),
+              messages: [...roundMessages],
+              ...(tools === undefined ? {} : { tools }),
+            });
 
-          // t7/t21: the provider can put tool-call markup in the *text* stream (measured on the voice
-          // path: 7 of 8 weather turns, and TTS read it out — baseline §4), and the model can reason
-          // in English mid-answer. Nothing a mouth should hear leaves this loop, so the deltas go
-          // through the hygiene hold — now with the deployment **language** (t12 F1: a pass-through
-          // filter is exactly why the adapter's deltas leaked) — and the round's text is accumulated
-          // from what the hold let through, never from the raw deltas.
-          const markupHold = createSpokenTextFilter({ language: adapter.#language });
-          let roundText = '';
-          let completed: MimoChatResult;
-          for (;;) {
-            const next = await generator.next();
-            if (next.done === true) {
-              completed = next.value;
-              break;
+            // t7/t21: the provider can put tool-call markup in the *text* stream (measured on the voice
+            // path: 7 of 8 weather turns, and TTS read it out — baseline §4), and the model can reason
+            // in English mid-answer. Nothing a mouth should hear leaves this step, so the deltas go
+            // through the hygiene hold — with the deployment **language** (t12 F1: a pass-through
+            // filter is exactly why the adapter's deltas leaked) — and the round's text is accumulated
+            // from what the hold let through, never from the raw deltas.
+            const markupHold = createSpokenTextFilter({ language: adapter.#language });
+            let spokenText = '';
+            let completed: MimoChatResult;
+            for (;;) {
+              const next = await generator.next();
+              if (next.done === true) {
+                completed = next.value;
+                break;
+              }
+              const safe = markupHold.push(next.value.text);
+              spokenText += safe;
+              if (safe.length > 0) yield { type: 'text', text: safe };
             }
-            const safe = markupHold.push(next.value.text);
-            roundText += safe;
-            if (safe.length > 0) yield { type: 'text', text: safe };
-          }
-          const heldTail = markupHold.flush();
-          roundText += heldTail;
-          if (heldTail.length > 0) yield { type: 'text', text: heldTail };
+            const heldTail = markupHold.flush();
+            spokenText += heldTail;
+            if (heldTail.length > 0) yield { type: 'text', text: heldTail };
 
-          model = completed.model;
-          finishReason = completed.finishReason;
-          if (roundText.trim().length > 0) latestText = roundText;
-          if (tools === undefined || completed.toolCalls.length === 0) break;
+            return {
+              model: completed.model,
+              finishReason: completed.finishReason,
+              rawText: completed.text,
+              spokenText,
+              toolCalls: completed.toolCalls.map((call) => ({ id: call.id, name: call.name, arguments: call.arguments })),
+            };
+          },
+        };
 
-          // Execute the requested tools, feed the results back, and let the model
-          // answer in the next round.
-          messages.push({
-            role: 'assistant',
-            content: completed.text,
-            tool_calls: completed.toolCalls.map((call) => ({
-              id: call.id,
-              type: 'function' as const,
-              function: { name: call.name, arguments: call.arguments },
-            })),
-          });
-          for (const call of completed.toolCalls) {
-            const { record, message } = await adapter.#executeTool(call.name, call.arguments, input);
-            usedTool = record.name;
-            yield { type: 'tool', name: record.name };
-            messages.push(message);
+        const iterator = runAgentLoop(step, messages, {
+          registry: adapter.#registry,
+          scope: adapter.#scope,
+          context: { timezone: adapter.#timezone, now: adapter.#now() },
+        });
+        let outcome: AgentLoopResult;
+        for (;;) {
+          const next = await iterator.next();
+          if (next.done === true) {
+            outcome = next.value;
+            break;
           }
+          yield next.value;
         }
 
-        const final = adapter.#interpret(latestText, usedTool, model, Date.now() - startedAt, finishReason);
+        const final = adapter.#interpret(
+          outcome.text,
+          outcome.usedTools.at(-1) ?? null,
+          outcome.model,
+          Date.now() - startedAt,
+          outcome.finishReason,
+        );
         settle?.resolve(final);
       } catch (cause) {
         const error = toBrainError(cause);
@@ -312,61 +336,6 @@ export class MimoBrainAdapter implements BrainAdapter {
     }
 
     return createBrainTurnStream(run(), result);
-  }
-
-  #toolDefinitions(round: number): MimoToolDefinition[] | undefined {
-    if (this.#tools.length === 0 || round > this.#maxToolRounds) return undefined;
-    return this.#tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    }));
-  }
-
-  async #executeTool(
-    name: string,
-    rawArguments: string,
-    input: UserTurnInput,
-  ): Promise<{ record: ToolCallRecord; message: MimoMessage }> {
-    const tool = this.#tools.find((candidate) => candidate.name === name);
-    const reply = (payload: Record<string, unknown>, id: string): MimoMessage => ({
-      role: 'tool',
-      tool_call_id: id,
-      content: JSON.stringify(payload),
-    });
-    const callId = `call_${name}_${Math.random().toString(36).slice(2, 10)}`;
-
-    if (tool === undefined) {
-      // An unknown tool is a refusal, not a crash: the model gets told and must
-      // still answer, which keeps a hallucinated tool name from breaking the turn.
-      const record: ToolCallRecord = { name, args: {}, ok: false, result: null, error: 'UNKNOWN_TOOL' };
-      this.#onToolCall?.(record);
-      return { record, message: reply({ error: '没有这个工具，请直接用已有信息回答' }, callId) };
-    }
-
-    let args: Record<string, unknown> = {};
-    try {
-      const parsed = rawArguments.trim().length === 0 ? {} : JSON.parse(rawArguments);
-      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) args = parsed as Record<string, unknown>;
-    } catch {
-      args = {};
-    }
-
-    try {
-      const result = await tool.execute(args, {
-        timezone: this.#timezone,
-        now: this.#now(),
-      });
-      const record: ToolCallRecord = { name, args, ok: true, result, error: null };
-      this.#onToolCall?.(record);
-      return { record, message: reply(result, callId) };
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      const record: ToolCallRecord = { name, args, ok: false, result: null, error: message };
-      this.#onToolCall?.(record);
-      return { record, message: reply({ error: message }, callId) };
-    }
-    void input;
   }
 
   evaluateProactiveCandidate(_input: ProactiveContext): Promise<ProactiveDecision> {

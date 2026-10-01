@@ -136,6 +136,12 @@ export interface ConversationTurn {
   readonly finishReason: string | null;
   /** t21 (t12 F2): why this turn was silent, or `null` when it spoke. */
   readonly silenceReason: SilenceReason;
+  /**
+   * Pack Phase 2: which tool backed this turn, or `null` when none ran. The event log already
+   * carried `tool_name`; the turn now carries it too, so a console can show the same fact
+   * without re-reading the store (and so an offline test can assert a tool really ran).
+   */
+  readonly toolName: string | null;
   /** t21: what had to be removed before anything could be spoken, or `null` when nothing was. */
   readonly hygiene: ReplyHygieneSummary | null;
   readonly latencyMs: number;
@@ -447,6 +453,8 @@ export class ConversationEngine {
 
     let turnAction: TurnAction = 'SILENCE';
     let turnText: string | null = null;
+    /** Pack Phase 2: the last tool that actually ran in this turn, if any. */
+    let turnToolName: string | null = null;
     let turnProvider = this.#adapter.provider;
     let turnModel = this.#adapter.describe().model;
     /** t21: the provider's stop reason, carried onto the turn (t4 F5 — attribute a mid-word cut). */
@@ -516,6 +524,7 @@ export class ConversationEngine {
       for await (const chunk of stream) {
         if (chunk.type === 'tool') {
           toolRan = true;
+          turnToolName = chunk.name;
           if (heldFacts.length > 0 && !suppressed) {
             await speak(heldFacts);
             heldFacts = '';
@@ -676,6 +685,7 @@ export class ConversationEngine {
       model: turnModel,
       finishReason: turnFinishReason,
       silenceReason: turnSilenceReason,
+      toolName: turnAction === 'SILENCE' ? null : turnToolName,
       hygiene: turnHygiene,
       latencyMs: Date.now() - startedAt,
       firstTokenMs: firstChunkAt === null ? null : firstChunkAt - startedAt,

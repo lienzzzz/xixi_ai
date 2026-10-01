@@ -20,8 +20,33 @@ export {
   type BrainErrorCauseCode,
   type BrainErrorCode,
 } from './errors.ts';
-export { FakeBrainAdapter, type FakeBrainOptions, type ScriptedOutcome } from './fake.ts';
+export { FakeBrainAdapter, scriptedToolPlan, sayToolResult, type FakeBrainOptions, type ScriptedOutcome, type ScriptedToolPlan, type ScriptedToolRequest } from './fake.ts';
 export { isSilenceReply, MimoBrainAdapter, SILENCE_TOKEN, type MimoBrainAdapterOptions } from './mimo.ts';
+/**
+ * Pack Phase 2 agent runtime, re-exported so every entry point (text or voice) builds
+ * its tool chain in one place: `createToolRegistry` → `MimoBrainAdapter`/`FakeBrainAdapter`
+ * → `runAgentLoop`, with the round cap and the permission checks owned by the registry.
+ */
+export {
+  MAX_TOOL_ROUNDS,
+  ToolPermission,
+  ToolRegistry,
+  createToolRegistry,
+  executeTool,
+  parseToolArguments,
+  type BuiltinToolRegistryOptions,
+  type ToolCall,
+  type ToolExecutionContext,
+  type ToolExecution,
+  type ToolPermissionDecision,
+  type ToolPermissionOptions,
+  type ToolPermissionPolicy,
+  type ToolPermissionRequest,
+  type ToolPermissionVerdict,
+  type ToolRegistryOptions,
+  type ToolRole,
+} from './tool-registry.ts';
+export { runAgentLoop, type AgentLoopOptions, type AgentLoopResult, type AgentStep, type AgentStepOutcome, type AgentToolCall } from './agent-loop.ts';
 /**
  * t7 reply hygiene, re-exported so the layer above can use it without depending on the model
  * client package directly: `sanitizeSpokenReply` is the deterministic gate the engine applies
@@ -38,11 +63,26 @@ export {
   type SpokenTextFilter,
 } from '@xixi/model-adapters';
 export {
+  asAgentTool,
   createCurrentTimeTool,
+  createMemoryReminderSink,
+  createNewsTool,
+  createReminderTool,
   createWeatherTool,
   defaultTools,
+  type AgentScope,
+  type AgentTool,
+  type DefaultToolsOptions,
+  type NewsItem,
+  type NewsLookup,
+  type NewsProvider,
+  type NewsToolOptions,
+  type ReminderSink,
+  type ReminderToolOptions,
+  type ScheduledReminder,
   type ToolCallRecord,
   type ToolContext,
+  type ToolRisk,
   type WeatherToolOptions,
   type XixiTool,
 } from './tools.ts';

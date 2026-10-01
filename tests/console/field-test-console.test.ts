@@ -15,6 +15,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
+import { WeatherClient } from '@xixi/model-adapters';
+
 import { concatWav, readWav, readWavInfo, sliceWav } from '../../scripts/lib/wav.ts';
 import {
   ConsoleError,
@@ -44,6 +46,34 @@ import { REPO_ROOT, loadConfig } from '../../scripts/lib/harness.ts';
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'xixi-console-test-'));
+}
+
+/**
+ * Wording that belongs to the machinery, never to a spoken reply: tool names, wire keys,
+ * the words for "call a tool". The acceptance for Phase 2 is that asking about the weather
+ * produces a sentence a person would hear, so the offline case asserts the absence.
+ */
+const INTERNAL_WORDING = /xixi_[a-z_]+|tool_call|arguments|parameters|schema|JSON|工具调用|调用成功|不认识的参数/;
+
+/** The console's offline run must not touch the network either — so the tool's source is stubbed. */
+function stubWeatherClient(): WeatherClient {
+  const fetchImpl = (async (input: string | URL | Request) => {
+    const url = String(input);
+    const body = url.includes('geocoding')
+      ? { results: [{ name: '成都', latitude: 30.66, longitude: 104.06, timezone: 'Asia/Shanghai', admin1: '四川省' }] }
+      : {
+          timezone: 'Asia/Shanghai',
+          daily: {
+            time: ['2026-09-30', '2026-10-01', '2026-10-02'],
+            weather_code: [61, 3, 0],
+            temperature_2m_max: [24.4, 25.1, 27.8],
+            temperature_2m_min: [18.2, 19.0, 20.1],
+            precipitation_probability_max: [80, 8, 0],
+          },
+        };
+    return { ok: true, status: 200, json: async () => body } as unknown as Response;
+  }) as unknown as typeof fetch;
+  return new WeatherClient({ fetchImpl });
 }
 
 const DEFAULT_POLICY = retentionPolicy(loadConfig());
@@ -357,3 +387,67 @@ test('the server binds 127.0.0.1 only and reports its real port on an ephemeral 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+/**
+ * Pack Phase 2 acceptance, entirely offline: a voice turn asking about the weather must
+ * really call the weather tool, and what comes back must be a person's sentence with no
+ * tool internals in it. The VAD and ASR are injected (neither the interpreter nor a key is
+ * needed) but everything between them is the production code the console serves: the same
+ * registry, the same loop, the same engine — and the same one for the text route, which is
+ * what "语音与文字共用一条工具链" has to mean.
+ */
+test('a voice turn about the weather runs the tool, and text and voice share that one chain', async () => {
+  const root = tempDir();
+  const called: string[] = [];
+  const handle = await createFieldServer({
+    port: 0,
+    offline: true,
+    ttsEnabled: false,
+    voiceDir: join(root, 'voice'),
+    dataDir: join(root, 'data'),
+    presenceDataDir: join(root, 'presence'),
+    reportDir: join(root, 'recon'),
+    autoPrune: false,
+    probeRunner: createFakeProbeRunner(),
+    // The VAD is the voice entry's only Python dependency; the offline ASR double says a
+    // fixed sentence, so an offline test that wants a weather question supplies both.
+    vadOverride: async () => ({ segments: [{ startMs: 0, endMs: 1200, durationMs: 1200 }], durationMs: 1200 }),
+    asrOverride: async () => '明天成都天气怎么样？',
+    // Keep the offline run offline: the tool's data source is stubbed, like the model.
+    toolOverrides: { weatherClient: stubWeatherClient() },
+    log: (line) => {
+      if (line.startsWith('[tool]')) called.push(line);
+    },
+  });
+  const post = async (path: string, body: unknown): Promise<Record<string, any>> =>
+    (await (await fetch(handle.url + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json()) as Record<string, any>;
+  try {
+    // The console states which capabilities its conversation scope offers: the four
+    // built-ins, and the round cap the model cannot raise.
+    const state = (await (await fetch(`${handle.url}/api/field/state`)).json()) as Record<string, any>;
+    assert.deepEqual([...state.tools.names].sort(), ['xixi_get_current_time', 'xixi_get_weather', 'xixi_news_stub', 'xixi_set_reminder_stub']);
+    assert.equal(state.tools.scope, 'conversation');
+    assert.equal(state.tools.maxRounds, 4);
+
+    const wav = readWav(join(REPO_ROOT, 'tests', 'audio-fixtures', 'direct-question.wav'));
+    const voice = await post('/api/voice', { audioBase64: wav.toString('base64'), speak: false });
+    assert.equal(voice.transcript, '明天成都天气怎么样？');
+    assert.equal(voice.action, 'SPEAK');
+    assert.equal(voice.toolName, 'xixi_get_weather', `the voice turn must go through the weather tool, saw ${String(voice.toolName)}`);
+    assert.ok(String(voice.reply).includes('明天成都'), `the reply is built from the tool result: ${String(voice.reply)}`);
+    assert.doesNotMatch(String(voice.reply), INTERNAL_WORDING, 'nothing internal may reach a reply a person hears');
+
+    // The typed turn on the same server: same chain, same tool, same words.
+    const text = await post('/api/turn', { text: '明天成都天气怎么样？', speak: false });
+    assert.equal(text.toolName, 'xixi_get_weather');
+    assert.equal(text.reply, voice.reply, 'text and voice must not produce two different answers');
+    assert.doesNotMatch(String(text.reply), INTERNAL_WORDING);
+
+    // The tool really ran on both paths (the console logs every execution).
+    assert.equal(called.filter((line) => line.startsWith('[tool] xixi_get_weather ok')).length, 2, called.join(' | '));
+  } finally {
+    await handle.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
