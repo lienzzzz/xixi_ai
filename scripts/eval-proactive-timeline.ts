@@ -26,7 +26,15 @@
  * 三段家庭脚本的文字与 t9 独立验证
  * （docs/verification/t9-proactive-v2-verification-2026-10-01.md）逐字同源（唯一修正：条目按
  * 分钟排序，否则脚本游标卡在第一条乱序条目上、热聊句要到窗口关闭后才触发），因此修复前后
- * 的数字可比。五项全过才 exit 0。
+ * 的数字可比。
+ *
+ * 另有一段 **t9 F4 的分离探针**（t3 评审 R4）：用 `maxPerDay=1` / `maxConsultsPerDay=1~2` 直接驱动
+ * 生产 `ProactiveEngine.consider`，再从 `proactive.decision` 日志读回理由码，证明**问询额度与开口额度
+ * 分开计**——一次付费的「不说」不吃当天的开口额度，问询额度用完有它自己的码。为什么必须补：三段家庭
+ * 脚本里的模型总是同意、上面的未回应探针又写死 `consultsToday: 0`，只跑本命令的人会以为 F4 也被覆盖了
+ * （实际只由单测与 t9 那支**已过期**的探针支撑）。
+ *
+ * 五项家庭目标与这段探针全过才 exit 0。
  *
  * Usage: node scripts/eval-proactive-timeline.ts [--tick-seconds=N] [--help]
  */
@@ -54,6 +62,7 @@ import {
   type ProactiveDecider,
   type ProactiveGateContext,
   type ProactiveReasonCode,
+  type ProactiveSettings,
 } from '@xixi/conversation';
 import { openXixiStore, type XixiStore } from '@xixi/domain';
 
@@ -66,14 +75,15 @@ const USAGE = [
   '用法：node scripts/eval-proactive-timeline.ts [--tick-seconds=N] [--help]',
   '',
   '离线复跑 pack Phase 5 的 12 小时家庭时间线验收：跑「有人回应的一天 / 没人回应的一天 /',
-  '上午有热聊的一天」三段脚本场景，外加一个「连续未回应」机制探针，按顺序打印五项目标的',
-  '逐项判定（实测值与阈值一起打印，阈值以 pack Phase 5 验收原文为准）。',
+  '上午有热聊的一天」三段脚本场景，外加「连续未回应」机制探针与 F4 的问询/开口额度分离探针，',
+  '按顺序打印五项目标与 F4 探针的逐项判定（实测值与阈值一起打印，阈值以 pack Phase 5 验收原文为准）。',
   '',
-  '退出码：五项全部通过才 exit 0；有任何一项未过 exit 1。',
+  '退出码：五项与 F4 分离探针全部通过才 exit 0；有任何一项未过 exit 1。',
   '本命令不联网、不花 API 费用；tick 间隔默认沿用 t9 独立验证的口径，想对齐生产节奏可传',
   '--tick-seconds=30。结论看运行输出的末尾判定表，不依赖任何固定数字。',
   '',
   '五项：主动次数区间、generic 占比、具体来源占比、未回应后降频、热聊中接话。',
+  '判定表第 6 行是 F4 的分离探针（问询额度与开口额度分开计），不属于 pack 的五项目标。',
   '时区固定为 +08:00（Asia/Shanghai），否则同一份脚本在不同机器上会判成不同的一天。',
 ].join('\n');
 
@@ -182,8 +192,6 @@ interface DecisionRow {
   readonly reasonCode: ProactiveReasonCode;
   readonly trigger: string;
   readonly modelConsulted: boolean;
-  /** Minutes into the simulated day — the F4 probe judges 「拒绝发生在开口之前还是之后」 with it. */
-  readonly minute: number;
 }
 
 interface ScenarioResult {
@@ -194,17 +202,7 @@ interface ScenarioResult {
   readonly userTurns: readonly string[];
 }
 
-interface ScenarioOptions {
-  /** How many simulated minutes the run covers; defaults to the full 12-hour household day. */
-  readonly minutes?: number;
-  /** Settings for this run; defaults to the shipped `config/xixi.example.yaml` proactive section. */
-  readonly settings?: ProactiveSettings;
-  /** The household script; defaults to `householdFor(scenario)`. */
-  readonly household?: Household;
-}
-
-async function runScenario(scenario: string, decider: ProactiveDecider | undefined, options: ScenarioOptions = {}): Promise<ScenarioResult> {
-  const scenarioSettings = options.settings ?? settings;
+async function runScenario(scenario: string, decider: ProactiveDecider | undefined): Promise<ScenarioResult> {
   const dataDir = mkdtempSync(join(tmpdir(), `xixi-timeline-${scenario}-`));
   /**
    * The simulated clock is the *only* time source: the FSM (`ConversationEngine`) and every event
@@ -445,6 +443,173 @@ function unansweredProbe(): { readonly rows: readonly Record<string, unknown>[];
   return { rows, monotone, holdsAfterTwo };
 }
 
+// ------------------------------------------- t9 F4's quota-separation probe (t3 review R4)
+
+/** One scripted run of the F4 probe: how the two budgets were set and what the log answered. */
+interface ConsultQuotaRow {
+  readonly label: string;
+  readonly maxPerDay: number;
+  readonly maxConsultsPerDay: number;
+  /** `reason_code`s in event order, read back **from the log** (not from the in-process outcomes). */
+  readonly reasonCodes: readonly string[];
+  /** `speak === true` records — what the delivery budget is really charged for. */
+  readonly deliveries: number;
+  /** `model_consulted === true` records — what the consult budget is really charged for. */
+  readonly consults: number;
+  readonly expected: readonly string[];
+  readonly pass: boolean;
+}
+
+/** The shipped `proactive` section with the two budgets overridden — the probe's only knob. */
+function settingsWithBudgets(maxPerDay: number, maxConsultsPerDay: number): ProactiveSettings {
+  return parseProactiveSettings({
+    ...(config.proactive as unknown as Record<string, unknown>),
+    max_per_day: maxPerDay,
+    max_consults_per_day: maxConsultsPerDay,
+  });
+}
+
+interface ConsultQuotaSpec {
+  readonly label: string;
+  readonly maxPerDay: number;
+  readonly maxConsultsPerDay: number;
+  readonly steps: number;
+  readonly expected: readonly string[];
+  readonly expectDeliveries: number;
+  readonly expectConsults: number;
+}
+
+/**
+ * Drive the real `ProactiveEngine.consider` through one scripted budget scenario.
+ *
+ * Production parts only: the engine, its settings parser, the log it writes and the
+ * `readProactiveConsultations` accounting it does on every call — the same entry point the resident
+ * loop and the console use. The one seam is the 读空气 decider, which is offline by design here:
+ * the first paid call says 「不说」 and every later one agrees. That is exactly the pattern t9 F4
+ * was about (40 refusals used to spend the whole day's *speaking* quota and the day went silent).
+ */
+async function runConsultQuotaScript(spec: ConsultQuotaSpec): Promise<{ readonly row: ConsultQuotaRow; readonly dataDir: string }> {
+  const dataDir = mkdtempSync(join(tmpdir(), 'xixi-f4-probe-'));
+  /** 09:00 +08:00 — awake and well outside the 23:30–07:30 quiet window, so no floor but the budgets. */
+  const start = new Date('2026-10-02T09:00:00+08:00');
+  let now = start;
+  const store: XixiStore = openXixiStore({ dataDir, clock: () => now });
+  const session = store.createSession();
+  const engine = new ProactiveEngine({
+    store,
+    settings: settingsWithBudgets(spec.maxPerDay, spec.maxConsultsPerDay),
+    offsetMinutes: OFFSET_MINUTES,
+    clock: () => now,
+  });
+  let consulted = 0;
+  const decide: ProactiveDecider = () => {
+    consulted += 1;
+    return consulted === 1 ? { speak: false, reasonCode: 'user_busy' } : { speak: true, reasonCode: 'good_moment' };
+  };
+
+  for (let step = 0; step < spec.steps; step += 1) {
+    // 5 minutes apart: past the 2-minute new-session floor and (for a fresh candidate) a strong
+    // candidate either way, so a blocked step is blocked by a budget and nothing else.
+    now = new Date(start.getTime() + step * 5 * 60_000);
+    await engine.consider({
+      candidate: {
+        candidateId: `f4-probe-${step}`,
+        trigger: 'topic_pool',
+        initiativeKind: 'external_sharing',
+        components: { topic_quality: 0.9, personal_relevance: 0.9, freshness: 0.8, receptivity: 0.9, engagement: 0.8 },
+        topicRef: `f4-probe-topic-${step}`,
+        intent: null,
+      },
+      at: now,
+      conversationState: 'IDLE',
+      sessionId: session.sessionId,
+      proactivity: PROACTIVITY,
+      decide,
+    });
+  }
+
+  const payloads = store
+    .readEvents({ type: 'proactive.decision', limit: Number.MAX_SAFE_INTEGER })
+    .map((event) => event.payload as Record<string, unknown>);
+  const reasonCodes = payloads.map((payload) => String(payload['reason_code'] ?? ''));
+  const deliveries = payloads.filter((payload) => payload['speak'] === true).length;
+  const consults = payloads.filter((payload) => payload['model_consulted'] === true).length;
+  store.close();
+
+  const pass =
+    reasonCodes.length === spec.expected.length &&
+    reasonCodes.every((code, index) => code === spec.expected[index]) &&
+    deliveries === spec.expectDeliveries &&
+    consults === spec.expectConsults;
+  return {
+    dataDir,
+    row: {
+      label: spec.label,
+      maxPerDay: spec.maxPerDay,
+      maxConsultsPerDay: spec.maxConsultsPerDay,
+      reasonCodes,
+      deliveries,
+      consults,
+      expected: spec.expected,
+      pass,
+    },
+  };
+}
+
+/**
+ * The decisive probe for 「问询额度与开口额度分开计」 (t9 F4, t3 review R4).
+ *
+ * Three rows, all with the *same* script (`不说` once, then agree) and budgets that are 1 or 0:
+ *
+ *   1. `maxPerDay=1 / maxConsultsPerDay=2`: the paid 「不说」 is charged to the *consult* budget, so
+ *      the day's single speaking slot survives it — the next candidate is delivered
+ *      (`MODEL_DECLINED → PASSED`), and only then does the **day** budget stop the third with
+ *      `QUOTA_DAY_EXCEEDED`. Deliveries and consultations are counted over the same log, never summed.
+ *   2. `maxPerDay=1 / maxConsultsPerDay=1`: the second candidate is stopped by
+ *      `QUOTA_CONSULT_EXCEEDED` while the speaking budget still has its only slot free — the code
+ *      names which budget ran out, which is the whole point of a separate code.
+ *   3. `maxPerDay=0 / maxConsultsPerDay=2`: spent speaking budget, nothing consulted — the row that
+ *      keeps the first two honest. It shows the same harness *does* report the day budget's own code
+ *      when that is the budget that ran out, so row 2's `QUOTA_CONSULT_EXCEEDED` cannot be an artefact of
+ *      a probe that always answers with the consult code.
+ */
+async function consultQuotaProbe(): Promise<{
+  readonly rows: readonly ConsultQuotaRow[];
+  readonly roots: readonly string[];
+  readonly pass: boolean;
+}> {
+  const runs = [
+    await runConsultQuotaScript({
+      label: '分开计：一次付费「不说」不吃当天唯一的开口额度',
+      maxPerDay: 1,
+      maxConsultsPerDay: 2,
+      steps: 3,
+      expected: ['MODEL_DECLINED', 'PASSED', 'QUOTA_DAY_EXCEEDED'],
+      expectDeliveries: 1,
+      expectConsults: 2,
+    }),
+    await runConsultQuotaScript({
+      label: '自有码：问询额度用尽与开口额度分开报',
+      maxPerDay: 1,
+      maxConsultsPerDay: 1,
+      steps: 2,
+      expected: ['MODEL_DECLINED', 'QUOTA_CONSULT_EXCEEDED'],
+      expectDeliveries: 0,
+      expectConsults: 1,
+    }),
+    await runConsultQuotaScript({
+      label: '反例对照：开口额度为 0 时报的是开口额度自己的码，且一次也没问模型',
+      maxPerDay: 0,
+      maxConsultsPerDay: 2,
+      steps: 1,
+      expected: ['QUOTA_DAY_EXCEEDED'],
+      expectDeliveries: 0,
+      expectConsults: 0,
+    }),
+  ];
+  return { rows: runs.map((run) => run.row), roots: runs.map((run) => run.dataDir), pass: runs.every((run) => run.row.pass) };
+}
+
 // ------------------------------------------------------------------- main
 
 async function main(): Promise<void> {
@@ -501,7 +666,13 @@ async function main(): Promise<void> {
   console.log(JSON.stringify(probe.rows, null, 2));
   console.log('');
 
-  // ------------------------------------------------------------ five goals
+  const f4Probe = await consultQuotaProbe();
+  roots.push(...f4Probe.roots);
+  console.log('=== t9 F4 探针：问询额度与开口额度分开计（生产 ProactiveEngine.consider 驱动；理由码读自日志）===');
+  console.log(JSON.stringify(f4Probe.rows, null, 2));
+  console.log('');
+
+  // ------------------------------------------- five pack goals + the F4 probe (rows 1–6)
   const genericByTopicRef = Number(responsiveMetrics['genericByTopicRefPct']);
   const genericByContent = Number(responsiveMetrics['genericByContentPct']);
   const specificShare = Number(responsiveMetrics['specificSourceSharePct']);
@@ -541,9 +712,21 @@ async function main(): Promise<void> {
       measured: `热聊窗口内生产通路接话 ${continuationsInWindow} 次（须 ≥ 1）；热聊场景相邻开口最小间隔 ${minGap} 分钟（须 < ${settings.baseCooldownMinutes}）`,
       pass: continuationsInWindow >= 1 && minGap < settings.baseCooldownMinutes,
     },
+    {
+      no: 6,
+      title: 'F4 探针（t3 评审 R4）：问询额度与开口额度分开计，各有各的码',
+      measured: f4Probe.rows
+        .map(
+          (row) =>
+            `${row.label}（maxPerDay=${row.maxPerDay}、maxConsultsPerDay=${row.maxConsultsPerDay}）：` +
+            `${row.reasonCodes.join(' → ')}（开口 ${row.deliveries} 次、问询 ${row.consults} 次）`,
+        )
+        .join('；'),
+      pass: f4Probe.pass,
+    },
   ];
 
-  console.log('=== pack Phase 5 五项目标判定 ===');
+  console.log('=== pack Phase 5 五项目标判定（第 6 行是 F4 探针，不属于 pack 的五项目标）===');
   for (const verdict of verdicts) {
     console.log(`${verdict.pass ? '✅' : '❌'} ${verdict.no}. ${verdict.title}`);
     console.log(`   实测：${verdict.measured}`);
@@ -551,7 +734,7 @@ async function main(): Promise<void> {
   const failed = verdicts.filter((verdict) => !verdict.pass);
   console.log('');
   if (failed.length === 0) {
-    console.log('结论：五项目标全部通过。');
+    console.log('结论：五项目标全部通过；F4 问询/开口额度分离探针也通过。');
   } else {
     console.log(`结论：${failed.map((verdict) => `${verdict.no}. ${verdict.title}`).join('；')} 未通过。`);
   }
