@@ -291,3 +291,13 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    （本轮是 `opencode-go` + `deepseek-v4.1-flash`，取自 `.dsh/settings.yaml.imported` 的 `agent-default-model`），
    省略时会继承 captain 当时的模型。④ 新团队的任务编号会从 t1 重新开始，**别把两轮的 t1/t3 混为一谈**——
    引用时写清「第几轮」。
+   **补充（2026-10-01 第四轮换来）**：① **provider 配额用尽也算「必须换模型」**——第三轮的 t13 死在
+   `429 GoUsageLimitError`（opencode-go：Go usage limit exceeded），而**成员不会因为换个任务就恢复**：
+   同一 provider 的所有成员都会连续 429。判据：失败回报里出现 `QUOTA` / `GoUsageLimitError` / 429，
+   就**不要重试**，直接走上面的流程（先给在途工作做快照提交 → 归档 → 换 provider 重建），
+   否则每重试一次只会在下游再堵一个任务。② **路由要以 web profile 的 `cordis.patch.yml` 为准**：
+   里面 `agent-default-model` 才是真正生效的 provider 与 model（第四轮是 `commandcode` +
+   `deepseek/deepseek-v4.1-flash`，`reasoningEffort: max`）；`.dsh/settings.yaml.imported` 可能仍是旧值，
+   照它填会让成员跑在已经配额用尽的 provider 上。③ 重建前把**在途工作快照入库**：
+   第三轮 t13 的改动（`tests/console/` 与 `scripts/eval-proactive-timeline.ts`）是绿的但未验收，
+   快照提交为 `b7fb811`，新团队的承接任务从它继续。
