@@ -154,6 +154,13 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    **amend 只替换你显式给出的字段**：把某个路径加进 inScope 之后，**必须同时检查 outOfScope 是否还禁止着它**
    （captain 本轮就把 `packages/conversation/src/engine.ts` 加进 inScope，却留着 outOfScope 里的 `packages/`，
    自相矛盾——成员会不知道该不该改）。**加完 inScope 要重读一遍整份契约。**
+   **子规则（2026-10-01 第三轮 t6 换来）**：**事件类型枚举与「钉死已发布迁移列表」的测试也在 inScope 之外**——
+   新事件类型的 `event_type` 枚举在 `packages/contracts/schemas/envelope.v1.json`（**不在** `schemas/events/` 下），
+   而 `tests/perception/world-state-projection.test.ts` 把已发布迁移列表钉成字面量（加迁移 003 就必红）。
+   派单时要把这两类路径**直接写进 inScope**，否则成员只能靠 §9.2 正文披露。
+   **并且：完成校验会拒绝把 inScope 外的路径写进 `changedPaths`（报 `is undeclared`）**——
+   所以契约外的必要改动**只能在回报正文里披露**；captain 收到后必须把它转成评审的**显式核对项**
+   （第三轮 t7 的 description 就是这么写的），否则这条披露没有任何人负责核。
 2. **契约校验只核对成员「声明」的 changedPaths**：未声明的越界编辑**不会**被自动拦截（t4 的 `package.json`、`scripts/voice-turn.ts` 就是这样绕过的）。
    因此唯一防线是：成员**如实披露** inScope 外的改动 + 评审**逐条复核**这些披露。
    **披露的固定格式（t45 的写法已被验证有效，请照抄）**：① 改了哪个文件（完整路径）；
