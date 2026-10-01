@@ -313,8 +313,12 @@ const MID_REPLY_HOLD_MAX = 600;
  *     `MID_REPLY_HOLD_MAX` is treated the same way the leading rule treats a long English opening:
  *     dropped, and the filter resumes at the next unquoted Han character.
  *
- * `options.language` is what turns the last two rules on: a pass-through filter is what the adapter
- * used to build, which is why its deltas leaked (t12 F1 — "适配器出口的过滤器带上语言参数").
+ * `options.language` decides what counts as foreign: the last two rules run when the deployment
+ * speaks Chinese, which is what `isChineseLanguage` reads an omitted option as (`zh`). Omitting it is
+ * therefore **not** a pass-through: the Chinese rules would apply to every deployment, and one that
+ * speaks something else would have its own long non-Chinese runs held back or dropped as if they were
+ * reasoning. Pass the configured language so the hold follows the deployment (t14/T5-F3 — the wording
+ * here used to promise a pass-through leak this function never had).
  */
 export function createSpokenTextFilter(options: SpokenReplyOptions = {}): SpokenTextFilter {
   const holdForeign = isChineseLanguage(options.language);
