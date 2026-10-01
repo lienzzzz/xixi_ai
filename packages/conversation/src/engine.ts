@@ -768,8 +768,19 @@ function summarizeHygiene(hygiene: ReplyHygieneResult): ReplyHygieneSummary {
  * 「凌晨一点半」 said at 00:29 is checkable — and wrong — without any tool call. The rule is narrow on
  * purpose: it fires only when (a) the sentence names a clock time, (b) the *time of day* matches the
  * real local period (or the sentence has a "now" cue), (c) there is no past-tense marker, and
- * (d) the claimed time is more than `CLOCK_TOLERANCE_MINUTES` away from the real one. 「昨天三点半就醒了」
- * and 「我平时三点半起床」 therefore pass; 「凌晨两点多」 at 00:32 does not.
+ * (d) **every** plausible reading of the claimed time is more than `CLOCK_TOLERANCE_MINUTES` away
+ * from the real one. 「昨天三点半就醒了」 and 「我平时三点半起床」 therefore pass; 「凌晨两点多」 at
+ * 00:32 does not.
+ *
+ * The readings are folded before the distance check (t1 round 2, found by probing the t21 snapshot):
+ *   * a period word picks the hour it names — 「下午三点」 is 15:00, not 03:00. Without this, every
+ *     PM clock sentence spoken *during its own period* (the exact case `periodMatches` arms on) was
+ *     measured against the AM reading and gated as a fabrication — 「现在下午三点了」 at 15:32 and
+ *     「现在已经晚上八点半了」 at 20:15 were both replaced by the repair line;
+ *   * a bare 12-hour form (no period word) has two readings — 「现在十二点半了」 at 00:32 means
+ *     00:30 (t4's own live example) — and the sentence is only a contradiction if **both** readings
+ *     miss the real clock. The repair line must not fire on a true statement: that is the over-gate
+ *     class the t114 review warned about.
  */
 export function findUnbackedFactClaims(
   text: string,
@@ -858,7 +869,10 @@ function findClockClaim(text: string, now: Date, offsetMinutes: number | undefin
   const digital = CLOCK_DIGITAL.exec(text);
   const ascii = CLOCK_SPOKEN.exec(text);
 
-  let claimed: number | null = null;
+  let claimedHour: number | null = null;
+  let claimedMinutes = 0;
+  /** `15:30` is written in 24-hour form: it has exactly one reading, unlike a bare 「三点」. */
+  let unambiguous = false;
   let match = '';
   let period = '';
   if (ascii !== null) {
@@ -866,25 +880,28 @@ function findClockClaim(text: string, now: Date, offsetMinutes: number | undefin
     const hour = Number(ascii[2]);
     const minutes = ascii[3] === '半' ? 30 : ascii[4] === undefined ? 0 : Number(ascii[4]);
     if (Number.isFinite(hour) && hour < 24 && Number.isFinite(minutes)) {
-      claimed = hour * 60 + minutes;
+      claimedHour = hour;
+      claimedMinutes = minutes;
       match = ascii[0].trim();
     }
   }
-  if (claimed === null && spoken !== null) {
+  if (claimedHour === null && spoken !== null) {
     period = spoken[1] ?? '';
     const token = spoken[2] as string;
     const hour = /^[0-9]+$/.test(token) ? Number(token) : chineseHour(token);
     if (hour !== null && hour < 24) {
-      const minutes = spoken[3] === '半' ? 30 : spoken[4] === undefined ? 0 : 30;
-      claimed = hour * 60 + minutes;
+      claimedMinutes = spoken[3] === '半' ? 30 : spoken[4] === undefined ? 0 : 30;
+      claimedHour = hour;
       match = spoken[0].trim();
     }
   }
-  if (claimed === null && digital !== null) {
-    claimed = Number(digital[1]) * 60 + Number(digital[2]);
+  if (claimedHour === null && digital !== null) {
+    claimedHour = Number(digital[1]);
+    claimedMinutes = Number(digital[2]);
+    unambiguous = true;
     match = digital[0].trim();
   }
-  if (claimed === null || match.length === 0) return null;
+  if (claimedHour === null || match.length === 0) return null;
 
   const sentence = sentenceAround(text, text.indexOf(match));
   if (PAST_CUE.test(sentence)) return null;
@@ -892,8 +909,32 @@ function findClockClaim(text: string, now: Date, offsetMinutes: number | undefin
     period !== '' && TIME_OF_DAY_HOURS.some((entry) => entry.word === period && realHour >= entry.from && realHour < entry.to);
   if (!periodMatches && !NOW_CUE.test(sentence)) return null;
 
-  const distance = Math.min(Math.abs(claimed - realMinutes), 1440 - Math.abs(claimed - realMinutes));
-  return distance > CLOCK_TOLERANCE_MINUTES ? match : null;
+  // The readings a sentence may name: the hour as written, plus the 12-hour alternate for a bare
+  // 1..12 form, narrowed to the period the sentence itself says (see the rule doc above).
+  const readings: number[] = [];
+  const addReading = (hour: number): void => {
+    const minutes = (((hour % 24) + 24) % 24) * 60 + claimedMinutes;
+    if (!readings.includes(minutes)) readings.push(minutes);
+  };
+  addReading(claimedHour);
+  if (!unambiguous && claimedHour >= 1 && claimedHour <= 12) addReading(claimedHour === 12 ? 0 : claimedHour + 12);
+  let candidates = readings;
+  if (period !== '') {
+    const range = TIME_OF_DAY_HOURS.find((entry) => entry.word === period);
+    if (range !== undefined) {
+      const inPeriod = candidates.filter((minutes) => {
+        const hour = Math.floor(minutes / 60);
+        return hour >= range.from && hour < range.to;
+      });
+      // 「晚上十二点」 names 00:00, which no period range claims — fall back to every reading.
+      if (inPeriod.length > 0) candidates = inPeriod;
+    }
+  }
+  const conflicts = candidates.every((candidate) => {
+    const distance = Math.abs(candidate - realMinutes);
+    return Math.min(distance, 1440 - distance) > CLOCK_TOLERANCE_MINUTES;
+  });
+  return conflicts ? match : null;
 }
 
 /** The sentence a match sits in — 「。」「！」「？」「；」and newlines are the boundaries (t117). */

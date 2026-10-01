@@ -86,27 +86,29 @@ interface Harness {
   readonly engine: ConversationEngine;
   readonly spoken: string[];
   readonly notices: { readonly code: string; readonly detail: string }[];
+  /** The turn's wall clock — the gate reads it, so a test can speak at 15:32 without waiting. */
+  readonly now: Date;
 }
 
-function harness(adapter: BrainAdapter): Harness {
+function harness(adapter: BrainAdapter, now: Date = T0): Harness {
   const root = mkdtempSync(join(tmpdir(), 'xixi-reply-pipeline-'));
-  const store = openXixiStore({ dbPath: join(root, 'x.sqlite'), clock: fixedClock(T0, 1_000) });
+  const store = openXixiStore({ dbPath: join(root, 'x.sqlite'), clock: fixedClock(now, 1_000) });
   const spoken: string[] = [];
   const notices: { code: string; detail: string }[] = [];
   const engine = new ConversationEngine({
     adapter,
     store,
     config: CONFIG,
-    clock: () => new Date(T0),
+    clock: () => new Date(now),
     offsetMinutes: OFFSET,
   });
-  return { store, engine, spoken, notices };
+  return { store, engine, spoken, notices, now };
 }
 
 async function speakOnce(h: Harness): Promise<Awaited<ReturnType<ConversationEngine['respond']>>> {
   const session = h.store.createSession();
   return h.engine.respond(
-    { sessionId: session.sessionId, text: '明天天气怎么样？', addressed: true, at: new Date(T0) },
+    { sessionId: session.sessionId, text: '明天天气怎么样？', addressed: true, at: new Date(h.now) },
     {
       onTextChunk: (chunk) => void h.spoken.push(chunk),
       onNotice: (notice) => void h.notices.push({ code: notice.code, detail: notice.detail }),
@@ -245,12 +247,59 @@ test('an invented "current time" is gated like any other unverifiable claim (t4 
     close(habit.store);
   }
 
-  // …and a time that is *right* is not a claim to replace.
+  // …and a time that is *right* is not a claim to replace. The sentence has no period word and no
+  // now-cue, so the gate never arms on it; the now-cue variant below exercises the tolerance itself.
   const correct = harness(scriptedAdapter('都快十二点半了，早点睡吧。', 'stop'));
   try {
     const turn = await speakOnce(correct);
-    assert.equal(turn.text, '都快十二点半了，早点睡吧。', '00:32 vs 十二点半 (00:30) is inside the tolerance');
+    assert.equal(turn.text, '都快十二点半了，早点睡吧。', 'no period word, no now-cue: not a claim about now');
   } finally {
     close(correct.store);
+  }
+});
+
+test('the period word and the 12-hour reading decide the claim, so a true clock sentence passes (t4 F2 / t21)', async () => {
+  // Re-checking the t21 snapshot by probe found an over-gate: 「下午三点」 was measured as 03:00, so
+  // every PM clock sentence spoken *during its own period* (the case `periodMatches` arms on) was
+  // replaced by the repair line. 「现在下午三点了」 at 15:32 is true — the repair line must not fire
+  // on a true statement (the over-gate class the t114 review warned about).
+  const afternoon = harness(scriptedAdapter('现在下午三点了，准备开会。', 'stop'), new Date('2026-10-01T15:32:00+08:00'));
+  try {
+    const turn = await speakOnce(afternoon);
+    assert.equal(turn.text, '现在下午三点了，准备开会。', '15:32 vs 下午三点 (15:00) is inside the tolerance');
+    assert.equal(afternoon.notices.some((item) => item.code === 'UNBACKED_FACT_CLAIM'), false);
+  } finally {
+    close(afternoon.store);
+  }
+
+  // The evening shape of the same rule: 20:15 vs 晚上八点半 (20:30) is the truth — spoken.
+  const evening = harness(scriptedAdapter('现在已经晚上八点半了，该睡了。', 'stop'), new Date('2026-10-01T20:15:00+08:00'));
+  try {
+    const turn = await speakOnce(evening);
+    assert.equal(turn.text, '现在已经晚上八点半了，该睡了。', '20:15 vs 晚上八点半 (20:30) is inside the tolerance');
+    assert.equal(evening.notices.some((item) => item.code === 'UNBACKED_FACT_CLAIM'), false);
+  } finally {
+    close(evening.store);
+  }
+
+  // …and the shape that *contradicts* the clock is still gated: 17:00 claimed at 15:32.
+  const wrong = harness(scriptedAdapter('现在下午五点了，准备开会。', 'stop'), new Date('2026-10-01T15:32:00+08:00'));
+  try {
+    const turn = await speakOnce(wrong);
+    assert.equal(turn.text, UNBACKED_FACT_REPLY, '下午五点 (17:00) is 88 minutes away from 15:32 — a fabrication');
+    assert.match(wrong.notices.find((item) => item.code === 'UNBACKED_FACT_CLAIM')?.detail ?? '', /下午五点/);
+  } finally {
+    close(wrong.store);
+  }
+
+  // t4's own live example (Run B round 17): 「现在十二点半了」 said at 00:32 is the 12-hour form of
+  // 00:30 — inside the tolerance under either reading, so it is spoken, not replaced.
+  const midnight = harness(scriptedAdapter('现在十二点半了，快睡吧。', 'stop'));
+  try {
+    const turn = await speakOnce(midnight);
+    assert.equal(turn.text, '现在十二点半了，快睡吧。', 'one reading of 十二点半 is 00:30, 2 minutes from the real clock');
+    assert.equal(midnight.notices.some((item) => item.code === 'UNBACKED_FACT_CLAIM'), false);
+  } finally {
+    close(midnight.store);
   }
 });
