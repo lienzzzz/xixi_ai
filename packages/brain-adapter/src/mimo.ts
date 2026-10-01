@@ -46,9 +46,14 @@ export interface MimoBrainAdapterOptions {
   /** Which agent surface this adapter is serving; the registry filters by it. */
   readonly scope?: AgentScope;
   /**
-   * t21: the deployment's reply language (`config.identity.language`). The reply-hygiene filter needs
-   * it to decide what counts as a foreign (reasoning) run; without it the filter is a pass-through and
-   * the adapter's deltas leak English reasoning to a streaming TTS (t12 F1).
+   * t21: the deployment's reply language (`config.identity.language`). The reply-hygiene filter judges
+   * a foreign (reasoning) run against it.
+   *
+   * Omitting it is **not** a pass-through: the constructor falls back to `zh-CN`, so the Chinese rules
+   * then apply to every deployment, and a deployment that speaks something else has its own long
+   * Han-free lines held back or dropped as if they were reasoning. Pass the configured language so the
+   * filter follows the deployment (t14/T5-F3 — the wording here used to promise a pass-through leak
+   * this seam never had).
    */
   readonly language?: string;
   /**
@@ -275,9 +280,10 @@ export class MimoBrainAdapter implements BrainAdapter {
             // t7/t21: the provider can put tool-call markup in the *text* stream (measured on the voice
             // path: 7 of 8 weather turns, and TTS read it out — baseline §4), and the model can reason
             // in English mid-answer. Nothing a mouth should hear leaves this step, so the deltas go
-            // through the hygiene hold — with the deployment **language** (t12 F1: a pass-through
-            // filter is exactly why the adapter's deltas leaked) — and the round's text is accumulated
-            // from what the hold let through, never from the raw deltas.
+            // through the hygiene hold with the deployment **language**: omitted, the adapter falls
+            // back to `zh-CN` and applies the Chinese rules to a deployment that may not speak Chinese
+            // (t14/T5-F3) — and the round's text is accumulated from what the hold let through, never
+            // from the raw deltas.
             const markupHold = createSpokenTextFilter({ language: adapter.#language });
             let spokenText = '';
             let completed: MimoChatResult;

@@ -99,8 +99,10 @@ function buildAdapter(): BrainAdapter {
       registry,
       scope: CONVERSATION_SCOPE,
       timezone: config.identity.timezone,
-      // t21: the reply-hygiene filter needs the deployment language to tell English reasoning from
-      // speech. Without it the adapter's deltas are a pass-through (t12 F1).
+      // t21/t14: the reply-hygiene filter tells English reasoning from speech by judging it against the
+      // deployment language. Omitting it is not a pass-through — the adapter falls back to `zh-CN`,
+      // which would apply the Chinese rules to a deployment that may not speak Chinese — so the
+      // configured language is passed explicitly (T5-F3).
       language: config.identity.language,
     });
   }
