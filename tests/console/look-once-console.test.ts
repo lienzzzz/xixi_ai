@@ -173,10 +173,16 @@ test('「看一眼」 sends exactly one image, speaks, logs the turn and refuses
     live.push(frameLine({ width: 480, height: 360, bytes: 9000 }));
     const looked = await post('/api/field/look', { question: '画面里有什么？' });
     assert.equal(looked.ok, true, JSON.stringify(looked.error ?? null));
-    assert.equal(brain.calls.length, 1, 'exactly one model call per press');
-    assert.equal(brain.calls[0]?.images?.length, 1, 'and exactly one image');
-    assert.equal(brain.calls[0]?.images?.[0]?.base64, JPEG_BASE64);
-    assert.equal(brain.calls[0]?.images?.[0]?.mediaType, 'image/jpeg');
+    // The proactive loop also ticks when 「启用」 starts it, and outside quiet hours it may ask the
+    // model whether to speak (t8's 读空气 seam) — so count the calls **that carried the frame**
+    // instead of every adapter call since server start. Depending on the wall clock for this was a
+    // latent flake: inside 23:30–07:30 the tick is blocked by QUIET_HOURS and the count happened to
+    // be 1 (the same class of clock dependency 4c0d1d2 fixed for the proactive card).
+    const frameCalls = brain.calls.filter((call) => (call.images?.length ?? 0) > 0);
+    assert.equal(frameCalls.length, 1, 'exactly one model call carries a frame per press');
+    assert.equal(frameCalls[0]?.images?.length, 1, 'and exactly one image');
+    assert.equal(frameCalls[0]?.images?.[0]?.base64, JPEG_BASE64);
+    assert.equal(frameCalls[0]?.images?.[0]?.mediaType, 'image/jpeg');
     assert.equal(looked.reply, '画面里有一个白色的信箱。');
     assert.equal(looked.segments.length, 1);
     assert.equal(looked.audio, null, '--no-tts: the reply is text, and the note says so');

@@ -123,8 +123,24 @@ export function explainAction(action: string): string {
   }
 }
 
-export function explainReason(reason: string): string {
+/**
+ * t21 (t12 F2): the plain-language reason a turn ended silent.
+ *
+ * `MODEL_SILENCE` and `ARTIFACT_ONLY_REPLY` were indistinguishable to every caller before this —
+ * one is a choice, the other means her reply was unusable and got removed.
+ */
+export function explainSilenceReason(reason: 'MODEL_SILENCE' | 'ARTIFACT_ONLY_REPLY' | null): string {
   switch (reason) {
+    case 'ARTIFACT_ONLY_REPLY':
+      return '整轮只剩工具标记/英文推理这类不能念出来的内容，清洗后没有可说的，所以这轮安静';
+    case 'MODEL_SILENCE':
+      return '模型自己选择不说话（沉默是一等结果，不是失败）';
+    default:
+      return '';
+  }
+}
+
+export function explainReason(reason: string): string {  switch (reason) {
     case 'ACCEPTED_WAKE_OR_DIRECT':
       return '接受：这是一次直呼（会话开始时视为叫醒西西）';
     case 'ACCEPTED_CONTINUATION':
@@ -644,6 +660,15 @@ export interface VoiceTurnPayload {
   readonly latencyMs: number | null;
   readonly totalMs: number;
   readonly model: string | null;
+  /** t21 (t12 F2): why the turn said nothing — `ARTIFACT_ONLY_REPLY` vs `MODEL_SILENCE` (null = spoke). */
+  readonly silenceReason: 'MODEL_SILENCE' | 'ARTIFACT_ONLY_REPLY' | null;
+  readonly silenceReasonText: string;
+  /** t21: what the hygiene gate removed before anything could be spoken. */
+  readonly hygiene: { readonly removedMarkupChars: number; readonly removedMarkdownChars: number; readonly removedReasoningChars: number; readonly emptied: boolean } | null;
+  /** t21 (t4 F5): the provider's stop reason — `length` means the reply was cut mid-sentence. */
+  readonly finishReason: string | null;
+  /** t21: the engine's notices for this turn (`REPLY_HYGIENE` / `REPLY_TRUNCATED` / …). */
+  readonly notices: readonly { readonly code: string; readonly detail: string }[];
   readonly audio: string | null;
   readonly at: string;
   readonly privacy: {
@@ -776,6 +801,8 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
 
     const chunks: string[] = [];
     let firstChunkAt: number | null = null;
+    /** t21 (t12 F2): the engine's notices, so the page can say *why* a turn said nothing. */
+    const turnNotices: { readonly code: string; readonly detail: string }[] = [];
     const llmStarted = Date.now();
     const turn = await deps.engine.respond(
       { sessionId: deps.currentSessionId(), text: transcript, addressed: deps.engine.state === 'IDLE' },
@@ -784,6 +811,7 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
           if (firstChunkAt === null) firstChunkAt = Date.now();
           chunks.push(chunk);
         },
+        onNotice: (notice) => void turnNotices.push({ code: notice.code, detail: notice.detail }),
       },
     );
     const llmMs = Date.now() - llmStarted;
@@ -841,6 +869,13 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
       latencyMs: turn.latencyMs,
       totalMs: Date.now() - totalStarted,
       model: `${turn.provider}/${turn.model}`,
+      // t21: the three things a reader needs to tell "she chose silence" from "her reply was
+      // unusable" and from "the provider cut her off mid-sentence".
+      silenceReason: turn.silenceReason,
+      silenceReasonText: explainSilenceReason(turn.silenceReason),
+      hygiene: turn.hygiene,
+      finishReason: turn.finishReason,
+      notices: turnNotices,
       audio,
       at: new Date().toISOString(),
       privacy: {
@@ -1840,6 +1875,12 @@ export interface ConsoleTurn {
   readonly replyGapMs?: number;
   /** `回应你` for a turn, `主动开口` for a proactive message. */
   readonly source?: string;
+  /** t21 (t12 F2): why this turn was silent — the two cases must not look alike in the page. */
+  readonly silenceReasonText?: string;
+  /** t21: what the hygiene gate removed before anything could be spoken. */
+  readonly hygiene?: { readonly removedMarkupChars: number; readonly removedMarkdownChars: number; readonly removedReasoningChars: number; readonly emptied: boolean } | null;
+  /** t21 (t4 F5): the provider's stop reason; `length` means the reply was cut mid-sentence. */
+  readonly finishReason?: string | null;
 }
 
 export interface FieldServerOptions {
@@ -1896,6 +1937,9 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
         maxCompletionTokens: 400,
         tools: defaultTools({ defaultPlace: config.identity.place ?? '' }),
         timezone: config.identity.timezone,
+        // t21: the reply-hygiene filter needs the deployment language to tell English reasoning from
+        // speech (t12 F1) — the same wiring the trial page uses.
+        language: config.identity.language,
         onToolCall: (record) => log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
       });
     }
@@ -2575,8 +2619,12 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
           // gate reads this flag, so 西西 cannot talk over a reply that is still being produced.
           turnInFlight = true;
           let turn: Awaited<ReturnType<typeof engine.respond>>;
+          const notices: { readonly code: string; readonly detail: string }[] = [];
           try {
-            turn = await engine.respond({ sessionId: session.sessionId, text, addressed: engine.state === 'IDLE' });
+            turn = await engine.respond(
+              { sessionId: session.sessionId, text, addressed: engine.state === 'IDLE' },
+              { onNotice: (notice) => void notices.push({ code: notice.code, detail: notice.detail }) },
+            );
           } finally {
             turnInFlight = false;
           }
@@ -2613,6 +2661,13 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
             latencyMs: turn.latencyMs,
             firstTokenMs: turn.firstTokenMs,
             model: `${turn.provider}/${turn.model}`,
+            // t21 (t12 F2 / t4 F5): the right column must be able to say *why* a turn was silent and
+            // whether the provider truncated it — the same three fields the voice path carries.
+            silenceReason: turn.silenceReason,
+            silenceReasonText: explainSilenceReason(turn.silenceReason),
+            hygiene: turn.hygiene,
+            finishReason: turn.finishReason,
+            notices,
             audio,
             at: new Date().toISOString(),
           });
@@ -6176,6 +6231,27 @@ function renderTurn(turn) {
   who.textContent = (turn.kind === 'voice' ? '语音' : '打字') + ' · ' + turn.state + ' · ' + new Date(turn.at).toLocaleTimeString();
   head.appendChild(who);
   item.appendChild(head);
+  // t21 (t12 F2): why this turn was silent, and whether the provider cut the reply short. Without
+  // these lines 「整轮只剩制品」 and 「模型自己选择沉默」 look identical in the right column.
+  if (turn.silenceReasonText) {
+    var why = document.createElement('div');
+    why.className = 'muted';
+    why.textContent = '沉默原因：' + turn.silenceReasonText;
+    item.appendChild(why);
+  }
+  if (turn.hygiene) {
+    var hygiene = document.createElement('div');
+    hygiene.className = 'muted';
+    hygiene.textContent = '清洗：剔除标记 ' + turn.hygiene.removedMarkupChars + ' 字、markdown ' + turn.hygiene.removedMarkdownChars
+      + ' 字、英文推理 ' + turn.hygiene.removedReasoningChars + ' 字' + (turn.hygiene.emptied ? '（剩余为空）' : '');
+    item.appendChild(hygiene);
+  }
+  if (turn.finishReason && turn.finishReason !== 'stop') {
+    var finish = document.createElement('div');
+    finish.className = 'muted';
+    finish.textContent = '停止原因：' + turn.finishReason + (turn.finishReason === 'length' ? '（被 token 上限截断，句子可能没说完）' : '');
+    item.appendChild(finish);
+  }
   if (turn.transcript) {
     var said = document.createElement('div');
     said.textContent = '听到：' + turn.transcript;
@@ -6464,6 +6540,7 @@ async function stopRecording() {
     renderTurn({
       kind: 'voice', at: data.at, action: data.action, actionText: data.actionText, reason: data.reason, reasonText: data.reasonText,
       transcript: data.transcript, reply: data.reply, state: data.state, stages: data.stages,
+      silenceReasonText: data.silenceReasonText, hygiene: data.hygiene, finishReason: data.finishReason,
       segmentsTotal: data.segmentsTotal, segmentsUsed: data.segmentsUsed, droppedSegments: data.droppedSegments,
       privacyNote: data.privacy.note,
       audioUrl: audioUrl, audioSeconds: seconds, audioPeakDbfs: peak

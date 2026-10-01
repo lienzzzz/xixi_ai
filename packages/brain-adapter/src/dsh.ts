@@ -185,6 +185,9 @@ export class DshBrainAdapter implements BrainAdapter {
       model: response.model,
       brainSessionId: response.brainSessionId ?? resumeBrainSessionId,
       latencyMs: response.latencyMs ?? this.#clock() - startedAt,
+      // t21: the harness protocol does not report a stop reason; saying `null` is honest, and the
+      // direct path is where `length` truncation shows up.
+      finishReason: null,
     };
 
     const chunks: BrainTurnChunk[] = [];

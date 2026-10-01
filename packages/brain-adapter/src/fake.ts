@@ -86,6 +86,8 @@ export class FakeBrainAdapter implements BrainAdapter {
       model: this.#model,
       brainSessionId: `fake-${input.sessionId}`,
       latencyMs: 0,
+      /** A scripted turn never hits a token budget — `stop` is the honest value (t21). */
+      finishReason: 'stop',
     };
 
     async function* replay(): AsyncGenerator<BrainTurnChunk> {

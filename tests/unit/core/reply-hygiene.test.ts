@@ -109,13 +109,15 @@ test('the streaming hold never emits half a tool-call marker', () => {
     hold.push('ll><function=get_weather>'),
     hold.push(`</tool_call>明天阴天。`),
   ];
-  assert.deepEqual(emitted, ['明天', '', '', '明天阴天。'], 'only text outside the block may be spoken early');
-  assert.equal(hold.flush(), '', 'nothing is left over once the block closed');
+  // t21: text is released up to the last Han character, so a trailing 「。」 waits for the next Han
+  // character (or the end of the stream) instead of being spoken and possibly retracted.
+  assert.deepEqual(emitted, ['明天', '', '', '明天阴天'], 'only text outside the block may be spoken early');
+  assert.equal(hold.flush(), '。', 'and the held tail is released when the stream ends');
 });
 
 test('a lone "<" is released as soon as the next character disproves a marker', () => {
   const hold = createSpokenTextFilter({ language: 'zh-CN' });
-  assert.equal(hold.push('我要是 <'), '我要是 ');
+  assert.equal(hold.push('我要是 <'), '我要是', 'the trailing space is not speech');
   assert.equal(hold.push('3 点还没睡'), '<3 点还没睡');
   assert.equal(hold.flush(), '');
 });
@@ -132,13 +134,52 @@ test('a streamed English opening is held until the Chinese decides it', () => {
   assert.equal(hold.push('The user is repeating their earlier message about going'), '');
   assert.equal(hold.push(' to town and not being back until evening. '), '');
   assert.equal(hold.push('都这么晚了，还没到家？'), '都这么晚了，还没到家？', 'the preamble is dropped, the Chinese is spoken');
-  assert.equal(hold.push('到家了就早点歇着。'), '到家了就早点歇着。', 'after that the stream flows untouched');
+  assert.equal(hold.push('到家了就早点歇着。'), '到家了就早点歇着', 'the trailing 「。」 waits for the next Han or the flush (t21)');
+  assert.equal(hold.flush(), '。', 'and it is released at the end of the stream');
 });
 
 test('a short English opening word is not treated as reasoning', () => {
   const hold = createSpokenTextFilter({ language: 'zh-CN' });
   assert.equal(hold.push('OK，'), '', 'held only until the first Chinese character decides it');
-  assert.equal(hold.push('我看看。'), 'OK，我看看。', 'a two-letter opening is not a reasoning preamble');
+  assert.equal(hold.push('我看看。'), 'OK，我看看', 'a two-letter opening is not a reasoning preamble');
+  assert.equal(hold.flush(), '。');
+});
+
+test('a mid-reply English reasoning run is never emitted and then retracted (t12 F1 / t21)', () => {
+  // The exact shape the t12 review measured: the reply *starts* in Chinese, then the model reasons in
+  // English, then the real answer follows. Before t21 the leading-only rule let the English straight
+  // out of the delta seam (「流出的 63 字里 62 字被撤回」).
+  const chunks = ['嗯，我在的。', 'The user asked twice in a row about the weather', ' and I need to answer with the tool result once it arrives.', '明天多云，12 到 20 度，风不大。'];
+  const hold = createSpokenTextFilter({ language: 'zh-CN' });
+  const emitted = chunks.map((chunk) => hold.push(chunk)).join('') + hold.flush();
+  assert.equal(emitted.includes('The user'), false, `no reasoning may leave the delta seam: ${emitted}`);
+  assert.equal(emitted.includes('I need to'), false);
+  assert.equal(emitted.includes('asked twice'), false);
+  assert.equal(emitted.includes('嗯，我在的'), true, 'the Chinese opening is still spoken');
+  assert.equal(emitted.includes('明天多云，12 到 20 度，风不大'), true, 'and so is the real answer');
+});
+
+test('markdown decorations never reach a mouth (t4 F3 / t21)', () => {
+  // Line breaks are the segmenter's business (`normalizeReplyText` drops them before playback), so
+  // this test compares the spoken *content*: no `**`, no `- `, no `#`, no backticks.
+  const spoken = (text: string): string => sanitizeSpokenReply(text, { language: 'zh-CN' }).text.replace(/\s+/g, '');
+  const bulleted = '- **别硬躺**。\n- **手机放下**。';
+  assert.equal(spoken(bulleted), '别硬躺。手机放下。');
+  const result = sanitizeSpokenReply(bulleted, { language: 'zh-CN' });
+  assert.ok(result.removedMarkdownChars > 0, 'the decorations are reported, not silently dropped');
+  assert.equal(spoken('## 标题\n先说 `x` 再 *强调* 一下。'), '标题先说x再强调一下。');
+  assert.equal(spoken('早点睡。\n|---|---|\n明天降温。'), '早点睡。明天降温。');
+  // Ordinary text is untouched: no decoration, no change.
+  assert.equal(spoken('明天多云，12 到 20 度，风不大。'), '明天多云，12到20度，风不大。');
+  assert.equal(spoken('你把 WiFi 密码记一下。'), '你把WiFi密码记一下。');
+  assert.equal(sanitizeSpokenReply('明天多云，12 到 20 度，风不大。', { language: 'zh-CN' }).text, '明天多云，12 到 20 度，风不大。');
+});
+
+test('a quoted English word inside Chinese survives (it is not reasoning)', () => {
+  const hold = createSpokenTextFilter({ language: 'zh-CN' });
+  // Chunk boundaries are not audible: the space may land on either side of the join.
+  const emitted = (hold.push('你把 WiFi ') + hold.push('密码记一下。') + hold.flush()).replace(/\s+/g, '');
+  assert.equal(emitted, '你把WiFi密码记一下。', 'a latin word inside a Chinese sentence is not stripped');
 });
 
 test('an all-English reply is released at the end when it is short, dropped when it is reasoning', () => {

@@ -100,6 +100,12 @@ export interface BrainTurnResult {
   /** The provider's own session id, to persist for a later restart (§21.6). */
   readonly brainSessionId: string | null;
   readonly latencyMs: number;
+  /**
+   * t21 (t4's F5): why the provider stopped generating — `stop`, `length`, `tool_calls`, `content_filter`
+   * … `length` is what a reply cut off mid-word looks like from here, so it is carried up to the turn
+   * and to the console instead of being dropped on the floor. `null` when the transport does not say.
+   */
+  readonly finishReason: string | null;
 }
 
 export interface BrainTurnStream extends AsyncIterable<BrainTurnChunk> {

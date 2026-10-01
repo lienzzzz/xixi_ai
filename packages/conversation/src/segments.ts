@@ -42,8 +42,13 @@ import { SILENCE_TOKEN } from './prompt.ts';
 
 export const REPLY_LIMITS = Object.freeze({
   /** Hard ceiling on segments per turn (ADR-0010 M1, raised 3 → 8 in P1). */
-  maxSegments: 8,
-  /** Hard ceiling on characters per segment; CJK text, so "characters" = code points (M2). */
+  maxSegments: 8,  /**
+   * **Target** block length per segment (t4 F4 / t6 F4): the greedy packer keeps segments at or below
+   * this, and a single longer sentence is chopped at it — but when the packer yields more than
+   * `maxSegments` groups, the tail is merged into the last segment and that one **does** go over this
+   * value (`mergedOverflow` says so). A deliberate trade: keeping every character outranks keeping the
+   * per-segment ceiling.
+   */
   segmentMaxChars: 60,
   /** Pause between segments, from the end of the previous one (M3). */
   minGapMs: 250,

@@ -93,6 +93,9 @@ function buildAdapter(): BrainAdapter {
       maxCompletionTokens: 400,
       tools: defaultTools({ defaultPlace: config.identity.place ?? '' }),
       timezone: config.identity.timezone,
+      // t21: the reply-hygiene filter needs the deployment language to tell English reasoning from
+      // speech. Without it the adapter's deltas are a pass-through (t12 F1).
+      language: config.identity.language,
       onToolCall: (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
     });
   }
@@ -238,7 +241,13 @@ async function handleTurn(body: TurnBody, response: ServerResponse): Promise<voi
   if (text.length === 0) throw new ConsoleError('EMPTY_MESSAGE', '没有输入文字', '在输入框里打一句话再按发送');
   // IDLE 时把这一次点击当作直呼（M2 之前用按钮代替唤醒词），会话开着就按继续处理。
   const addressed = engine.state === 'IDLE';
-  const turn = await engine.respond({ sessionId: session.sessionId, text, addressed });
+  // t21 (t12 F2): the engine's notices are the only way to see *why* a turn said nothing —
+  // 「标记/推理被剔干净」 and 「模型自己决定不说」 used to look identical here.
+  const notices: { readonly code: string; readonly detail: string }[] = [];
+  const turn = await engine.respond(
+    { sessionId: session.sessionId, text, addressed },
+    { onNotice: (notice) => void notices.push({ code: notice.code, detail: notice.detail }) },
+  );
 
   let audio: string | null = null;
   if (ttsOn && body.speak !== false && turn.action === 'SPEAK' && turn.text !== null) {
@@ -256,6 +265,13 @@ async function handleTurn(body: TurnBody, response: ServerResponse): Promise<voi
     latencyMs: turn.latencyMs,
     firstTokenMs: turn.firstTokenMs,
     model: turn.model,
+    // t21: why it was silent (ARTIFACT_ONLY_REPLY vs MODEL_SILENCE), what was removed, and whether
+    // the provider cut the reply short (`finish_reason=length`).
+    silenceReason: turn.silenceReason,
+    silenceReasonLabel: silenceReasonLabel(turn.silenceReason),
+    hygiene: turn.hygiene,
+    finishReason: turn.finishReason,
+    notices,
     audio,
     at: toOffsetIso(),
     source: 'reply',
@@ -264,6 +280,23 @@ async function handleTurn(body: TurnBody, response: ServerResponse): Promise<voi
     segmentGapMs: turn.segments.length > 0 ? turn.segmentGapMs : plan.gapMs,
     segmentSummary: plan.summary,
   });
+}
+
+/**
+ * t21: the sentence a person can read when a turn said nothing.
+ *
+ * The two cases are not the same thing and the page must not pretend they are: one is the model's
+ * choice, the other is the hygiene gate having removed the whole reply (t12 F2).
+ */
+export function silenceReasonLabel(reason: string | null): string {
+  switch (reason) {
+    case 'ARTIFACT_ONLY_REPLY':
+      return '整轮只剩工具标记/英文推理这类不能念出来的内容，已经剔除干净，所以这轮什么都没说';
+    case 'MODEL_SILENCE':
+      return '模型自己选择不说话（沉默是一等结果，不是失败）';
+    default:
+      return '';
+  }
 }
 
 const server = createServer((request, response) => {
@@ -677,8 +710,14 @@ form.addEventListener('submit', async (event) => {
       + ' · ' + data.state;
     pending.parentElement.remove();
     if (data.ok === false) { add('xixi', '出错了：' + data.error, data.hint ?? ''); return; }
-    if (data.action === 'SILENCE' || !data.accepted) add('xixi silent', data.accepted ? '（西西选择沉默）' : '（这句不是对西西说的）', meta);
-    else addSegmented('xixi', data.sourceLabel ?? '回应你', data.segments, data.segmentGapMs ?? 450, meta);
+    if (data.action === 'SILENCE' || !data.accepted) {
+      // t21: 「整轮只剩制品所以没说」 vs 「模型自己选择沉默」 must read differently, and a truncated
+      // reply (finish_reason=length) must be visible instead of looking like a finished sentence.
+      const why = data.accepted ? (data.silenceReasonLabel || '（西西选择沉默）') : '（这句不是对西西说的）';
+      add('xixi silent', why, meta + (data.finishReason ? ' · finish=' + data.finishReason : ''));
+      if (data.hygiene) add('xixi silent', '剔除了 ' + (data.hygiene.removedMarkupChars + data.hygiene.removedMarkdownChars + data.hygiene.removedReasoningChars) + ' 字不能念的内容', 'hygiene');
+    }
+    else addSegmented('xixi', data.sourceLabel ?? '回应你', data.segments, data.segmentGapMs ?? 450, meta + (data.finishReason === 'length' ? ' · ⚠ 被 token 上限截断' : ''));
     if (data.audio) { const audio = new Audio('data:audio/wav;base64,' + data.audio); audio.play().catch(() => {}); }
     setBanner(await (await fetch('/api/state')).json());
   } catch (error) {
@@ -705,30 +744,37 @@ input.focus();
 </script>
 </body></html>`;
 
-server.on('error', (error: NodeJS.ErrnoException) => {
-  if (error.code === 'EADDRINUSE') {
-    console.error(`端口 ${PORT} 已被占用（可能已经开着一个 npm run web 或现场测试控制台）。`);
-    console.error(`换一个端口：npm run web -- --port ${PORT + 1}；或先关掉占用该端口的程序。`);
-    console.error('想用「一条命令」的现场测试控制台（含设备验收）：npm run field-test');
-  } else {
-    console.error(`无法在本机监听 ${PORT}：${error.message}`);
-  }
-  process.exit(1);
-});
+/**
+ * t21: the trial page's own helpers are importable (`silenceReasonLabel` is asserted in
+ * `tests/console/reply-pipeline-console.test.ts`), so the listener only starts when this file *is*
+ * the program — importing it must not bind a port.
+ */
+if (import.meta.main) {
+  server.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`端口 ${PORT} 已被占用（可能已经开着一个 npm run web 或现场测试控制台）。`);
+      console.error(`换一个端口：npm run web -- --port ${PORT + 1}；或先关掉占用该端口的程序。`);
+      console.error('想用「一条命令」的现场测试控制台（含设备验收）：npm run field-test');
+    } else {
+      console.error(`无法在本机监听 ${PORT}：${error.message}`);
+    }
+    process.exit(1);
+  });
 
-server.listen(PORT, '127.0.0.1', () => {
-  // `--port 0` binds an ephemeral port; printing the *bound* one lets the console tests
-  // drive this page without guessing (and is more honest for a user who typed 0 by accident).
-  const bound = server.address();
-  const actualPort = typeof bound === 'object' && bound !== null ? bound.port : PORT;
-  console.log(`西西试用页面： http://127.0.0.1:${actualPort}`);
-  console.log(
-    `大脑 ${USE_FAKE ? '离线替身（--fake，不联网、不花钱）' : USE_DSH ? 'DSH Harness（每轮启动 profile，较慢）' : '直连 MiMo（实时路径）'}` +
-      `｜身份 ${config.identity.name}｜地点 ${config.identity.place ?? '未设置'}｜朗读回复 ${TTS_ENABLED ? '开' : '关'}`,
-  );
-  console.log(`会话 ${session.sessionId}`);
-  console.log('多段回复（ADR-0010）：西西的回复会按段逐条出现，段间停 450ms；页面上标着「第 i/N 段」。');
-  console.log('主动性：页面底部那块可以开关主动开口、调冷却/额度/静默时段，并能看每道门禁的判定。');
-  console.log('语音输入：页面按住🎤说话（浏览器采集，只把 VAD 检出的语音段送去识别，整段录音不落盘）。按 Ctrl+C 结束。');
-  console.log('现场测试（一条命令、含设备验收与实时状态页）：npm run field-test');
-});
+  server.listen(PORT, '127.0.0.1', () => {
+    // `--port 0` binds an ephemeral port; printing the *bound* one lets the console tests
+    // drive this page without guessing (and is more honest for a user who typed 0 by accident).
+    const bound = server.address();
+    const actualPort = typeof bound === 'object' && bound !== null ? bound.port : PORT;
+    console.log(`西西试用页面： http://127.0.0.1:${actualPort}`);
+    console.log(
+      `大脑 ${USE_FAKE ? '离线替身（--fake，不联网、不花钱）' : USE_DSH ? 'DSH Harness（每轮启动 profile，较慢）' : '直连 MiMo（实时路径）'}` +
+        `｜身份 ${config.identity.name}｜地点 ${config.identity.place ?? '未设置'}｜朗读回复 ${TTS_ENABLED ? '开' : '关'}`,
+    );
+    console.log(`会话 ${session.sessionId}`);
+    console.log('多段回复（ADR-0010）：西西的回复会按段逐条出现，段间停 450ms；页面上标着「第 i/N 段」。');
+    console.log('主动性：页面底部那块可以开关主动开口、调冷却/额度/静默时段，并能看每道门禁的判定。');
+    console.log('语音输入：页面按住🎤说话（浏览器采集，只把 VAD 检出的语音段送去识别，整段录音不落盘）。按 Ctrl+C 结束。');
+    console.log('现场测试（一条命令、含设备验收与实时状态页）：npm run field-test');
+  });
+}

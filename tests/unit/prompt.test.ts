@@ -60,6 +60,8 @@ test('the identity reads as a person, not as a numbered must / must-not list (P1
   assert.match(CORE_IDENTITY, /不要把对方的话重新总结一遍/);
   assert.match(CORE_IDENTITY, /我记得好像/);
   assert.match(CORE_IDENTITY, /可以被打断/);
+  // t21 (t4 F3): answers are speech, not a formatted document — the hygiene layer strips what slips through.
+  assert.match(CORE_IDENTITY, /不用列表、不加粗、不用标题/);
   // Ordinary knowledge questions may be answered at length — length must have a distribution.
   assert.match(CORE_IDENTITY, /遇到知识问题、需要解释的事，可以自然多说几句/);
 });

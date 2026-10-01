@@ -35,6 +35,12 @@ export interface MimoBrainAdapterOptions {
   readonly stream?: boolean;
   /** Read-only tools the model may request (§27). Empty means none. */
   readonly tools?: readonly XixiTool[];
+  /**
+   * t21: the deployment's reply language (`config.identity.language`). The reply-hygiene filter needs
+   * it to decide what counts as a foreign (reasoning) run; without it the filter is a pass-through and
+   * the adapter's deltas leak English reasoning to a streaming TTS (t12 F1).
+   */
+  readonly language?: string;
   /** How many tool rounds a single turn may use before the model must answer. */
   readonly maxToolRounds?: number;
   readonly timezone?: string;
@@ -101,6 +107,8 @@ export class MimoBrainAdapter implements BrainAdapter {
   readonly #tools: readonly XixiTool[];
   readonly #maxToolRounds: number;
   readonly #timezone: string;
+  /** t21: reply language, used by the hygiene filter on the streaming seam. */
+  readonly #language: string;
   readonly #now: () => Date;
   readonly #onToolCall: ((record: ToolCallRecord) => void) | undefined;
 
@@ -114,6 +122,7 @@ export class MimoBrainAdapter implements BrainAdapter {
     this.#tools = options.tools ?? [];
     this.#maxToolRounds = options.maxToolRounds ?? 2;
     this.#timezone = options.timezone ?? 'Asia/Shanghai';
+    this.#language = options.language ?? 'zh-CN';
     this.#now = options.now ?? (() => new Date());
     this.#onToolCall = options.onToolCall;
   }
@@ -155,7 +164,13 @@ export class MimoBrainAdapter implements BrainAdapter {
     return messages;
   }
 
-  #interpret(text: string, toolName: string | null, modelName: string, latencyMs: number): BrainTurnResult {
+  #interpret(
+    text: string,
+    toolName: string | null,
+    modelName: string,
+    latencyMs: number,
+    finishReason: string | null,
+  ): BrainTurnResult {
     const silent = isSilenceReply(text);
     // §55 semantics: the action describes what the turn *did*. A turn that used a
     // tool and then spoke is SPEAK, with `toolName` kept for the audit trail;
@@ -169,6 +184,7 @@ export class MimoBrainAdapter implements BrainAdapter {
       model: modelName,
       brainSessionId: null,
       latencyMs,
+      finishReason,
     };
   }
 
@@ -224,6 +240,8 @@ export class MimoBrainAdapter implements BrainAdapter {
     async function* run(): AsyncGenerator<BrainTurnChunk> {
       let model = adapter.#model;
       let usedTool: string | null = null;
+      /** t21 (t4 F5): the provider's own stop reason, so a reply cut mid-word can be attributed. */
+      let finishReason: string | null = null;
       // The model may (and does) emit a spoken preamble together with tool_calls
       // ("明天成都的天气我帮你查一下。" + xixi_get_weather). Text is therefore not
       // proof that the turn is answered: only the absence of tool_calls is.
@@ -237,13 +255,13 @@ export class MimoBrainAdapter implements BrainAdapter {
             ...(tools === undefined ? {} : { tools }),
           });
 
-          // t7: the provider can put tool-call markup in the *text* stream (measured on the voice
-          // path: 7 of 8 weather turns, and TTS read it out — baseline §4). Nothing a mouth should
-          // hear leaves this loop, so the deltas go through the hygiene hold and the round's text is
-          // accumulated from what the hold let through — never from the raw deltas. The hold is
-          // markup-only here: the deployment language (which decides about English reasoning) is the
-          // engine's configuration, not this adapter's.
-          const markupHold = createSpokenTextFilter();
+          // t7/t21: the provider can put tool-call markup in the *text* stream (measured on the voice
+          // path: 7 of 8 weather turns, and TTS read it out — baseline §4), and the model can reason
+          // in English mid-answer. Nothing a mouth should hear leaves this loop, so the deltas go
+          // through the hygiene hold — now with the deployment **language** (t12 F1: a pass-through
+          // filter is exactly why the adapter's deltas leaked) — and the round's text is accumulated
+          // from what the hold let through, never from the raw deltas.
+          const markupHold = createSpokenTextFilter({ language: adapter.#language });
           let roundText = '';
           let completed: MimoChatResult;
           for (;;) {
@@ -261,6 +279,7 @@ export class MimoBrainAdapter implements BrainAdapter {
           if (heldTail.length > 0) yield { type: 'text', text: heldTail };
 
           model = completed.model;
+          finishReason = completed.finishReason;
           if (roundText.trim().length > 0) latestText = roundText;
           if (tools === undefined || completed.toolCalls.length === 0) break;
 
@@ -283,7 +302,7 @@ export class MimoBrainAdapter implements BrainAdapter {
           }
         }
 
-        const final = adapter.#interpret(latestText, usedTool, model, Date.now() - startedAt);
+        const final = adapter.#interpret(latestText, usedTool, model, Date.now() - startedAt, finishReason);
         settle?.resolve(final);
       } catch (cause) {
         const error = toBrainError(cause);

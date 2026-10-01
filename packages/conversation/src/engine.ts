@@ -99,6 +99,24 @@ export interface RespondHooks {
   readonly onNotice?: (notice: { readonly code: string; readonly detail: string }) => void | Promise<void>;
 }
 
+/**
+ * t21: why a turn ended silent — the two cases every caller used to see as one.
+ *
+ *  * `MODEL_SILENCE` — the model (or the §55 token) chose not to speak;
+ *  * `ARTIFACT_ONLY_REPLY` — it *did* answer, but the whole reply was an artifact (tool-call markup,
+ *    English reasoning, markdown-only) and the hygiene gate removed it. 「她本来想调工具、没有结果所以
+ *    没说」 is this one, and a console must be able to tell the user that (t12 F2).
+ */
+export type SilenceReason = 'MODEL_SILENCE' | 'ARTIFACT_ONLY_REPLY' | null;
+
+/** t21: a compact, JSON-able summary of what the hygiene gate removed (for the turn + the console). */
+export interface ReplyHygieneSummary {
+  readonly removedMarkupChars: number;
+  readonly removedMarkdownChars: number;
+  readonly removedReasoningChars: number;
+  readonly emptied: boolean;
+}
+
 export interface ConversationTurn {
   readonly accepted: boolean;
   readonly reason: TurnAcceptanceReason;
@@ -111,6 +129,15 @@ export interface ConversationTurn {
   readonly segmentGapMs: number;
   readonly provider: string;
   readonly model: string;
+  /**
+   * t21 (t4 F5): the provider's stop reason (`stop` / `length` / `tool_calls`…), or `null` when the
+   * transport does not report one. `length` is what a reply cut off mid-word looks like.
+   */
+  readonly finishReason: string | null;
+  /** t21 (t12 F2): why this turn was silent, or `null` when it spoke. */
+  readonly silenceReason: SilenceReason;
+  /** t21: what had to be removed before anything could be spoken, or `null` when nothing was. */
+  readonly hygiene: ReplyHygieneSummary | null;
   readonly latencyMs: number;
   /** Model first-token latency, when the adapter streams (§46.4). */
   readonly firstTokenMs: number | null;
@@ -348,7 +375,11 @@ export class ConversationEngine {
     // spoken line, whichever seam produced them.
     const cleaned = sanitizeSpokenReply(text, { language: this.#config.identity.language }).text;
     if (toolName !== null) return { ok: true, text: cleaned, claims: [] };
-    const claims = findUnbackedFactClaims(cleaned);
+    // t21: the clock is part of the same boundary — this seam has the turn's own timestamp available.
+    const claims = findUnbackedFactClaims(cleaned, {
+      now: this.#clock(),
+      offsetMinutes: this.#offsetMinutes,
+    });
     if (claims.length === 0) return { ok: true, text: cleaned, claims: [] };
     return { ok: false, text: UNBACKED_FACT_REPLY, claims };
   }
@@ -383,6 +414,11 @@ export class ConversationEngine {
         segmentGapMs: this.#replyLimits.gapMs ?? REPLY_LIMITS.defaultGapMs,
         provider: this.#adapter.provider,
         model: this.#adapter.describe().model,
+        // A rejected turn never reached the model: no stop reason, and the silence is the FSM's
+        // refusal rather than something the model or the hygiene gate did.
+        finishReason: null,
+        silenceReason: null,
+        hygiene: null,
         latencyMs: 0,
         firstTokenMs: null,
         prompt: null,
@@ -413,6 +449,12 @@ export class ConversationEngine {
     let turnText: string | null = null;
     let turnProvider = this.#adapter.provider;
     let turnModel = this.#adapter.describe().model;
+    /** t21: the provider's stop reason, carried onto the turn (t4 F5 — attribute a mid-word cut). */
+    let turnFinishReason: string | null = null;
+    /** t21: why the turn ended silent, when it did (t12 F2 — artifact-only vs a chosen silence). */
+    let turnSilenceReason: SilenceReason = null;
+    /** t21: what the hygiene gate had to remove, or null when the reply was clean. */
+    let turnHygiene: ReplyHygieneSummary | null = null;
     let firstChunkAt: number | null = null;
     // Supplying `onSegment` selects segmented playback, and the two audio seams
     // are mutually exclusive (see `RespondHooks`): otherwise this reply would be
@@ -461,6 +503,16 @@ export class ConversationEngine {
         const safe = markupHold.push(text);
         if (safe.length > 0) await hooks.onTextChunk?.(safe);
       };
+      /**
+       * t21: program-generated lines (`UNBACKED_FACT_REPLY`, the silence notices) are already final
+       * text — they are not model deltas that could still turn into reasoning or markup, so they must
+       * not go through the hold. Holding them would swallow a trailing 「？」 (the hold releases only up
+       * to the last Han character), and the repair line *is* a question.
+       */
+      const speakProgram = async (text: string): Promise<void> => {
+        if (playSegments) return;
+        await hooks.onTextChunk?.(text);
+      };
       for await (const chunk of stream) {
         if (chunk.type === 'tool') {
           toolRan = true;
@@ -506,12 +558,29 @@ export class ConversationEngine {
       if (hygiene.removedChars > 0) {
         await hooks.onNotice?.({ code: 'REPLY_HYGIENE', detail: describeHygiene(hygiene) });
       }
+      // t21 (t4 F5): a reply that stops mid-word is a provider truncation, and without the stop reason
+      // it is indistinguishable from a model that simply ended there. `length` means the token budget
+      // ran out; a broken sentence at the very end is the visible symptom (t4 measured 1/39 turns).
+      const truncated = result.finishReason === 'length';
+      if (truncated) {
+        await hooks.onNotice?.({
+          code: 'REPLY_TRUNCATED',
+          detail: `模型输出被 token 上限截断（finish_reason=length，provider=${result.provider}/${result.model}，${(hygiene.text || result.text || '').length} 字）`,
+        });
+      }
 
       // t111 (the「成都阴天 19 到 25 度」bug): the model asserted something only a lookup can know
       // and never called the tool. 铁律 1/3 put this boundary in the program, not in the prompt: the
       // claim must not reach audio, the transcript, or working memory. She says she is not sure
       // instead, and the caller gets a notice with the offending text for the audit trail.
-      const unbackedClaims = toolRan || hygiene.text.length === 0 ? [] : findUnbackedFactClaims(hygiene.text);
+      //
+      // t21 (t4 F2) added the clock to that boundary: the program knows the real time (it is in the
+      // prompt), so 「凌晨一点半」 at 00:29 is a checkable claim that contradicts the world state — no
+      // tool needed to refute it. Past-tense talk (「昨天三点半」) is left alone on purpose.
+      const unbackedClaims =
+        toolRan || hygiene.text.length === 0
+          ? []
+          : findUnbackedFactClaims(hygiene.text, { now: at, offsetMinutes: this.#offsetMinutes });
       let replyText: string | null = result.text === null ? null : hygiene.text;
       if (unbackedClaims.length > 0) {
         replyText = UNBACKED_FACT_REPLY;
@@ -520,7 +589,7 @@ export class ConversationEngine {
           code: 'UNBACKED_FACT_CLAIM',
           detail: `未调用工具却给出可核查事实：${unbackedClaims.map((claim) => claim.match).join('、')}`,
         });
-        await speak(UNBACKED_FACT_REPLY);
+        await speakProgram(UNBACKED_FACT_REPLY);
       } else if (heldFacts.length > 0) {
         // A tool ran after the claim was held → the sentence was backed, so it may be spoken now.
         await speak(heldFacts);
@@ -532,11 +601,20 @@ export class ConversationEngine {
       // stray control token can never reach TTS or the transcript. `replyText` (not
       // `result.text`) is what the turn actually says, so a replaced claim never
       // reaches the log either (t111).
+      //
+      // t21 (t12 F2): 「为什么她这次没说话」 has two very different answers — the model chose silence,
+      // or the whole reply was an artifact (a tool marker / English reasoning / markdown) that the
+      // hygiene gate removed. They used to look identical in every caller, so the turn now carries a
+      // `silenceReason` (and the hygiene summary) that a console can print.
+      const artifactOnly = result.text !== null && hygiene.text.length === 0 && result.action !== 'SILENCE';
       const silent = result.action === 'SILENCE' || replyText === null || isSilenceReply(replyText);
       turnAction = silent ? 'SILENCE' : result.action;
       turnText = silent ? null : replyText;
       turnProvider = result.provider;
       turnModel = result.model;
+      turnFinishReason = result.finishReason;
+      turnSilenceReason = silent ? (artifactOnly ? 'ARTIFACT_ONLY_REPLY' : 'MODEL_SILENCE') : null;
+      turnHygiene = hygiene.removedChars === 0 ? null : summarizeHygiene(hygiene);
 
       this.#store.recordTurn({
         sessionId: input.sessionId,
@@ -596,6 +674,9 @@ export class ConversationEngine {
       segmentGapMs: replySplit?.gapMs ?? this.#replyLimits.gapMs ?? REPLY_LIMITS.defaultGapMs,
       provider: turnProvider,
       model: turnModel,
+      finishReason: turnFinishReason,
+      silenceReason: turnSilenceReason,
+      hygiene: turnHygiene,
       latencyMs: Date.now() - startedAt,
       firstTokenMs: firstChunkAt === null ? null : firstChunkAt - startedAt,
       prompt,
@@ -614,7 +695,7 @@ export class ConversationEngine {
  * prompt forbids it (see `HARD_POLICY` §7); this is the deterministic backstop.
  */
 export interface UnbackedFactClaim {
-  readonly kind: 'temperature' | 'forecast' | 'attribution';
+  readonly kind: 'temperature' | 'forecast' | 'attribution' | 'clock';
   /** The offending substring, kept for the audit note (never spoken). */
   readonly match: string;
 }
@@ -658,9 +739,20 @@ export const UNBACKED_FACT_REPLY = '这个我记不准，不敢乱说——要�
 function describeHygiene(hygiene: ReplyHygieneResult): string {
   const parts: string[] = [];
   if (hygiene.removedMarkupChars > 0) parts.push(`${hygiene.removedMarkupChars} 字的工具调用标记`);
+  if (hygiene.removedMarkdownChars > 0) parts.push(`${hygiene.removedMarkdownChars} 字的 markdown 记号`);
   if (hygiene.removedReasoningChars > 0) parts.push(`${hygiene.removedReasoningChars} 字的英文推理`);
   const remainder = hygiene.text.length === 0 ? '剩余为空，按沉默处理' : `剩余：${hygiene.text.slice(0, 40)}`;
   return `回复里剔除了${parts.join('、')}（${remainder}）`;
+}
+
+/** The turn-level view of the same hygiene result (t21, t12 F2: the console must see the reason). */
+function summarizeHygiene(hygiene: ReplyHygieneResult): ReplyHygieneSummary {
+  return {
+    removedMarkupChars: hygiene.removedMarkupChars,
+    removedMarkdownChars: hygiene.removedMarkdownChars,
+    removedReasoningChars: hygiene.removedReasoningChars,
+    emptied: hygiene.text.length === 0,
+  };
 }
 
 /**
@@ -671,8 +763,18 @@ function describeHygiene(hygiene: ReplyHygieneResult): string {
  * that carries something checkable. It must not fire on ordinary talk (「今天有点冷，多穿点」
  * 「朋友说要来吃饭」「医生说多喝水」): a gate that answers 「我不敢乱说」 to a homey sentence is
  * worse than the bug it fixes, and the review (t114 §3) caught exactly that class of damage.
+ *
+ * t21 added the **clock** (t4 F2): the program hands the model the real time in the prompt, so
+ * 「凌晨一点半」 said at 00:29 is checkable — and wrong — without any tool call. The rule is narrow on
+ * purpose: it fires only when (a) the sentence names a clock time, (b) the *time of day* matches the
+ * real local period (or the sentence has a "now" cue), (c) there is no past-tense marker, and
+ * (d) the claimed time is more than `CLOCK_TOLERANCE_MINUTES` away from the real one. 「昨天三点半就醒了」
+ * and 「我平时三点半起床」 therefore pass; 「凌晨两点多」 at 00:32 does not.
  */
-export function findUnbackedFactClaims(text: string): UnbackedFactClaim[] {
+export function findUnbackedFactClaims(
+  text: string,
+  context: { readonly now?: Date; readonly offsetMinutes?: number | undefined } = {},
+): UnbackedFactClaim[] {
   const claims: UnbackedFactClaim[] = [];
   const add = (kind: UnbackedFactClaim['kind'], match: string): void => {
     if (!claims.some((claim) => claim.kind === kind && claim.match === match)) claims.push({ kind, match });
@@ -692,7 +794,106 @@ export function findUnbackedFactClaims(text: string): UnbackedFactClaim[] {
     const sentence = sentenceAround(text, attributed.index);
     if (ATTRIBUTION_CONTENT.test(sentence)) add('attribution', attributed[1] ?? attributed[0]);
   }
+  const clock = context.now === undefined ? null : findClockClaim(text, context.now, context.offsetMinutes);
+  if (clock !== null) add('clock', clock);
   return claims;
+}
+
+/** How far a spoken clock time may sit from the real one before it counts as invented (t21). */
+export const CLOCK_TOLERANCE_MINUTES = 45;
+
+/** A "this is happening now" cue; without one, only a matching time-of-day word can make a claim. */
+const NOW_CUE = /(现在|这会儿|这个点|这么晚|都\d|已经|还没|还在|才)/;
+/** Past-tense markers: 「昨天三点半」 is a memory, not a claim about now. */
+const PAST_CUE = /(昨天|昨晚|昨天晚上|前天|上周|上个?月|去年|以前|平时|小时候|当年|那次|那天|当时|刚刚?才)/;
+const TIME_OF_DAY = /(凌晨|清早|早上|上午|中午|下午|傍晚|晚上|深夜|半夜)/;
+/** `凌晨一点半`, `两点多`, `23:30`, `晚上 7 点` — a clock time with an optional period word. */
+const CLOCK_SPOKEN = /(凌晨|清早|早上|上午|中午|下午|傍晚|晚上|深夜|半夜)?\s*([0-9]{1,2})\s*点(?:(半)|([0-9]{1,2})\s*分)?([多几])?/;
+const CLOCK_DIGITAL = /(?:^|[^\d])([01]?[0-9]|2[0-3])[:：]([0-5][0-9])(?![\d])/;
+
+const CN_DIGITS: Readonly<Record<string, number>> = Object.freeze({
+  零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10,
+});
+
+/** Parse a spoken Chinese hour token (`一`, `两`, `三`, `十`, `十一`) into 0..23. */
+function chineseHour(token: string): number | null {
+  if (token.length === 1) return CN_DIGITS[token] ?? null;
+  if (token.startsWith('十')) return 10 + (CN_DIGITS[token[1] as string] ?? 0);
+  if (token.endsWith('十')) return (CN_DIGITS[token[0] as string] ?? 0) * 10;
+  const [tens, ones] = token.split('十');
+  if (tens !== undefined && ones !== undefined) {
+    return (CN_DIGITS[tens] ?? 0) * 10 + (CN_DIGITS[ones] ?? 0);
+  }
+  return null;
+}
+
+/** The period word → the hours it covers, for "does this time of day match now". */
+const TIME_OF_DAY_HOURS: readonly { readonly word: string; readonly from: number; readonly to: number }[] = [
+  { word: '凌晨', from: 0, to: 5 },
+  { word: '清早', from: 5, to: 8 },
+  { word: '早上', from: 5, to: 9 },
+  { word: '上午', from: 8, to: 11 },
+  { word: '中午', from: 11, to: 13 },
+  { word: '下午', from: 13, to: 17 },
+  { word: '傍晚', from: 17, to: 19 },
+  { word: '晚上', from: 18, to: 23 },
+  { word: '深夜', from: 22, to: 24 },
+  { word: '半夜', from: 23, to: 24 },
+];
+
+/**
+ * The clock time a sentence claims, when that claim is about *now* and contradicts the real clock.
+ * Returns the offending substring, or `null` (see `findUnbackedFactClaims` for the rule).
+ */
+function findClockClaim(text: string, now: Date, offsetMinutes: number | undefined): string | null {
+  const local = offsetMinutes === undefined ? now : new Date(now.getTime() + offsetMinutes * 60_000);
+  const realMinutes =
+    offsetMinutes === undefined
+      ? local.getHours() * 60 + local.getMinutes()
+      : local.getUTCHours() * 60 + local.getUTCMinutes();
+  const realHour = Math.floor(realMinutes / 60);
+
+  // Chinese numerals are the common form in speech; digits are handled by both patterns below.
+  const spoken = /(凌晨|清早|早上|上午|中午|下午|傍晚|晚上|深夜|半夜)?\s*([零一二两三四五六七八九十]{1,3})\s*点(?:(半)|([0-9一二三四五六七八九十]{1,3})\s*分)?([多几])?/.exec(text);
+  const digital = CLOCK_DIGITAL.exec(text);
+  const ascii = CLOCK_SPOKEN.exec(text);
+
+  let claimed: number | null = null;
+  let match = '';
+  let period = '';
+  if (ascii !== null) {
+    period = ascii[1] ?? '';
+    const hour = Number(ascii[2]);
+    const minutes = ascii[3] === '半' ? 30 : ascii[4] === undefined ? 0 : Number(ascii[4]);
+    if (Number.isFinite(hour) && hour < 24 && Number.isFinite(minutes)) {
+      claimed = hour * 60 + minutes;
+      match = ascii[0].trim();
+    }
+  }
+  if (claimed === null && spoken !== null) {
+    period = spoken[1] ?? '';
+    const token = spoken[2] as string;
+    const hour = /^[0-9]+$/.test(token) ? Number(token) : chineseHour(token);
+    if (hour !== null && hour < 24) {
+      const minutes = spoken[3] === '半' ? 30 : spoken[4] === undefined ? 0 : 30;
+      claimed = hour * 60 + minutes;
+      match = spoken[0].trim();
+    }
+  }
+  if (claimed === null && digital !== null) {
+    claimed = Number(digital[1]) * 60 + Number(digital[2]);
+    match = digital[0].trim();
+  }
+  if (claimed === null || match.length === 0) return null;
+
+  const sentence = sentenceAround(text, text.indexOf(match));
+  if (PAST_CUE.test(sentence)) return null;
+  const periodMatches =
+    period !== '' && TIME_OF_DAY_HOURS.some((entry) => entry.word === period && realHour >= entry.from && realHour < entry.to);
+  if (!periodMatches && !NOW_CUE.test(sentence)) return null;
+
+  const distance = Math.min(Math.abs(claimed - realMinutes), 1440 - Math.abs(claimed - realMinutes));
+  return distance > CLOCK_TOLERANCE_MINUTES ? match : null;
 }
 
 /** The sentence a match sits in — 「。」「！」「？」「；」and newlines are the boundaries (t117). */

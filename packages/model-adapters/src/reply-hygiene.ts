@@ -32,7 +32,15 @@
 /** One Han character. */
 const HAN_CHAR = /\p{Script=Han}/u;
 /** CJK punctuation, so a Chinese phrase stays one region across its commas and full stops. */
-const CJK_PUNCT = /[，。！？、；：""''「」『』（）〔〕【】《》〈〉…—·～]/u;
+/**
+ * CJK punctuation, written with escapes on purpose: a literal `''` here was previously matched as a
+ * plain apostrophe, which turned `it's` into a "Chinese run" (t21). Quotes are handled separately by
+ * `isQuote`, never absorbed into a Chinese run.
+ */
+const CJK_PUNCT =
+  /[\u3001\u3002\uff01\uff1f\uff0c\uff1b\uff1a\u300c\u300d\u300e\u300f\uff08\uff09\u3014\u3015\u3010\u3011\u300a\u300b\u3008\u3009\u2026\u2014\u00b7\uff5e]/u;
+/** Straight and typographic quotes: they delimit a *quotation*, which is not the speaker's own line. */
+const QUOTE_CHARS = new Set(['"', '\u201c', '\u201d', '\u2018', '\u2019']);
 const ASCII_LETTER = /[A-Za-z]/;
 
 /** `<tool_call>` … `</tool_call>`, plus the `<|tool_call|>` spelling. */
@@ -82,9 +90,12 @@ const REASONING_CUE =
 export interface ReplyHygieneResult {
   /** What may be spoken; empty when the whole reply was an artifact. */
   readonly text: string;
-  /** Total characters taken out (markup + reasoning), for the audit note. */
+  /** Total characters taken out (markup + markdown + reasoning), for the audit note. */
   readonly removedChars: number;
+  /** Tool-call markup (a provider protocol artifact). */
   readonly removedMarkupChars: number;
+  /** Markdown decorations that a TTS would have read out loud (`**`, `- `, `#`). */
+  readonly removedMarkdownChars: number;
   readonly removedReasoningChars: number;
 }
 
@@ -158,9 +169,14 @@ export function stripForeignReasoning(text: string): { readonly text: string; re
       continue;
     }
     if (isReasoningBlock(block)) {
-      const tail = trailingChineseTail(block);
-      removedChars += block.length - tail.length;
-      kept += tail;
+      // t21 (from the t12 review's O1): a reasoning block may still contain the *answer* — the model
+      // writes a Chinese sentence, reasons in English, then answers in Chinese. Keeping only the
+      // trailing Chinese run deleted 「嗯，我在的。」 and 「明天多云…」 along with the reasoning. What is
+      // kept instead is every **unquoted** Chinese part of the block; a Chinese quotation inside the
+      // reasoning (the user's own words, `they said "今天下午…"`) stays dropped.
+      const keptFromBlock = sentenceUnits(block).map((unit) => unquotedChineseRuns(unit)).join('').trim();
+      removedChars += block.length - keptFromBlock.length;
+      kept += keptFromBlock;
       continue;
     }
     for (const unit of sentenceUnits(block)) {
@@ -177,18 +193,86 @@ export function stripForeignReasoning(text: string): { readonly text: string; re
 }
 
 /**
- * The deterministic gate: markup always goes, foreign reasoning goes when the deployment speaks
- * Chinese. Callers must speak `text` and never the input.
+ * The Chinese content of one sentence, with anything inside ASCII quotes removed.
+ *
+ * A run starts at a Han character (or CJK punctuation) and absorbs everything that is not an ASCII
+ * letter — digits, spaces, `，`, `。` — so 「明天多云，12 到 20 度」 comes through whole, while the
+ * English around it does not.
+ */
+function unquotedChineseRuns(sentence: string): string {
+  let kept = '';
+  let run = '';
+  let inQuotes = false;
+  const flush = (): void => {
+    kept += run;
+    run = '';
+  };
+  for (const char of sentence) {
+    if (isQuote(char)) {
+      inQuotes = !inQuotes;
+      flush();
+      continue;
+    }
+    // A run must *start* on Chinese text; once started it absorbs digits, spaces and punctuation
+    // (so 「明天多云，12 到 20 度」 survives whole) but never an ASCII letter.
+    const startsRun = HAN_CHAR.test(char) || CJK_PUNCT.test(char);
+    if (!inQuotes && (startsRun || (run.length > 0 && !ASCII_LETTER.test(char)))) run += char;
+    else flush();
+  }
+  flush();
+  return kept;
+}
+
+function isQuote(char: string): boolean {
+  return QUOTE_CHARS.has(char);
+}
+
+/**
+ * Remove markdown decorations a mouth would read out loud (t21, from the t4 verification's F3:
+ * "朗读时会出现星号星号").
+ *
+ * A knowledge answer that comes back as a bulleted, bolded list is *text* markup, not speech:
+ * `- **别硬躺**。` must be spoken as 「别硬躺。」. Only decorations go — the words stay, and nothing
+ * here decides what she may say. Sentence enders are kept so the segmenter still sees sentence
+ * boundaries (the newlines themselves are dropped later by `normalizeReplyText`).
+ */
+export function stripMarkdownDecorations(text: string): { readonly text: string; readonly removedChars: number } {
+  let removed = 0;
+  const drop = (match: string, keep: string): string => {
+    removed += match.length - keep.length;
+    return keep;
+  };
+  const withoutMarkup = text
+    // `**粗体**` / `__粗体__` / `*斜体*` / `` `代码` ``
+    .replace(/\*\*([^*\n]+)\*\*/g, (match, inner: string) => drop(match, inner))
+    .replace(/__([^_\n]+)__/g, (match, inner: string) => drop(match, inner))
+    .replace(/(^|[^*\w])\*([^*\n]+)\*(?!\*)/g, (match, lead: string, inner: string) => drop(match, `${lead}${inner}`))
+    .replace(/`([^`\n]+)`/g, (match, inner: string) => drop(match, inner))
+    // line-leading decorations: headings, bullets, ordered-list numbers
+    .replace(/^[ \t]*#{1,6}[ \t]+/gm, (match) => drop(match, ''))
+    .replace(/^[ \t]*[-*+•][ \t]+/gm, (match) => drop(match, ''))
+    .replace(/^[ \t]*\d{1,2}[.、)][ \t]+/gm, (match) => drop(match, ''))
+    // a markdown table's separator row (`|---|---|`) is pure punctuation
+    .replace(/^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*$/gm, (match) => drop(match, ''));
+  return { text: withoutMarkup, removedChars: removed };
+}
+
+/**
+ * The deterministic gate: markup always goes, markdown decorations go (they are read out loud),
+ * and foreign reasoning goes when the deployment speaks Chinese. Callers must speak `text` and
+ * never the input.
  */
 export function sanitizeSpokenReply(text: string, options: SpokenReplyOptions = {}): ReplyHygieneResult {
   const markup = stripToolCallMarkup(text);
+  const markdown = stripMarkdownDecorations(markup.text);
   const reasoning = isChineseLanguage(options.language)
-    ? stripForeignReasoning(markup.text)
-    : { text: markup.text, removedChars: 0 };
+    ? stripForeignReasoning(markdown.text)
+    : { text: markdown.text, removedChars: 0 };
   return {
     text: reasoning.text,
-    removedChars: markup.removedChars + reasoning.removedChars,
+    removedChars: markup.removedChars + markdown.removedChars + reasoning.removedChars,
     removedMarkupChars: markup.removedChars,
+    removedMarkdownChars: markdown.removedChars,
     removedReasoningChars: reasoning.removedChars,
   };
 }
@@ -204,25 +288,40 @@ export interface SpokenTextFilter {
 const FOREIGN_PREAMBLE_MIN_LETTERS = 40;
 /** How much an undecided opening may buffer before it is judged by its length alone. */
 const LEADING_MAX_CHARS = 2000;
+/**
+ * t21: how much Han-free text may accumulate **after** the reply has started before it is given up
+ * on and treated as reasoning. The observed leak was ~60 characters; 600 leaves room for quoted
+ * English inside a Chinese sentence without holding a whole turn.
+ */
+const MID_REPLY_HOLD_MAX = 600;
 
 /**
  * The streaming seam's hold, for a TTS driven by deltas.
  *
- * Two things are never spoken piece by piece:
+ * Nothing is ever spoken and then retracted — the whole point of this class (t21, from the t12
+ * review's F1: "delta 出口先吐后撤"). Three things are held back:
  *   * **tool-call markup** — buffered from the first possible marker until the block closes (or the
  *     hold overflows, or the stream ends);
  *   * **a leading foreign opening** — when the deployment speaks Chinese, an English preamble may
- *     turn out to be the reasoning leak (§4.2), so the opening is held until the first Han character
+ *     turn out to be the reasoning leak, so the opening is held until the first Han character
  *     arrives; a short opening word (`OK，…`) is then spoken as-is, a long English preamble is
- *     dropped and only the Chinese behind it is spoken. Once Chinese has started, text flows
- *     untouched — a per-chunk judgement deeper into the reply is not possible without the whole
- *     text, and the whole text is what `sanitizeSpokenReply` gates.
+ *     dropped and only the Chinese behind it is spoken;
+ *   * **a mid-reply foreign run** (t21) — after the reply has started, text is released only up to
+ *     the **last Han character seen so far**. Everything after it (English clauses, punctuation) is
+ *     kept back until the next Han character proves it was a quotation or an aside, and reasoning is
+ *     dropped from that window *before* it is ever emitted. Han-free text that overruns
+ *     `MID_REPLY_HOLD_MAX` is treated the same way the leading rule treats a long English opening:
+ *     dropped, and the filter resumes at the next unquoted Han character.
+ *
+ * `options.language` is what turns the last two rules on: a pass-through filter is what the adapter
+ * used to build, which is why its deltas leaked (t12 F1 — "适配器出口的过滤器带上语言参数").
  */
 export function createSpokenTextFilter(options: SpokenReplyOptions = {}): SpokenTextFilter {
   const holdForeign = isChineseLanguage(options.language);
   let buffer = '';
   let leading = holdForeign;
   let pending = '';
+  let tail = '';
   let dropping = false;
   /**
    * While the reply is being dropped as reasoning, an ASCII-quoted Chinese phrase is *quoted*, not
@@ -234,7 +333,7 @@ export function createSpokenTextFilter(options: SpokenReplyOptions = {}): Spoken
   const resumeAtChinese = (text: string): string => {
     for (let index = 0; index < text.length; index += 1) {
       const char = text[index] as string;
-      if (char === '"') {
+      if (isQuote(char)) {
         inQuotes = !inQuotes;
         continue;
       }
@@ -249,29 +348,55 @@ export function createSpokenTextFilter(options: SpokenReplyOptions = {}): Spoken
   const consume = (text: string): string => {
     if (!holdForeign) return text;
     if (dropping) return resumeAtChinese(text);
-    if (!leading) return text;
-    pending += text;
-    const hanAt = firstHanIndex(pending);
-    if (hanAt === -1) {
-      if (pending.length > LEADING_MAX_CHARS && statsOf(pending).letters >= FOREIGN_PREAMBLE_MIN_LETTERS) {
-        pending = '';
+    if (leading) {
+      pending += text;
+      const hanAt = firstHanIndex(pending);
+      if (hanAt === -1) {
+        if (pending.length > LEADING_MAX_CHARS && statsOf(pending).letters >= FOREIGN_PREAMBLE_MIN_LETTERS) {
+          pending = '';
+          dropping = true;
+          inQuotes = false;
+        }
+        return '';
+      }
+      const preamble = pending.slice(0, hanAt);
+      const rest = pending.slice(hanAt);
+      pending = '';
+      leading = false;
+      if (statsOf(preamble).letters >= FOREIGN_PREAMBLE_MIN_LETTERS) {
+        // The opening is the reasoning leak: drop the rest of it too, and resume at the first Chinese
+        // that is not a quotation of the user's own words.
+        dropping = true;
+        inQuotes = seedQuotes(preamble);
+        return resumeAtChinese(rest);
+      }
+      const head = preamble + rest;
+      return head.length === 0 ? '' : release(head);
+    }
+    return release(text);
+  };
+
+  /**
+   * t21: release only what cannot still turn out to be reasoning — up to the last Han character.
+   * Whatever follows it stays in `tail` until another Han character (or the end of the stream)
+   * decides it.
+   */
+  const release = (text: string): string => {
+    tail += text;
+    const lastHan = lastHanIndex(tail);
+    if (lastHan === -1) {
+      if (tail.length > MID_REPLY_HOLD_MAX) {
+        // A long Han-free stretch mid-reply is the reasoning leak: drop it and wait for Chinese.
+        tail = '';
         dropping = true;
         inQuotes = false;
       }
       return '';
     }
-    const preamble = pending.slice(0, hanAt);
-    const rest = pending.slice(hanAt);
-    pending = '';
-    leading = false;
-    if (statsOf(preamble).letters >= FOREIGN_PREAMBLE_MIN_LETTERS) {
-      // The opening is the reasoning leak: drop the rest of it too, and resume at the first Chinese
-      // that is not a quotation of the user's own words.
-      dropping = true;
-      inQuotes = seedQuotes(preamble);
-      return resumeAtChinese(rest);
-    }
-    return preamble + rest;
+    const window = tail.slice(0, lastHan + 1);
+    tail = tail.slice(lastHan + 1);
+    // Reasoning inside the window was never emitted, so dropping it here is not a retraction.
+    return stripForeignReasoning(window).text;
   };
 
   return {
@@ -315,11 +440,24 @@ export function createSpokenTextFilter(options: SpokenReplyOptions = {}): Spoken
         const text = statsOf(pending).letters >= FOREIGN_PREAMBLE_MIN_LETTERS ? '' : pending;
         pending = '';
         leading = false;
-        return emitted + text;
+        return emitted + tidyTail(text);
       }
-      return emitted;
+      return emitted + tidyTail(tail);
     },
   };
+}
+
+/** At the end of the stream the held tail is Han-free: short punctuation stays, a long run is reasoning. */
+function tidyTail(text: string): string {
+  if (text.length === 0) return '';
+  return statsOf(text).letters >= FOREIGN_PREAMBLE_MIN_LETTERS ? '' : text;
+}
+
+function lastHanIndex(text: string): number {
+  for (let index = text.length - 1; index >= 0; index -= 1) {
+    if (HAN_CHAR.test(text[index] as string)) return index;
+  }
+  return -1;
 }
 
 function firstHanIndex(text: string): number {

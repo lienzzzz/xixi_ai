@@ -5,12 +5,18 @@
  * them to the adapter and the event log.
  */
 export {
+  CLOCK_TOLERANCE_MINUTES,
   ConversationEngine,
+  findUnbackedFactClaims,
+  UNBACKED_FACT_REPLY,
   type ConversationEngineOptions,
   type ConversationTurn,
+  type ReplyHygieneSummary,
   type ReplySegmentPlayback,
   type RespondHooks,
   type RespondInput,
+  type SilenceReason,
+  type UnbackedFactClaim,
 } from './engine.ts';
 export {
   ConversationStateMachine,
