@@ -99,13 +99,16 @@ test('用户的回答落成三种收口，且都不再追问', () => {
  * 唯一手工造的事件是那条 `proactive.decision`（生产里它由 `ProactiveEngine` 说出那句话时写下，
  * 这里要测的不是它）。
  */
-function reconcileAfterAnswer(answer: string): { status: string | null; settled: number; ignored: readonly string[] } {
+function reconcileAfterAnswer(
+  answer: string,
+  topic = '明天下午我要去镇上办证。',
+): { status: string | null; settled: number; ignored: readonly string[] } {
   const dir = mkdtempSync(join(tmpdir(), 'xixi-topic-answer-'));
   let now = DAY1;
   const store = openXixiStore({ dbPath: join(dir, 'x.sqlite'), clock: () => now });
   try {
     const session = store.createSession();
-    store.recordTurn({ sessionId: session.sessionId, role: 'user', action: 'SPEAK', text: '明天下午我要去镇上办证。' });
+    store.recordTurn({ sessionId: session.sessionId, role: 'user', action: 'SPEAK', text: topic });
 
     const engine = new TopicEngine({ store, clock: () => now });
     const [thread] = engine.reconcile(DAY1).created;
@@ -147,17 +150,88 @@ function reconcileAfterAnswer(answer: string): { status: string | null; settled:
 }
 
 test('收口与被问的那件事挂钩：相关的一轮照旧收口，无关的一轮不算回答（T7-F1）', () => {
-  // 相关：出现话题的信号字（镇/办/证）→ 三种收口都算回应过。
+  // 相关：出现话题的内容字（镇/办/证）→ 三种收口都算回应过（零回归：真答案照旧收口）。
   assert.deepEqual(reconcileAfterAnswer('办好了，昨天就办完了。'), { status: 'resolved', settled: 1, ignored: [] });
   assert.deepEqual(reconcileAfterAnswer('还没办，过两天再去。'), { status: 'snoozed', settled: 1, ignored: [] });
   assert.deepEqual(reconcileAfterAnswer('正在办，下午去镇上。'), { status: 'engaged', settled: 1, ignored: [] });
-  // 弱证据：答复形状（「没去」是收口模板）并且命中的字就在话题里 —— 他确实在回答这件事。
-  assert.deepEqual(reconcileAfterAnswer('没去成，改天再说吧。'), { status: 'snoozed', settled: 1, ignored: [] });
+  assert.deepEqual(reconcileAfterAnswer('证已经拿到了。'), { status: 'resolved', settled: 1, ignored: [] });
+  assert.deepEqual(reconcileAfterAnswer('还没办好呢'), { status: 'snoozed', settled: 1, ignored: [] });
 
   // 无关：只是接着聊别的 → 不收口、不写事件，话题还开着（第二天照样惦记着）。
   for (const chatter of ['今天天气不错啊。', '明天天气怎么样？', '嗯，你问这个干嘛。', '我今天修好了电视。']) {
     assert.deepEqual(reconcileAfterAnswer(chatter), { status: 'offered', settled: 0, ignored: [chatter] }, chatter);
   }
+});
+
+/**
+ * t7 评审 T7-R1 的回归：**位移字不是内容字**。
+ *
+ * 下面这一列是**无关句探针表**（t7 的 3 句 + 原有 4 句闲聊 + 我补的 3 句）：它们都不能被当成回答。
+ * 表里前 3 句正是 t7 实测过的漏洞 —— 都只带一个「去」，却曾被判成在回答「去镇上办证」那件事，
+ * 于是话题被写进 `open_thread.changed` 落到 `engaged`（终态、永不再问）。
+ * 表格放在测试里（而不是只留在某次脚本输出里）：换机器、换人也能一条命令重跑。
+ */
+test('T7-R1：只共享位移字（「去」）的无关句不算回答，话题保持 offered', () => {
+  const neverAnAnswer = [
+    // t7-R1 的三句实测探针：都只带一个「去」。
+    '我今天去散步了。',
+    '我去公园转了一圈。',
+    '我去楼下买了点水果。',
+    // 原有四句闲聊（T7-F1 的探针）。
+    '今天天气不错啊。',
+    '明天天气怎么样？',
+    '嗯，你问这个干嘛。',
+    '我今天修好了电视。',
+    // 再补三句不同形状的（时间词 / 动作 / 第三人的事）。
+    '电视里在放戏。',
+    '中午吃的面条。',
+    '隔壁老王家孙子回来了。',
+  ];
+  for (const chatter of neverAnAnswer) {
+    assert.deepEqual(reconcileAfterAnswer(chatter), { status: 'offered', settled: 0, ignored: [chatter] }, chatter);
+  }
+});
+
+/**
+ * t7 评审 T7-R2 的修复（选 a：弱证据收紧到「必须命中内容字」）。
+ *
+ * 旧的弱证据允许「答复形状 + 只共享一个『去』」过线，于是这三句会把话题**永久收口**成 snoozed
+ * —— 与 T7-F1 同一种害处，只是换了触发模板。收紧之后它们与「闲聊」同等处理。
+ *
+ * **取舍的另一面也钉在这里**（写下来，不留给读者猜）：不含内容字的真回答（「没去成，改天再说吧。」
+ * 「不去了」）也不再收口 —— 这是有意的：话题留在窗口里，`reofferAfterMinutes` 之后可以再问一次，
+ * 而且还要过主动引擎的硬门禁与社会预算；多问一次是有界、看得见的，静默丢掉一件事是无界的。
+ */
+test('T7-R2：答复形状 + 只共享「去」也不算回答；不含内容字的真回答改为「窗口内可再问」', () => {
+  for (const chatter of ['我今天没去散步。', '我没去散步。', '今天没去成。']) {
+    assert.deepEqual(reconcileAfterAnswer(chatter), { status: 'offered', settled: 0, ignored: [chatter] }, chatter);
+  }
+  // 已知代价（不是漏洞，是选择）：这两句是「真回答」，但它们一个字都没提到那件事。
+  for (const answerWithoutTopic of ['没去成，改天再说吧。', '不去了。']) {
+    assert.deepEqual(
+      reconcileAfterAnswer(answerWithoutTopic),
+      { status: 'offered', settled: 0, ignored: [answerWithoutTopic] },
+      answerWithoutTopic,
+    );
+  }
+});
+
+/**
+ * 已知残余（t8 实测，**不是期望行为**）：这是「字」级规则，不是理解 —— 换个话题主题时，
+ * 共享一个内容字仍会被算作相关。
+ *
+ * 实测：「明天我要去买药。」的话题下，「我去楼下买了点水果。」因为都带「买」被判相关、话题收口成
+ * `engaged`（我在这个主题下 13 句无关探针 1/13 误判；同一类还有「看 / 吃 / 拿」这些通用动词）；
+ * 「复诊」「理发」两个主题实测 0/13。要根治得把规则从「字」升级到「词 / 对象」，会改
+ * `isAnswerAboutThread` 的形状 —— 不在本次修复范围，所以钉在这里当**残余的度量**，别当成已解决。
+ * **修好它之后这条用例必须一起改**（改完把它移出「已知残余」）。
+ */
+test('已知残余：共享一个通用动词（「买」）的无关句仍会收口 —— 要修就得改这条', () => {
+  assert.deepEqual(reconcileAfterAnswer('我去楼下买了点水果。', '明天我要去买药。'), {
+    status: 'engaged',
+    settled: 1,
+    ignored: [],
+  });
 });
 
 test('设置：非数字/非布尔退回默认，越界被夹进合法区间，出厂 config 与代码默认逐字一致', () => {
