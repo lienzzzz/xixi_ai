@@ -257,6 +257,9 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    ② t33 的完成回报因 payload 被截断（缺 task_id）**整份被拒**，只能重发。
    **做法**：验收条目写短句；`evidence`/`commandsRun` 的 evidence 字段保持一句话；
    路径与编号集中放在 `inScope`/`deliverables`；不要把长表格塞进契约字段。
+   **第四轮 t10 又见一例（2026-10-01）**：派单时 `description` 里写了三条验收，而 `acceptance` 数组只到了两条
+   （成员按数组两条回报并在回报里说明——这是**正确做法**）。**纪律**：captain 建完任务后**回读一次 acceptance 条数**；
+   成员遇到这种不一致时**以 acceptance 数组为准**，并在回报里写明差异。
 17. **同一个事实可能有三份不同的说法——以代码为准**：t33 面对「`appendEvent` 有几个调用点」，
    发现**文档写 2 个、评审说 3 个、代码实际 4 个**，且其中一处写入在引擎层、另有一条**绕过 `appendEvent`
    直接写库**的 Python 路径（感知边）。**遇到分歧就去读代码并给出文件与行号**，然后同时更正文档与评审结论。
