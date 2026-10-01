@@ -16,6 +16,7 @@
  *   node scripts/chat.ts --dsh               # through the DSH harness (slower)
  *   node scripts/chat.ts --personality verbosity=0.1,talkativeness=0.2
  *   node scripts/chat.ts --personality=verbosity=0.1
+ *   node scripts/chat.ts --print-wiring   # 离线：打印这条入口交给模型的工具链，然后退出
  *   echo "西西，明天天气怎么样？`n那后天呢？" | node scripts/chat.ts
  *
  * `--personality` is an administrative baseline override (the M3 seam), applied
@@ -28,12 +29,14 @@ import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, defaultTools, type BrainAdapter } from '@xixi/brain-adapter';
+import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter, type ToolCallRecord, type ToolRegistry } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
 import { ConversationEngine } from '@xixi/conversation';
-import { openXixiStore, PERSONALITY_PROPERTIES, personalityProperty } from '@xixi/domain';
+import { openXixiStore, PERSONALITY_PROPERTIES, personalityProperty, type XixiConfig } from '@xixi/domain';
+import { WeatherClient, type MimoClient } from '@xixi/model-adapters';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
+import { CONVERSATION_SCOPE, buildToolChain } from './field-test.ts';
 
 export interface PersonalityArgsResult {
   /**
@@ -123,6 +126,79 @@ export function parsePersonalityArgs(argv: readonly string[]): PersonalityArgsRe
   return { values: problems.length > 0 ? {} : values, problems };
 }
 
+/** How the CLI talks to the model: a scripted stand-in, the DSH harness, or a direct MiMo call. */
+export type ChatMode = 'fake' | 'dsh' | 'mimo';
+
+/**
+ * The weather source `--fake` uses.
+ *
+ * `npm run chat -- --fake` is documented as a **completely offline** demo (AGENTS §7), and that
+ * promise has to survive the tools being wired in: without this, a question about the weather would
+ * reach the real provider from a run that is supposed to touch nothing. The payload is the same
+ * fields a live lookup returns — code, temperatures, precipitation probability — so the tool derives
+ * the same summary, range and umbrella advice from it as it would from the network.
+ */
+function offlineWeatherSource(): WeatherClient {
+  const reply = (body: unknown): Response => ({ ok: true, status: 200, json: async () => body }) as unknown as Response;
+  const fetchImpl = (async (input: string | URL | Request) =>
+    String(input).includes('geocoding')
+      ? reply({ results: [{ name: '成都', latitude: 30.66, longitude: 104.06, timezone: 'Asia/Shanghai', admin1: '四川省' }] })
+      : reply({
+          timezone: 'Asia/Shanghai',
+          daily: {
+            time: ['2026-10-01', '2026-10-02', '2026-10-03'],
+            weather_code: [61, 3, 0],
+            temperature_2m_max: [24.4, 25.1, 27.8],
+            temperature_2m_min: [18.2, 19.0, 20.1],
+            precipitation_probability_max: [80, 8, 0],
+          },
+        })) as unknown as typeof fetch;
+  return new WeatherClient({ fetchImpl });
+}
+
+/**
+ * The one tool chain this entry talks through (pack Phase 2, extended in t14/T5-F1).
+ *
+ * It is the console's own `buildToolChain`, not a CLI-local copy of the built-in set: the registry,
+ * the permission policy and the round cap are therefore the same objects the field-test console and
+ * the trial page use, and a new tool joins every entry at once. `--fake` gets an in-memory weather
+ * source so the offline demo stays offline; every other mode keeps the real one.
+ */
+export function buildChatToolChain(mode: ChatMode, config: XixiConfig, onToolCall?: (record: ToolCallRecord) => void): ToolRegistry {
+  return buildToolChain(config, {
+    ...(onToolCall === undefined ? {} : { onToolCall }),
+    ...(mode === 'fake' ? { weatherClient: offlineWeatherSource() } : {}),
+  });
+}
+
+export interface ChatDirectAdapterOptions {
+  readonly config: XixiConfig;
+  readonly toolChain: ToolRegistry;
+  /** Injected by a test; the CLI lets the adapter build its client from the environment. */
+  readonly client?: MimoClient;
+}
+
+/**
+ * The direct-MiMo adapter with this entry's exact wiring — exported so an offline test can drive the
+ * real thing instead of a lookalike.
+ *
+ * Two t14 fixes live here. T5-F1: the adapter is handed the shared *registry* (not a bare
+ * `defaultTools` list), so this CLI gets the same four built-ins, the same permissions and the same
+ * four-round cap as the console. T5-F3: the reply-hygiene filter is told the **deployment language**
+ * from the config; the adapter's own default is a hard-coded `zh-CN`, and a deployment that speaks
+ * something else must not silently inherit that assumption.
+ */
+export function buildDirectAdapter(options: ChatDirectAdapterOptions): MimoBrainAdapter {
+  return new MimoBrainAdapter({
+    ...(options.client === undefined ? {} : { client: options.client }),
+    maxCompletionTokens: 400,
+    registry: options.toolChain,
+    scope: CONVERSATION_SCOPE,
+    timezone: options.config.identity.timezone,
+    language: options.config.identity.language,
+  });
+}
+
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const useFake = argv.includes('--fake');
   const useDsh = argv.includes('--dsh');
@@ -142,6 +218,24 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   }
 
   const config = loadConfig();
+  const mode: ChatMode = useFake ? 'fake' : useDsh ? 'dsh' : 'mimo';
+
+  // The offline wiring report (t14): what this entry hands the model, with no model call and no
+  // store. The chain comes from the same builder `buildAdapter` uses, so it cannot drift from it.
+  if (argv.includes('--print-wiring')) {
+    const chain = buildChatToolChain(mode, config);
+    console.log(
+      JSON.stringify({
+        entry: 'chat',
+        language: config.identity.language,
+        maxToolRounds: chain.maxToolRounds,
+        tools: chain.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name),
+        permissions: Object.fromEntries(chain.names().map((name) => [name, chain.check(name, CONVERSATION_SCOPE).verdict])),
+      }),
+    );
+    return;
+  }
+
   /** `XIXI_CHAT_DATA_DIR` is the test/parallel-instance seam (same idea as the other entries). */
   const store = openXixiStore({ dataDir: process.env.XIXI_CHAT_DATA_DIR ?? join(REPO_ROOT, 'data', 'chat') });
   const session = store.latestSession() ?? store.createSession();
@@ -159,7 +253,13 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   }
 
   function buildAdapter(): BrainAdapter {
-    if (useFake) return new FakeBrainAdapter();
+    // One chain for the REPL's text turns, built by the console's own factory (t14/T5-F1): the
+    // `--fake` branch runs the real loop over the real registry, so "offline" exercises the tool
+    // path instead of skipping it, and `--dsh` is untouched because the harness owns its tools.
+    const toolChain = buildChatToolChain(mode, config, (record) =>
+      process.stderr.write(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}\n`),
+    );
+    if (useFake) return new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE });
     if (useDsh) {
       const transport = new CliDshTransport({
         dshHome: DSH_HOME,
@@ -171,13 +271,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
       });
       return new DshBrainAdapter({ transport, store });
     }
-    const tools = defaultTools({ defaultPlace: config.identity.place ?? '' });
-    return new MimoBrainAdapter({
-      maxCompletionTokens: 400,
-      tools,
-      timezone: config.identity.timezone,
-      onToolCall: (record) => process.stderr.write(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}\n`),
-    });
+    return buildDirectAdapter({ config, toolChain });
   }
 
   const adapter = buildAdapter();

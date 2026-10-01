@@ -14,6 +14,7 @@
  *   node scripts/eval-realism.ts --corpus=all          # 黄金 + 仓库既有语料
  *   node scripts/eval-realism.ts --corpus=all --repeat=3   # 同语料跑 3 次（样本小，必须看抖动）
  *   node scripts/eval-realism.ts --fake                # 离线替身（只验证管线，结论不采信）
+ *   node scripts/eval-realism.ts --print-wiring         # 离线：打印这条入口交给模型的工具链，然后退出
  *   node scripts/eval-realism.ts --no-gate             # 只测量：有违规也 exit 0
  *   node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-09-30-v01.json
  *                                                      # 不调用模型，从保存的原文复算指标
@@ -33,12 +34,14 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { FakeBrainAdapter, MimoBrainAdapter, defaultTools, type BrainAdapter } from '@xixi/brain-adapter';
+import { FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter, type ToolCallRecord, type ToolRegistry } from '@xixi/brain-adapter';
 import { ConversationEngine, evaluateProactiveGates, parseProactiveSettings, resolveReplyLimits, splitReplyIntoSegments, type ProactiveGateContext } from '@xixi/conversation';
-import { openXixiStore } from '@xixi/domain';
+import { openXixiStore, type XixiConfig } from '@xixi/domain';
+import { WeatherClient } from '@xixi/model-adapters';
 
 import { CORPUS, FORBIDDEN_PATTERNS, type Scenario } from '../tests/scenarios/corpus.ts';
 import { GOLDEN_CONVERSATIONS, type GoldenConversation } from '../tests/scenarios/golden-conversations.ts';
+import { CONVERSATION_SCOPE, buildToolChain } from './field-test.ts';
 import { REPO_ROOT, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
 import {
   bannedTemplatesIn,
@@ -196,14 +199,71 @@ interface RunResult {
 
 const config = loadConfig();
 const settings = parseProactiveSettings(config.proactive as unknown as Record<string, unknown>);
+
+/**
+ * The weather source the offline stand-in uses: the same three days a live lookup returns, served
+ * from memory. `--fake` promises a run that touches nothing (AGENTS §7), and once the shared tool
+ * chain is wired in (t14/T5-F1) a corpus turn about the weather would otherwise reach the provider.
+ */
+function offlineWeatherSource(): WeatherClient {
+  const reply = (body: unknown): Response => ({ ok: true, status: 200, json: async () => body }) as unknown as Response;
+  const fetchImpl = (async (input: string | URL | Request) =>
+    String(input).includes('geocoding')
+      ? reply({ results: [{ name: '成都', latitude: 30.66, longitude: 104.06, timezone: 'Asia/Shanghai', admin1: '四川省' }] })
+      : reply({
+          timezone: 'Asia/Shanghai',
+          daily: {
+            time: ['2026-10-01', '2026-10-02', '2026-10-03'],
+            weather_code: [61, 3, 0],
+            temperature_2m_max: [24.4, 25.1, 27.8],
+            temperature_2m_min: [18.2, 19.0, 20.1],
+            precipitation_probability_max: [80, 8, 0],
+          },
+        })) as unknown as typeof fetch;
+  return new WeatherClient({ fetchImpl });
+}
+
+/**
+ * The one tool chain this runner talks through (pack Phase 2, extended in t14/T5-F1): the console's
+ * own factory, so a realism run reaches the same four built-ins with the same permissions and the
+ * same four-round cap as the console. `onToolCall` prints what actually ran — an offline run that
+ * answers a weather turn must show the tool in its log, not a lucky-looking sentence.
+ */
+function evalToolChain(config: XixiConfig, onToolCall?: (record: ToolCallRecord) => void): ToolRegistry {
+  return buildToolChain(config, {
+    ...(onToolCall === undefined ? {} : { onToolCall }),
+    ...(useFake ? { weatherClient: offlineWeatherSource() } : {}),
+  });
+}
+
+// The offline wiring report (t14): what this runner hands the model, with no model call and no store.
+if (has('print-wiring')) {
+  const chain = evalToolChain(config);
+  console.log(
+    JSON.stringify({
+      entry: 'eval-realism',
+      language: config.identity.language,
+      maxToolRounds: chain.maxToolRounds,
+      tools: chain.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name),
+      permissions: Object.fromEntries(chain.names().map((name) => [name, chain.check(name, CONVERSATION_SCOPE).verdict])),
+    }),
+  );
+  process.exit(0);
+}
+
+const toolChain = evalToolChain(config, (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`));
 const dataDir = mkdtempSync(join(tmpdir(), 'xixi-realism-'));
 
 function makeAdapter(): BrainAdapter {
-  if (useFake) return new FakeBrainAdapter();
+  if (useFake) return new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE });
   return new MimoBrainAdapter({
     maxCompletionTokens: 400,
-    tools: defaultTools({ defaultPlace: config.identity.place ?? '' }),
+    registry: toolChain,
+    scope: CONVERSATION_SCOPE,
     timezone: config.identity.timezone,
+    // t14 / T5-F3: the reply filter judges foreign (reasoning) runs against the deployment
+    // language, not the adapter's hard-coded `zh-CN` default.
+    language: config.identity.language,
   });
 }
 

@@ -14,6 +14,7 @@
  *   node scripts/eval-conversation.ts                 # mechanical checks only
  *   node scripts/eval-conversation.ts --judge         # + judge model
  *   node scripts/eval-conversation.ts --fake          # offline smoke of the harness
+ *   node scripts/eval-conversation.ts --print-wiring  # 离线：打印这条入口交给模型的工具链，然后退出
  *   node scripts/eval-conversation.ts --dsh           # evaluate the DSH path
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -21,14 +22,15 @@ import { join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
-import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, defaultTools, type BrainAdapter } from '@xixi/brain-adapter';
+import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter, type ToolCallRecord, type ToolRegistry } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
 import { assertSchema, type JsonSchema } from '@xixi/contracts';
 import { ConversationEngine } from '@xixi/conversation';
-import { MimoClient } from '@xixi/model-adapters';
-import { openXixiStore } from '@xixi/domain';
+import { MimoClient, WeatherClient } from '@xixi/model-adapters';
+import { openXixiStore, type XixiConfig } from '@xixi/domain';
 import { CORPUS, FORBIDDEN_PATTERNS, type Scenario } from '../tests/scenarios/corpus.ts';
 
+import { CONVERSATION_SCOPE, buildToolChain } from './field-test.ts';
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
 
 for (const [key, value] of Object.entries(readDotEnv())) {
@@ -77,6 +79,73 @@ interface JudgeScore {
 
 const config = loadConfig();
 
+/**
+ * Where a report goes. `--out <dir>` / `--out=<dir>` mirrors `scripts/eval-realism.ts`, so an
+ * offline run (or a test) can write its report to a temporary directory instead of adding a file
+ * under `docs/recon/` — the default, which is where a real judged run belongs.
+ */
+function reportDirectory(): string {
+  const list = process.argv.slice(2);
+  const withValue = list.find((argument) => argument.startsWith('--out='));
+  if (withValue !== undefined) return withValue.slice('--out='.length);
+  const at = list.indexOf('--out');
+  const next = at >= 0 ? list[at + 1] : undefined;
+  return next !== undefined && !next.startsWith('--') ? next : join(REPO_ROOT, 'docs', 'recon');
+}
+const reportDir = reportDirectory();
+
+/**
+ * The weather source the offline stand-in uses: the same three days a live lookup returns, served
+ * from memory. `--fake` promises a run that touches nothing (AGENTS §7), and once the shared tool
+ * chain is wired in (t14/T5-F1) a corpus turn about the weather would otherwise reach the provider.
+ */
+function offlineWeatherSource(): WeatherClient {
+  const reply = (body: unknown): Response => ({ ok: true, status: 200, json: async () => body }) as unknown as Response;
+  const fetchImpl = (async (input: string | URL | Request) =>
+    String(input).includes('geocoding')
+      ? reply({ results: [{ name: '成都', latitude: 30.66, longitude: 104.06, timezone: 'Asia/Shanghai', admin1: '四川省' }] })
+      : reply({
+          timezone: 'Asia/Shanghai',
+          daily: {
+            time: ['2026-10-01', '2026-10-02', '2026-10-03'],
+            weather_code: [61, 3, 0],
+            temperature_2m_max: [24.4, 25.1, 27.8],
+            temperature_2m_min: [18.2, 19.0, 20.1],
+            precipitation_probability_max: [80, 8, 0],
+          },
+        })) as unknown as typeof fetch;
+  return new WeatherClient({ fetchImpl });
+}
+
+/**
+ * The one tool chain this runner talks through (pack Phase 2, extended in t14/T5-F1): the console's
+ * own factory, so the corpus runs against the same four built-ins with the same permissions and the
+ * same four-round cap. `onToolCall` prints what actually ran.
+ */
+function evalToolChain(config: XixiConfig, onToolCall?: (record: ToolCallRecord) => void): ToolRegistry {
+  return buildToolChain(config, {
+    ...(onToolCall === undefined ? {} : { onToolCall }),
+    ...(useFake ? { weatherClient: offlineWeatherSource() } : {}),
+  });
+}
+
+// The offline wiring report (t14): what this runner hands the model, with no model call and no store.
+if (args.has('--print-wiring')) {
+  const chain = evalToolChain(config);
+  console.log(
+    JSON.stringify({
+      entry: 'eval-conversation',
+      language: config.identity.language,
+      maxToolRounds: chain.maxToolRounds,
+      tools: chain.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name),
+      permissions: Object.fromEntries(chain.names().map((name) => [name, chain.check(name, CONVERSATION_SCOPE).verdict])),
+    }),
+  );
+  process.exit(0);
+}
+
+const toolChain = evalToolChain(config, (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`));
+
 const JUDGE_SCHEMA: JsonSchema = {
   type: 'object',
   additionalProperties: false,
@@ -90,7 +159,7 @@ const JUDGE_SCHEMA: JsonSchema = {
 };
 
 function makeAdapter(store: ReturnType<typeof openXixiStore>): BrainAdapter {
-  if (useFake) return new FakeBrainAdapter();
+  if (useFake) return new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE });
   if (useDsh) {
     const transport = new CliDshTransport({
       dshHome: DSH_HOME,
@@ -103,8 +172,12 @@ function makeAdapter(store: ReturnType<typeof openXixiStore>): BrainAdapter {
   }
   return new MimoBrainAdapter({
     maxCompletionTokens: 400,
-    tools: defaultTools({ defaultPlace: config.identity.place ?? '' }),
+    registry: toolChain,
+    scope: CONVERSATION_SCOPE,
     timezone: config.identity.timezone,
+    // t14 / T5-F3: the reply filter judges foreign (reasoning) runs against the deployment
+    // language, not the adapter's hard-coded `zh-CN` default.
+    language: config.identity.language,
   });
 }
 
@@ -389,8 +462,8 @@ if (useJudge) {
       ? ''
       : ['## 未能评审的场景（测量缺口，不计为通过）', '', ...judgeFailures.map((failure) => `- ${failure.scenario}：${failure.detail.slice(0, 200)}`), ''].join('\n'),
   ].join('\n');
-  const reportPath = join(REPO_ROOT, 'docs', 'recon', `conversation-eval-${new Date().toISOString().slice(0, 10)}.md`);
-  mkdirSync(join(REPO_ROOT, 'docs', 'recon'), { recursive: true });
+  const reportPath = join(reportDir, `conversation-eval-${new Date().toISOString().slice(0, 10)}.md`);
+  mkdirSync(reportDir, { recursive: true });
   writeFileSync(reportPath, report, 'utf8');
   console.log(`\n报告已写入 ${reportPath}`);
 }
