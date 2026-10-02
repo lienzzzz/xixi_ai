@@ -776,15 +776,6 @@ export interface VoiceTurnPayload {
       readonly audioMs: number | null;
       readonly durationMs: number;
       readonly bytes: number;
-      /**
-       * This clause's own audio (base64 WAV) — what the page plays, clause by clause.
-       *
-       * t11: the first version reported clauses and then handed the page one stitched blob, so
-       * 「逐块播放」 was not actually possible from the payload; the page had to fall back to
-       * playing the whole reply. `null` means this clause failed to synthesize (it is also listed
-       * in `errors`), never 「silence instead of speech」.
-       */
-      readonly audio: string | null;
     }[];
     readonly errors: readonly string[];
     /** The four baseline delays (`docs/benchmarks/v01-baseline.md` §3.1), same clock. */
@@ -828,6 +819,23 @@ export interface VoiceDeps {
     readonly text: string;
     readonly signal: AbortSignal;
   }) => Promise<Buffer | Uint8Array>;
+  /**
+   * t13: the incremental speech seam — every clause, **in playback order**, as soon as its audio
+   * exists. A server registers this to write each clause to its response immediately, which is what
+   * makes 「边生成边送达」 true on the wire rather than only inside the process. Awaited, so a slow
+   * consumer back-pressures the hand-off instead of buffering the whole reply.
+   *
+   * When it is not supplied the payload still carries the same clauses (text, duration, timing) —
+   * only the base64 audio is omitted, because the sink is the only thing that has it.
+   */
+  readonly onClause?: (clause: {
+    readonly index: number;
+    readonly text: string;
+    readonly audio: string;
+    readonly durationMs: number;
+    readonly synthMs: number | null;
+    readonly audioAtMs: number;
+  }) => void | Promise<void>;
   readonly log?: (line: string) => void;
 }
 
@@ -1027,6 +1035,22 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
             (text) => speakStream({ text, signal: abortController.signal }),
             (wav) => readWavInfo(Buffer.from(wav)).durationMs,
           );
+    // t13: the streaming seam. When the caller supplies `onClause`, every clause is handed over the
+    // moment its audio exists (in playback order), so a server can put it on the wire without
+    // waiting for the reply — and the payload below then carries only counts and timings.
+    if (pipeline !== null && deps.onClause !== undefined) {
+      const onClause = deps.onClause;
+      pipeline.onClause((clause) =>
+        onClause({
+          index: clause.index,
+          text: clause.text,
+          audio: Buffer.from(clause.wav).toString('base64'),
+          durationMs: clause.durationMs,
+          synthMs: clause.synthMs,
+          audioAtMs: clause.atMs - llmStarted,
+        }),
+      );
+    }
 
     const turn = await deps.engine.respond(
       { sessionId: deps.currentSessionId(), text: transcript, addressed: deps.engine.state === 'IDLE' },
@@ -1055,10 +1079,15 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
     let ttsMs: number | null = null;
     if (shouldSpeak && turn.text !== null) {
       if (pipeline !== null && spoken.length > 0) {
-        // Concatenate the clause audio into the one WAV the old contract returns, so nothing
-        // downstream (the console, the page's `audio` field) has to change its shape.
-        const stitched = concatWav(spoken.map((chunk) => Buffer.from(chunk.wav)), 0);
-        audio = stitched.toString('base64');
+        // t13: when the caller registered the incremental seam (`onClause`) it already received
+        // every clause's audio, so the turn payload deliberately carries **no** blob: the page plays
+        // from the seam, and the turn stays counts-and-timings. Without a seam the old contract is
+        // unchanged — one stitched WAV — so a caller that only consumes the single-object shape
+        // (the typed-text route, a script) keeps working.
+        if (deps.onClause === undefined) {
+          const stitched = concatWav(spoken.map((chunk) => Buffer.from(chunk.wav)), 0);
+          audio = stitched.toString('base64');
+        }
         ttsMs = firstClauseAudioMs;
       } else {
         // The streaming path produced nothing (every clause failed, or the whole reply arrived
@@ -1140,8 +1169,6 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
                   audioMs: clause.audioAtMs === null ? null : clause.audioAtMs - llmStarted,
                   durationMs: synthesized?.durationMs ?? 0,
                   bytes: clause.bytes,
-                  // The clause audio itself, so 「逐块播放」 needs no second synthesis anywhere.
-                  audio: synthesized === undefined ? null : Buffer.from(synthesized.wav).toString('base64'),
                 };
               }),
               errors: pipeline.errors,
@@ -2981,7 +3008,20 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
           return;
         }
         if (request.method === 'POST' && url.pathname === '/api/voice') {
-          const payload = await handleVoiceTurn(deps, await readBody(request));
+          // t13: the console's own page plays the reply clause by clause, so this route collects the
+          // incremental seam into a per-clause array and hands it to the page. The turn event keeps
+          // counts and timings only — an audio blob on the turn object would mean the browser got
+          // everything at once and could not start speaking before the reply ended.
+          const clauseAudio: { index: number; text: string; audio: string; durationMs: number }[] = [];
+          const payload = await handleVoiceTurn(
+            {
+              ...deps,
+              onClause: async (clause) => {
+                clauseAudio.push({ index: clause.index, text: clause.text, audio: clause.audio, durationMs: clause.durationMs });
+              },
+            },
+            await readBody(request),
+          );
           pushTurn({
             kind: 'voice',
             at: payload.at,
@@ -3002,7 +3042,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
             toolName: payload.toolName,
             source: '回应你',
           });
-          json(response, 200, payload);
+          json(response, 200, { ...payload, clauseAudio });
           return;
         }
         if (request.method === 'POST' && url.pathname === '/api/turn') {
@@ -7065,17 +7105,24 @@ async function startRecording() {
 }
 
 /**
- * Play what came back, clause by clause when the server streamed it (pack Phase 8).
+ * Play what came back, clause by clause (pack Phase 8 / t13).
  *
- * BOOT and the turn payload are the inputs here: the payload's stream.clauses field is the speech
- * the turn really produced, each with its own base64 WAV;
- * playing them one after another is the browser half of 「第一块立刻播」. A payload without a
- * stream (a text turn, or a console whose TTS sink is not installed) falls back to the single
- * whole-reply audio it carries, so both shapes are understood by one path.
+ * Two shapes reach the page, and both are understood here:
+ *   * data.clauseAudio — the field-test console's route, which collects the incremental seam and
+ *     attaches each clause's WAV to the response ({index, text, audio, durationMs});
+ *   * data.stream.clauses[].audio — a caller that put the audio on the clause records instead.
+ *
+ * A payload with neither (a text turn, or a console whose TTS sink is not installed) falls back to
+ * the single whole-reply audio it carries. A barge-in stops the loop: the remaining clauses are
+ * dropped, never resumed mid-reply.
  */
 async function playReplyAudio(data) {
-  var clauses = data.stream && data.stream.clauses ? data.stream.clauses : null;
-  if (clauses && clauses.length > 0 && data.stream.enabled === true) {
+  var clauses = data.clauseAudio && data.clauseAudio.length > 0
+    ? data.clauseAudio
+    : data.stream && data.stream.clauses && data.stream.clauses.length > 0 && data.stream.enabled === true
+      ? data.stream.clauses
+      : null;
+  if (clauses) {
     for (var i = 0; i < clauses.length; i += 1) {
       if (!clauses[i].audio) continue;
       var started = await xixiSpeakClause(clauses[i].audio);
@@ -7170,7 +7217,11 @@ async function stopRecording() {
       privacyNote: data.privacy.note,
       audioUrl: audioUrl, audioSeconds: seconds, audioPeakDbfs: peak
     });
-    if (data.audio) { new Audio('data:audio/wav;base64,' + data.audio).play().catch(function () {}); }
+    // t13: the voice turn's audio goes through the shared player, which prefers the reply's
+    // per-clause audio (data.clauseAudio) and only falls back to the stitched blob. Leaving a
+    // standalone new Audio(...) here meant the page could not play clause by clause even though the
+    // payload carried everything it needed.
+    await playReplyAudio(data);
     if (data.reason === 'NO_SPEECH_DETECTED') {
       el('hint').textContent = '没识别到语音：' + levelAdvice(peak) + ' 点右栏那条的「▶ 播放我这次录音」听一下录到了什么。';
     } else if (data.reason === 'ASSENT_ONLY') {

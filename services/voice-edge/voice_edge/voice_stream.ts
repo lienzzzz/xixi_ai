@@ -254,6 +254,12 @@ export class SpeechPipeline {
   readonly #early: boolean;
   readonly #earlyMinChars: number;
   #firstClauseHook: FirstClauseHook | null = null;
+  #clauseHook: ((clause: SynthesizedClause) => void | Promise<void>) | null = null;
+  /** Next clause index whose delivery has **completed** — everything below it is done. */
+  #deliveredCursor = 0;
+  /** Clauses whose audio exists but which are waiting for their turn in the order. */
+  #queue = new Map<number, SynthesizedClause>();
+  #delivered = 0;
   #firstDispatched = false;
   #nextIndex = 0;
   #firstTextAtMs: number | null = null;
@@ -281,6 +287,68 @@ export class SpeechPipeline {
   onFirstClause(hook: FirstClauseHook): void {
     this.#firstClauseHook = hook;
     if (this.#firstDispatched && this.#clauses[0] !== undefined) hook(this.#clauses[0]);
+  }
+
+  /**
+   * Every clause, **in playback order**, as soon as its audio exists (t13).
+   *
+   * This is the seam a streaming server needs: it turns 「合成在背后跑」 into 「这一块的音频已经可以
+   * 发给浏览器了」 without polling. The hook is called sequentially and in index order — clause *n*
+   * is never handed out before clause *n−1*, even though the synthesis calls run concurrently — so
+   * the receiver can push each clause straight onto the wire. Awaited: a slow consumer back-pressures
+   * the synthesis hand-off instead of buffering the whole reply in memory.
+   *
+   * A clause whose synthesis failed is **not** delivered (there is no audio), and it is reported in
+   * `errors` exactly as before; ordering of the delivered clauses is preserved.
+   */
+  onClause(hook: (clause: SynthesizedClause) => void | Promise<void>): void {
+    this.#clauseHook = hook;
+    // Anything already synthesized is queued, so registering after `push()` is not a race.
+    for (const chunk of [...this.#audio.values()].sort((left, right) => left.index - right.index)) {
+      if (chunk.index >= this.#deliveredCursor) this.#queue.set(chunk.index, chunk);
+    }
+    void this.#pump();
+  }
+
+  /** How many clauses have been handed to `onClause` (the streaming seam's own counter). */
+  get delivered(): number {
+    return this.#delivered;
+  }
+
+  /**
+   * Hand over every queued clause that is next in line, and keep going until the next wanted index
+   * is missing. Delivery is strictly index-ordered: clause *n* waits for clause *n−1*, whatever
+   * order synthesis finished in, and each clause is handed over exactly once (the index moves
+   * forward, so a re-queue cannot duplicate it).
+   */
+  async #pump(): Promise<void> {
+    const hook = this.#clauseHook;
+    if (hook === null) return;
+    while (this.#queue.has(this.#deliveredCursor)) {
+      const chunk = this.#queue.get(this.#deliveredCursor) as SynthesizedClause;
+      this.#queue.delete(this.#deliveredCursor);
+      try {
+        // Awaited on purpose: a slow consumer back-pressures the hand-off instead of letting the
+        // whole reply pile up in memory.
+        await hook(chunk);
+      } finally {
+        this.#deliveredCursor += 1;
+        this.#delivered += 1;
+      }
+    }
+  }
+
+  /** Put a synthesized clause in the delivery queue (index order decides when it goes out). */
+  #deliver(chunk: SynthesizedClause): void {
+    if (this.#clauseHook === null) return;
+    if (chunk.index < this.#deliveredCursor) return;
+    this.#queue.set(chunk.index, chunk);
+    void this.#pump();
+  }
+
+  /** The in-order delivery: resolves when nothing more can be handed over right now. */
+  awaitDeliveries(): Promise<void> {
+    return this.#pump();
   }
 
   /** When the model's first text delta arrived (after ASR), or `null` if it never did. */
@@ -377,6 +445,18 @@ export class SpeechPipeline {
       for (const clause of this.#chunker.flush()) this.#dispatch(clause);
     }
     await Promise.allSettled(this.#pending);
+    // Everything synthesized must be handed over before `flush()` resolves, in index order. Pumping
+    // alone is not enough: the queue only advances past the next wanted index, so a clause whose
+    // synthesis finished *after* a later one is parked until the earlier one arrives (t13). Yielding
+    // between pumps lets the pending deliveries that were awaited inside a pump register theirs.
+    for (const chunk of [...this.#audio.values()].sort((left, right) => left.index - right.index)) {
+      this.#deliver(chunk);
+    }
+    for (let round = 0; round < 100; round += 1) {
+      await this.#pump();
+      if (this.#queue.size === 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
     const from = mode === 'released' ? before : 0;
     return [...this.#audio.entries()]
       .filter(([index]) => index >= from)
@@ -409,7 +489,12 @@ export class SpeechPipeline {
           record.synthMs = atMs - dispatchedAtMs;
           record.audioAtMs = atMs;
           record.bytes = bytes;
-          this.#audio.set(index, { index, text: clause.text, wav, durationMs, atMs, synthMs: record.synthMs });
+          const chunk: SynthesizedClause = { index, text: clause.text, wav, durationMs, atMs, synthMs: record.synthMs };
+          this.#audio.set(index, chunk);
+          // t13: hand this clause to the streaming consumer the moment its audio exists, in
+          // playback order. `void` on purpose — the caller's own back-pressure is expressed by
+          // awaiting the function it was given, not by blocking this synthesis promise.
+          void this.#deliver(chunk);
         })
         .catch((error: unknown) => {
           this.#errors.push(`clause ${index}（${clause.text.slice(0, 20)}）合成失败：${error instanceof Error ? error.message : String(error)}`);

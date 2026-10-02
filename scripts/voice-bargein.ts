@@ -156,19 +156,18 @@ const { stopsAtMs, droppedMs } = truncateOnBargeIn({ decisionMs: decisionMs ?? 0
  * interrupted: once aborted, `playbackStateAt` answers 「no」 for every instant by construction, so
  * a criterion that only asks the aborted timeline cannot fail (t5 review:
  * `%TEMP%\t5-review\audiblestop-repro.mjs` scanned 10 001 instants and found the question
- * unfalsifiable). A fixed 200 ms offset is not enough either — this script's own clause layout has
- * a gap between clause 1 and clause 2 right around 1.2 s, so the probe measured silence for the
- * wrong reason and the criterion failed for a reason that has nothing to do with barge-in.
+ * unfalsifiable).
  *
  * So the probe is anchored to the audio itself: the **first instant after the abort at which the
  * uninterrupted timeline would still be playing**. On the aborted timeline that same instant must
- * be silent (playback stopped); on the running timeline it is audible by construction (that is how
- * it was chosen), which is the counterfactual that makes the criterion falsifiable. Both answers
- * come from the same `PlaybackTimeline` class the browser drives; the browser *rule* itself is
- * executed in `tests/unit/voice/voice-stream.test.ts` (node:vm), not grepped.
+ * be silent (playback stopped); on the running timeline it is audible, which is the counterfactual
+ * that makes the criterion falsifiable. Both answers come from the same `PlaybackTimeline` class the
+ * browser drives; the browser *rule* itself is executed in `tests/unit/voice/voice-stream.test.ts`
+ * (node:vm), not grepped.
  */
 const abortAtMs = startsAtMs + (decisionMs ?? 0);
 const running = timeline.metrics();
+
 const probeAtMs = (() => {
   const nextSlot = running.slots.find((slot) => slot.startMs >= abortAtMs);
   if (nextSlot !== undefined) return nextSlot.startMs;
@@ -178,6 +177,50 @@ const probeAtMs = (() => {
 const aborted = timeline.abort(abortAtMs, { playedMs: abortAtMs });
 const laterState = playbackStateAt(aborted, probeAtMs);
 const counterfactualState = playbackStateAt(running, probeAtMs);
+
+/**
+ * The ledger, **computed independently** of `PlaybackTimeline` (t13).
+ *
+ * The audible-stop criterion reads its numbers back from the same object that produced them, so on
+ * its own it only shows that object is self-consistent. This block recomputes the same quantities
+ * from the *inputs* — the clause durations and where playback stopped — and compares. If the
+ * timeline's arithmetic were wrong the two would disagree and `--strict` fails; when they agree,
+ * what has been checked is real accounting rather than a tautology. (The audible-stop evidence
+ * itself lives in the node:vm test, which actually runs the browser rule.)
+ */
+const independentClauses = clauses.map((text, index) => ({
+  index,
+  chars: text.length,
+  durationMs: Math.round((text.length / chars) * botDurationMs),
+}));
+const independentTotalMs = independentClauses.reduce((sum, clause) => sum + clause.durationMs, 0);
+const independentPlayedMs = Math.max(0, Math.min(abortAtMs, independentTotalMs));
+const independentStartOf = (index: number): number =>
+  independentClauses.slice(0, index).reduce((sum, previous) => sum + previous.durationMs, 0);
+const ledger = {
+  independent: {
+    totalMs: independentTotalMs,
+    playedMs: Math.round(independentPlayedMs),
+    droppedMs: Math.round(Math.max(0, independentTotalMs - independentPlayedMs)),
+    unplayedClauses: independentClauses.filter((clause) => independentStartOf(clause.index) + clause.durationMs > independentPlayedMs).map((clause) => clause.index),
+    clauseDurationsMs: independentClauses.map((clause) => clause.durationMs),
+  },
+  timeline: {
+    totalMs: running.totalDurationMs,
+    playedMs: Math.round(aborted.playedMs),
+    droppedMs: Math.round(aborted.droppedMs),
+    unplayedClauses: [...aborted.droppedClauses].sort((left, right) => left - right),
+  },
+  // The one line the criterion looks at. Both sides are derived from the same inputs by two
+  // different routes; equality is the claim, and a wrong `PlaybackTimeline` would break it.
+  agrees: false as boolean,
+};
+ledger.agrees =
+  ledger.independent.totalMs === ledger.timeline.totalMs &&
+  ledger.independent.playedMs === ledger.timeline.playedMs &&
+  ledger.independent.droppedMs === ledger.timeline.droppedMs &&
+  ledger.independent.unplayedClauses.join(',') === ledger.timeline.unplayedClauses.join(',');
+
 const audibleStop = {
   abortedAtMs: aborted.abortedAtMs,
   probeAtMs,
@@ -188,7 +231,14 @@ const audibleStop = {
   droppedClauses: aborted.droppedClauses,
   totalClauses: aborted.totalClauses,
   // The counterfactual: the same instant, no interruption. It has to be audible, or the probe is
-  // pointing at a gap and the criterion is measuring nothing.
+  // pointing somewhere with no audio at all and the aborted answer means nothing.
+  //
+  // Scope, honestly (t12 R4 / t13): this is a **probe-legitimacy** check, not the proof that the
+  // speaker stopped. `playbackStateAt` answers 「no」 for every instant on an aborted timeline, so
+  // asking only that timeline cannot fail — and asking a *running* timeline the same question can
+  // only answer 「yes」 where there is audio. The falsifiable half of this criterion is the
+  // **independent ledger** below (a wrong `PlaybackTimeline` breaks it) plus the node:vm test that
+  // really executes the browser stop rule.
   counterfactualNotAborted: counterfactualState.audible,
   counterfactualClause: counterfactualState.clause,
   counterfactualNote:
@@ -234,6 +284,7 @@ printEvidence('打断（离线测量，§14.2 + pack Phase 8）', {
   },
   clauses,
   audibleStop: strict || decisionMs !== null ? audibleStop : null,
+  ledger: strict ? ledger : null,
   assent: strict ? assent : null,
   vadEvents: segmentation.events,
   caveat:
@@ -264,6 +315,10 @@ if (strict) {
     console.error(`FAILED：反事实证明不成立——同一时刻（${Math.round(probeAtMs)}ms）未打断也听不到声音，说明探测点落在播放窗口之外，这条判据本身没有意义`);
     process.exit(1);
   }
+  if (!ledger.agrees) {
+    console.error(`FAILED：独立算出的台账与 timeline 读数不一致——独立 ${JSON.stringify(ledger.independent)} vs timeline ${JSON.stringify(ledger.timeline)}`);
+    process.exit(1);
+  }
   if (aborted.droppedMs <= 0) {
     console.error('FAILED：打断没有丢掉任何未播音频，播放队列清空不成立');
     process.exit(1);
@@ -278,6 +333,8 @@ if (strict) {
   console.log(
     `播放队列：${aborted.totalClauses} 段，已听 ${Math.round(aborted.playedMs)}ms，丢弃 ${aborted.droppedClauses.length} 段（${Math.round(aborted.droppedMs)}ms）；` +
       `探测点 ${Math.round(probeAtMs)}ms：打断后仍在播 ${laterState.audible ? '是' : '否'}／未打断时应为 ${counterfactualState.audible ? '是' : '否'}；` +
+      `台账独立复核 ${ledger.agrees ? '一致' : '不一致'}（${ledger.independent.playedMs}/${ledger.independent.droppedMs}ms，未播 ${ledger.independent.unplayedClauses.join('+') || '无'}）；` +
       `应和候选停顿 ${assent.pauseMs.join('/')}ms → ${assent.decisionAtLongestPause?.reason ?? '无'}`,
   );
+  console.log('说明：本脚本核对的是「记账」与「判定」；真正被执行的浏览器停声规则在 tests/unit/voice/voice-stream.test.ts（node:vm 跑 XIXI_PLAYBACK_JS）。');
 }

@@ -304,14 +304,89 @@ function streamingSpeechSink(): VoiceDeps['speakStream'] {
 }
 
 /**
+ * The NDJSON event mapping, as a **pure function** (t13).
+ *
+ * It exists so the wire format can be asserted without a server: given the incremental clauses the
+ * sink produced and the finished payload, it yields the exact events to write. Two properties are
+ * the whole point of the streaming voice path, and both are checked in
+ * `tests/console/voice-streaming-console.test.ts`:
+ *
+ *   * one `clause` event **per clause**, in order, carrying that clause's audio verbatim;
+ *   * the `turn` event carries **counts and timings only** — no base64 audio anywhere on it. A blob
+ *     there would mean the browser received everything at once and could not start speaking before
+ *     the reply ended.
+ *
+ * `synthesize` is injected purely so the test can assert the mapper never calls it: the audio is
+ * produced once, by the sink, while the reply is being generated.
+ */
+export function voiceStreamEvents(input: {
+  readonly result: Record<string, unknown>;
+  readonly clauses: readonly VoiceClauseEvent[];
+  readonly segments: readonly string[];
+  readonly segmentGapMs: number;
+  readonly ttsMode: 'streaming' | 'none';
+  readonly synthesize?: (text: string) => unknown;
+}): Record<string, unknown>[] {
+  const events: Record<string, unknown>[] = [];
+  const stitchedAudio: string[] = [];
+  for (const clause of [...input.clauses].sort((left, right) => left.index - right.index)) {
+    stitchedAudio.push(clause.audio);
+    events.push({
+      type: 'clause',
+      index: clause.index,
+      text: clause.text,
+      audio: clause.audio,
+      ttsMs: clause.synthMs,
+      of: input.clauses.length,
+    });
+  }
+  const stream = input.result['stream'] as { readonly enabled?: boolean; readonly ttsSegments?: number; readonly errors?: readonly string[] } | null | undefined;
+  events.push({
+    type: 'turn',
+    // Counts and timings only: the reply's text lives in `reply` (one string, not one per clause),
+    // and **no audio** of any kind is attached — not the clauses' and not the stitched blob. The
+    // clause audio already went out on its own events, and the stitched one travels on `end`; a blob
+    // here would mean the browser received everything at once and could not start speaking early.
+    ...input.result,
+    audio: null,
+    clauseAudio: null,
+    stream: stream === null || stream === undefined ? stream ?? null : {
+      enabled: stream.enabled === true,
+      ttsSegments: stream.ttsSegments ?? input.clauses.length,
+      errors: stream.errors ?? [],
+    },
+    sourceLabel: '回应你',
+  });
+  events.push({
+    type: 'end',
+    segments: input.segments,
+    segmentGapMs: input.segmentGapMs,
+    clauses: input.clauses.length,
+    ttsMode: input.ttsMode,
+    // The same stitched WAV the single-object shape carries, for a caller that wants one blob.
+    audio: stitchedAudio.length > 0 ? concatWav(stitchedAudio.map((item) => Buffer.from(item, 'base64')), 0).toString('base64') : null,
+  });
+  return events;
+}
+
+/** One clause on its way to the wire: the audio the sink produced, plus its timing. */
+export interface VoiceClauseEvent {
+  readonly index: number;
+  readonly text: string;
+  readonly audio: string;
+  readonly durationMs: number;
+  readonly synthMs: number | null;
+}
+
+/**
  * One voice turn, streamed. Writes newline-delimited JSON events as they happen — the reply's
  * first clause is on the wire before the rest of the reply exists, which is what the browser
  * needs in order to start speaking while she is still generating (pack Phase 8).
  *
- * Events: `turn` (what was heard / what she decided, including per-clause text and timing),
- * `clause` (one clause's audio straight from the sink — never re-synthesized here), `end` (what
- * was played), `error`. Chunking happens inside `handleVoiceTurn` with the same `ClauseChunker`
- * the offline pipeline uses, so the page and the CLI cannot drift.
+ * The order is: each `clause` event the moment the sink finishes it, then `turn` (counts and
+ * timings), then `end` (the segment plan and, for convenience, the stitched WAV). Chunking happens
+ * inside `handleVoiceTurn` with the same `ClauseChunker` the offline pipeline uses, so the page and
+ * the CLI cannot drift.
  */
 async function streamVoice(body: TurnBody, response: ServerResponse): Promise<void> {
   response.writeHead(200, {
@@ -331,33 +406,30 @@ async function streamVoice(body: TurnBody, response: ServerResponse): Promise<vo
     }
   };
   const sink = streamingSpeechSink();
+  // Clauses are written as they are synthesized: `onClause` is awaited by the delivery chain, so a
+  // slow socket back-pressures the hand-off instead of buffering the reply in memory.
+  const clauses: VoiceClauseEvent[] = [];
   try {
-    // `voiceDeps()` already installs the sink when it exists, so this call is the whole wiring:
-    // one sink, one synthesis per clause, and the same function `handleVoice` uses.
-    const result = await handleVoiceTurn(voiceDeps(), body as VoiceTurnBody);
-    send({ type: 'turn', ...result, sourceLabel: '回应你', audio: null });
-    const clauses = result.stream?.clauses ?? [];
-    const audios: string[] = [];
-    for (const clause of clauses) {
-      // No synthesis here: the audio already exists (`clause.audio`), produced by the sink while
-      // the reply was being generated. A clause that failed is reported as a clause with no audio
-      // and an `errors` entry, never as a silent success.
-      if (clause.audio === null) continue;
-      audios.push(clause.audio);
-      send({ type: 'clause', index: clause.index, text: clause.text, audio: clause.audio, ttsMs: clause.synthMs, of: clauses.length });
-    }
-    if (open && result.reply !== null) {
-      const plan = segmentPlan(result.reply, config.reply);
-      send({
-        type: 'end',
-        segments: plan.segments,
-        segmentGapMs: plan.gapMs,
-        clauses: clauses.length,
-        ttsMode: sink === undefined ? 'none' : 'streaming',
-        // The same stitched WAV the single-object shape carries, for a caller that wants one blob.
-        audio: audios.length > 0 ? concatWav(audios.map((item) => Buffer.from(item, 'base64')), 0).toString('base64') : null,
-      });
-    }
+    const result = await handleVoiceTurn(
+      {
+        ...voiceDeps(),
+        onClause: async (clause) => {
+          const event: VoiceClauseEvent = { index: clause.index, text: clause.text, audio: clause.audio, durationMs: clause.durationMs, synthMs: clause.synthMs };
+          clauses.push(event);
+          send({ type: 'clause', index: event.index, text: event.text, audio: event.audio, ttsMs: event.synthMs, of: null });
+        },
+      },
+      body as VoiceTurnBody,
+    );
+    const plan = segmentPlan(result.reply, config.reply);
+    const events = voiceStreamEvents({
+      result: result as unknown as Record<string, unknown>,
+      clauses,
+      segments: plan.segments,
+      segmentGapMs: plan.gapMs,
+      ttsMode: sink === undefined ? 'none' : 'streaming',
+    });
+    for (const event of events) send(event);
     console.log(
       `[voice] streaming ${result.action} vad=${result.vadMs}ms asr=${result.asrMs ?? '-'}ms first=${result.firstTokenMs ?? '-'}ms clauses=${clauses.length} (one TTS call each)`,
     );

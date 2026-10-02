@@ -294,6 +294,18 @@ test('the page is Chinese, self-describing and carries the boot state', () => {
   assert.ok(page.includes('只有文字、没有声音'), 'and says there is no speech at all');
   assert.doesNotMatch(page, /整条回复一次合成/, 'the stale whole-reply claim must not survive');
   assert.doesNotMatch(page, /边生成边按句读切块/, 'and an offline console must not claim streaming TTS');
+
+  // t13: the console and the trial page must not be able to disagree with the server about
+  // granularity, so each boot's note is asserted against `segmentTtsNote(mode)` for **that** boot —
+  // a page rendering a sentence that belongs to another mode fails here.
+  for (const ttsMode of ['streaming', 'whole-reply'] as const) {
+    const withMode = buildFieldPage({ ...boot, offline: false, ttsEnabled: true, ttsMode, modelConfigured: true });
+    assert.ok(withMode.includes(segmentTtsNote(ttsMode)), `a '${ttsMode}' boot renders segmentTtsNote('${ttsMode}')`);
+    assert.ok(
+      !withMode.includes(segmentTtsNote(ttsMode === 'streaming' ? 'whole-reply' : 'streaming')),
+      `and not the other mode's sentence ('${ttsMode}')`,
+    );
+  }
   assert.ok(page.includes('data/field-test'), 'and names its own database path');
   assert.ok(page.includes('px-quiet-start'), 'and carries the proactive knobs');
   assert.ok(page.includes('延迟分段'), 'the per-stage latency line is part of the UI');

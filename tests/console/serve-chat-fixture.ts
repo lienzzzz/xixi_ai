@@ -30,6 +30,13 @@ export interface TrialPageOptions {
   readonly env?: Readonly<Record<string, string>>;
   /** How long to wait for a *response* (not just for the startup line). Default 60 s. */
   readonly readyTimeoutMs?: number;
+  /**
+   * Start with 朗读 on (`--no-tts` is passed by default). Together with a `MIMO_API_KEY` in `env`
+   * this is what makes the process install a streaming TTS sink, i.e. what puts the page in
+   * `streaming` mode — **without** any call ever being made (t13 asserts the page's sentence, not a
+   * synthesis; nothing in these tests hits `/api/voice` on such a process).
+   */
+  readonly tts?: boolean;
 }
 
 /** Poll the page until it answers, or throw with the child's output. */
@@ -57,7 +64,8 @@ async function waitUntilReady(child: ChildProcess, base: string, output: () => s
 }
 
 export async function startTrialPage(options: TrialPageOptions): Promise<TrialPageFixture> {
-  const child = spawn(process.execPath, ['scripts/serve-chat.ts', '--fake', '--no-tts', '--port', '0'], {
+  const args = ['scripts/serve-chat.ts', '--fake', '--port', '0', ...(options.tts === true ? [] : ['--no-tts'])];
+  const child = spawn(process.execPath, args, {
     cwd: REPO_ROOT,
     env: { ...process.env, XIXI_WEB_DATA_DIR: options.dataDir, ...(options.env ?? {}) },
     stdio: ['ignore', 'pipe', 'pipe'],
