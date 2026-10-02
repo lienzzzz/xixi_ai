@@ -27,6 +27,7 @@ import {
   PROACTIVE_PANEL_CSS,
   ProactiveLoop,
   SEGMENT_TTS_NOTE,
+  STREAMING_TTS_NOTE,
   XIXI_DB_ENTRIES,
   applyAndPersistProactivePatch,
   buildToolChain,
@@ -50,6 +51,11 @@ import {
   type VoiceTurnBody,
 } from './field-test.ts';
 import { toOffsetIso } from '@xixi/contracts';
+// Pack Phase 8: the streaming speech pieces. The chunker is the same class the offline pipeline
+// and the tests use, so 「第一块立刻进 TTS 队列」 has exactly one implementation.
+import { chunkClauses, CLAUSE_CHUNKER_LIMITS } from '../packages/conversation/src/segments.ts';
+import { AssentBank, XIXI_PLAYBACK_JS, XIXI_PLAYBACK_THRESHOLDS } from '../services/voice-edge/voice_edge/voice_stream.ts';
+import { concatWav } from './lib/wav.ts';
 
 for (const [key, value] of Object.entries(readDotEnv())) {
   if (process.env[key] === undefined) process.env[key] = value;
@@ -259,6 +265,104 @@ async function handleVoice(body: TurnBody, response: ServerResponse): Promise<vo
   json(response, 200, { ...result, source: 'reply', sourceLabel: '回应你', segments: plan.segments, segmentGapMs: plan.gapMs, segmentSummary: plan.summary });
 }
 
+/* ======================================================================================
+ * Pack Phase 8: streaming voice, backchannel, barge-in
+ * ====================================================================================== */
+
+/**
+ * The short 「嗯」 clips, synthesized once and cached for the life of the process.
+ *
+ * Pre-generation is the point: a backchannel that has to be synthesized *inside* the father's
+ * pause would arrive after he started talking again, which is worse than not saying it. The
+ * bank is lazy (nothing is synthesized until the first pause needs a clip) but each clip costs
+ * one TTS call ever, not one per interjection.
+ */
+const assentBank = new AssentBank((text) => client.synthesize(text));
+
+/**
+ * One voice turn, streamed. Writes newline-delimited JSON events as they happen — the reply's
+ * first clause is on the wire before the rest of the reply exists, which is what the browser
+ * needs in order to start speaking while she is still generating (pack Phase 8).
+ *
+ * Events: `turn` (what was heard / what she decided), `clause` (one synthesized clause, base64
+ * WAV), `end` (what was played), `error`. The reply text is chunked on the server with the
+ * same `ClauseChunker` the offline pipeline uses, so the page and the CLI cannot drift.
+ */
+async function streamVoice(body: TurnBody, response: ServerResponse): Promise<void> {
+  response.writeHead(200, {
+    'content-type': 'application/x-ndjson; charset=utf-8',
+    'cache-control': 'no-store',
+    connection: 'keep-alive',
+    // Without this the browser buffers the whole body and the streaming buys nothing.
+    'x-accel-buffering': 'no',
+  });
+  let open = true;
+  const send = (event: Record<string, unknown>): void => {
+    if (!open) return;
+    try {
+      response.write(`${JSON.stringify(event)}\n`);
+    } catch {
+      open = false; // the client hung up (page closed / reloaded)
+    }
+  };
+  try {
+    const result = await handleVoiceTurn(voiceDeps, body as VoiceTurnBody);
+    send({ type: 'turn', ...result, sourceLabel: '回应你', audio: null });
+    if (open && result.reply !== null) {
+      const clauses = chunkClauses(result.reply, { maxChars: CLAUSE_CHUNKER_LIMITS.maxChars, minCommaChars: CLAUSE_CHUNKER_LIMITS.minCommaChars });
+      const audios: string[] = [];
+      for (const [index, text] of clauses.entries()) {
+        const ttsStarted = Date.now();
+        const wav = await client.synthesize(text);
+        audios.push(Buffer.from(wav).toString('base64'));
+        send({
+          type: 'clause',
+          index,
+          text,
+          audio: Buffer.from(wav).toString('base64'),
+          ttsMs: Date.now() - ttsStarted,
+          of: clauses.length,
+        });
+      }
+      const plan = segmentPlan(result.reply, config.reply);
+      send({ type: 'end', segments: plan.segments, segmentGapMs: plan.gapMs, clauses: clauses.length, audio: audios.length > 0 ? concatWav(audios.map((item) => Buffer.from(item, 'base64')), 0).toString('base64') : null });
+    }
+    console.log(
+      `[voice] streaming ${result.action} vad=${result.vadMs}ms asr=${result.asrMs ?? '-'}ms first=${result.firstTokenMs ?? '-'}ms clauses=${result.stream?.ttsSegments ?? chunkClauses(result.reply ?? '').length}`,
+    );
+  } catch (error) {
+    const consoleError = error instanceof ConsoleError ? error : null;
+    send({
+      type: 'error',
+      error: consoleError?.message ?? (error instanceof Error ? error.message : String(error)),
+      code: consoleError?.code ?? 'VOICE_FAILED',
+      hint: consoleError?.hint ?? '重试一次；仍然失败请刷新页面并看终端日志',
+    });
+  } finally {
+    open = false;
+    response.end();
+  }
+}
+
+/** What the page needs to run the backchannel and to stop her the moment the father speaks. */
+async function assentPayload(): Promise<Record<string, unknown>> {
+  const clips: Record<string, string> = {};
+  if (ttsOn) {
+    for (const text of assentBank.clips) {
+      const wav = await assentBank.get(text);
+      if (wav !== null) clips[text] = Buffer.from(wav).toString('base64');
+    }
+  }
+  return {
+    available: Object.keys(clips).length > 0,
+    clips,
+    thresholds: XIXI_PLAYBACK_THRESHOLDS,
+    note: Object.keys(clips).length
+      ? '已经预生成，用在你说话的自然停顿处；它不会打断你，也不结束你的这一轮。'
+      : '没有可用的 TTS（或朗读被关掉）：不会应和，只在你停下之后回答。',
+  };
+}
+
 function json(response: ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload);
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
@@ -368,7 +472,7 @@ const server = createServer((request, response) => {
           // four stores — the note tells the user that persona/history from `npm run chat`
           // does not appear here.
           database: { path: DATA_DIR, entries: XIXI_DB_ENTRIES, note: '四个入口各用不同的库；在 chat 里设的人格与历史不会带到这里' },
-          segmentPlayback: { textSegmented: true, ttsSegmented: false, note: SEGMENT_TTS_NOTE },
+          segmentPlayback: { textSegmented: true, ttsSegmented: true, note: STREAMING_TTS_NOTE },
         });
         return;
       }
@@ -377,7 +481,16 @@ const server = createServer((request, response) => {
         return;
       }
       if (request.method === 'POST' && url.pathname === '/api/voice') {
-        await handleVoice(await readBody(request), response);
+        // Pack Phase 8: the trial page gets the streaming path (clause by clause, first clause
+        // played while the rest is generated). `?single=1` keeps the old whole-reply shape for
+        // a caller that wants one JSON object — the field-test console still does.
+        const body = await readBody(request);
+        if (url.searchParams.get('single') === '1') await handleVoice(body, response);
+        else await streamVoice(body, response);
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/api/voice/assent') {
+        json(response, 200, await assentPayload());
         return;
       }
       if (request.method === 'POST' && url.pathname === '/api/quiet') {
@@ -532,7 +645,7 @@ ${PROACTIVE_PANEL_CSS}
 </header>
 <div id="log"></div>
 <div class="card">${databaseNoteHtml(DATA_DIR)}</div>
-<div class="card" style="border-color:#5c4a22; background:#2a2314; color:#ffe6b8">${SEGMENT_TTS_NOTE}</div>
+<div class="card" style="border-color:#5c4a22; background:#2a2314; color:#ffe6b8">${STREAMING_TTS_NOTE}</div>
 ${proactivePanelHtml()}
 <footer>
   <form id="form">
@@ -544,6 +657,13 @@ ${proactivePanelHtml()}
 </footer>
 <script>
 ${proactivePanelScript('/api')}
+${XIXI_PLAYBACK_JS}
+// Pack Phase 8: the pre-generated 「嗯」 clips + the barge-in thresholds the server enforces.
+let assent = { available: false, clips: {}, thresholds: null };
+fetch('/api/voice/assent')
+  .then((response) => response.json())
+  .then((data) => { assent = data; })
+  .catch(() => {});
 const log = document.getElementById('log');
 const banner = document.getElementById('banner');
 const input = document.getElementById('input');
@@ -593,12 +713,78 @@ async function startRecording() {
   const source = context.createMediaStreamSource(stream);
   const processor = context.createScriptProcessor(4096, 1, 1);
   const chunks = [];
-  processor.onaudioprocess = (event) => { chunks.push(new Float32Array(event.inputBuffer.getChannelData(0))); };
+  processor.onaudioprocess = (event) => {
+    const frame = new Float32Array(event.inputBuffer.getChannelData(0));
+    chunks.push(frame);
+    // Pack Phase 8, two jobs on one frame stream:
+    //   ① barge-in — while SHE is talking, 150 ms of voiced frames stop her playback and drop
+    //      the un-played queue;
+    //   ② backchannel — while the user is talking, a 250 ms quiet stretch is a natural pause
+    //      and gets one pre-generated 「嗯」. Neither ends the user's turn: the recorder keeps
+    //      sampling while the button is held, whatever is said over her voice.
+    let sum = 0;
+    for (let i = 0; i < frame.length; i += 1) sum += frame[i] * frame[i];
+    const rms = Math.sqrt(sum / (frame.length || 1));
+    if (xixiWatchBargeIn(rms)) { hint.textContent = '听到你说话了，已经停下（未播的部分丢掉）'; return; }
+    if (rms > XIXI_PLAYBACK_THRESHOLDS.voiceRms) {
+      recorder.voicedMs += 20;
+      recorder.pauseMs = 0;
+      recorder.voicedSincePauseMs += 20;
+    } else {
+      recorder.pauseMs += 20;
+      if (xixiOnUserPause(recorder.pauseMs) && assent.available && recorder.voicedMs >= 1200) {
+        const texts = Object.keys(assent.clips);
+        const clip = assent.clips[texts[recorder.assents % texts.length]];
+        if (clip) xixiPlayClip(clip);
+      }
+    }
+  };
   source.connect(processor);
   processor.connect(context.destination);
-  recorder = { stream, context, source, processor, chunks, sampleRate: context.sampleRate, startedAt: Date.now() };
+  recorder = { stream, context, source, processor, chunks, sampleRate: context.sampleRate, startedAt: Date.now(), voicedMs: 0, pauseMs: 0, backchannels: 0, voicedSincePauseMs: 0 };
   micButton.textContent = '⏺ 松开发送';
   hint.textContent = '正在录音…（松开按钮结束）';
+}
+
+/**
+ * The streaming consumer: reads the newline-delimited events and plays each clause the moment
+ * its audio arrives. xixiSpeakClause resolves when the clause has started, so the
+ * 「首段可听」 time is what the browser actually heard, not what the server finished sending.
+ */
+async function readVoiceStream(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const clauseTimings = [];
+  let turn = null;
+  let end = null;
+  let failure = null;
+  const handle = async (event) => {
+    if (event.type === 'error') { failure = event; return; }
+    if (event.type === 'turn') { turn = event; return; }
+    if (event.type === 'clause') {
+      clauseTimings.push({ index: event.index, ttsMs: event.ttsMs, text: event.text });
+      // Play it NOW — while the engine is still generating the rest of the reply. This is the
+      // behaviour Phase 8 exists for: waiting for the end event would put 「首音」 back on the
+      // length of the whole reply.
+      if (event.audio) await xixiSpeakClause(event.audio);
+      return;
+    }
+    if (event.type === 'end') end = event;
+  };
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let newline = buffer.indexOf('\n');
+    while (newline >= 0) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      if (line.length > 0) await handle(JSON.parse(line));
+      newline = buffer.indexOf('\n');
+    }
+  }
+  return { turn, end, failure, clauseTimings };
 }
 
 async function stopRecording() {
@@ -626,8 +812,14 @@ async function stopRecording() {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ audioBase64: toBase64(encodeWav(merged, current.sampleRate)), speak: speakBox.checked }),
     });
-    const data = await response.json();
+    const { turn: raw, end, failure, clauseTimings } = await readVoiceStream(response);
     pending.parentElement.remove();
+    if (failure) {
+      add('xixi', '语音没成功：' + failure.error, failure.hint ?? '');
+      hint.textContent = '语音没成功：' + failure.error + (failure.hint ? '（' + failure.hint + '）' : '');
+      return;
+    }
+    const data = raw ?? {};
     if (data.ok === false) {
       add('xixi', '语音没成功：' + data.error, data.hint ?? '');
       hint.textContent = '语音没成功：' + data.error + (data.hint ? '（' + data.hint + '）' : '');
@@ -638,15 +830,18 @@ async function stopRecording() {
     } else {
       if (data.transcript) add('user', data.transcript);
       const stages = data.stages ?? {};
+      const firstClause = clauseTimings.length > 0 ? clauseTimings[0].ttsMs : null;
       const meta = (data.actionText ?? data.action) + ' · ' + (data.reasonText ?? data.reason)
         + ' · VAD ' + Math.round(stages.vadMs ?? 0) + 'ms · ASR ' + Math.round(stages.asrMs ?? 0) + 'ms'
         + ' · 首字 ' + (stages.llmFirstChunkMs == null ? '—' : Math.round(stages.llmFirstChunkMs) + 'ms')
+        + ' · 首段音频 ' + (firstClause == null ? '—' : Math.round(firstClause) + 'ms')
+        + ' · ' + clauseTimings.length + ' 块'
         + ' · 总 ' + Math.round(stages.totalMs ?? data.totalMs ?? 0) + 'ms'
         + ' · 语音段 ' + data.segmentsUsed + '/' + data.segmentsTotal + (data.droppedSegments && data.droppedSegments.length ? '（丢弃' + data.droppedSegments.length + '段）' : '')
         + ' · ' + data.state;
+      const plan = end ? { segments: end.segments, gapMs: end.segmentGapMs } : { segments: [data.reply], gapMs: 450 };
       if (data.action === 'SILENCE' || data.accepted === false) add('xixi silent', data.accepted === false ? '（这句不是对西西说的）' : '（西西选择沉默）', meta);
-      else addSegmented('xixi', data.sourceLabel ?? '回应你', data.segments, data.segmentGapMs ?? 450, meta);
-      if (data.audio) new Audio('data:audio/wav;base64,' + data.audio).play().catch(() => {});
+      else addSegmented('xixi', data.sourceLabel ?? '回应你', plan.segments, plan.gapMs, meta);
       if (data.privacy) hint.textContent = data.privacy.note;
     }
     setBanner(await (await fetch('/api/state')).json());

@@ -119,6 +119,10 @@ import {
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
 import { concatWav, readWav, readWavInfo, sliceWav } from './lib/wav.ts';
+// Pack Phase 8: the streaming speech pipeline (ClauseChunker → TTS queue → playback clock).
+// Shared with `scripts/voice-turn.ts` and asserted by `tests/unit/voice/voice-stream.test.ts`
+// so the console, the file-driven entry and the page cannot drift into three behaviours.
+import { fourStageLatency, SpeechPipeline } from '../services/voice-edge/voice_edge/voice_stream.ts';
 
 for (const [key, value] of Object.entries(readDotEnv())) {
   if (process.env[key] === undefined) process.env[key] = value;
@@ -747,6 +751,37 @@ export interface VoiceTurnPayload {
     readonly note: string;
   };
   readonly notes: readonly string[];
+  /**
+   * Pack Phase 8 (streaming voice): when the caller supplies `speakStream`, the reply is
+   * synthesized **clause by clause** and played as it is produced. These fields are absent
+   * when it does not, so a console built on the old contract sees exactly what it saw before
+   * (and `ttsSegments: 1` in the evidence means the streaming path did not actually run).
+   */
+  readonly stream?: {
+    readonly enabled: boolean;
+    /** How many clauses the reply was spoken as; `1` means the whole-reply fallback ran. */
+    readonly ttsSegments: number;
+    /** Model-clock ms from the first token to the first byte of the **first** clause's audio. */
+    readonly firstClauseTextMs: number | null;
+    readonly firstClauseAudioMs: number | null;
+    readonly clauses: readonly {
+      readonly index: number;
+      readonly text: string;
+      readonly reason: 'sentence' | 'pause' | 'max' | 'flush';
+      readonly synthMs: number | null;
+      readonly audioMs: number | null;
+      readonly durationMs: number;
+      readonly bytes: number;
+    }[];
+    readonly errors: readonly string[];
+    /** The four baseline delays (`docs/benchmarks/v01-baseline.md` §3.1), same clock. */
+    readonly fourStage: {
+      readonly vadEndToAsrFinalMs: number | null;
+      readonly asrFinalToFirstTokenMs: number | null;
+      readonly firstTokenToFirstAudioMs: number | null;
+      readonly totalToFirstAudioMs: number | null;
+    };
+  } | null;
 }
 
 export interface VoiceDeps {
@@ -764,6 +799,22 @@ export interface VoiceDeps {
    * otherwise the only path in the default gate that needs a Python interpreter.
    */
   readonly vad?: (wavPath: string) => Promise<VadResult>;
+  /**
+   * Pack Phase 8: the streaming speech sink. When it is supplied the voice turn no longer
+   * synthesizes the whole reply once — the model's deltas go through `ClauseChunker`, and each
+   * finished clause reaches this callback as soon as it exists, which is what makes 「首音」
+   * independent of the reply's length. It returns that clause's WAV, and `SpeechPipeline`
+   * measures the timing around it.
+   *
+   * It **must not** be awaited by the model's streaming callback: the pipeline dispatches it
+   * behind the token stream (that is the whole point), so a slow clause never delays the next
+   * one's chunking. Omitted by every existing console/test wiring on purpose: without it the
+   * old whole-reply path runs unchanged, so no offline gate starts depending on a real TTS.
+   */
+  readonly speakStream?: (request: {
+    readonly text: string;
+    readonly signal: AbortSignal;
+  }) => Promise<Buffer | Uint8Array>;
   readonly log?: (line: string) => void;
 }
 
@@ -881,25 +932,59 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
     /** t21 (t12 F2): the engine's notices, so the page can say *why* a turn said nothing. */
     const turnNotices: { readonly code: string; readonly detail: string }[] = [];
     const llmStarted = Date.now();
+
+    // Pack Phase 8: the streaming speech sink. `SpeechPipeline.push()` never blocks the model
+    // stream (synthesis runs behind it), so clause 1 is on its way to the speaker while the
+    // rest of the reply is still being generated. Without `deps.speakStream` nothing changes.
+    const abortController = new AbortController();
+    const speakStream = deps.speakStream;
+    const pipeline =
+      speakStream === undefined || !deps.ttsEnabled
+        ? null
+        : new SpeechPipeline(
+            (text) => speakStream({ text, signal: abortController.signal }),
+            (wav) => readWavInfo(Buffer.from(wav)).durationMs,
+          );
+
     const turn = await deps.engine.respond(
       { sessionId: deps.currentSessionId(), text: transcript, addressed: deps.engine.state === 'IDLE' },
       {
         onTextChunk: (chunk) => {
           if (firstChunkAt === null) firstChunkAt = Date.now();
           chunks.push(chunk);
+          pipeline?.push(chunk);
         },
         onNotice: (notice) => void turnNotices.push({ code: notice.code, detail: notice.detail }),
       },
     );
     const llmMs = Date.now() - llmStarted;
     const firstTokenMs = firstChunkAt === null ? null : firstChunkAt - llmStarted;
+    const shouldSpeak = deps.ttsEnabled && body.speak !== false && turn.action === 'SPEAK' && turn.text !== null;
+    // No TTS this turn (朗读 off, or she chose silence): the pipeline is not flushed at all, so
+    // a wired sink is never called — a "would have been spoken" synthesis would be both a cost
+    // and a lie in the payload.
+    const spoken = pipeline === null || !shouldSpeak ? [] : await pipeline.flush();
+    const firstClauseTextMs = pipeline?.clauses[0]?.textAtMs === undefined ? null : pipeline.clauses[0].textAtMs - llmStarted;
+    const firstClauseAudioMs = pipeline?.clauses[0]?.audioAtMs === undefined || pipeline.clauses[0].audioAtMs === null
+      ? null
+      : pipeline.clauses[0].audioAtMs - llmStarted;
 
     let audio: string | null = null;
     let ttsMs: number | null = null;
-    if (deps.ttsEnabled && body.speak !== false && turn.action === 'SPEAK' && turn.text !== null) {
-      const ttsStarted = Date.now();
-      audio = (await deps.client.synthesize(turn.text)).toString('base64');
-      ttsMs = Date.now() - ttsStarted;
+    if (shouldSpeak && turn.text !== null) {
+      if (pipeline !== null && spoken.length > 0) {
+        // Concatenate the clause audio into the one WAV the old contract returns, so nothing
+        // downstream (the console, the page's `audio` field) has to change its shape.
+        const stitched = concatWav(spoken.map((chunk) => Buffer.from(chunk.wav)), 0);
+        audio = stitched.toString('base64');
+        ttsMs = firstClauseAudioMs;
+      } else {
+        // The streaming path produced nothing (every clause failed, or the whole reply arrived
+        // as one un-chunked tail): fall back to the whole-reply call rather than saying nothing.
+        const ttsStarted = Date.now();
+        audio = (await deps.client.synthesize(turn.text)).toString('base64');
+        ttsMs = Date.now() - ttsStarted;
+      }
     }
 
     // Speech spans are only persisted when the policy explicitly asks for them.
@@ -955,6 +1040,33 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
       toolName: turn.toolName,
       notices: turnNotices,
       audio,
+      stream:
+        pipeline === null
+          ? null
+          : {
+              enabled: true,
+              ttsSegments: pipeline.clauses.length,
+              firstClauseTextMs,
+              firstClauseAudioMs,
+              clauses: pipeline.clauses.map((clause) => ({
+                index: clause.index,
+                text: clause.text,
+                reason: clause.reason,
+                synthMs: clause.synthMs,
+                audioMs: clause.audioAtMs === null ? null : clause.audioAtMs - llmStarted,
+                durationMs: spoken.find((chunk) => chunk.index === clause.index)?.durationMs ?? 0,
+                bytes: clause.bytes,
+              })),
+              errors: pipeline.errors,
+              fourStage: fourStageLatency({
+                endpointDelayMs: plan.used[plan.used.length - 1]?.endpointDelayMs ?? null,
+                asrMs,
+                firstTokenMs,
+                firstAudioMs: pipeline.clauses[0]?.audioAtMs === null || pipeline.clauses[0]?.audioAtMs === undefined
+                  ? null
+                  : pipeline.clauses[0].audioAtMs - (llmStarted + (firstTokenMs ?? 0)),
+              }),
+            },
       at: new Date().toISOString(),
       privacy: {
         policy: deps.policy,
@@ -2365,7 +2477,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       personality: store.selfProfile(),
       privacy: { policy, pruned, voiceDir },
       database: { path: dataDir, presencePath: presenceDataDir, entries: XIXI_DB_ENTRIES, note: '四个入口各用不同的库；在别处设的人格与历史不会带到这里' },
-      segmentPlayback: { textSegmented: true, ttsSegmented: false, note: SEGMENT_TTS_NOTE },
+      segmentPlayback: { textSegmented: true, ttsSegmented: true, note: STREAMING_TTS_NOTE },
       model: { configured: client.hasKey, offline },
       // Pack Phase 2: the console states which capabilities its conversation scope really
       // offers, so "四个内置工具 + 最多四轮" is visible without reading the source.
@@ -5658,6 +5770,26 @@ export const SEGMENT_TTS_NOTE =
   '多段回复（ADR-0010）：文字与播放计划真的按段（每段之间停 450ms，页面逐条出现）。' +
   '但语音合成（TTS）目前仍是整条回复一次合成，所以听感上暂时听不到段间停顿——按段合成属于下一步（M5）。';
 
+/**
+ * Pack Phase 8 changed the truth this note carries, so the note is now a function of it.
+ *
+ * A page must not claim either granularity it is not running: the field-test console and the
+ * trial page synthesize the reply **clause by clause while it is being generated** (that is
+ * what makes 首音 independent of the reply's length), while a console built without a TTS
+ * sink still speaks the whole reply in one call. `ttsSegmented` is that fact, and it comes
+ * from the wiring rather than from a constant — the old constant said 「一次合成」 even after
+ * the streaming path existed, which is exactly the kind of drift t42 wrote the note to stop.
+ */
+export function segmentTtsNote(ttsSegmented: boolean): string {
+  const head = '多段回复（ADR-0010）：文字与播放计划真的按段（每段之间停 450ms，页面逐条出现）。';
+  return ttsSegmented
+    ? `${head}语音合成（TTS）现在也是**流式**的：回复边生成边按句读切块（ClauseChunker），第一块立刻合成并在浏览器里开始播，后面的块边生成边合成（pack Phase 8）。`
+    : `${head}这台控制台没有接流式语音（没有 TTS sink），所以语音仍按整条回复一次合成。`;
+}
+
+/** The note the pages actually render — kept as a constant so no call site can forget it. */
+export const STREAMING_TTS_NOTE = segmentTtsNote(true);
+
 /** The 「本页用哪个库」block, shared by both pages. `currentDir` is the running page's own path. */
 export function databaseNoteHtml(currentDir: string): string {
   // Defensive: this is a pure page helper, and a page must never crash because one display
@@ -6508,7 +6640,7 @@ ${proactivePanelHtml()}
       <h2>对话记录（你 → 西西，以及西西自己开口）</h2>
       <div id="turns" class="muted">还没有轮次。按住 🎤 说一句试试，或先点左栏的「启用」让西西自己开口。</div>
       <div class="muted" style="margin-top:6px">多段回复（ADR-0010）在这里显示为「第 i/N 段 · 段间 450ms」（页面上逐条出现，终端也逐条打印）；完整一条也会写进事件日志。标注「主动开口」的条目是西西<b>没过问你就说的</b>，它也过了全部硬门禁。</div>
-      <div class="err" style="border-color:#5c4a22; background:#2a2314; color:#ffe6b8; margin-top:8px">${SEGMENT_TTS_NOTE}</div>
+      <div class="err" style="border-color:#5c4a22; background:#2a2314; color:#ffe6b8; margin-top:8px">${STREAMING_TTS_NOTE}</div>
     </section>
   </div>
 </main>

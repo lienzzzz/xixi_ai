@@ -284,8 +284,11 @@ test('the page is Chinese, self-describing and carries the boot state', () => {
   for (const marker of ['id="col-sensors"', 'id="col-config"', 'id="col-conversation"', 'id="px-enable"', 'id="px-disable"', 'id="px-cam"', 'id="px-tts-switch"', 'id="px-camera-switch"']) {
     assert.ok(page.includes(marker), `the three-column layout is missing ${marker}`);
   }
-  // t42 acceptance item 3: a page must not let a reader think TTS is segmented too.
-  assert.ok(page.includes('整条回复一次合成'), 'the page states the TTS granularity');
+  // t42 acceptance item 3: a page must not let a reader think TTS is segmented too — with pack
+  // Phase 8 that statement flipped: TTS really is streamed per clause now, and the page has to
+  // say so (a page that still said 「整条回复一次合成」 would be the misleading one).
+  assert.ok(page.includes('边生成边按句读切块'), 'the page states the real TTS granularity (streaming)');
+  assert.doesNotMatch(page, /整条回复一次合成/, 'and never repeats the stale whole-reply claim');
   assert.ok(page.includes('data/field-test'), 'and names its own database path');
   assert.ok(page.includes('px-quiet-start'), 'and carries the proactive knobs');
   assert.ok(page.includes('延迟分段'), 'the per-stage latency line is part of the UI');

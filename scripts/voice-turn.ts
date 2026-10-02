@@ -30,6 +30,10 @@ import { openXixiStore } from '@xixi/domain';
 
 import { REPO_ROOT, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
 import { concatWav, readWavInfo, readWav } from './lib/wav.ts';
+// Pack Phase 8: the streaming speech pipeline (ClauseChunker → TTS queue → playback clock).
+// The same class the console and the page use, so 「第一块立刻进 TTS 队列」 has one home.
+import { fourStageLatency, percentiles, SpeechPipeline } from '../services/voice-edge/voice_edge/voice_stream.ts';
+import { CLAUSE_CHUNKER_LIMITS } from '../packages/conversation/src/segments.ts';
 // Shared with the field-test console: the multi-segment planner and the
 // speech-only slicer, so "use every segment" lives in exactly one place.
 // `buildToolChain`/`CONVERSATION_SCOPE` come from the same file for the same reason:
@@ -61,6 +65,30 @@ interface VoiceTurnResult {
   readonly reason: string;
   readonly replyWav: string | null;
   readonly timings: Record<string, number | null>;
+  /** Pack Phase 8: one entry per clause that went to TTS, with the pipeline's own clock. */
+  readonly clauses:
+    | readonly {
+        readonly index: number;
+        readonly chars: number;
+        readonly reason: string;
+        readonly textMs: number;
+        readonly audioMs: number | null;
+        readonly synthMs: number | null;
+      }[]
+    | null;
+  /** ③ of the V0.1 whole-reply path on the identical reply (`--legacy-tts`), same batch. */
+  readonly legacyTtsMs: number | null;
+  /** `--trace` only: each model delta with its arrival time (to explain a ③ number). */
+  readonly deltas: readonly { readonly atMs: number; readonly chars: number; readonly text: string }[] | null;
+  /** When clause 1's TTS request went out, relative to the first token. */
+  readonly firstClauseDispatchedMs: number | null;
+  /** The four `docs/benchmarks/v01-baseline.md` §3.1 delays, from this turn's own clock. */
+  readonly fourStage: {
+    readonly vadEndToAsrFinalMs: number | null;
+    readonly asrFinalToFirstTokenMs: number | null;
+    readonly firstTokenToFirstAudioMs: number | null;
+    readonly totalToFirstAudioMs: number | null;
+  };
 }
 
 interface SegmentationResult {
@@ -98,12 +126,34 @@ async function segment(wavPath: string): Promise<SegmentationResult> {
 
 const args = process.argv.slice(2);
 const useFake = args.includes('--fake');
+/** Read a `--flag value` pair; defined before the flags that use it. */
+function argValue(name: string, fallback: string): string {
+  const index = args.indexOf(name);
+  return index >= 0 && args[index + 1] !== undefined ? (args[index + 1] as string) : fallback;
+}
+/**
+ * `--legacy-tts` synthesizes the **whole reply** once, after the reply is complete, exactly as
+ * V0.1 did (`docs/benchmarks/v01-baseline.md` §3.2). It exists so the 「改造前」 column of a
+ * latency report can come from the same batch, on the same reply text, rather than from a
+ * different run on a different day. It costs one extra TTS call per turn.
+ */
+const legacyTts = args.includes('--legacy-tts');
+/** `--trace` records every model delta with its arrival time (why stage ③ is what it is). */
+const trace = args.includes('--trace');
+/**
+ * `--min-comma=N` / `--max-chars=N` set the ClauseChunker's thresholds for this batch, so the
+ * 「第一块多长」 trade can be measured instead of guessed: a shorter first clause is synthesized
+ * sooner (first-audio latency falls) but the reply needs more TTS calls (total time rises).
+ * The defaults are `CLAUSE_CHUNKER_LIMITS` — see `packages/conversation/src/segments.ts`.
+ */
+const minComma = Number(argValue('--min-comma', String(CLAUSE_CHUNKER_LIMITS.minCommaChars)));
+const maxChars = Number(argValue('--max-chars', String(CLAUSE_CHUNKER_LIMITS.maxChars)));
 const wavs: string[] = [];
 for (let index = 0; index < args.length; index += 1) {
   if (args[index] === '--wav' && args[index + 1] !== undefined) wavs.push(args[index + 1]);
 }
 if (wavs.length === 0) {
-  console.error('用法：node scripts/voice-turn.ts --wav <file.wav> [--wav <file2.wav> ...] [--fake]');
+  console.error('用法：node scripts/voice-turn.ts --wav <file.wav> [--wav <file2.wav> ...] [--fake] [--legacy-tts]');
   process.exit(2);
 }
 
@@ -182,28 +232,85 @@ for (const wavPath of wavs) {
   const chunks: string[] = [];
   let firstChunkAt: number | null = null;
   const llmStart = Date.now();
+  /** `--trace`: every model delta and its arrival time, so a latency number can be explained. */
+  const deltas: { atMs: number; chars: number; text: string }[] = [];
+
+  /**
+   * Pack Phase 8: the streaming speech sink. Until 2026-10-01 this entry spoke the whole reply
+   * in one TTS call *after* the engine had finished, which is why stage ③ (「首 token → 首个音频」)
+   * sat at 2.3 s P50 in `docs/benchmarks/v01-baseline.md` §3.2. Now each clause goes to TTS the
+   * moment the chunker releases it, so ③ is the cost of the **first clause** and the reply's
+   * length no longer delays the first audible sound.
+   *
+   * `--legacy-tts` keeps the old shape in the same batch, on the same reply text: without it
+   * the 「改造前」 column could only come from a different run on a different day.
+   */
+  const pipeline =
+    useFake || client === null
+      ? null
+      : new SpeechPipeline(
+          (text) => client.synthesize(text),
+          (wav) => readWavInfo(Buffer.from(wav)).durationMs,
+          { earlyFirstClause: true, minCommaChars: minComma, maxChars },
+        );
+  /** Set by the pipeline the instant clause 1's TTS request is in flight. */
+  let firstClauseDispatchedAtMs: number | null = null;
+  pipeline?.onFirstClause((clause) => {
+    firstClauseDispatchedAtMs = clause.textAtMs;
+  });
   const turn = await engine.respond(
     { sessionId: session.sessionId, text: transcript, addressed: first },
     {
       onTextChunk: (chunk) => {
         if (firstChunkAt === null) firstChunkAt = Date.now();
         chunks.push(chunk);
+        if (trace) deltas.push({ atMs: Date.now() - llmStart, chars: chunk.length, text: chunk });
+        pipeline?.push(chunk);
       },
     },
   );
   const llmMs = Date.now() - llmStart;
   first = false;
+  const spoken = pipeline === null ? [] : await pipeline.flush();
 
   let replyWav: string | null = null;
   let ttsMs: number | null = null;
+  let legacyTtsMs: number | null = null;
   if (turn.action === 'SPEAK' && turn.text !== null && client !== null) {
-    const ttsStart = Date.now();
-    const audio = await client.synthesize(turn.text);
-    ttsMs = Date.now() - ttsStart;
-    replyWav = join(OUT_DIR, `reply-${results.length + 1}.wav`);
-    writeFileSync(replyWav, audio);
-    replyBuffers.push(audio);
+    if (pipeline !== null) {
+      // ③ for the streaming path: first token → first clause's audio, both read off the same
+      // clock the stages above use (never recomputed from a total).
+      const firstTokenAt = firstChunkAt;
+      const clause = pipeline.clauses[0];
+      ttsMs = clause === undefined || clause.audioAtMs === null || firstTokenAt === null ? null : clause.audioAtMs - firstTokenAt;
+      if (legacyTts) {
+        // The V0.1 counterfactual, on the identical reply text: one call for the whole reply.
+        const legacyStart = Date.now();
+        await client.synthesize(turn.text);
+        legacyTtsMs = Date.now() - legacyStart;
+      }
+      const buffers = spoken.map((chunk) => Buffer.from(chunk.wav));
+      if (buffers.length > 0) {
+        replyWav = join(OUT_DIR, `reply-${results.length + 1}.wav`);
+        writeFileSync(replyWav, concatWav(buffers, 0));
+        replyBuffers.push(concatWav(buffers, 0));
+      }
+    } else {
+      const ttsStart = Date.now();
+      const audio = await client.synthesize(turn.text);
+      ttsMs = Date.now() - ttsStart;
+      replyWav = join(OUT_DIR, `reply-${results.length + 1}.wav`);
+      writeFileSync(replyWav, audio);
+      replyBuffers.push(audio);
+    }
   }
+  const firstClause = pipeline?.clauses[0] ?? null;
+  const fourStage = fourStageLatency({
+    endpointDelayMs: lastUsed.endpointDelayMs ?? null,
+    asrMs,
+    firstTokenMs: firstChunkAt === null ? null : firstChunkAt - llmStart,
+    firstAudioMs: ttsMs,
+  });
 
   results.push({
     wav: wavPath,
@@ -223,6 +330,25 @@ for (const wavPath of wavs) {
     toolName: turn.toolName,
     reason: turn.reason,
     replyWav,
+    /** Pack Phase 8: one entry per clause that went to TTS, with its own timings. */
+    clauses:
+      firstClause === null
+        ? null
+        : (pipeline?.clauses ?? []).map((clause) => ({
+            index: clause.index,
+            chars: clause.text.length,
+            reason: clause.reason,
+            textMs: clause.textAtMs - llmStart,
+            audioMs: clause.audioAtMs === null ? null : clause.audioAtMs - llmStart,
+            synthMs: clause.synthMs,
+          })),
+    /** ③ of the V0.1 path on the identical reply (`--legacy-tts`), for a same-batch comparison. */
+    legacyTtsMs,
+    /** `--trace` only: the model's delta stream, so a ③ number can be diagnosed. */
+    deltas: trace ? deltas : null,
+    fourStage,
+    /** When clause 1's TTS request went out, relative to the first token (`--trace` explains it). */
+    firstClauseDispatchedMs: firstClauseDispatchedAtMs === null ? null : firstClauseDispatchedAtMs - llmStart,
     timings: {
       sourceDurationMs: Math.round(info.durationMs),
       vadMs,
@@ -252,11 +378,54 @@ if (replyBuffers.length > 0) {
   writeFileSync(conversationWav, concatWav(replyBuffers, 400));
 }
 
-printEvidence('语音闭环（夹具音频 → VAD → ASR → 对话 → TTS）', {
+/**
+ * Pack Phase 8's latency report, on the Four baseline delays.
+ *
+ * The before/after comparison only means something if both columns are the same measurement:
+ * ① VAD end → ASR final, ② ASR final → first token, ③ first token → first audible, ④ the sum
+ * including the endpoint hold. `--legacy-tts` fills ③-of-the-old-path in this very batch; the
+ * V0.1 column from `docs/benchmarks/v01-baseline.md` §3.2 is printed next to it for context,
+ * and the two are never mixed into one number (the baseline's runs are a different day, a
+ * different conversation and a different reply length).
+ */
+const latency = {
+  command: `node scripts/voice-turn.ts ${wavs.map((wav) => `--wav ${wav}`).join(' ')}${legacyTts ? ' --legacy-tts' : ''}${minComma === CLAUSE_CHUNKER_LIMITS.minCommaChars ? '' : ` --min-comma ${minComma}`}`,
+  chunker: { minCommaChars: minComma, maxChars, earlyFirstClause: true, defaults: CLAUSE_CHUNKER_LIMITS },
+  streaming: {
+    '① VAD end → ASR final (asrMs)': percentiles(results.map((turn) => turn.fourStage.vadEndToAsrFinalMs)),
+    '② ASR final → 首 token (llmFirstChunkMs)': percentiles(results.map((turn) => turn.fourStage.asrFinalToFirstTokenMs)),
+    '③ 首 token → 首段可听（第一块的合成）': percentiles(results.map((turn) => turn.fourStage.firstTokenToFirstAudioMs)),
+    '④ 首段可听总延迟（含端点保持）': percentiles(results.map((turn) => turn.fourStage.totalToFirstAudioMs)),
+  },
+  legacySameBatch: legacyTts
+    ? {
+        '③ 首 token → 整段音频（--legacy-tts，同一批）': percentiles(results.map((turn) => turn.legacyTtsMs)),
+        '④ 合计（--legacy-tts，用同一批 ①②）': percentiles(
+          results.map((turn) => {
+            const endpoint = turn.speech?.endpointDelayMs ?? null;
+            if (endpoint === null || turn.fourStage.asrFinalToFirstTokenMs === null || turn.legacyTtsMs === null) return null;
+            return Math.round(endpoint + (turn.fourStage.vadEndToAsrFinalMs ?? 0) + turn.fourStage.asrFinalToFirstTokenMs + turn.legacyTtsMs);
+          }),
+        ),
+      }
+    : null,
+  v01Baseline: {
+    source: 'docs/benchmarks/v01-baseline.md §3.2（n=16，2026-09-29 四批，非同一批）',
+    '① P50': 569,
+    '② P50': 2629,
+    '③ P50': 2285.5,
+    '④ P50': 6816,
+  },
+  clauseCount: percentiles(results.map((turn) => (turn.clauses === null ? null : turn.clauses.length))),
+  note: '四个延迟的定义与 docs/benchmarks/v01-baseline.md §3.1 逐字对应；③ 在流式下是「第一块」的合成耗时，在旧链路上是「整段回复」的合成耗时 —— 不是同一个物理量，所以两列分开写、不合并',
+};
+
+printEvidence('语音闭环（夹具音频 → VAD → ASR → 对话 → 流式 TTS）', {
   adapter: adapter.describe(),
   sessionId: session.sessionId,
   turns: results,
   stitchedReplyWav: conversationWav,
+  latency,
   note: 'e2e 估算含 VAD 端点延迟；每段文件的 segmentsTotal/segmentsUsed/droppedSegments 说明是否丢弃了语音段（不再静默丢弃）；真实麦克风与扬声器验收见 docs/recon/field-test-report-<日期>.md（§33 的 P50 < 500ms 打断目标不在本次证据内）',
 });
 store.recordHealth('voice-edge', 'ok', `voice turn batch of ${wavs.length}`);

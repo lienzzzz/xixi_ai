@@ -114,6 +114,366 @@ export function normalizeReplyText(text: string): string {
   return text.replace(/\s*\r?\n\s*/g, '').trim();
 }
 
+/* ======================================================================================
+ * ClauseChunker — the *streaming* splitter (pack Phase 8)
+ * ======================================================================================
+ *
+ * `splitReplyIntoSegments` above splits a reply **after it is complete**; it is the
+ * playback planner (ADR-0010) and stays exactly that. A voice turn needs something
+ * different: text arrives as model deltas, and the first clause must reach TTS while
+ * the rest of the reply is still being generated, otherwise 「首音」 waits for the whole
+ * reply to be synthesized. This class is that online splitter.
+ *
+ * Four triggers, matching the pack's ClauseChunker contract:
+ *   1. a sentence ender (`。！？!?…` — a run of them counts once) cuts immediately;
+ *   2. a comma-like mark (`，,、；;：:——、…`) cuts once the clause holds at least
+ *      `minCommaChars` characters — the "合理逗号 + 最低字数" rule;
+ *   3. `maxChars` cuts even with no punctuation at all (最大等待字符数);
+ *   4. `push()` input is appended and any complete clause is returned right away.
+ *
+ * Triggers 1–3 must not cut inside a decimal number or a URL (`3.14`, `v2.6`,
+ * `https://example.com/a，b`). A cut is never taken at a mark that has no lookahead
+ * yet, so a half-arrived 「3.」 waits for the next delta instead of being split.
+ *
+ * Invariants (pinned by `tests/unit/voice/clause-chunker.test.ts`):
+ *   * no character is invented, dropped or reordered. Every clause is trimmed (a leading
+ *     space would otherwise be sent to TTS as text), so the exact statement is:
+ *     `join(clauses) === text.trim()` **and** nothing non-whitespace is lost —
+ *     `text.replace(/\s/g, '')` equals the same of the joined clauses, with the empty
+ *     string staying empty. Unlike `normalizeReplyText`, line breaks are not removed: the input is
+ *     already-normalized delta text and an audible clause is exactly what was handed over;
+ *   * a clause is never empty and never longer than `maxChars` unless a single
+ *     indivisible run (a long URL) cannot be cut at all — that case is counted in
+ *     `overlong` rather than hidden.
+ */
+
+/** Characters that end a clause outright. Run-of-marks is handled by the scanner. */
+const SENTENCE_MARKS = new Set(['。', '！', '？', '!', '?', '…', '．', '.']);
+/** Marks that may cut **only** once the clause is already long enough. */
+const PAUSE_MARKS = new Set(['，', ',', '、', '；', ';', '：', ':', '—', '～', '~', '|']);
+/** Marks after which a decimal/URL guard applies (the `.` of `3.14` / `example.com`). */
+const DOTTED_PAUSE_MARKS = new Set(['.', '．']);
+const CJK_END_MARKS = new Set(['。', '！', '？', '…', '．']);
+const CJK_PAUSE_MARKS = new Set(['，', '、', '；', '：']);
+
+export const CLAUSE_CHUNKER_LIMITS = Object.freeze({
+  /**
+   * How long a clause must already be before a comma-like mark may cut it.
+   *
+   * This is the 「合理逗号 + 最低字数」 rule, and it is deliberately not a low number: a comma is
+   * a *release valve at the ceiling*, not a place to stop early. Cutting 「好的，」 at three
+   * characters produces a fragment that sounds like a hiccup, and it buys no latency — the
+   * first clause is released by the first sentence end anyway (that is what the target needs),
+   * while every comma cut adds one TTS round trip to the reply. Below this many characters a
+   * comma is simply ignored; above it, a comma is used as soon as the ceiling forces a cut.
+   */
+  minCommaChars: 12,
+  /**
+   * Hard ceiling on how long a clause may wait for a mark, i.e. 最大等待字符数. A reply with no
+   * punctuation at all (measured: models do produce these) must still start speaking, and a long
+   * clause costs more TTS time than the latency budget allows.
+   */
+  maxChars: 40,
+  /**
+   * How long the **first** clause must already be before a comma may release it mid-stream
+   * (`SpeechPipeline` with `earlyFirstClause`). Not a chunker rule — the chunker never cuts at a
+   * comma below `maxChars`; this is the one place where a slightly early start is worth a
+   * slightly short first clause, because the model sends the full stop last (measured 2026-10-01:
+   * waiting for it cost 200–800 ms before TTS could start).
+   */
+  earlyFirstClauseMinChars: 10,
+});
+
+export interface ClauseChunkerOptions {
+  readonly minCommaChars?: number;
+  readonly maxChars?: number;
+}
+
+function clampLimit(value: number | undefined, fallback: number, min: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.trunc(value));
+}
+
+function isDigit(char: string | undefined): boolean {
+  return char !== undefined && char >= '0' && char <= '9';
+}
+
+function isSpace(char: string | undefined): boolean {
+  return char !== undefined && /\s/.test(char);
+}
+
+/** CJK characters carry the same width as the Latin ones the limits are written in. */
+function isCjk(char: string | undefined): boolean {
+  if (char === undefined) return false;
+  const code = char.codePointAt(0) ?? 0;
+  return (
+    (code >= 0x3040 && code <= 0x30ff) || // kana
+    (code >= 0x3400 && code <= 0x4dbf) || // CJK ext A
+    (code >= 0x4e00 && code <= 0x9fff) || // CJK
+    (code >= 0xf900 && code <= 0xfaff) || // compatibility ideographs
+    (code >= 0xff00 && code <= 0xffef) // full-width forms
+  );
+}
+
+/** `v2.6`, `3.14`, `第 3.5 条` — a dotted number, never a sentence end. */
+const DOTTED_NUMBER = /(?:^|[\s(（])(?:v|V|第)?\d+(?:\.\d+)+/g;
+
+/**
+ * The half-open ranges `[start, end)` that must never be cut inside, because they hold a
+ * decimal number, a version or a URL. Recomputed per scan from the text that has arrived; the
+ * cost is irrelevant next to a model round trip, and a stateless scan cannot drift out of sync.
+ * (Fresh regex objects: a module-level `/g` regex carries `lastIndex` between callers.)
+ *
+ * The URL pattern stops at a sentence mark and at CJK text on purpose. `\S*` looked right until a
+ * real reply was measured: models write 「地址是 https://example.com/a，打开就能看到。」 with no
+ * space before the full stop, so `\S*` swallowed the rest of the sentence, which made *every*
+ * character of it "inside a URL" and silently disabled the early release (found 2026-10-01 by
+ * `tests/unit/voice/voice-stream.test.ts`).
+ */
+export function unbreakableSpans(text: string): readonly { readonly start: number; readonly end: number }[] {
+  const spans: { start: number; end: number }[] = [];
+  for (const match of text.matchAll(/(?:https?:\/\/|www\.)[^\s。！？，、；：…，（）()「」『』"'<>【】]+/gi)) {
+    const start = match.index ?? 0;
+    spans.push({ start, end: start + match[0].length });
+  }
+  for (const match of text.matchAll(DOTTED_NUMBER)) {
+    // `(?:^|[\s(（])` puts the marker one character into the match; shift back to the first digit.
+    const lead = /^[\s(（]/.test(match[0]) ? 1 : 0;
+    const start = (match.index ?? 0) + lead;
+    spans.push({ start, end: start + (match[0].length - lead) });
+  }
+  return spans.sort((left, right) => left.start - right.start);
+}
+
+function insideSpan(spans: readonly { readonly start: number; readonly end: number }[], at: number): boolean {
+  return spans.some((span) => at > span.start && at < span.end);
+}
+
+/**
+ * Is `index` a place the chunker is allowed to cut **after**? Pure and exported so the
+ * guard itself can be tested (the tests that matter are the decimal and URL ones).
+ *
+ * "Allowed" is not the same as "now": a mark that is both safe *and* unambiguous also has to
+ * clear `isStickyMark()`'s lookahead before it can release a clause mid-stream.
+ */
+export function isSafeCutIndex(text: string, index: number, spans = unbreakableSpans(text)): boolean {
+  if (insideSpan(spans, index)) return false;
+  const mark = text[index];
+  if (mark === undefined || !DOTTED_PAUSE_MARKS.has(mark)) return true;
+  if (isDigit(text[index - 1]) && (isDigit(text[index + 1]) || isCjk(text[index + 1]))) return false;
+  const around = (offset: number): string => text[index + offset] ?? '';
+  return !(isSpace(around(-1)) && isSpace(around(1)));
+}
+
+/**
+ * Marks that cannot be part of a number or a URL, in any language: a cut right after one is
+ * always safe, so they release a clause even when they are the last character that arrived.
+ */
+const NON_STICKY_MARKS = new Set(['。', '！', '？', '…', '，', '、', '；', '：', '—', '～']);
+
+/** A mark that still needs the next delta before its verdict is known. */
+function isStickyMark(text: string, index: number): boolean {
+  const mark = text[index] as string;
+  if (NON_STICKY_MARKS.has(mark)) return false;
+  if (index === text.length - 1) return true; // "3." / "a," — what follows decides
+  if (!DOTTED_PAUSE_MARKS.has(mark)) return false;
+  // A dot right after a whitespace-free run of non-space characters may be a host name
+  // ("example.com") or the start of a decimal ("3.14"): wait for the character after it.
+  if (isDigit(text[index - 1] ?? '')) return false; // covered by `unbreakableSpans`
+  if (isSpace(text[index - 1])) return false; // ". " is never part of a host name
+  return /[^\s。！？，、；：]/.test(text[index + 1] ?? '');
+}
+
+/**
+ * Does `char` end a clause on its own — i.e. is a cut right after it safe *and* unambiguous?
+ *
+ * Exported for the streaming pipeline, which uses it for one decision: 「the first clause is
+ * complete, send it to TTS now」 (`SpeechPipeline.push` with `earlyFirstClause`). A comma is
+ * deliberately **not** such a mark, even though it ends a clause: releasing a comma prefix would
+ * make the rest of the sentence start with a comma, and 「明天 3」 could still become 「明天 3.14」.
+ */
+export function isDecisiveSentenceEnd(char: string | undefined): boolean {
+  return char !== undefined && SENTENCE_MARKS.has(char) && !DOTTED_PAUSE_MARKS.has(char);
+}
+
+/** A comma-like mark that cannot be part of a number or a URL — the other decisive release. */
+export function isDecisivePauseEnd(char: string | undefined): boolean {
+  return char !== undefined && NON_STICKY_MARKS.has(char) && PAUSE_MARKS.has(char);
+}
+
+export interface ClauseChunk {
+  readonly text: string;
+  /** Why this clause was returned — the audit trail for a latency number (pack Phase 8). */
+  readonly reason: 'sentence' | 'pause' | 'max' | 'flush';
+}
+
+export class ClauseChunker {
+  readonly #minCommaChars: number;
+  readonly #maxChars: number;
+  #buffer = '';
+  #overlong = 0;
+
+  constructor(options: ClauseChunkerOptions = {}) {
+    this.#minCommaChars = clampLimit(options.minCommaChars, CLAUSE_CHUNKER_LIMITS.minCommaChars, 1);
+    this.#maxChars = clampLimit(options.maxChars, CLAUSE_CHUNKER_LIMITS.maxChars, 2);
+  }
+
+  /** What is still unsent (empty after `flush()`). */
+  get pending(): string {
+    return this.#buffer;
+  }
+
+  /** How many clauses went out over `maxChars` — an indivisible run (URL) was the cause. */
+  get overlong(): number {
+    return this.#overlong;
+  }
+
+  /**
+   * Feed the next delta. Returns every clause that became complete, in order — usually
+   * one, often none, and more than one when a delta carried several sentences at once.
+   */
+  push(chunk: string): readonly ClauseChunk[] {
+    if (chunk.length === 0) return [];
+    this.#buffer += chunk;
+    return this.#drain(false);
+  }
+
+  /** End of stream: whatever is left is the last clause (or nothing). */
+  flush(): readonly ClauseChunk[];
+  /**
+   * Release everything **up to** `at`, leaving the rest buffered — the seam the streaming voice
+   * path uses to send its first clause to TTS the moment its mark arrives, while the model is
+   * still generating the sentence that follows (pack Phase 8, `earlyFirstClause`).
+   *
+   * `at` is a hint, not an override: it is clamped into the buffer and only honoured when the
+   * character before it passes `isSafeCutIndex`, so a caller that guesses badly gets a shorter
+   * clause rather than one split inside a number or a URL. An empty result means "nothing to
+   * release yet", which is what lets a caller ask on every delta. Never used by
+   * `splitReplyIntoSegments` — the offline splitter stays untouched.
+   */
+  flush(at: number): readonly ClauseChunk[];
+  flush(at?: number): readonly ClauseChunk[] {
+    if (at !== undefined) return this.#releaseUpTo(at);
+    const out = this.#drain(true);
+    const tail = this.#buffer.trim();
+    if (tail.length > 0) {
+      if (tail.length > this.#maxChars) this.#overlong += 1;
+      out.push({ text: tail, reason: 'flush' });
+    }
+    this.#buffer = '';
+    return out;
+  }
+
+  #releaseUpTo(at: number): ClauseChunk[] {
+    const raw = Number.isFinite(at) ? Math.trunc(at) : 0;
+    const bounded = Math.max(0, Math.min(raw, this.#buffer.length));
+    if (bounded === 0) return [];
+    const head = this.#buffer.slice(0, bounded);
+    const spans = unbreakableSpans(head);
+    let cut = bounded;
+    while (cut > 0 && !isSafeCutIndex(head, cut - 1, spans)) cut -= 1;
+    if (cut === 0) return [];
+    const clause = head.slice(0, cut).trim();
+    if (clause.length === 0) return [];
+    if (clause.length > this.#maxChars) this.#overlong += 1;
+    this.#buffer = this.#buffer.slice(cut);
+    return [{ text: clause, reason: 'sentence' }];
+  }
+
+  #drain(atEnd: boolean): ClauseChunk[] {
+    const out: ClauseChunk[] = [];
+    for (;;) {
+      const text = this.#buffer;
+      if (text.length === 0) return out;
+      const spans = unbreakableSpans(text);
+      const cut = this.#findCut(text, spans, atEnd);
+      if (cut === null) return out;
+      const clause = text.slice(0, cut.at).trim();
+      if (clause.length === 0) {
+        // Only whitespace before the cut (a run of spaces after a mark): drop it and look on.
+        this.#buffer = text.slice(cut.at);
+        continue;
+      }
+      if (clause.length > this.#maxChars) this.#overlong += 1;
+      out.push({ text: clause, reason: cut.reason });
+      this.#buffer = text.slice(cut.at);
+      if (!atEnd && out.length >= 32) return out; // a burst: let the caller catch up
+    }
+  }
+
+  /**
+   * Mark-based cut, then the `maxChars` ceiling, then nothing (wait for more text).
+   *
+   * The scan is O(buffer) per call and the buffer is emptied at every clause, so it stays
+   * small — no index bookkeeping, and therefore no way for a stale index to drift.
+   */
+  #findCut(
+    text: string,
+    spans: readonly { readonly start: number; readonly end: number }[],
+    atEnd: boolean,
+  ): { readonly at: number; readonly reason: 'sentence' | 'pause' | 'max' } | null {
+    /** The last comma-like mark that is a legitimate cut point — used only at the ceiling. */
+    let bestPause = -1;
+    for (let index = 0; index < text.length; index += 1) {
+      const mark = text[index] as string;
+      const isSentence = SENTENCE_MARKS.has(mark);
+      const isPause = PAUSE_MARKS.has(mark);
+      if (!isSentence && !isPause) continue;
+      if (!isSafeCutIndex(text, index, spans)) continue;
+      // A mark whose verdict still depends on text that has not arrived cannot cut yet:
+      // 「看到 3.」 may still become 「看到 3.14」. The next delta (or `flush()`) releases it,
+      // so a clause is never cut inside a number, a version or a URL.
+      if (!atEnd && isStickyMark(text, index)) continue;
+      if (isSentence) return { at: this.#endOfMarkRun(text, index), reason: 'sentence' };
+      // A comma-like mark is remembered, not used: it only breaks the clause once the ceiling
+      // has been reached (see `CLAUSE_CHUNKER_LIMITS.minCommaChars`).
+      if (index + 1 >= this.#minCommaChars) bestPause = index + 1;
+    }
+    // The ceiling is the last resort: it applies only when nothing above released the clause.
+    if (text.length <= this.#maxChars) return null;
+    const ceiling = Math.min(text.length, this.#maxChars);
+    if (bestPause > 0 && bestPause <= ceiling) return { at: bestPause, reason: 'pause' };
+    return { at: this.#ceilingCut(text, spans), reason: 'max' };
+  }
+
+  /** Cut after a whole run of trailing marks (`！！`, `？！`, `……`) — one clause, one breath. */
+  #endOfMarkRun(text: string, index: number): number {
+    let end = index + 1;
+    while (end < text.length && (SENTENCE_MARKS.has(text[end] as string) || PAUSE_MARKS.has(text[end] as string))) {
+      end += 1;
+    }
+    return end;
+  }
+
+  /**
+   * The clause is at least `maxChars` long and holds no usable mark: cut at the last safe
+   * position (so a URL or a decimal stays whole), or — if even that is impossible — at the
+   * ceiling itself, which is the only case that can produce an over-long clause.
+   */
+  #ceilingCut(text: string, spans: readonly { readonly start: number; readonly end: number }[]): number {
+    const ceiling = Math.min(text.length, this.#maxChars);
+    for (let index = ceiling - 1; index > 0; index -= 1) {
+      if (isSafeCutIndex(text, index - 1, spans)) return index;
+    }
+    // No safe position at all (one indivisible run): cut at the ceiling. Never 0 — a cut that
+    // consumes nothing would make the drain loop spin forever.
+    return Math.max(1, ceiling);
+  }
+}
+
+/**
+ * One-shot convenience: chunk an already-complete reply. Used by the offline tests and by
+ * callers that want the streaming split of a finished text (never by the live path, which
+ * pushes deltas).
+ */
+export function chunkClauses(text: string, options: ClauseChunkerOptions = {}): readonly string[] {
+  const chunker = new ClauseChunker(options);
+  const out: string[] = [];
+  for (const clause of chunker.push(text)) out.push(clause.text);
+  for (const clause of chunker.flush()) out.push(clause.text);
+  return out;
+}
+
 const SENTENCE = /[^。！？!?…]+[。！？!?…]*/g;
 
 /** Cut after sentence enders, keeping the punctuation attached to its sentence. */

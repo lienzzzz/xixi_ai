@@ -131,6 +131,7 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | `packages/model-adapters/src/mimo.ts`（含 `chatJson` 策略） | `design/brain-and-models.md`、`recon/mimo-api-probe-2026-09-29.md`（若发现新缺陷） |
 | `apps/brain-dsh/profile/cordis.patch.yml`（插件集/人格/system prompt） | `design/brain-and-models.md`、`architecture.md`、`design/security-and-privacy.md`（权限面） |
 | `services/voice-edge/**` 或 VAD 参数 | `design/voice.md`、`recon/pipecat-spike-2026-09-29.md`、`recon/device-acceptance-2026-09-30.md` |
+| `services/voice-edge/**/voice_stream.ts`（切块与流式合成） | `design/voice.md` 的流式段、[`recon/voice-streaming-2026-10-01.md`](recon/voice-streaming-2026-10-01.md)、`testing.md` 的语音命令 |
 | `services/perception-edge/**` 或在场检测参数 | [`design/perception.md`](design/perception.md)、`recon/camera-detector-choice-2026-09-30.md` |
 | `scripts/field-test.ts`（现场测试控制台） | `design/perception.md`、`design/voice.md`、[`testing.md`](testing.md) 的脚本表、本文件 §0 的用户须知 |
 | `packages/conversation/src/proactive.ts` 或人格默认值 | `design/conversation.md`、[`adr/0009`](adr/0009-proactive-triggers-and-hard-gates.md)、本文件 §0（主动性怎么调/怎么关） |

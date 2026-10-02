@@ -391,17 +391,22 @@ test('the console serves the proactive card, its state, and obeys the switch ove
     assert.deepEqual(state.openThreads, { threads: [], candidates: [], history: [] }, '库里还没有话题时如实报空，不编造');
 
     // t42 acceptance item 3: the page must say which database it uses, that the four entry
-    // points do not share one, and that TTS is still whole-reply (text is what is segmented).
+    // points do not share one, and what TTS granularity is really running. Pack Phase 8 made
+    // that granularity *streaming* (clause by clause, first clause played while the rest is
+    // generated), so the honest statement is the opposite of the old one — and a page that
+    // still claimed 「整条回复一次合成」 would now be the dishonest version.
     const fieldState = (await (await fetch(`${handle.url}/api/field/state`)).json()) as Record<string, any>;
     assert.equal(fieldState.database?.path, join(root, 'data'), 'the console reports the store it is really using');
     assert.ok(Array.isArray(fieldState.database?.entries) && fieldState.database.entries.length >= 4, 'all entry points are listed');
     assert.equal(fieldState.segmentPlayback?.textSegmented, true);
-    assert.equal(fieldState.segmentPlayback?.ttsSegmented, false, 'the honest state: TTS is not segmented yet');
-    assert.match(String(fieldState.segmentPlayback?.note ?? ''), /整条回复一次合成/);
+    assert.equal(fieldState.segmentPlayback?.ttsSegmented, true, 'the honest state after Phase 8: TTS is streamed per clause');
+    assert.match(String(fieldState.segmentPlayback?.note ?? ''), /流式/, 'and the note names the mechanism');
+    assert.match(String(fieldState.segmentPlayback?.note ?? ''), /ClauseChunker/);
     assert.ok(page.includes('本页用的是哪个数据库'), 'the console shows the database block prominently');
     assert.ok(page.includes('data/field-test'), 'and its own path');
     assert.ok(page.includes('不会'), 'and warns that another entry point\'s persona/history is not here');
-    assert.ok(page.includes('整条回复一次合成'), 'and states the TTS granularity honestly');
+    assert.ok(page.includes('边生成边按句读切块'), 'and states the real TTS granularity');
+    assert.doesNotMatch(page, /整条回复一次合成/, 'the stale claim must not survive the change');
 
     // The shipped default quiet window is 23:30–07:30 (config/xixi.example.yaml), so a drill that is
     // required to be deliverable fails every night between those hours. Pin an empty window first:
@@ -475,12 +480,13 @@ test('the trial page shows segments in order, labels the source, and carries the
     assert.ok(html.includes('主动开口'), 'proactive messages are labelled differently');
     assert.ok(html.includes(`id="${PROACTIVE_PANEL_IDS.card}"`), 'the trial page carries the same proactive card');
     assert.ok(html.includes('data/web-chat'), 'the trial page names its own database');
-    assert.ok(html.includes('整条回复一次合成'), 'and discloses that TTS is not segmented yet');
+    assert.ok(html.includes('边生成边按句读切块'), 'and discloses that TTS is streamed per clause (pack Phase 8)');
+    assert.doesNotMatch(html, /整条回复一次合成/, 'the stale whole-reply claim must not survive');
 
     const webState = (await (await fetch(base + '/api/state')).json()) as Record<string, any>;
     assert.equal(webState.database?.path, root, 'the trial page reports the store it is really using');
     assert.ok(Array.isArray(webState.database?.entries) && webState.database.entries.length >= 4, 'all entry points are listed');
-    assert.equal(webState.segmentPlayback?.ttsSegmented, false);
+    assert.equal(webState.segmentPlayback?.ttsSegmented, true);
 
     // The switch and the strength first: cooldown 0 makes the *next* gate reachable below,
     // which is also how this test shows a knob change taking effect immediately. The quiet window is
