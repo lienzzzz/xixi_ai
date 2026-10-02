@@ -123,6 +123,7 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | `packages/conversation/src/fsm.ts`（状态/超时/判定） | `design/conversation.md`、`tests/unit/conversation-fsm.test.ts` |
 | `packages/conversation/src/prompt.ts`（§26 顺序/指令） | `design/conversation.md`、`tests/unit/prompt.test.ts` |
 | `packages/conversation/src/segments.ts`（段数上限/块长/容量） | `design/conversation.md` §7、[`adr/0010`](adr/0010-multi-segment-replies.md) 的修订记录、本文件 §0 与 `README.md` 的「多段回复」行 |
+| `packages/conversation/src/topic-engine.ts`（收口判据与词表） | `design/conversation.md` 的收口段、[`adr/0012`](adr/0012-open-thread-closure-criterion.md) §判据升级、`progress.md` |
 | `packages/model-adapters/src/reply-hygiene.ts` 或引擎的清洗/通知 | `design/brain-and-models.md` §4、`design/conversation.md` 的通知表、`progress.md` |
 | `scripts/lib/realism-metrics.ts` 或 `scripts/eval-realism.ts`（指标口径/语料） | [`benchmarks/realism-metrics.md`](benchmarks/realism-metrics.md) 的口径段、`tests/scenarios/realism-metrics.test.ts` |
 | `packages/brain-adapter/src/types.ts`（§25 接口） | `design/brain-and-models.md`、`architecture.md` |
