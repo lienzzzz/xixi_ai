@@ -302,6 +302,19 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    取消态任务，就是冻结。
    本轮修法：把 t13 与 t15 合并成一条「回复管道」任务（同一位成员、同一批文件），
    再按正确依赖重建下游（t21→t22→t23/t24/t25），内容一字未丢。
+   **补充（2026-10-01 第五轮换来）：依赖「失败」同样冻结下游，而运行期有三处硬限制，解药是 `amend_task`。**
+   ① **失败的任务不满足依赖**：第五轮 t3（流式语音）判 failed 后，依赖它的 t4 永远不被派发——
+   状态页只显示 `pending` 且成员空转（与取消同款）。② **运行期不能取消任务**：`edit_plan` 的 `remove_task`
+   会被拒（提示 roster 与 removal 只能在 staged 计划里改），所以「先取消再重建」这条路走不通。
+   ③ **依赖只能正向补**：校验器要求**被更新**的那个任务对自己重叠的每个任务声明依赖；若两者互相重叠、
+   而对方已经依赖了你，补一条反向依赖就报 `cycle`——于是「删掉那条失败依赖」这个动作会被重叠校验挡住。
+   **解药（本轮实测可行）**：用 **`agent_teams_amend_task`** 收窄其中一个任务的 `inScope`（**inScope 只有 amend 能改**），
+   把重叠路径按**文件级**让给另一条线，**然后**再 `edit_plan` 改依赖就通过了。本轮实例：t4 与 t9 在
+   `scripts/field-test.ts`、`scripts/serve-chat.ts`、`packages/conversation/src/`、`tests/unit/`、`tests/console/`
+   上重叠 → 把 t4 的 `inScope` 收窄到领域层与提示词层的具体文件（控制台面板与 scripts 下的接线列为下一轮），
+   t4 的依赖随即可以改成 `[t2, t1]`。
+   **纪律**：任务判 failed 后**立刻**检查所有下游（`deps` 含它的待办任务）并改接；改接被重叠挡住就用 amend 收窄 inScope，
+   并且**把切掉的部分写成下一轮候选**（本轮把「心情的控制台面板」记进 handoff），不要把范围收缩混同为降标准。
 23. **运行中的团队改不了成员模型——要换模型只能归档重建**（2026-10-01 第三轮换队的真实原因）：
    运行中的团队 `agent_teams_edit_plan` **只允许改 pending 且无 attempt 的任务**（依赖/描述/assignee），
    `update_member` 会被拒；成员模型只在 `add_member`（或 `create({plan})`）那一刻生效，**建完就固定**。
