@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { flattenPrompt } from '@xixi/brain-adapter';
+import { moodProse } from '@xixi/domain';
 import {
   CORE_IDENTITY,
   HARD_POLICY,
@@ -182,4 +183,79 @@ test('sections are addressable so the Debug UI can show exactly what the model s
   const names = prompt.sections.map((section) => section.name);
   assert.deepEqual(names, ['core-identity', 'safety-policy', 'effective-style', 'world-state', 'current-turn']);
   assert.ok(prompt.sections.every((section) => section.part === 'system' || section.part === 'user'));
+});
+
+/**
+ * 心情进提示词（第五轮 t4）：**散文**给模型，数字只进 `sections`（Debug UI）。
+ *
+ * 两条要同时成立，所以它们钉在同一个用例里：
+ *   * 模型看到的是句子（`mood.ts` 渲染），不是 `valence=0.31` 这种参数（pack §23 明文禁止）；
+ *   * 没传心情时提示词与从前**逐字相同** —— 特性是增量的，老调用方不必知道它存在。
+ */
+test('心情以散文进提示词：没有数字、没有不存在的经历，且不接线时提示词逐字不变', () => {
+  const withoutMood = assembler.assemble(input());
+  assert.ok(!withoutMood.system.includes('你现在的心情'), '不传心情就没有这一段');
+  assert.equal(
+    withoutMood.sections.some((section) => section.name === 'mood'),
+    false,
+  );
+
+  const mood = {
+    valence: 0.31,
+    energy: 0.72,
+    prose: moodProse({ valence: 0.31, energy: 0.72 }),
+    updatedAt: '2026-10-01T20:00:00+08:00',
+    staleAfterMinutes: 160,
+    now: '2026-10-01T20:05:00+08:00',
+  };
+  const withMood = assembler.assemble(input({ mood }));
+
+  // 散文进了稳定前缀，而且带一句「这是状态不是事实」的边界（pack §23 的可执行版本）。
+  assert.ok(withMood.system.includes('你现在的心情'));
+  assert.ok(withMood.system.includes('不是发生过的某件事'));
+  for (const line of mood.prose) {
+    assert.ok(withMood.system.includes(line), `每一句散文都该进提示词：${line}`);
+  }
+  // 模型看不到数字：`0.31` / `0.72` 不许出现在 system 或 user 里。
+  assert.doesNotMatch(withMood.system, /0\.31|0\.72|valence|energy/, 'system 里不许出现数值或参数名');
+  assert.doesNotMatch(withMood.user, /0\.31|0\.72|valence|energy/, 'user 里也不许出现');
+  assert.ok(withMood.user.includes('心情：'), '世界状态那一行给的是「这份心情有多新」，不是数值');
+
+  // Debug UI 看得到数值（挂在 `sections[].debug` 上，**不拼进** system/user）。
+  const moodSection = withMood.sections.find((section) => section.name === 'mood');
+  assert.ok(moodSection !== undefined, '心情必须是可寻址的一段（§22.2）');
+  assert.equal(moodSection.part, 'system');
+  assert.ok((moodSection.debug ?? '').includes(String(mood.valence)), 'Debug 段里保留数值供核对');
+  assert.ok(!withMood.system.includes('valence='), '数值绝不能拼进模型看的 system');
+
+  // 心情不同 → 说话方式不同（否则「轻微影响语气」没有可观察结果）。
+  const low = assembler.assemble(input({ mood: { ...mood, valence: 0.05, energy: 0.05, prose: moodProse({ valence: 0.05, energy: 0.05 }) } }));
+  assert.notEqual(low.system, withMood.system);
+
+  // 久未更新的心情要说明「多半淡了」，否则一句早上的心情会被当成此刻的心情。
+  const stale = assembler.assemble(input({ mood: { ...mood, updatedAt: '2026-10-01T01:00:00+08:00' } }));
+  assert.ok(stale.user.includes('早先的心情'), '过期的心情必须自己说明');
+});
+
+test('心情那一行不泄漏数值、也不依赖系统时钟（重放同输入同输出）', () => {
+  const mood = {
+    valence: 0.9,
+    energy: 0.9,
+    prose: moodProse({ valence: 0.9, energy: 0.9 }),
+    updatedAt: '2026-10-01T20:00:00+08:00',
+    staleAfterMinutes: 160,
+    now: '2026-10-01T21:00:00+08:00',
+  };
+  const first = assembler.assemble(input({ mood }));
+  const second = assembler.assemble(input({ mood }));
+  assert.equal(first.system, second.system, '同样的输入必须得到同样的提示词（`now` 是显式传入的）');
+  assert.equal(first.user, second.user);
+  // 「刚更新过 / 早先的心情」这类措辞里不该出现时刻：`user` 里唯一允许出现时间的是那一行「现在：…」。
+  const worldLines = first.user.split('\n').filter((line) => line.startsWith('- '));
+  const withoutNow = worldLines.filter((line) => !line.startsWith('- 现在：'));
+  assert.ok(
+    withoutNow.every((line) => !/\d{2}:\d{2}/.test(line)),
+    `除了「现在：」那一行，上下文里不该再出现时刻：${JSON.stringify(withoutNow)}`,
+  );
+  assert.ok(first.user.includes('心情：'), '心情那一行仍然在');
 });

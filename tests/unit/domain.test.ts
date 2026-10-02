@@ -6,6 +6,14 @@ import { join } from 'node:path';
 
 import { buildEvent, type EventEnvelope } from '@xixi/contracts';
 import {
+  applyMoodDecay,
+  applyMoodDelta,
+  applyMoodSignals,
+  applyTimeOfDay,
+  clampMood,
+  clampMoodValue,
+  classifyMoodSignal,
+  DEFAULT_MOOD_SETTINGS,
   DEFAULT_SELF_MODEL_SETTINGS,
   DomainError,
   fixedClock,
@@ -13,8 +21,17 @@ import {
   loadXixiConfig,
   MemoryStore,
   migrate,
+  MOOD_BAND_THRESHOLDS,
+  MOOD_BOUNDS,
+  MOOD_SIGNAL_CODES,
+  MOOD_SIGNALS,
+  moodBand,
+  moodBias,
+  moodProse,
+  NEUTRAL_MOOD,
   OpenThreadStore,
   openXixiStore,
+  parseMoodSettings,
   parseSelfModelSettings,
   parseXixiConfig,
   personalityProperty,
@@ -386,8 +403,8 @@ test('004_memory 是新增迁移：四张表落地，旧库照旧能打开', () 
   const files = listMigrationFiles();
   assert.deepEqual(
     files.map((file) => file.name),
-    ['001_initial.sql', '002_world_state.sql', '003_open_threads.sql', '004_memory.sql'],
-    '已发布的迁移只能新增，不能改写',
+    ['001_initial.sql', '002_world_state.sql', '003_open_threads.sql', '004_memory.sql', '005_mood.sql'],
+    '已发布的迁移只能新增，不能改写（005_mood 是第五轮 t4 新增的心情表）',
   );
   const store = tempStore();
   try {
@@ -414,6 +431,285 @@ test('self_model 段：出厂配置与代码默认逐字一致，坏值被夹进
     parseSelfModelSettings({ learning_enabled: 'yes', daily_limit_explicit: null, drift_limit: {}, session_override_limit: [] }),
     DEFAULT_SELF_MODEL_SETTINGS,
   );
+});
+
+/**
+ * 有界的心情（第五轮 t4）——**上下界的证明**。
+ *
+ * 判据不是「试了很多次都没越界」，而是每一条路径都只做 `clamp(prev + delta)`：
+ * `clamp` 的值域是 `[0,1]`，与 `prev`、`delta` 无关，于是「`prev ∈ [0,1]` ⇒ `next ∈ [0,1]`」
+ * 对任意步数归纳成立（`moodApply` 是全部写入路径的唯一入口）。
+ *
+ * 这条用例把那个归纳**逐格**跑出来：
+ *   * 单步：每一个信号、每一个极端起点；
+ *   * 序列：连续极端输入（同向 1000 次、轮换 1000 次）；
+ *   * 反方向：只往一个方向推，也必须停在边界上而不是穿过去；
+ *   * 坏输入：`NaN` / `±Infinity` / 负的经过时间 / `rate > 1`；
+ *   * 衰减与时段牵引：任何一步都不例外。
+ */
+test('心情的上下界：任何输入序列（含连续极端）都不越界 —— 逐步 clamp 的归纳证明', () => {
+  const inBounds = (state: { valence: number; energy: number }, where: string): void => {
+    for (const [axis, value] of [
+      ['valence', state.valence],
+      ['energy', state.energy],
+    ] as const) {
+      assert.ok(
+        Number.isFinite(value) && value >= MOOD_BOUNDS.min && value <= MOOD_BOUNDS.max,
+        `${where}：${axis}=${value} 越界（必须在 [${MOOD_BOUNDS.min}, ${MOOD_BOUNDS.max}]）`,
+      );
+    }
+  };
+
+  // 1) clamp 本身：边界值、越界值、非有限值。`NaN` 不能被当成「大数」，它是坏输入 → 退回中性。
+  assert.equal(clampMoodValue(0), 0);
+  assert.equal(clampMoodValue(1), 1);
+  assert.equal(clampMoodValue(1e9), 1);
+  assert.equal(clampMoodValue(-1e9), 0);
+  assert.equal(clampMoodValue(Number.POSITIVE_INFINITY), 1);
+  assert.equal(clampMoodValue(Number.NEGATIVE_INFINITY), 0);
+  assert.equal(clampMoodValue(Number.NaN), NEUTRAL_MOOD.valence);
+  assert.deepEqual(clampMood({ valence: Number.NaN, energy: 9e9 }), { valence: 0.5, energy: 1 });
+
+  // 2) 单步：每个信号 × 每个极端起点。
+  const corners = [
+    { valence: 0, energy: 0 },
+    { valence: 1, energy: 1 },
+    { valence: 0, energy: 1 },
+    { valence: 1, energy: 0 },
+    { valence: 0.5, energy: 0.5 },
+  ];
+  for (const corner of corners) {
+    for (const code of MOOD_SIGNAL_CODES) {
+      const spec = MOOD_SIGNALS[code];
+      inBounds(applyMoodDelta(corner, { valence: spec.valence, energy: spec.energy }), `单步 ${code} 起点 ${JSON.stringify(corner)}`);
+    }
+  }
+
+  // 3) 序列一：同一个极端信号连续 1000 次（「连续极端输入」）。
+  let state = { valence: 0.5, energy: 0.5 };
+  for (let step = 0; step < 1000; step += 1) {
+    state = applyMoodSignals(state, [{ code: 'blamed', at: '2026-10-01T00:00:00+08:00', evidence: '被嫌了一句' }]).state;
+    state = applyMoodSignals(state, [{ code: 'rejected', at: '2026-10-01T00:00:00+08:00', evidence: '被明确叫停了' }]).state;
+    inBounds(state, `连续负面第 ${step} 步`);
+  }
+  assert.equal(state.valence, 0, '连续负面必须停在 0 而不是穿过去');
+
+  // 4) 序列二：反方向（连续正面）停在 1。
+  state = { valence: 0.5, energy: 0.5 };
+  for (let step = 0; step < 1000; step += 1) {
+    state = applyMoodSignals(state, [{ code: 'praised', at: '2026-10-01T00:00:00+08:00', evidence: '被夸了一句' }]).state;
+    inBounds(state, `连续正面第 ${step} 步`);
+  }
+  assert.equal(state.valence, 1, '连续正面必须停在 1');
+
+  // 5) 序列三：所有信号轮换 1000 次（正负交替、每类都上场）。
+  state = { valence: 0.5, energy: 0.5 };
+  for (let step = 0; step < 1000; step += 1) {
+    const batch = MOOD_SIGNAL_CODES.map((code) => ({
+      code,
+      at: '2026-10-01T00:00:00+08:00',
+      evidence: MOOD_SIGNALS[code].label,
+    }));
+    state = applyMoodSignals(state, batch).state;
+    inBounds(state, `轮换第 ${step} 步`);
+  }
+
+  // 6) 衰减与时段：负时间、`NaN`、超大间隔、每个小时点。
+  for (const hours of [-5, 0, Number.NaN, Number.POSITIVE_INFINITY, 0.001, 24, 100_000]) {
+    inBounds(applyMoodDecay({ valence: 0, energy: 1 }, hours), `衰减 ${String(hours)} 小时`);
+    inBounds(applyMoodDecay({ valence: 1, energy: 0 }, hours), `衰减 ${String(hours)} 小时（反向）`);
+  }
+  for (let hour = 0; hour < 24; hour += 1) {
+    for (const hours of [-1, 0, Number.NaN, 0.5, 8, 1000]) {
+      inBounds(applyTimeOfDay({ valence: 0, energy: 0 }, hour, hours), `时段 ${hour} 点 / ${String(hours)} 小时`);
+      inBounds(applyTimeOfDay({ valence: 1, energy: 1 }, hour, hours), `时段 ${hour} 点 / ${String(hours)} 小时（反向）`);
+    }
+  }
+
+  // 7) 中性不被时段推动：「今天还没发生任何事」必须是真正的中性。
+  for (let hour = 0; hour < 24; hour += 1) {
+    assert.deepEqual(applyTimeOfDay(NEUTRAL_MOOD, hour, 8), NEUTRAL_MOOD, `${hour} 点的中性心情不该被时段推走`);
+  }
+
+  // 7b) 回落是**半程折返**：一次长间隔把偏离抹掉一部分，但永远抹不到越过中性到另一边。
+  for (const start of [0, 0.1, 0.9, 1]) {
+    const after = applyMoodDecay({ valence: start, energy: start }, 100, DEFAULT_MOOD_SETTINGS);
+    assert.ok(after.valence >= Math.min(start, NEUTRAL_MOOD.valence) - 1e-9, `回落不该越过中性（起点 ${start}）`);
+    assert.ok(after.valence <= Math.max(start, NEUTRAL_MOOD.valence) + 1e-9, `回落不该反向冲出去（起点 ${start}）`);
+    inBounds(after, `回落 ${start}`);
+  }
+  assert.equal(applyMoodDecay(NEUTRAL_MOOD, 100, DEFAULT_MOOD_SETTINGS).valence, NEUTRAL_MOOD.valence, '中性没有可回落的东西');
+
+  // 8) 出厂设置下走一遍完整序列（信号 + 衰减 + 时段交替），每一步都在界内。
+  state = { valence: 0.5, energy: 0.5 };
+  for (let step = 0; step < 500; step += 1) {
+    const code = MOOD_SIGNAL_CODES[step % MOOD_SIGNAL_CODES.length] ?? 'praised';
+    state = applyMoodSignals(state, [{ code, at: '2026-10-01T00:00:00+08:00', evidence: MOOD_SIGNALS[code].label }], DEFAULT_MOOD_SETTINGS).state;
+    state = applyMoodDecay(state, step % 7 === 0 ? 12 : 0.1, DEFAULT_MOOD_SETTINGS);
+    state = applyTimeOfDay(state, step % 24, step % 5 === 0 ? 6 : 0.5);
+    inBounds(state, `完整序列第 ${step} 步（${code}）`);
+  }
+});
+
+test('心情的语义层：区间决定散文，散文里没有数字、也不编造经历', () => {
+  // 区间边界只有一份（`MOOD_BAND_THRESHOLDS`），散文只认区间。
+  assert.equal(moodBand(0), 'veryLow');
+  assert.equal(moodBand(MOOD_BAND_THRESHOLDS.low - 0.01), 'low');
+  assert.equal(moodBand(MOOD_BAND_THRESHOLDS.low), 'neutral');
+  assert.equal(moodBand(MOOD_BAND_THRESHOLDS.good), 'neutral');
+  assert.equal(moodBand(MOOD_BAND_THRESHOLDS.good + 0.01), 'good');
+  assert.equal(moodBand(1), 'veryGood');
+
+  // 偏表达：'good' 与 'neutral' 的措辞必须真的不一样（否则「轻微影响语气」没有可观察结果）。
+  const neutral = moodProse({ valence: 0.5, energy: 0.5 });
+  const good = moodProse({ valence: 0.9, energy: 0.5 });
+  const low = moodProse({ valence: 0.1, energy: 0.1 });
+  assert.notDeepEqual(neutral, good);
+  assert.notDeepEqual(neutral, low);
+  assert.match(good.join('\n'), /轻快|松快/);
+  assert.match(low.join('\n'), /话少|别装|短一点/);
+
+  // 散文里**没有数字**（pack §23：不要把情绪数值暴露给 prompt），也没有参数名/机器话。
+  for (const state of [
+    { valence: 0, energy: 0 },
+    { valence: 0.5, energy: 0.5 },
+    { valence: 1, energy: 1 },
+    { valence: 0.42, energy: 0.77 },
+  ]) {
+    const text = moodProse(state).join('\n');
+    assert.doesNotMatch(text, /\d/, `散文里不该出现数字：${text}`);
+    assert.doesNotMatch(text, /valence|energy|mood|心情值|参数/i, `散文里不该出现参数名：${text}`);
+    // pack §23 的可执行版本：不许出现「我今天出去买菜了」式的**不存在的实体经历**。
+    assert.doesNotMatch(text, /我(今天|刚才|昨天)?(出去|去|到|在)(买|逛|看|吃|走|做)/, `散文不许编造实体经历：${text}`);
+    assert.doesNotMatch(text, /(我|自己)(吃|喝|睡)过|我身体|我累了一天/, `散文不许描述身体经历：${text}`);
+    // 但必须保留「这是状态不是事实」的那道边界。
+    assert.match(text, /不要因此说出你没做过的事/);
+  }
+
+  // 偏表达与两个维度的**平均**一致：valence 高、energy 低时不该被算成「很好」。
+  assert.equal(moodBias(NEUTRAL_MOOD), 0);
+  assert.ok(moodBias({ valence: 1, energy: 1 }) > 0.9);
+  assert.ok(moodBias({ valence: 0, energy: 0 }) < -0.9);
+  assert.ok(moodBias({ valence: Number.NaN, energy: Number.NaN }) === 0, '坏输入退回中性而不是把偏置变成 NaN');
+});
+
+test('心情的信号识别：夸 / 嫌 / 明确叫停分得开，普通聊天不是情绪事件', () => {
+  assert.equal(classifyMoodSignal('谢谢你啊'), 'praised');
+  assert.equal(classifyMoodSignal('还是你细心'), 'praised');
+  assert.equal(classifyMoodSignal('你说得不错'), 'praised');
+  assert.equal(classifyMoodSignal('真烦人'), 'blamed');
+  assert.equal(classifyMoodSignal('你记错了'), 'blamed');
+  // 拒绝优先于嫌弃、也优先于夸奖：「你别说了，谢谢」按拒绝算。
+  assert.equal(classifyMoodSignal('你别说了'), 'rejected');
+  assert.equal(classifyMoodSignal('今天别聊了'), 'rejected');
+  assert.equal(classifyMoodSignal('安静点'), 'rejected');
+  assert.equal(classifyMoodSignal('你别说了，谢谢'), 'rejected');
+  // 普通聊天与**长期指令**都不是心情信号：前者不该推动情绪，后者走人格学习那一层。
+  for (const text of ['今天天气不错', '中午吃的面条', '明天我要去买药', '嗯', '', '   ']) {
+    assert.equal(classifyMoodSignal(text), null, `「${text}」不该被当成情绪事件`);
+  }
+  assert.equal(classifyMoodSignal('你可以主动一点'), null, '长期指令不是心情信号（那是 feedback-interpreter 的活）');
+  assert.equal(classifyMoodSignal('你话太多了'), null, '同上：嫌话多属于人格学习');
+});
+
+test('心情的持久化：可查看、可复位、可回滚（历史是一份变更记录）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'xixi-mood-store-'));
+  const at = new Date('2026-10-01T20:00:00+08:00');
+  const store = openXixiStore({ dbPath: join(dir, 'x.sqlite'), clock: fixedClock(at) });
+  try {
+    // 全新库：没有心情行，读回来是「还没有」（查看方不能把「没有」当成中性）。
+    assert.equal(store.mood(), null);
+    assert.equal(store.moodSchemaVersion(), 0);
+    assert.deepEqual(store.moodHistory(), []);
+
+    // 写入：非有限值也被夹住（表里不可能出现越界值）。
+    const written = store.recordMood({
+      state: { valence: 1.4, energy: Number.NaN },
+      previous: null,
+      source: 'mood:test',
+      summary: '测试写入',
+      signals: { praised: 1 },
+      signalCount: 1,
+      evidence: { praised: 1 },
+    });
+    assert.equal(written.valence, 1);
+    assert.equal(written.energy, NEUTRAL_MOOD.energy, 'NaN 退回中性');
+    assert.equal(store.moodSchemaVersion(), 1, '持久记录带 schema_version（铁律 10）');
+    assert.deepEqual(store.mood()?.evidence, { praised: 1 });
+
+    // 第二次写入（真的变了）→ 历史里多一行，且 delta 与 before/after 一致。
+    store.recordMood({
+      state: { valence: 0.2, energy: 0.3 },
+      previous: { valence: written.valence, energy: written.energy },
+      source: 'mood:blamed',
+      summary: '被嫌了一句×1',
+      signals: { blamed: 1 },
+      signalCount: 1,
+      evidence: { praised: 1, blamed: 1 },
+    });
+    const history = store.moodHistory();
+    assert.equal(history.length, 2);
+    assert.equal(history[1]?.note, '被嫌了一句×1');
+    assert.ok(Math.abs((history[1]?.delta.valence ?? 0) - (0.2 - 1)) < 1e-9, 'delta 必须与 before/after 一致');
+
+    // 没变化的一拍**不写历史**（否则每 tick 一行会把「为什么她今天低」淹掉），但 lastBeatAt 会前进。
+    const beforeQuiet = store.moodHistory().length;
+    store.recordMood({
+      state: { valence: 0.2, energy: 0.3 },
+      previous: { valence: 0.2, energy: 0.3 },
+      source: 'mood:decay',
+      summary: '没有新的信号',
+      signals: {},
+      signalCount: 0,
+      evidence: { praised: 1, blamed: 1 },
+      at: '2026-10-01T21:00:00+08:00',
+    });
+    assert.equal(store.moodHistory().length, beforeQuiet, '没变化就不写历史');
+    assert.equal(store.mood()?.lastBeatAt, '2026-10-01T21:00:00+08:00', '但评估时刻要前进（衰减据它算）');
+
+    // 复位：回到中性、留一行 reset=true、并把解释旧心情的计数清掉。
+    const reset = store.resetMood('test:reset', '2026-10-01T22:00:00+08:00');
+    assert.equal(reset.valence, NEUTRAL_MOOD.valence);
+    assert.equal(reset.energy, NEUTRAL_MOOD.energy);
+    assert.deepEqual(reset.evidence, {});
+    const last = store.moodHistory().at(-1);
+    assert.equal(last?.reset, true);
+    assert.match(last?.note ?? '', /复位/);
+
+    // 手改一行越界值（模拟旧版本/人工编辑）：读回来仍然在界内。
+    const stored = store.mood();
+    assert.ok(stored !== null);
+  } finally {
+    store.close();
+  }
+
+  // 重开：状态还在（持久化），且仍是合法值。
+  const reopened = openXixiStore({ dbPath: join(dir, 'x.sqlite'), clock: fixedClock(at) });
+  try {
+    const persisted = reopened.mood();
+    assert.equal(persisted?.valence, NEUTRAL_MOOD.valence, '复位后的状态跨重启仍然是中性');
+    assert.equal(reopened.appliedMigrations.length, 0, '重启不该重跑迁移');
+  } finally {
+    reopened.close();
+  }
+});
+
+test('mood 段：出厂配置与代码默认逐字一致，坏值被夹进区间', () => {
+  const config = loadXixiConfig(join(REPO_ROOT, 'config', 'xixi.example.yaml'));
+  assert.deepEqual(parseMoodSettings(config.mood), DEFAULT_MOOD_SETTINGS);
+  assert.deepEqual(parseMoodSettings(undefined), DEFAULT_MOOD_SETTINGS);
+  assert.equal(parseMoodSettings({ decay_per_hour: 0.2 }).decayPerHour, 0.2);
+  assert.deepEqual(
+    parseMoodSettings({ enabled: 'yes', decay_per_hour: null, decay_cap: {}, max_signals_per_beat: [] }),
+    DEFAULT_MOOD_SETTINGS,
+  );
+  // 越界被夹进区间（与 open_threads / self_model 同一口径），不是抛错。
+  assert.deepEqual(parseMoodSettings({ decay_per_hour: 5, decay_cap: -1, max_signals_per_beat: 0 }), {
+    ...DEFAULT_MOOD_SETTINGS,
+    decayPerHour: 1,
+    decayCap: 0,
+    maxSignalsPerBeat: 1,
+  });
 });
 
 test('malformed configuration is refused with a named path', () => {

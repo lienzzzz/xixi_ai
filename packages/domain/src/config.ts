@@ -49,6 +49,12 @@ export interface XixiConfig {
    * （`packages/domain/src/self-model.ts` 的 `DEFAULT_SELF_MODEL_SETTINGS`）。
    */
   readonly selfModel?: Record<string, unknown>;
+  /**
+   * 有界的心情（第五轮 t4）。可选：缺段 = 出厂默认（`packages/domain/src/mood.ts` 的
+   * `DEFAULT_MOOD_SETTINGS`）。**心情不参与硬底线**，所以这一段里没有任何能把主动开口
+   * 关掉的开关 —— 它只能调「回落多快、一次吸收多少信号」。
+   */
+  readonly mood?: Record<string, unknown>;
   readonly memory: Record<string, unknown>;
   readonly privacy: Record<string, unknown>;
   readonly features: Record<string, unknown>;
@@ -147,6 +153,7 @@ export function parseXixiConfig(source: string, file = '<inline>'): XixiConfig {
     reply: optionalSection(xixi, 'reply'),
     openThreads: optionalSection(xixi, 'open_threads'),
     selfModel: optionalSection(xixi, 'self_model'),
+    mood: optionalSection(xixi, 'mood'),
     memory: section(xixi, 'memory', file),
     privacy: section(xixi, 'privacy', file),
     features: section(xixi, 'features', file),

@@ -41,9 +41,12 @@ test('002_world_state is a new, additive migration', () => {
   // （004_memory.sql）各要一批新表，所以多了两个**新增**的迁移。这条断言的用意是
   // 「已发布的迁移只能新增、不能改写」，因此列表必须把每一个已发布文件都写出来
   // （改写 001/002/003 仍然会被抓住），新迁移就把它加进来。
+  //
+  // 第五轮 t4：有界的心情新增 `005_mood.sql`（`mood_state` + `mood_history` 两张表，
+  // 见 docs/adr/0013-bounded-mood-state.md）。它同样是**新增**，没有改写任何已发布的迁移。
   assert.deepEqual(
     files.map((file) => file.name),
-    ['001_initial.sql', '002_world_state.sql', '003_open_threads.sql', '004_memory.sql'],
+    ['001_initial.sql', '002_world_state.sql', '003_open_threads.sql', '004_memory.sql', '005_mood.sql'],
     '已发布的迁移只能新增，不能改写',
   );
   const store = tempStore();

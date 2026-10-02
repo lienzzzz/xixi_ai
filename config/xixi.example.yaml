@@ -125,6 +125,19 @@ xixi:
     drift_limit: 0.30             # 学习层累计偏移上限
     session_override_limit: 0.35  # 「今天想安静点」这类当天覆盖的单次上限
 
+  # 有界的心情（第五轮 t4）：短期情绪状态，由事件演化（被夸 / 被嫌 / 被明确叫停、主动没人应 /
+  # 有人接、有人到家、深夜与清晨），按时间向中性回落，两个维度都在 [0,1] 内**可证明**不越界。
+  # 本段**已被代码读取**：`packages/domain/src/mood.ts` 的 `parseMoodSettings` 读它，
+  # `packages/conversation/src/mood-engine.ts` 用它演化（默认每个 live 入口都开）。
+  # 它只影响**语气**与对话窗口（各最多 ±6%，权重远小于上面的人格层），**不参与任何硬底线**：
+  # 静默时段 / 额度 / 隐私都在 `proactive.ts` 的硬门禁里判定，那条路径拿不到心情。
+  # 查看与复位走领域接口（`XixiStore.mood` / `moodHistory` / `resetMood`）；控制台面板属于下一轮。
+  mood:
+    enabled: true                 # 关掉后不再演化（已有状态保持原样，仍可查看与复位）
+    decay_per_hour: 0.075         # 每小时把「距中性多远」抹掉约 7.5%（半衰期约 9 小时）
+    decay_cap: 0.6                # 两次评估之间最多抹掉 60% 的偏离（断电再开机不会心情被清空）
+    max_signals_per_beat: 8       # 一次评估最多吸收多少条信号（多出来的留给下一拍）
+
   privacy:
     continuous_audio_cloud_upload: false
     continuous_video_cloud_upload: false

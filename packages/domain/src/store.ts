@@ -36,6 +36,14 @@ import {
 } from './open-threads.ts';
 import { clampPersonality, personalityProperty } from './personality.ts';
 import {
+  clampMood,
+  clampMoodValue,
+  MOOD_SIGNAL_CODES,
+  NEUTRAL_MOOD,
+  type MoodSignalCode,
+  type MoodState,
+} from './mood.ts';
+import {
   effectivePersonality,
   localDayOf,
   type LearnedDelta,
@@ -196,6 +204,74 @@ export interface SelfProfileChange {
   readonly createdAt: string;
 }
 
+/** `mood_state` 的唯一键：心情是「现在」的一个点，所以只有一行（005_mood.sql）。 */
+export const MOOD_STATE_KEY = 'mood.now';
+
+/**
+ * 存下来的心情（`mood_state` 一行）。
+ *
+ * `evidence` 是**累计**的信号次数 —— 它让面板回答「她为什么是这个心情」，也让审计不必回读整份日志。
+ * 数值本身有硬边界（`mood.ts` 的 `clampMoodValue` 是唯一写入路径），读回来时再夹一次，
+ * 所以「库里存了一个越界值」这种状态不会传到消费方。
+ */
+export interface StoredMood {
+  readonly valence: number;
+  readonly energy: number;
+  readonly evidence: Readonly<Partial<Record<string, number>>>;
+  readonly lastBeatAt: string | null;
+  /**
+   * 已经吸收到哪一条事件（`events.sequence`）。
+   *
+   * 为什么时间戳不够：`respond()` 先把这一轮落库、再评估心情，两者可能是**同一个时刻**，
+   * 于是「严格晚于上次评估」这个条件会把这一轮排除掉（夸奖要到下一拍才算）。而放宽成「不早于」
+   * 又会让同一拍被重复吸收。**序号**是唯一能同时满足「不漏」与「不重」的游标。
+   */
+  readonly lastEventSequence: number;
+  readonly source: string;
+  readonly summary: string;
+  readonly updatedAt: string;
+}
+
+export interface MoodSnapshot {
+  /** 此刻事件日志的最大序号（调用方可以吸收到这儿为止）。 */
+  readonly cursorSequence: number;
+  readonly mood: StoredMood | null;
+  /** 最近若干条变更，老的在前。 */
+  readonly history: readonly MoodChange[];
+}
+
+export interface RecordMoodInput {
+  readonly state: MoodState;
+  readonly previous: MoodState | null;
+  /** 程序标识符：`mood:praised` / `mood:reset` / `mood:quiet`。 */
+  readonly source: string;
+  /** 渲染好的中文摘要（面板显示它，不显示 code）。 */
+  readonly summary: string;
+  /** 本拍用到的信号次数（code → 次数）。 */
+  readonly signals: Readonly<Partial<Record<string, number>>>;
+  readonly signalCount: number;
+  readonly droppedCount?: number;
+  /** 这一次是不是复位；复位也写历史，否则「她为什么突然平静了」没有答案。 */
+  readonly reset?: boolean;
+  readonly evidence: Readonly<Partial<Record<string, number>>>;
+  /** 本拍读到的事件序号上界（下一次评估从它之后开始）。省略 = 保持原值。 */
+  readonly cursorSequence?: number;
+  readonly at?: string;
+}
+
+export interface MoodChange {
+  readonly changeId: string;
+  readonly before: MoodState;
+  readonly after: MoodState;
+  readonly delta: MoodState;
+  readonly reset: boolean;
+  readonly signals: Readonly<Partial<Record<string, number>>>;
+  readonly signalCount: number;
+  readonly droppedCount: number;
+  readonly note: string;
+  readonly createdAt: string;
+}
+
 interface EventRow {
   sequence: number;
   event_id: string;
@@ -235,6 +311,35 @@ interface WorldStateRow {
   updated_at: string;
   confidence: number;
   ttl_seconds: number;
+}
+
+interface MoodStateRow {
+  key: string;
+  schema_version: number;
+  valence: number;
+  energy: number;
+  evidence_json: string;
+  last_beat_at: string | null;
+  cursor_json: string;
+  source: string;
+  summary: string;
+  updated_at: string;
+}
+
+interface MoodHistoryRow {
+  change_id: string;
+  before_valence: number;
+  before_energy: number;
+  after_valence: number;
+  after_energy: number;
+  delta_valence: number;
+  delta_energy: number;
+  reset: number;
+  signals_json: string;
+  signal_count: number;
+  dropped_count: number;
+  note: string;
+  created_at: string;
 }
 
 interface OpenThreadRow {
@@ -874,6 +979,187 @@ export class XixiStore {
     });
   }
 
+  // ------------------------------------------------------------------ mood (005)
+
+  /**
+   * The current mood, or `null` when nothing has ever moved it (a fresh database).
+   *
+   * Both dimensions are **clamped on read** as well as on write: a row that was written by an older
+   * build (or edited by hand) must never be able to hand a consumer a value outside `[0,1]`.
+   * `staleHours` is not stored — it is derived from `lastBeatAt` by the caller, which owns the clock.
+   */
+  mood(): StoredMood | null {
+    this.#assertOpen();
+    const row = this.#db.prepare('SELECT * FROM mood_state WHERE key = ?').get(MOOD_STATE_KEY) as unknown;
+    if (row === undefined) return null;
+    return toStoredMood(row as MoodStateRow);
+  }
+
+  /**
+   * 冷静地看一眼心情：**一个事务里**读三样东西，而且不写任何一行。
+   *
+   * 为什么需要它（实测换来的）：`ConversationEngine.respond()` 先把这一轮落库、再组装提示词并评估心情，
+   * 两者常常是**同一个时刻**。若「读到哪一条事件」与「读到哪儿为止」分两次读，就可能出现
+   * 「事件在这两次读之间落库、但游标已经前进」的窗口 —— 那一轮就被永久跳过了（本机实测：夸奖
+   * 在 `respond()` 里第一次评估时被漏掉，要等到下一拍才算）。一个只读快照把这两件事绑在一起：
+   *   * `cursorSequence` 是此刻事件日志的最大序号（下一个该被吸收的位置）；
+   *   * `mood` / `moodHistory` 是同一瞬间的行。
+   * 心情与日志的一致性因此不依赖「两次读之间没人写」，而是由**单次读**保证。
+   */
+  moodSnapshot(options: { readonly historyLimit?: number } = {}): MoodSnapshot {
+    this.#assertOpen();
+    return this.#transaction(() => {
+      const row = this.#db.prepare('SELECT MAX(sequence) AS last FROM events').get() as unknown as { last: number | null };
+      const historyLimit = Math.max(1, Math.floor(options.historyLimit ?? 20));
+      const historyRows = this.#db
+        .prepare('SELECT * FROM mood_history ORDER BY created_at DESC, rowid DESC LIMIT ?')
+        .all(historyLimit) as unknown as MoodHistoryRow[];
+      const moodRow = this.#db.prepare('SELECT * FROM mood_state WHERE key = ?').get(MOOD_STATE_KEY) as unknown;
+      return {
+        cursorSequence: Number(row.last ?? 0),
+        mood: moodRow === undefined ? null : toStoredMood(moodRow as MoodStateRow),
+        history: historyRows.map(toMoodChange).reverse(),
+      };
+    });
+  }
+
+  /**
+   * Persist one mood beat: the current row plus — only when it actually changed — one history row.
+   *
+   * Why "only when it changed": the breaker loop beats every tick, so writing a history row per beat
+   * would bury the answer to "why is she low today" under hundreds of identical rows. A beat that
+   * changes nothing is not an event worth keeping; the current row still gets its `lastBeatAt`
+   * advanced, because that timestamp is what the next decay is computed from.
+   *
+   * Timestamps are written with the **local** offset (`toOffsetIso`, the repo's convention, see
+   * `domain-model.md` §4.1), not `Date#toISOString()`: everything that compares them
+   * (`worldState`, `moodHistory`, the engine's "since the last beat" window) goes through
+   * `Date.parse`, and a UTC stamp mixed with local ones shifts every boundary by the offset —
+   * measured as an 8-hour error on this machine, which silently dropped same-evening events.
+   */
+  recordMood(input: RecordMoodInput): StoredMood {
+    this.#assertOpen();
+    const at = input.at ?? this.#now();
+    const next = clampMood(input.state);
+    const before = input.previous === null ? null : clampMood(input.previous);
+    const changed =
+      before === null ||
+      input.reset === true ||
+      Math.abs(before.valence - next.valence) > 1e-9 ||
+      Math.abs(before.energy - next.energy) > 1e-9;
+
+    this.#transaction(() => {
+      const current = this.#db.prepare('SELECT cursor_json FROM mood_state WHERE key = ?').get(MOOD_STATE_KEY) as unknown as
+        | { cursor_json: string }
+        | undefined;
+      const cursor = input.cursorSequence ?? (current === undefined ? 0 : parseCursor(current.cursor_json));
+      this.#db
+        .prepare(
+          `INSERT INTO mood_state (
+             key, schema_version, valence, energy, evidence_json, last_beat_at, cursor_json, source, summary, updated_at
+           )
+           VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET
+             valence = excluded.valence,
+             energy = excluded.energy,
+             evidence_json = excluded.evidence_json,
+             last_beat_at = excluded.last_beat_at,
+             cursor_json = excluded.cursor_json,
+             source = excluded.source,
+             summary = excluded.summary,
+             updated_at = excluded.updated_at`,
+        )
+        .run(
+          MOOD_STATE_KEY,
+          next.valence,
+          next.energy,
+          JSON.stringify(input.evidence),
+          at,
+          JSON.stringify({ sequence: cursor }),
+          input.source,
+          input.summary,
+          at,
+        );
+
+      if (!changed) return;
+      const from = before ?? next;
+      this.#db
+        .prepare(
+          `INSERT INTO mood_history (
+             change_id, schema_version, before_valence, before_energy, after_valence, after_energy,
+             delta_valence, delta_energy, reset, signals_json, signal_count, dropped_count, note, created_at
+           ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          `moodchg_${randomUUID()}`,
+          from.valence,
+          from.energy,
+          next.valence,
+          next.energy,
+          next.valence - from.valence,
+          next.energy - from.energy,
+          input.reset === true ? 1 : 0,
+          JSON.stringify(input.signals),
+          input.signalCount,
+          input.droppedCount ?? 0,
+          input.summary,
+          at,
+        );
+    });
+
+    const stored = this.mood();
+    if (stored === null) throw new DomainError('MIGRATION_FAILED', 'mood_state row missing after write');
+    return stored;
+  }
+
+  /**
+   * 心情历史（最近 N 条，老的在后）：可查看、可回滚的凭据。
+   *
+   * It is a **change log**, not a time series: a quiet hour produces no row at all. Pair it with the
+   * event log when the question is "what happened", and with this table when the question is
+   * "how did she take it".
+   */
+  moodHistory(limit = 20): MoodChange[] {
+    this.#assertOpen();
+    const rows = this.#db
+      .prepare('SELECT * FROM mood_history ORDER BY created_at DESC, rowid DESC LIMIT ?')
+      .all(Math.max(1, Math.floor(limit))) as unknown as MoodHistoryRow[];
+    return rows.map(toMoodChange).reverse();
+  }
+
+  /**
+   * 复位（可回滚的一侧）：回到中性，并**留一行历史**说明是谁按的。
+   *
+   * Deliberately not "delete the row": a reset is an event in her short-term state's life, and the
+   * question "why did she suddenly sound neutral again" must have an answer in the data.
+   */
+  resetMood(reason = 'admin:reset', at?: string): StoredMood {
+    this.#assertOpen();
+    const current = this.mood();
+    const before: MoodState = current === null ? NEUTRAL_MOOD : { valence: current.valence, energy: current.energy };
+    return this.recordMood({
+      state: NEUTRAL_MOOD,
+      previous: before,
+      source: 'mood:reset',
+      summary: `心情复位：${reason}`,
+      signals: {},
+      signalCount: 0,
+      reset: true,
+      // A reset is not evidence: the counts that explained the old mood are dropped on purpose.
+      evidence: {},
+      ...(at === undefined ? {} : { at }),
+    });
+  }
+
+  /** `mood_state` 的 schema 版本（铁律 10：持久记录都带版本，读取方可以核对）。 */
+  moodSchemaVersion(): number {
+    this.#assertOpen();
+    const row = this.#db.prepare('SELECT schema_version FROM mood_state WHERE key = ?').get(MOOD_STATE_KEY) as unknown as
+      | { schema_version: number }
+      | undefined;
+    return row?.schema_version ?? 0;
+  }
+
   /**
    * Record a presence transition: **one transaction**, event log + projection.
    *
@@ -1499,6 +1785,76 @@ function toWorldStateEntry(row: WorldStateRow): WorldStateEntry {
     confidence: row.confidence,
     ttlSeconds: row.ttl_seconds,
   };
+}
+
+/**
+ * A stored mood row, clamped on the way out.
+ *
+ * The clamp is the same one the writer used (`mood.ts`), applied again here because a value can
+ * also reach the table through an older build or a hand edit — "out of bounds" must be
+ * impossible for consumers, not merely unlikely.
+ */
+function toStoredMood(row: MoodStateRow): StoredMood {
+  return {
+    valence: clampMoodValue(row.valence),
+    energy: clampMoodValue(row.energy),
+    evidence: parseMoodCounts(row.evidence_json),
+    lastBeatAt: row.last_beat_at,
+    lastEventSequence: parseCursor(row.cursor_json),
+    source: row.source,
+    summary: row.summary,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** The event-sequence cursor, or 0 when the column is missing/corrupt (start from the beginning). */
+function parseCursor(json: string): number {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (typeof parsed !== 'object' || parsed === null) return 0;
+    const sequence = (parsed as { sequence?: unknown }).sequence;
+    if (typeof sequence !== 'number' || !Number.isFinite(sequence) || sequence < 0) return 0;
+    return Math.floor(sequence);
+  } catch {
+    return 0;
+  }
+}
+
+function toMoodChange(row: MoodHistoryRow): MoodChange {
+  const before: MoodState = { valence: clampMoodValue(row.before_valence), energy: clampMoodValue(row.before_energy) };
+  const after: MoodState = { valence: clampMoodValue(row.after_valence), energy: clampMoodValue(row.after_energy) };
+  return {
+    changeId: row.change_id,
+    before,
+    after,
+    // Derived from the two states, not read from the stored columns: `delta` must agree with
+    // `after - before` even if a hand edit moved only one of the four numbers.
+    delta: { valence: after.valence - before.valence, energy: after.energy - before.energy },
+    reset: row.reset === 1,
+    signals: parseMoodCounts(row.signals_json),
+    signalCount: row.signal_count,
+    droppedCount: row.dropped_count,
+    note: row.note,
+    createdAt: row.created_at,
+  };
+}
+
+/** Parse a stored JSON count map, dropping anything that is not a finite positive number. */
+function parseMoodCounts(json: string): Readonly<Partial<Record<MoodSignalCode, number>>> {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
+    const counts: Partial<Record<MoodSignalCode, number>> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!MOOD_SIGNAL_CODES.includes(key as MoodSignalCode)) continue;
+      if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) continue;
+      counts[key as MoodSignalCode] = value;
+    }
+    return counts;
+  } catch {
+    // A corrupt count map must not take the mood down with it: the numbers are the durable part.
+    return {};
+  }
 }
 
 function toOpenThread(row: OpenThreadRow): OpenThread {

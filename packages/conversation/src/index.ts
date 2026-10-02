@@ -37,10 +37,11 @@ export {
   worldStateLite,
   type AssembleInput,
   type AssembledPrompt,
+  type MoodContext,
   type PromptTurn,
   type WorldStateLite,
 } from './prompt.ts';
-export { DEFAULT_SILENCE_TOLERANCE } from './personality.ts';
+export { DEFAULT_SILENCE_TOLERANCE, moodToleranceScale } from './personality.ts';
 export {
   normalizeReplyText,
   REPLY_LIMITS,

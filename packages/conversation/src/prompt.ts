@@ -30,6 +30,32 @@ export interface PromptTurn {
   readonly action?: TurnAction;
 }
 
+/**
+ * 心情进提示词的那一小块（第五轮 t4）。
+ *
+ * **模型只看到 `prose`**（`mood.ts` 的 `moodProse` 渲染出的散文）；`valence` / `energy` /
+ * `updatedAt` 只出现在 `AssembledPrompt.sections` 里给 Debug UI 看 ——
+ * pack §23 的原话是「不要把所有情绪数值暴露给 prompt」，这条就是它的可执行版本。
+ *
+ * `updatedAt` 让提示词能说一句「这是最近的状态，不是此刻突然发生的」：心情会自然回落，
+ * 一天前的心情读起来不该像刚发生的事（`staleAfterMinutes` 由引擎按回落常数给出）。
+ */
+export interface MoodContext {
+  readonly valence: number;
+  readonly energy: number;
+  /** 给模型看的散文（可能多行；`moodProse()` 的输出原样传进来）。 */
+  readonly prose: readonly string[];
+  /** 这份心情最近一次更新时刻（ISO）；null = 从未演化过（还没按中性写库）。 */
+  readonly updatedAt?: string | null;
+  /** 多久没更新就该说「有点旧了」（分钟）。引擎给的是回落时间常数。 */
+  readonly staleAfterMinutes?: number;
+  /**
+   * 判断「有多新」用的当下时刻（ISO 带偏移）。**显式传入**，因为这个判断必须跟着调用方的时钟走
+   * （重放、测试用注入时钟）：拿 `Date.now()` 会让同一份输入在不同时间产出不同的提示词。
+   */
+  readonly now?: string | null;
+}
+
 export interface WorldStateLite {
   /** ISO timestamp with offset, e.g. 2026-09-29T23:58:00.000+08:00 */
   readonly now: string;
@@ -56,6 +82,11 @@ export interface AssembleInput {
   readonly userText: string;
   /** §55 silence channel: the assistant may answer with this exact token instead of speaking. */
   readonly language?: string;
+  /**
+   * 现在的心情（第五轮 t4）。**可选**：不传就等于「没有心情这一层」，提示词与 V0.1 逐字相同
+   * （老调用方与旧测试不必知道这个特性存在）。
+   */
+  readonly mood?: MoodContext | undefined;
 }
 
 export interface AssembledPrompt {
@@ -69,7 +100,18 @@ export interface AssembledPrompt {
   readonly history: readonly { readonly role: TurnRole; readonly content: string }[];
   /** Changing suffix: world state, conversation state and the current turn. Never the prior turns. */
   readonly user: string;
-  readonly sections: readonly { readonly name: string; readonly part: 'system' | 'user'; readonly text: string }[];
+  /**
+   * 组成 `system`/`user` 的每一段，按顺序 —— 给 Debug UI 与评审逐段核对（§22.2）。
+   *
+   * `debug` 是**只给程序看**的补充（例如心情的数值）：它**不会**拼进 `system`/`user`，
+   * 所以「面板能核对」与「模型看不到数字」这两件事可以同时成立（pack §23）。
+   */
+  readonly sections: readonly {
+    readonly name: string;
+    readonly part: 'system' | 'user';
+    readonly text: string;
+    readonly debug?: string;
+  }[];
 }
 
 export const SILENCE_TOKEN = '[静默]';
@@ -261,18 +303,23 @@ export class PromptAssembler {
   /** Ordered per §26. Kept as data so the Debug UI can show exactly what the model saw (§22.2). */
   assemble(input: AssembleInput): AssembledPrompt {
     const directives = personalityDirectives(input.personality);
+    const moodText = moodSectionText(input.mood);
 
     const system = [
       CORE_IDENTITY,
       `你的名字是「${input.identityName}」。`,
       HARD_POLICY,
       `你现在按这些话来说（运行时给的说话方式，不要复述给用户）：\n${directives.map((d) => `- ${d}`).join('\n')}`,
+      // 心情跟**人格**一起放在稳定前缀里，而不是跟着世界状态走：它是一段状态、不是「这一轮的事实」，
+      // 而且它的更新频率远低于轮次（只有真的变了才变），所以前缀缓存照旧有效（§46.3）。
+      ...(moodText === null ? [] : [moodText]),
     ].join('\n\n');
 
     const worldLines = [
       `现在：${input.world.now}（${input.world.timezone}）`,
       `时段：${input.world.timeOfDay}　星期：${input.world.weekday}`,
       `会话状态：${input.conversationState}（本会话第 ${input.turnIndex + 1} 轮）`,
+      ...(input.mood === undefined ? [] : [`心情：${moodFreshnessLine(input.mood)}`]),
       ...(input.world.extra ?? []),
     ];
 
@@ -297,9 +344,67 @@ export class PromptAssembler {
         { name: 'core-identity', part: 'system', text: CORE_IDENTITY },
         { name: 'safety-policy', part: 'system', text: HARD_POLICY },
         { name: 'effective-style', part: 'system', text: directives.join('\n') },
+        ...(moodText === null
+          ? []
+          : [
+              {
+                name: 'mood',
+                part: 'system' as const,
+                text: moodText,
+                // 只给程序：数值不拼进 `system`，面板照样能核对（见 `sections` 的说明）。
+                debug: moodDebugText(input.mood),
+              },
+            ]),
         { name: 'world-state', part: 'user', text: worldLines.join('\n') },
         { name: 'current-turn', part: 'user', text: input.userText },
       ],
     };
   }
+}
+
+/**
+ * Debug 段的正文：**数值**。
+ *
+ * 它挂在 `sections[].debug` 上，**不拼进** `system`/`user`：`sections` 是给控制台/Debug UI 的
+ * 核对视图（§22.2），面板因此不必自己再算一遍「她现在是哪个区间」。pack §23 禁止的是
+ * **把情绪数值暴露给 prompt**，不是禁止程序自己记录它们。
+ */
+function moodDebugText(mood: MoodContext | undefined): string | undefined {
+  if (mood === undefined) return undefined;
+  return `valence=${mood.valence.toFixed(3)} energy=${mood.energy.toFixed(3)}`;
+}
+
+/**
+ * 心情那一段的正文：散文 + 一句「这是状态不是事实」的收尾。
+ *
+ * 没有心情（或散文是空的）时返回 `null`，于是整段不出现 —— 「没接线的老调用方」与
+ * 「心情是中性」在提示词里都不会多出一段空话。
+ */
+function moodSectionText(mood: MoodContext | undefined): string | null {
+  if (mood === undefined) return null;
+  const lines = mood.prose.map((line) => line.trim()).filter((line) => line.length > 0);
+  if (lines.length === 0) return null;
+  const freshness = moodFreshnessLine(mood);
+  return `你现在的心情（这是**此刻的状态**，不是发生过的某件事；只影响你说话的样子）：\n${lines.join('\n')}\n${freshness}`;
+}
+
+/**
+ * 「这份心情有多新」的一句话。
+ *
+ * 为什么要有它：心情会自然回落，所以一份很久没更新的心情不该读起来像刚发生的事。
+ * 措辞里没有数字（与 `personalityDirectives` 同一条纪律），也不会描述任何经历。
+ */
+function moodFreshnessLine(mood: MoodContext): string {
+  if (mood.updatedAt === undefined || mood.updatedAt === null) return '还说不准，先按平常的样子来。';
+  const updated = Date.parse(mood.updatedAt);
+  if (!Number.isFinite(updated)) return '还说不准，先按平常的样子来。';
+  // The comparison uses the caller's clock when it supplies one; a future timestamp counts as
+  // "just now" rather than producing a negative age (replay and injected clocks do that).
+  const nowMs = mood.now === undefined || mood.now === null ? Date.now() : Date.parse(mood.now);
+  if (!Number.isFinite(nowMs)) return '还说不准，先按平常的样子来。';
+  const ageMinutes = (nowMs - updated) / 60_000;
+  if (!Number.isFinite(ageMinutes) || ageMinutes < 0) return '刚更新过。';
+  const staleAfter = mood.staleAfterMinutes ?? 6 * 60;
+  if (ageMinutes >= staleAfter) return '这是早先的心情，现在多半淡了，别照着它使劲。';
+  return '刚更新过。';
 }

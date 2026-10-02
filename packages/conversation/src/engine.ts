@@ -7,8 +7,8 @@ import {
   type BrainImageInput,
   type ReplyHygieneResult,
 } from '@xixi/brain-adapter';
-import type { Clock, TurnAction, XixiConfig, XixiStore } from '@xixi/domain';
-import { systemClock } from '@xixi/domain';
+import type { Clock, MoodBeatResult, MoodEngine, MoodState, TurnAction, XixiConfig, XixiStore } from '@xixi/domain';
+import { MoodEngine as MoodEngineImpl, moodBiasOf, moodProactivityNudge, systemClock } from '@xixi/domain';
 
 import {
   ConversationStateMachine,
@@ -17,8 +17,8 @@ import {
   type TurnAcceptance,
   type TurnAcceptanceReason,
 } from './fsm.ts';
-import { PromptAssembler, SILENCE_TOKEN, worldStateLite, type AssembledPrompt, type PromptTurn } from './prompt.ts';
-import { DEFAULT_SILENCE_TOLERANCE } from './personality.ts';
+import { PromptAssembler, SILENCE_TOKEN, worldStateLite, type AssembledPrompt, type MoodContext, type PromptTurn } from './prompt.ts';
+import { DEFAULT_SILENCE_TOLERANCE, moodToleranceScale } from './personality.ts';
 import type { PostTurnJob } from './extractor.ts';
 import { REPLY_LIMITS, resolveReplyLimits, splitReplyIntoSegments, type ReplySegmentOptions, type SegmentedReply } from './segments.ts';
 
@@ -55,6 +55,15 @@ export interface ConversationEngineOptions {
    * `TurnMemoryExtractor.enqueue`（见 `packages/conversation/src/extractor.ts`）。
    */
   readonly afterTurn?: ((job: PostTurnJob) => void) | undefined;
+  /**
+   * 有界的心情（第五轮 t4）。省略 = 引擎自己用 `store` 与 `config.mood` 建一个（默认开启）；
+   * 显式传 `false` 表示「入口不要这一层」（提示词与 V0.1 逐字相同，见 `prompt.ts` 的 `mood`）。
+   *
+   * 为什么由引擎持有：心情的演化要读原始事件（`conversation.turn` / `proactive.decision` /
+   * `presence.changed`），而引擎是唯一同时拿着 store、时钟与轮次的地方 —— 与
+   * `#syncSilenceTolerance` 同一条理由（别让调用方各自记着接一次线）。
+   */
+  readonly mood?: MoodEngine | false | undefined;
 }
 
 export interface RespondInput {
@@ -190,6 +199,8 @@ export class ConversationEngine {
    * would repeat the previous index because it never writes a turn.
    */
   #decisionCount = 0;
+  /** 有界的心情（第五轮 t4）。`null` = 这个入口不要心情这一层。 */
+  readonly #mood: MoodEngine | null;
 
   constructor(options: ConversationEngineOptions) {
     this.#adapter = options.adapter;
@@ -207,11 +218,55 @@ export class ConversationEngine {
     // so neither the config nor a caller can raise the ADR-0010 ceilings.
     this.#replyLimits = resolveReplyLimits(this.#config.reply, options.reply);
     this.#afterTurn = options.afterTurn;
+    // 心情：默认按 `config.mood` 建一个（与 topic engine / self model 同样的默认开启口径），
+    // `false` 显式关掉。它只影响语气与窗口（见 `personality.ts`），**不参与硬底线**。
+    this.#mood =
+      options.mood === false
+        ? null
+        : options.mood ??
+          new MoodEngineImpl({
+            store: this.#store,
+            config: this.#config.mood,
+            clock: this.#clock,
+            offsetMinutes: this.#offsetMinutes,
+          });
     // The personality is the source of truth, so it is read at construction and
     // re-read on every turn. Forgetting this wiring is no longer invisible: an
     // unset tolerance leaves the window unscaled instead of silently matching
     // the seeded 0.7.
     this.#syncSilenceTolerance();
+  }
+
+  /** 心情引擎（`null` = 这个入口关掉了心情这一层）。查看与复位都走它。 */
+  get mood(): MoodEngine | null {
+    return this.#mood;
+  }
+
+  /**
+   * 现在的心情（只读，不落库）：面板与测试读它，`prose` 就是进提示词的那几句话。
+   *
+   * 读它**不会**推进状态：真正的演化只在 {@link beatMood}（`respond()` 与 `buildPrompt()` 各调一次）。
+   */
+  moodStatus(at: Date = this.#clock()): { readonly state: MoodState; readonly bias: number; readonly prose: readonly string[] } | null {
+    if (this.#mood === null) return null;
+    const state = this.#mood.stateAt(at);
+    return { state, bias: moodBiasOf(state), prose: this.#mood.prose(at) };
+  }
+
+  /**
+   * 演化一拍并把结果落库（幂等：同一时刻重复调用不写第二行历史）。
+   *
+   * `respond()` 与 `buildPrompt()` 都会调用它，所以「谁在什么时候把心情推进了一格」是可以从
+   * `mood_history` 逐条对回来的（每条都带时间戳与信号摘要）。
+   */
+  beatMood(at: Date = this.#clock()): MoodBeatResult | null {
+    return this.#mood?.beat(at) ?? null;
+  }
+
+  /** 心情对软评分/软阈值的有界偏移（最多 ±0.03）：给主动开口的**软**那一侧用，不碰硬门禁。 */
+  moodProactivityNudge(at: Date = this.#clock()): number {
+    if (this.#mood === null) return 0;
+    return moodProactivityNudge(moodBiasOf(this.#mood.stateAt(at)));
   }
 
   get adapter(): BrainAdapter {
@@ -280,7 +335,11 @@ export class ConversationEngine {
     // The FSM itself has no default, so none of these can silently stand in for
     // "personality not wired" the way the old hidden 0.7 did.
     const tolerance = fromStore ?? this.#silenceToleranceOverride ?? DEFAULT_SILENCE_TOLERANCE;
-    this.#fsm.setSilenceTolerance(tolerance);
+    // 第五轮 t4：心情**乘**在人格算出来的容忍度上，最多 ±6%（`moodToleranceScale`），
+    // 所以它永远盖不过人格（人格那侧的倍率是 0.5..1.5）。心情关掉时乘数恒为 1，
+    // 于是这一行在有/没有心情两种配置下都不会改变既有行为。
+    const moodScale = this.#mood === null ? 1 : moodToleranceScale(moodBiasOf(this.#mood.stateAt(this.#clock())));
+    this.#fsm.setSilenceTolerance(tolerance * moodScale);
   }
 
   /** The tolerance currently scaling the follow-up window (never null). */
@@ -325,6 +384,8 @@ export class ConversationEngine {
           addressed: input.addressed,
           acceptance_score: acceptance.accept ? 1 : 0,
           linger_ms: this.#fsm.lingerMs,
+          // 这个数是**人格算出来的容忍度**（见 `#syncSilenceTolerance` 的注释：心情乘在它上面，
+          // 但它本身不带心情）—— 字段名与语义保持不变，心情的数值不塞进这个契约字段。
           silence_tolerance: this.silenceTolerance,
         },
       }),
@@ -355,8 +416,14 @@ export class ConversationEngine {
     }));
   }
 
-  /** Build the prompt for a turn without calling the model (Debug UI, tests, replay). */
-  buildPrompt(input: RespondInput): AssembledPrompt {
+  /**
+   * 组装这一轮的提示词（不调用模型）—— Debug UI、测试、重放都用它。
+   *
+   * `moodBeat` 是**已经评估好**的那一拍（`respond()` 会在把这一轮落库之后先评估，再调这里）。
+   * 省略时它自己评估一拍（Debug UI 与测试走这条默认路径）。两条路径都只评估**一次**，
+   * 而且都用同一份 `#moodContext` 渲染，所以「提示词里写的心情」与「库里那行心情」永远是同一个。
+   */
+  buildPrompt(input: RespondInput, moodBeat: MoodBeatResult | null = this.beatMood(input.at ?? this.#clock())): AssembledPrompt {
     const at = input.at ?? this.#clock();
     const session = this.#store.getSession(input.sessionId);
     return this.#assembler.assemble({
@@ -370,7 +437,30 @@ export class ConversationEngine {
       history: this.workingMemory(input.sessionId),
       userText: input.text,
       language: languageName(this.#config.identity.language),
+      mood: this.#moodContext(at, moodBeat),
     });
+  }
+
+  /**
+   * 心情进提示词的那一小块：散文给模型，数字只进 `sections`（Debug UI）。
+   *
+   * `staleAfterMinutes` 用的是回落时间常数（`3 / decay_per_hour` 分钟 = 抹掉约 20% 的时间），
+   * 所以「这份心情算不算旧」与心情真的回落到哪儿是一致的一套数，不是随手写的第二个常数。
+   */
+  #moodContext(at: Date, beat: MoodBeatResult | null): MoodContext | undefined {
+    if (this.#mood === null) return undefined;
+    const state = beat?.state ?? this.#mood.stateAt(at);
+    const stored = beat?.stored ?? this.#mood.stored();
+    const decayPerHour = this.#mood.settings.decayPerHour;
+    const staleAfterMinutes = decayPerHour > 0 ? Math.round((0.2 / decayPerHour) * 60) : 6 * 60;
+    return {
+      valence: state.valence,
+      energy: state.energy,
+      prose: beat?.prose ?? this.#mood.prose(at),
+      updatedAt: stored?.updatedAt ?? null,
+      staleAfterMinutes,
+      now: toOffsetIso(at),
+    };
   }
 
   /**
@@ -444,8 +534,6 @@ export class ConversationEngine {
     }
 
     this.#fsm.onUserTurn(at.getTime());
-    const prompt = this.buildPrompt({ ...input, at });
-    const startedAt = Date.now();
     // pack Phase 4：用户这条轮次的事件 id 要交给后台提取器 —— 派生出来的记忆/学习/未完话题
     // 都靠它指回原始事实（铁律 4：Raw Event 与 Memory 分层）。
     const userTurnEventId = this.#store.recordTurn({
@@ -454,6 +542,11 @@ export class ConversationEngine {
       action: 'SPEAK',
       text: input.text,
     }).event.event_id;
+    // 心情在**落库之后**评估：真实的一轮是「判接受 → 落 turn → 组装提示词」，而心情的信号源就是
+    // 刚落的这一轮（「谢谢你啊」）。评估放在落库之前会看不到它（现象：夸奖要等到下一拍才算），
+    // 所以这里把评估结果**传给** `buildPrompt`，两边用的是同一拍。
+    const prompt = this.buildPrompt({ ...input, at }, this.beatMood(at));
+    const startedAt = Date.now();
 
     let decisionRecorded = false;
     const recordAcceptedDecision = (action: TurnAction, state: ConversationState): void => {
