@@ -58,6 +58,10 @@ xixi:
     hot_chat_window_min: 15        # 上面那次数的统计窗口（分钟）——一句孤零零的搭话不算热聊，所以被忽视的一天仍会显著降频
     topic_repeat_window_h: 12      # 同主题重复惩罚的窗口（pack v02：same_topic_cooldown_hours 12）
     generic_topic_cooldown_h: 24   # 没带具体话题的泛泛开口，用更长的窗口扣分（pack v02：generic 24）
+    # 未回应惩罚（ADR-0011 §决定 2 的补充，2026-10-01 定口径）：它只是**扣分信号**，不是禁止——
+    # 连续两次没人回应之后取「**显著降频**」，不取 pack 测试文档那句更严的「继续主动 = 0」。
+    # 判据是一个幅度：同一条多日脚本在惩罚开/关下的开口数之差，命令
+    # `node scripts/eval-proactive-timeline.ts` 的 M1–M6 判定表（多日部分）。
     unanswered_penalty: 0.45       # 最近几条主动没人回应时的扣分（pack v02：unanswered 0.45）
     explicit_reject_penalty: 0.80  # 「别说了 / 今天不想聊」时的扣分（pack v02：explicit_reject 0.80）
     same_topic_penalty: 0.55       # 同一话题重复的扣分（pack v02：same_topic 0.55）

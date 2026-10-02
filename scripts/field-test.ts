@@ -5047,6 +5047,12 @@ export interface ProactiveLoopOptions {
    * `topicEngine.reconcile(now); return topicEngine.followUps(now);`（见 scripts/field-test.ts 的装配处）。
    */
   readonly readOpenThreads?: (() => readonly OpenThreadFollowUp[]) | undefined;
+  /**
+   * 可选的 `TopicEngine`：给了它就在每个 tick 里**先对齐再取候选**（提取 → 认下已说出口的 → 按回答
+   * 收口 → `followUps`），这正是现场测试控制台 `readOpenThreads` 做的事，只是把「怎么对齐」交给循环，
+   * 免得每个调用方各写一遍。给了它就不要再给 {@link readOpenThreads}（两者互斥，前者优先）。
+   */
+  readonly topicEngine?: TopicEngine | undefined;
   /** Injected for tests; 「随机闲聊」 only fires below `PROACTIVE_RANDOM_SMALLTALK_CHANCE`. */
   readonly random?: (() => number) | undefined;
   readonly readSessionId: () => string | null;
@@ -5191,13 +5197,25 @@ export class ProactiveLoop {
       const now = this.#options.now?.() ?? new Date();
       this.#ticks += 1;
       const presence = await this.#options.readPresence();
+      /**
+       * 未完话题（pack Phase 3）的两种装配：显式 `readOpenThreads`（控制台那条路，它自己先 reconcile
+       * 再取），或者把 `TopicEngine` 交给循环、由这里统一「先对齐再取」。两条都是**同一个生产引擎**
+       * 的同一套幂等调用，所以 `open_loop_followup` 候选在两条路上逐字段相同。
+       */
+      const openThreads = this.#options.topicEngine === undefined
+        ? this.#options.readOpenThreads?.()
+        : (() => {
+            const now2 = this.#options.now?.() ?? now;
+            this.#options.topicEngine?.reconcile(now2);
+            return this.#options.topicEngine?.followUps(now2);
+          })();
       const plans = buildProactiveCandidates({
         now,
         presence,
         lastUserTurnAt: this.#options.readLastUserTurnAt(),
         inConversation: this.#options.readState() !== 'IDLE' || (this.#options.readInFlightTurn?.() ?? false),
         recentUserTopics: this.#options.readRecentUserTopics?.(),
-        openThreads: this.#options.readOpenThreads?.(),
+        openThreads,
         random: this.#options.random,
         spokenCount: this.#spoken.length,
         recentLines: this.#spoken.slice(-4),
