@@ -22,6 +22,15 @@ import {
   TopicEngine,
   type TopicEngineSettings,
 } from '@xixi/conversation';
+// `isAnswerAboutThread` / `objectWordsIn` / `actionWordsIn` / `isFrameWord` 还没登记进
+// `packages/conversation/src/index.ts`（那是另一个包的路径），所以这里直接按源文件导入 ——
+// 它们本来就是这一层要测的东西。
+import {
+  actionWordsIn,
+  isAnswerAboutThread,
+  isFrameWord,
+  objectWordsIn,
+} from '../../../packages/conversation/src/topic-engine.ts';
 import { loadXixiConfig, OpenThreadStore, openXixiStore } from '@xixi/domain';
 
 const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
@@ -217,21 +226,188 @@ test('T7-R2：答复形状 + 只共享「去」也不算回答；不含内容字
 });
 
 /**
- * 已知残余（t8 实测，**不是期望行为**）：这是「字」级规则，不是理解 —— 换个话题主题时，
- * 共享一个内容字仍会被算作相关。
+ * t8 的残余已被本轮（第五轮 t2）升级掉：**共享一个内容字的无关句不再收口**。
  *
- * 实测：「明天我要去买药。」的话题下，「我去楼下买了点水果。」因为都带「买」被判相关、话题收口成
- * `engaged`（我在这个主题下 13 句无关探针 1/13 误判；同一类还有「看 / 吃 / 拿」这些通用动词）；
- * 「复诊」「理发」两个主题实测 0/13。要根治得把规则从「字」升级到「词 / 对象」，会改
- * `isAnswerAboutThread` 的形状 —— 不在本次修复范围，所以钉在这里当**残余的度量**，别当成已解决。
- * **修好它之后这条用例必须一起改**（改完把它移出「已知残余」）。
+ * 升级前是**字**级判据：话题「明天我要去买药。」下，「我去楼下买了点水果。」因为都带「买」被判相关、
+ * 话题收口成 `engaged`（t8 实测 13 句无关探针里 1 句；同一类还有「看 / 吃 / 拿」）。现在判据比的是
+ * **词与对象**（见 `isAnswerAboutThread` 的注释与 ADR-0012）：「水果」不是「药」，这个话题收不了口。
+ *
+ * 这条用例就是 t8 残余的**度量**：同一个探针表、同一个生产路径，期望从「1/13 误收口」变成 0。
+ * 探针表放在测试里（而不是只留在某次脚本输出里）：换机器、换人也能一条命令重跑。
  */
-test('已知残余：共享一个通用动词（「买」）的无关句仍会收口 —— 要修就得改这条', () => {
+test('t2 升级：共享一个通用动词（「买」）的无关句不再收口', () => {
   assert.deepEqual(reconcileAfterAnswer('我去楼下买了点水果。', '明天我要去买药。'), {
-    status: 'engaged',
-    settled: 1,
-    ignored: [],
+    status: 'offered',
+    settled: 0,
+    ignored: ['我去楼下买了点水果。'],
   });
+});
+
+/**
+ * t2 的第二个残余：「老李家的孙子回来了。」（t8 实测同样是 1/13）。
+ *
+ * 共享的字是「孙子」，但它说的是**别人**的孙子 —— 对象被换进了「老李家的」框里，而话题里没有这个框。
+ * 判据据此判「不算回答」：对象对上了也要看**是谁的**。
+ */
+test('t2 升级：把对象换进「别人家」框里的无关句不再收口', () => {
+  assert.deepEqual(reconcileAfterAnswer('老李家的孙子回来了。', '明天我要去看孙子。'), {
+    status: 'offered',
+    settled: 0,
+    ignored: ['老李家的孙子回来了。'],
+  });
+});
+
+/**
+ * 升级后的**探针表**（同一个生产路径 `reconcileAfterAnswer`，不是另写一份判定）。
+ *
+ * 三条口径，都在这里钉死：
+ *
+ *   1. `unrelated`：13 句无关句 —— 期望**全部**不收口（`offered`，进 `ignored`）。这是 t8 那张表的
+ *      原样复制（含「我去楼下买了点水果。」），换到 7 个话题上跑，所以「共享内容字不再误收口」
+ *      是被度量出来的，不是被声明的。
+ *   2. `answers`：真答案 —— 期望全部收口。话题里的东西被说到了就算回答（「复诊改到下周了。」对
+ *      「复诊」；「药拿回来了」对「拿药」），**升级不拿召回换分数**。
+ *   3. `boundary`：**被显式钉住的边界句**（「没去成，改天再说吧。」「不去了。」）—— 期望仍然**不收口**。
+ *      钉法与期望沿用 t8（ADR-0012 §决策 4），理由见文件末尾那一段注释；判据换了，这两句的行为刻意
+ *      保持不变，所以升级没有偷偷改掉一条已经写进文档的取舍。
+ */
+interface TopicProbe {
+  readonly topic: string;
+  readonly subject: string | null;
+  /** 这个话题的**真答案**：期望收口。 */
+  readonly answers: readonly string[];
+  /** **被钉住的边界句**：期望不收口（话题留在窗口里，`reofferAfterMinutes` 之后还能再问一次）。 */
+  readonly boundary?: readonly string[];
+}
+
+/** t8 那张 13 句表，原样沿用（t7-R1 的 3 句 + T7-F1 的 4 句 + t8 补的 3 句 + 答复形状 3 句）。 */
+const UNRELATED_PROBES: readonly string[] = Object.freeze([
+  '今天天气不错啊。',
+  '明天天气怎么样？',
+  '嗯，你问这个干嘛。',
+  '我今天修好了电视。',
+  '我今天去散步了。',
+  '我去公园转了一圈。',
+  '我去楼下买了点水果。',
+  '我今天没去散步。',
+  '我没去散步。',
+  '今天没去成。',
+  '电视里在放戏。',
+  '中午吃的面条。',
+  '隔壁老王家孙子回来了。',
+]);
+
+const TOPIC_PROBES: readonly TopicProbe[] = Object.freeze([
+  {
+    // t8 残余的这两个话题放在最前面：它们是这次升级的靶子。
+    topic: '明天我要去买药。',
+    subject: '去买药',
+    answers: ['买了点药，医生说饭后再吃。', '药已经买回来了。'],
+  },
+  {
+    topic: '明天我要去看孙子。',
+    subject: '去看孙子',
+    answers: ['见到了，孙子挺好的。', '孙子不在家，没见着。'],
+  },
+  {
+    topic: '明天下午我要去镇上办证。',
+    subject: '去镇上办证',
+    answers: ['办好了，昨天就办完了。', '还没办，过两天再去。', '正在办，下午去镇上。', '证已经拿到了。', '还没办好呢'],
+    // 钉住的边界句（见上面第 3 条）。
+    boundary: ['没去成，改天再说吧。', '不去了。'],
+  },
+  {
+    topic: '明天上午我要去医院复诊。',
+    subject: '去医院复诊',
+    answers: ['复诊改到下周了。', '还没去复诊，下周再说。'],
+  },
+  {
+    topic: '明天我要去理发。',
+    subject: '去理发',
+    answers: ['理发的人太多，没理成。'],
+  },
+  {
+    topic: '明天早上我要去买菜，家里的油也没了。',
+    subject: '去买菜，家里的油也没了',
+    answers: ['买回来了，油也顺手带了。', '菜买回来了。'],
+  },
+  {
+    topic: '明天上午我要去社区医院拿药。',
+    subject: '去社区医院拿药',
+    answers: ['药拿回来了，医生说下个月再复查。'],
+  },
+]);
+
+test('t2 探针表：13 句无关句在 7 个话题上都不收口（0/13 × 7），真答案照旧收口', () => {
+  let falseSettles = 0;
+  let checkedAnswers = 0;
+  for (const probe of TOPIC_PROBES) {
+    const thread = { summary: probe.topic, subject: probe.subject };
+    for (const chatter of UNRELATED_PROBES) {
+      const outcome = reconcileAfterAnswer(chatter, probe.topic);
+      if (outcome.settled !== 0) falseSettles += 1;
+      assert.deepEqual(
+        outcome,
+        { status: 'offered', settled: 0, ignored: [chatter] },
+        `「${probe.topic}」+「${chatter}」不该收口`,
+      );
+    }
+    for (const answer of probe.answers) {
+      assert.equal(
+        isAnswerAboutThread(thread, answer),
+        true,
+        `升级不拿召回换分数：「${probe.topic}」+「${answer}」应当是回答`,
+      );
+      checkedAnswers += 1;
+    }
+    for (const pinned of probe.boundary ?? []) {
+      assert.deepEqual(
+        reconcileAfterAnswer(pinned, probe.topic),
+        { status: 'offered', settled: 0, ignored: [pinned] },
+        `钉住的边界句行为不变：「${probe.topic}」+「${pinned}」`,
+      );
+    }
+  }
+  assert.equal(falseSettles, 0, `13 句无关探针 × ${TOPIC_PROBES.length} 个话题：误收口 ${falseSettles} 句`);
+  assert.equal(checkedAnswers, 15, '真答案探针数（改动探针表要一起改这个数）');
+});
+
+test('t2 词表：通用动词（买 / 拿）不是收口依据，四张表的分工是显式的', () => {
+  // 靶子那两个词：`买` 是通用动词（t8 的另一条残余就是它），`拿` 也是（拿药 / 拿东西 / 拿快递）。
+  for (const word of ['买', '拿', '去', '吃', '说', '做', '弄']) {
+    assert.equal(isFrameWord(word), true, `「${word}」是通用动词，不能当收口依据`);
+  }
+  assert.deepEqual(actionWordsIn('我去楼下买了点水果。'), [], '这句话里没有有辨识度的动作词');
+  assert.deepEqual(objectWordsIn('我去楼下买了点水果。'), ['水果'], '各自记录，比对时按对象比');
+  // 对象词与动作词**允许重合**（「复诊」「理发」本身就是动宾复合词），这一点也钉住。
+  assert.deepEqual(objectWordsIn('复诊'), ['复诊']);
+  assert.deepEqual(actionWordsIn('复诊'), ['复诊']);
+  assert.deepEqual(objectWordsIn('办证'), ['办证'], '长词优先：`办证` 命中就不再单独记 `证`');
+  assert.deepEqual(actionWordsIn('办证'), ['办'], '话题的动作词是 `办` —— 「办好了」就是靠它过线的');
+});
+
+/**
+ * 「没去成，改天再说吧。」这类边界句**为什么不收口**（沿用 t8 的取舍，判据升级后重新核对过）。
+ *
+ * 它一个字都没提到那件事（没有「办」也没有「证」），**在字面上与「今天没去成。」无法区分** ——
+ * 一句「没去成」可能是没去成那件事，也可能是没去成散步。判据说「不算回答」时，话题留在 `offered`：
+ * `reofferAfterMinutes`（3 小时）之后可以再问一次，而且是**有界**的（`maxAttempts` 2 次之后 `exhausted`，
+ * 每一次还要过主动引擎的硬门禁与社会预算）。反过来「猜它是回答」会把话题写进 `snoozed`/`resolved`
+ * ——**终态、不可重开**（`OpenThreadStore` 不允许重开），静默丢一件事是**无界**的。
+ *
+ * 所以这条取舍的代价是「多问一次」，不是「丢掉一件事」；本轮升级**没有**改动它。
+ */
+test('t2 边界：不含那件事任何词形的真回答仍不算回答 —— 有意保留的取舍（t8 已写入 ADR-0012）', () => {
+  for (const pinned of ['没去成，改天再说吧。', '不去了。']) {
+    assert.deepEqual(reconcileAfterAnswer(pinned, '明天下午我要去镇上办证。'), {
+      status: 'offered',
+      settled: 0,
+      ignored: [pinned],
+    });
+  }
+  // 对照：提到了那件事的两句就是回答（差别只在有没有说到「办」「证」）。
+  assert.equal(isAnswerAboutThread({ summary: '明天下午我要去镇上办证', subject: '去镇上办证' }, '还没办'), true);
+  assert.equal(isAnswerAboutThread({ summary: '明天下午我要去镇上办证', subject: '去镇上办证' }, '证已经拿到了。'), true);
 });
 
 test('设置：非数字/非布尔退回默认，越界被夹进合法区间，出厂 config 与代码默认逐字一致', () => {

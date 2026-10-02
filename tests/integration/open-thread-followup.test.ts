@@ -465,3 +465,104 @@ test('重启之后仍然记得那件事：话题表是投影，日志是唯一�
     h.store.close();
   }
 });
+
+/**
+ * t2（第五轮）：收口判据从「字」升级到「词 / 对象」之后，**整条产线路径**上的探针表。
+ *
+ * 与单测同一张 13 句表（`tests/unit/core/topic-engine.test.ts` 的 `UNRELATED_PROBES`），但这里走的是
+ * 真的主动追问（`buildProactiveCandidates` + `ProactiveEngine.consider` + `proactive.decision` 事件）
+ * 与真的状态机（`OpenThreadStore`）—— 单测证判据，集成证「判据接到状态机上还是对的」。
+ *
+ * 两个靶子是 t8 记在 ADR-0012 里的残余：
+ *   * 「明天我要去买药。」+「我去楼下买了点水果。」（共享通用动词「买」）
+ *   * 「明天我要去看孙子。」+「老李家的孙子回来了。」（共享名词「孙子」，但那是别人的孙子）
+ * 升级前它们会被收口（终态、永不再问）；升级后必须全部留在 `offered`，而且**真答案照旧收口**。
+ */
+test('t2：字级判据升级后，13 句无关探针在产线路径上都不收口，真答案照旧收口', async () => {
+  const probed = [
+    { line: '明天我要去买药。', chatter: '我去楼下买了点水果。', answer: '买了点药，医生说饭后再吃。' },
+    { line: '明天我要去看孙子。', chatter: '老李家的孙子回来了。', answer: '见到了，孙子挺好的。' },
+  ];
+  const unrelated = [
+    '今天天气不错啊。',
+    '明天天气怎么样？',
+    '嗯，你问这个干嘛。',
+    '我今天修好了电视。',
+    '我今天去散步了。',
+    '我去公园转了一圈。',
+    '我去楼下买了点水果。',
+    '我今天没去散步。',
+    '我没去散步。',
+    '今天没去成。',
+    '电视里在放戏。',
+    '中午吃的面条。',
+    '隔壁老王家孙子回来了。',
+  ];
+
+  for (const probe of probed) {
+    for (const chatter of unrelated) {
+      const h = harness();
+      try {
+        // Day 1 他说的那件事。
+        h.say(probe.line);
+        const created = h.engine.reconcile(DAY1);
+        assert.equal(created.created.length, 1, `应当记下一件事：${probe.line}`);
+
+        // Day 2 主动追问（真决策、真 delivery、真日志），话题进入 offered。
+        h.at(DAY2);
+        h.engine.reconcile(DAY2);
+        const plan = openLoopPlans(h, DAY2)[0];
+        assert.ok(plan !== undefined, `到点该问：${probe.line}`);
+        const outcome = await h.proactive.consider({
+          candidate: plan.candidate,
+          at: DAY2,
+          conversationState: 'IDLE',
+          sessionId: h.sessionId,
+        });
+        assert.equal(outcome.speak, true, `应当开口：${outcome.reasonCode} ${outcome.score}`);
+        h.engine.reconcile(DAY2);
+        const threadId = plan.candidate.topicRef ?? '';
+        assert.equal(h.store.openThread(threadId)?.status, 'offered');
+
+        // 十分钟后他说的是别的事：不能收口，话题还得开着。
+        h.at(DAY2_ANSWER);
+        h.say(chatter);
+        const after = h.engine.reconcile(DAY2_ANSWER);
+        assert.equal(after.settled.length, 0, `「${probe.line}」+「${chatter}」不该收口`);
+        assert.deepEqual(after.ignored.map((entry) => entry.text), [chatter], '不写事件，但留下凭据');
+        assert.equal(h.store.openThread(threadId)?.status, 'offered', '话题还开着，等的是那件事的回答');
+      } finally {
+        h.store.close();
+      }
+    }
+
+    // 真答案照旧收口（升级不拿召回换分数）：走同一条路径，只换最后那句话。
+    const h = harness();
+    try {
+      h.say(probe.line);
+      h.engine.reconcile(DAY1);
+      h.at(DAY2);
+      h.engine.reconcile(DAY2);
+      const plan = openLoopPlans(h, DAY2)[0];
+      assert.ok(plan !== undefined);
+      const outcome = await h.proactive.consider({
+        candidate: plan.candidate,
+        at: DAY2,
+        conversationState: 'IDLE',
+        sessionId: h.sessionId,
+      });
+      assert.equal(outcome.speak, true);
+      h.engine.reconcile(DAY2);
+      const threadId = plan.candidate.topicRef ?? '';
+
+      h.at(DAY2_ANSWER);
+      h.say(probe.answer);
+      const settled = h.engine.reconcile(DAY2_ANSWER);
+      assert.equal(settled.settled.length, 1, `真答案应当收口：${probe.answer}`);
+      assert.equal(h.store.openThread(threadId)?.status, 'engaged');
+      assert.equal(h.engine.followUps(DAY3).length, 0, '收口之后不再追问');
+    } finally {
+      h.store.close();
+    }
+  }
+});

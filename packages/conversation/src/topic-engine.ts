@@ -264,47 +264,281 @@ const TOPIC_TIME_WORDS =
   /(?:大后天|后天|明天|明日|明早|明晚|下个星期|下星期|下周|今晚|今天晚上|今天|待会儿|一会儿|早上|早晨|一早|上午|中午|下午|傍晚|日落|晚上|夜里|晚点|时候|时间|点钟)/gu;
 
 /**
- * 换个话题也照样出现的字：人称、虚词、语气词、量词，以及「去/来/上/到」这类只表示位移的字。
- * 它们单独出现说明不了「在说那件事」（「去」在「去散步」里也有），所以不算**内容字**。
+ * 换一件事也照样出现的常用动词：「去 / 来 / 走 / 做 / 买 / 看 / 吃 / 拿 / 说 / 放」……
  *
- * 「去」是 t7 评审 T7-R1 实测出来的漏洞补上的：少了它，「我今天去散步了。」「我去公园转了一圈。」
- * 「我去楼下买了点水果。」都会被当成在回答「去镇上办证」那件事，把话题**永久收口**。
+ * 它们**单独**出现说明不了「在说那件事」：「我去楼下买了点水果。」里有「买」，
+ * 「老李家的孙子回来了。」里有「看」在别处，都只是在聊别的。所以它们**不能**当收口依据。
+ *
+ * 这是 t7 评审 T7-R1/R2 与 t8 记下的两条残余（ADR-0012「判据升级」段）两次实测的共同教训：
+ * 「去」是位移字，「买 / 看 / 吃 / 拿」只是通用动词 —— 真正能区分「那件事」的是**对象**
+ * （药 / 证 / 孙子 / 材料），不是这些谁都能用的动词。
  */
-const TOPIC_GENERIC_CHARS = new Set([
-  ...'我你他她它你们的了是有在要得想会能就都也还不好很太再又只把被给让跟和与或而但如果这那哪谁什么怎样为因所以上下来到过走进回出起个点些一二三几多少事儿子时候号天去',
+const FRAME_WORDS = new Set<string>([
+  ...'去来往走做弄搞说讲问吃喝拿着放想会能要得把给让跟和与或而但的了是有在就都也还不好很太再又只被这那哪谁什么怎样因为所以上下里外到过进出起开用完别没',
+  // 「买」也是通用动词：买药 / 买水果 / 买菜 / 买票……换一件事照样出现，单独出现说明不了在说那件事
+  // （t8 残余的两条误收口里就有一条是「买」）。
+  '买',
 ]);
+
+/**
+ * 话题里可能出现的**具体东西**（对象词）：药、证、孙子、材料、电视……
+ *
+ * 对象词是判据的主力：**说了那件东西，才算在说那件事**。
+ *   * 「明天我要去买药。」的话题下，「我去楼下买了点水果。」不带「药」→ 不算回答（t8 记下的那条残余）；
+ *   * 「办证」这类**动宾复合词**（办 + 证）整体登记为对象词，于是「办好了」「还没办」照旧算回答
+ *     —— 它们是「办证」的一部分，不是「拿一个通用动词蒙过去」。
+ *
+ * 这份清单是**受控词表**（铁律 1：规则由程序负责），不是分词器：仓库里没有词典依赖，也不该为
+ * 一条收口判据引入一个（铁律 12）。代价写在 ADR-0012「判据升级 §代价与已知边界」：**没登记进来的
+ * 名词等于没有对象词** —— 那时判据退回它下面的动作词规则（与 t7 之后的行为一致，不会比字级更糟）。
+ */
+const OBJECT_WORDS: readonly string[] = Object.freeze([
+  // 证件与手续（动宾复合词「办证」整体登记，见上：它让「办好了」「还没办」照旧算回答）
+  '身份证', '医保卡', '办证', '证', '材料', '手续', '证明',
+  // 身体与看病
+  '社区医院', '医院', '复诊', '体检', '住院', '挂号', '看病', '药',
+  // 家里的物件（「理发」也是动宾复合词）
+  '电视', '被子', '衣服', '戏', '照片', '报纸', '理发',
+  // 吃的
+  '水果', '面条', '豆腐', '鸡蛋', '牛奶', '排骨', '菜', '油', '米', '面', '肉', '饭',
+  // 家里的人
+  '小孙子', '孙子', '孙女', '老伴', '儿子', '女儿', '孩子', '娃',
+]);
+
+/**
+ * 话题里可能出现的**有辨识度的动作**：办 / 取 / 交 / 签 / 修 / 接 / 送 / 洗……
+ *
+ * 它们只在**两种**情况下算数（见 `isAnswerAboutThread`）：话题里压根没有对象词，或者对象词带着
+ * 「不在回答那件事」的标记。像「办好了」这种不含对象词的真回答就是靠这里过线的。
+ *
+ * 与 {@link FRAME_WORDS} 的分界是**可核对**的：`FRAME_WORDS` 里的动词在换一件事时也照旧出现
+ * （买药 / 买水果 / 看电视 / 看孙子），这里的动词则指向具体的手续或家务。
+ */
+const ACTION_WORDS: readonly string[] = Object.freeze([
+  '挂号', '复诊', '看病', '体检', '住院', '理发', '报名',
+  '办', '修', '交', '缴', '取', '领', '签', '寄', '接', '送', '洗', '晒', '浇', '种', '喂', '收', '记', '约', '请',
+  '借',
+  // 上面的长词在匹配时优先（「复诊」比「诊」准），`wordsIn` 按长度降序。
+  // 通用动词（去 / 来 / 买 / 拿 / 看 / 吃 / 还 / 做 / 弄…）不在这里：编进 `FRAME_WORDS`，
+  // 而 `assertVocabularyShape()` 会在启动时把「放错表」报出来。
+]);
+
+/**
+ * 「别人家的东西」的写法：那种回答即便撞上了同一个对象词，说的也不是**他**那件事
+ * （ADR-0012 的第二个残余：「老李家的孙子回来了。」不是「我去看孙子」的回答）。
+ *
+ * 只在**对象词已经对上**之后才查它，所以不会误伤「我家的孙子挺好的」这类真回答。
+ * 「我家 / 咱家 / 俺家」等第一人称不在表里；否定式「不在家 / 没在家」描述的是行踪，也不在表里
+ * （`不在家` 里「家」前面是「不」，`老李家的` 前面是姓氏或「隔壁」）。
+ */
+const OTHER_OWNER_PATTERN = /(?:[老小]?[叫姓张李王刘陈杨赵黄周吴徐孙马胡郭林何高罗郑梁谢宋唐许韩冯邓曹彭曾肖田董袁潘于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤]家|隔壁|邻居|人家)/u;
+
+/** 词表按长度降序排一次的缓存（词表是常量，没必要每次判定都重排）。 */
+const sortedCache = new WeakMap<readonly string[], readonly string[]>();
+
+/**
+ * 三张表的**关系**必须成立，否则静默退化（加了词却没人用）。
+ *
+ *   * `FRAME_WORDS` 与 `OBJECT_WORDS` / `ACTION_WORDS` **不相交** —— 一个词不能既被当成「换一件事也照样
+ *     出现的通用动词」又被当成收口依据（这正是「买」踩过的坑）；
+ *   * `OBJECT_WORDS` 与 `ACTION_WORDS` **允许重合**：「复诊」「理发」「看病」本身就是动宾复合词，
+ *     既是那件事、也是那个动作，两边都登记是对的；
+ *   * 表里没有空串、没有重复。
+ *
+ * 在模块加载时**跑一次**（失败就抛，等于启动即崩）：这样上面那张「通用动词」清单是**真的在把关**，
+ * 而不是一段写着好看、其实没人读的注释。加词时如果放错表，这里立刻报出来。
+ */
+function assertVocabularyShape(): void {
+  const tables: readonly (readonly [string, readonly string[]])[] = [
+    ['OBJECT_WORDS', OBJECT_WORDS],
+    ['ACTION_WORDS', ACTION_WORDS],
+  ];
+  for (const [name, words] of tables) {
+    const seen = new Set<string>();
+    for (const word of words) {
+      if (word.length === 0) throw new Error(`${name} 里有空词`);
+      if (seen.has(word)) throw new Error(`${name} 里有重复词：${word}`);
+      seen.add(word);
+      if (FRAME_WORDS.has(word)) throw new Error(`${word} 既在 FRAME_WORDS 里又在 ${name} 里`);
+    }
+  }
+}
+
+assertVocabularyShape();
+
+/** 话题里出现过的字（去掉时间词之后）——守卫判定「这轮话有没有把话题里没有的东西换进来」时用。 */
+function charsOf(text: string): Set<string> {
+  return new Set([...text]);
+}
+
+function sortedVocabulary(vocabulary: readonly string[]): readonly string[] {
+  const cached = sortedCache.get(vocabulary);
+  if (cached !== undefined) return cached;
+  const sorted = [...vocabulary].sort((left, right) => right.length - left.length);
+  sortedCache.set(vocabulary, sorted);
+  return sorted;
+}
+
+/** `haystack` 里有没有 `needle`（子串，按词表逐词比 —— 判据是「词/对象」，不是「字」）。 */
+function containsWord(haystack: string, needle: string): boolean {
+  return haystack.includes(needle);
+}
+
+/** 一个片段里出现的**对象词**（长词优先：`办证` 命中就不再单独记 `证`）。 */
+export function objectWordsIn(text: string): string[] {
+  return wordsIn(text, OBJECT_WORDS).map((match) => match.word);
+}
+
+/** 一个片段里出现的**动作词**（长词优先，同上）。 */
+export function actionWordsIn(text: string): string[] {
+  return wordsIn(text, ACTION_WORDS).map((match) => match.word);
+}
+
+/**
+ * 这个词是不是**通用动词**（换一件事也照样出现，不能当收口依据）。
+ *
+ * 收口判据不直接用这个函数（它靠词表本身的成员资格），导出是为了让测试能把「`买`/`拿` 这类词
+ * 不许进动作表」这条关系**显式**钉住，而不是靠一条注释。
+ */
+export function isFrameWord(word: string): boolean {
+  return FRAME_WORDS.has(word);
+}
+
+function wordsIn(text: string, vocabulary: readonly string[]): readonly WordMatch[] {
+  const matches: WordMatch[] = [];
+  const covered: string[] = [];
+  // 词表按长度降序（`sortedVocabulary`），所以先命中的一定是最长的词形。
+  for (const word of sortedVocabulary(vocabulary)) {
+    if (!containsWord(text, word)) continue;
+    // 已经被更长的词形盖住了（命中「办证」之后的「证」）：它不是独立证据，但也**确实被说了**，
+    // 所以照样挂到覆盖它的长词下（见 `covered`）。
+    if (covered.includes(word)) continue;
+    // 后面那些更短的词表项只要是这个词的一部分，就不再单独成条 —— 判定只看「说到没说到」，
+    // 而「说了『办证』」同时意味着「说了『证』」（`covered` 里记下来）。
+    for (const shorter of sortedVocabulary(vocabulary)) {
+      if (shorter.length >= word.length) continue;
+      if (word.includes(shorter) && containsWord(text, shorter) && !covered.includes(shorter)) covered.push(shorter);
+    }
+    matches.push({ word, covered: [] });
+  }
+  // 回头把「被覆盖」的短词挂到覆盖它的长词上：判定「回答有没有说到话题里那件东西」时，
+  // 「办证」这个话题遇到「证已经拿到了」也算说到（见 `topicFormMatches` / `formsOf`）。
+  return matches.map((match) => ({
+    word: match.word,
+    covered: covered.filter((word) => word !== match.word && match.word.includes(word)),
+  }));
+}
+
+/** 一个片段里说到的一个词：`word` 本身，以及被它以更长词形盖住的 `covered`（「办证」`covered` = 「证」）。 */
+interface WordMatch {
+  readonly word: string;
+  readonly covered: readonly string[];
+}
 
 /**
  * 这一轮话是不是在回答「那件事」。
  *
- * 只有**一条规则**，而且只看字面证据（铁律 1：判断由规则做、可复算，不需要模型理解）：
- * 回答里必须出现话题的**内容字** —— `subject`（没有就用 `summary`）去掉时间词、再去掉
- * `TOPIC_GENERIC_CHARS`（人称 / 虚词 / 位移字）之后剩下的字（「去镇上办证」→ 镇 / 办 / 证）。
+ * 判据是**词 / 对象**级（t8 之后本轮升级；旧版是「字」级，见 ADR-0012「已知残余」）：
+ * 只看字面证据、纯函数、可复算（铁律 1），但比对的单位是**词**，不是「碰巧共享的一个字」。
  *
- * 早先还有一条「弱证据」：回答是答复形状（「办好了」/「还没办」）并且命中的字在话题里就行 ——
- * 它实际是靠**位移字**过线的（「没去成」里的「去」），于是「答复形状 + 只共享一个『去』」的无关句
- * （「我今天没去散步。」）也被当成回答、把话题**永久收口**（`snoozed`/`engaged` 都是终态，store
- * 不允许重开；t7 评审 T7-R2 实测：「我没去散步。」「今天没去成。」→ snoozed）。收紧成「必须命中
- * 内容字」之后，这条弱证据与主规则**等价**（命中的片段本来就是回答的子串），所以删掉 ——
- * 不留一段永远不会单独生效的代码。
+ * 三步，按顺序：
+ *
+ *   1. **对象词**：话题（`subject`，没有就用 `summary`，去掉时间词）里有对象词时，回答必须带上
+ *      其中之一 —— 说了那件东西才算在说那件事。「明天我要去买药。」的话题下「我去楼下买了点水果。」
+ *      不带「药」→ 不算回答（t8 的 1/13）。
+ *   2. **别人家的**：对象词对上了，但回答把它放进「别人的」框里（「老李家的孙子回来了。」「隔壁老王家
+ *      孙子回来了。」），而话题里没有这个框 → 不算回答（t8 的另一个 1/13）。要过这一关，回答得同时
+ *      说得出话题的动作（「看」）才行。
+ *   3. **动作词**：话题里没有对象词时（「明天我要去」这种极罕见的情况），退回到比对有辨识度的动作词
+ *      （办 / 取 / 交 / 修 / 洗……），**通用动词不算**（`FRAME_WORDS`：去 / 来 / 买 / 看 / 吃 / 拿…）。
  *
  * 取舍与边界（已实测，探针表见 tests/unit/core/topic-engine.test.ts）：
  *   * 不相关的话**永远不会**关掉话题：它们进 `ReconcileResult.ignored`，话题保持 `offered`；
  *   * 反过来，**没有提到那件事**的真回答（「没去成，改天再说吧。」「不去了」）也不算回答：
  *     话题留在窗口里，`reofferAfterMinutes` 之后可以再问一次 —— 而且还要过主动引擎的硬门禁与
  *     社会预算，不是一定会开口。这是**有意**的取舍：多问一次是有界、看得见的，静默丢掉一件事是无界的；
- *   * 话题里一个内容字都没有时（「明天我要去」这种，极罕见）没有回答能收口它，只能等到过期 ——
- *     宁可多问一次，也不要靠一个「去」字猜；
- *   * **已知残余（t8 实测，未修）**：这是**字**级规则而不是理解 —— 换个话题主题时，共享一个内容字
- *     仍会被算作相关：「明天我要去买药。」的话题下，「我去楼下买了点水果。」因为都带「买」被判相关
- *     （我自己 13 句无关探针里 1 句；同一类还有「看 / 吃 / 拿」这些通用动词）。根治要把规则从
- *     「字」升级到「词 / 对象」，那是另一件事，先如实量在这里，别当成已解决。
+ *   * 话题里一个对象词、一个动作词都没有时（「明天我要去」这种，极罕见）没有回答能收口它，
+ *     只能等到过期 —— 宁可多问一次，也不要靠一个「去」字猜；
+ *   * 词表是**受控清单**：新出现的名词若没登记，等于没有对象词（退回第 3 步）。加词是改词表，
+ *     不是改判定逻辑；探针表（同一份测试文件）是加词之后的回归依据。
  */
 export function isAnswerAboutThread(thread: Pick<OpenThread, 'summary' | 'subject'>, text: string): boolean {
   const answer = text.trim();
   if (answer.length === 0) return false;
-  const topic = (thread.subject ?? thread.summary).replace(TOPIC_TIME_WORDS, '');
-  return [...new Set([...topic])].some((char) => !TOPIC_GENERIC_CHARS.has(char) && answer.includes(char));
+
+  const topicText = (thread.subject ?? thread.summary).replace(TOPIC_TIME_WORDS, '');
+  const topicObjects = wordsIn(topicText, OBJECT_WORDS);
+  const topicActions = wordsIn(topicText, ACTION_WORDS);
+  const answerObjects = formsOf(wordsIn(answer, OBJECT_WORDS));
+  const answerActions = formsOf(wordsIn(answer, ACTION_WORDS));
+  const topicChars = charsOf(topicText);
+
+  // 1) 对象词：话题里有的东西，回答里必须也提到其中一个。
+  //
+  // 「提到」按**词**比（不是字），两条证据：
+  //   a. 回答里的词形与话题词形相同（「证已经拿到了」对「办证」：「证」是「办证」的部分）；
+  //   b. 回答说了**话题的动作词**，而且要说得一样完整（「办好了」「还没办」对「办证」：都是「办」）。
+  // 「我去楼下买了点水果」两条都不满足：`买` 是通用动词（进 `FRAME_WORDS`），不在话题动作词里。
+  if (topicObjects.length > 0) {
+    const topicForms = formsOf(topicObjects);
+    const answerForms = [...new Set([...answerObjects, ...answerActions])];
+    // 「说得一样完整」很关键：回答里的**短**动作词被话题**长**动作词盖住不算数，
+    // 否则「拿」会对上「拿药」——「东西拿到了」就会被当成回答了「去拿药」，那还是「共享一个字」。
+    const saidTopicAction = topicActions.some((action) =>
+      answerActions.some((word) => word.length >= action.word.length && action.word.includes(word)),
+    );
+    const mentioned = topicForms.some((form) => answerForms.includes(form)) || saidTopicAction;
+    if (!mentioned) return false;
+    // 2) 别人家的：话题说的是**他**那件事（第一人称、没有定语），回答却把它换进了别人的框里
+    //    （「老李家的孙子回来了」）。
+    if (outsideReference(topicText, answer, topicChars)) {
+      return answerActions.some((word) => topicFormMatches(topicActions, word));
+    }
+    return true;
+  }
+
+  // 3) 话题里没有对象词：退回到有辨识度的动作词（通用动词不在 `ACTION_WORDS` 里）。
+  return answerActions.some((word) => topicFormMatches(topicActions, word));
+}
+
+/** 一个片段里说到的全部词形：命中的词，以及被它盖住、但随时可能单独被说出来的短词。 */
+function formsOf(matches: readonly WordMatch[]): string[] {
+  return matches.flatMap((match) => [match.word, ...match.covered]);
+}
+
+/**
+ * 回答里的一个动作词，是不是话题动作词。
+ *
+ * 只在「话题里没有对象词」或「对象被换进别人家的框里」这两条兜底路径上用：这时没有对象可比，
+ * 只能比动作词，而且**通用动词不算**（`FRAME_WORDS`：去 / 来 / 买 / 拿 / 吃…）。
+ * 「办好了」里的「办」对「办证」成立（「办」就是话题动作词）。
+ */
+function topicFormMatches(topicActions: readonly WordMatch[], word: string): boolean {
+  return topicActions.some((action) => action.word === word);
+}
+
+/**
+ * 回答有没有把对象换进**别人的**框里（ADR-0012 的第二个残余）。
+ *
+ * 只在对象词已经对上之后才问这个问题（对象对不上前面就返回 false 了），所以判据可以写得很窄：
+ * 回答里出现「别人的」写法 —— 「老李家的」「隔壁」「人家」—— 而且那个**定语**在话题里没有对应
+ * （「去隔壁老王家拿东西」这个话题里的「隔壁」就是对得上的），就算换了个东西：
+ * 「老李家的孙子回来了」不是「我去看孙子」的回答。
+ *
+ * 两种写法不算「别人的」：
+ *   * 否定式「孙子不在家」「没在家」讲的是行踪，不是归属；
+ *   * 第一人称定语「我家的孙子」「咱家的」讲的就是他那件事。
+ */
+function outsideReference(topic: string, answer: string, topicChars: Set<string>): boolean {
+  const found = OTHER_OWNER_PATTERN.exec(answer);
+  if (found === null) return false;
+  const marker = found[0];
+  const prefix = answer.slice(0, found.index);
+  if (/[不没未]$/.test(prefix)) return false;
+  const owner = prefix.match(/[我咱俺自家]{1,2}$/u)?.[0] ?? '';
+  if (owner.length > 0) return false;
+  // 话题里没有这个定语（逐字比：话题里出现过「隔壁」就说明它本来就是这件事的一部分）。
+  return [...marker].some((char) => !topicChars.has(char));
 }
 
 // ------------------------------------------------------------------ follow-ups
