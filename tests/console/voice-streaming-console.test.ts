@@ -50,7 +50,10 @@ function depsWith(overrides: Partial<VoiceDeps> = {}): VoiceDeps {
   return {
     python: join(REPO_ROOT, '.venvs', 'voice-pipecat', 'Scripts', 'python.exe'),
     voiceDir: join(root, 'voice'),
-    client: { synthesize: async () => Buffer.alloc(0) } as unknown as VoiceDeps['client'],
+    // Counted, so a turn that synthesizes more than once per clause is visible.
+    client: {
+      synthesize: async (text: string) => wavOf(500),
+    } as unknown as VoiceDeps['client'],
     engine,
     currentSessionId: () => session.sessionId,
     ttsEnabled: true,
@@ -60,6 +63,43 @@ function depsWith(overrides: Partial<VoiceDeps> = {}): VoiceDeps {
     log: () => {},
     ...overrides,
   };
+}
+
+/**
+ * One voice turn through the production handler, with a counted TTS sink and a counted direct
+ * `client.synthesize`.
+ *
+ * Both counters are returned instead of being module state, so no test can pass because of another
+ * test's calls. The point of counting is the t11 finding that `streamVoice` synthesized every
+ * clause a second time: 「TTS 调用次数 == 块数」 is only an assertion if somebody counts.
+ */
+async function runStreamingTurn(options: {
+  readonly text?: string;
+  readonly wavMs?: number;
+  readonly overrides?: Partial<VoiceDeps>;
+  readonly synthesize?: (text: string) => Buffer;
+} = {}): Promise<{
+  readonly payload: Awaited<ReturnType<typeof handleVoiceTurn>>;
+  readonly sinkCalls: readonly string[];
+  readonly wholeReplyCalls: readonly string[];
+}> {
+  const sinkCalls: string[] = [];
+  const directCalls: string[] = [];
+  const deps = depsWith({
+    ...options.overrides,
+    client: {
+      synthesize: async (text: string) => {
+        directCalls.push(text);
+        return wavOf(options.wavMs ?? 500);
+      },
+    } as unknown as VoiceDeps['client'],
+    speakStream: async ({ text }) => {
+      sinkCalls.push(text);
+      return options.synthesize === undefined ? wavOf(options.wavMs ?? Math.max(400, text.length * 100)) : options.synthesize(text);
+    },
+  });
+  const payload = await handleVoiceTurn(deps, { audioBase64: silenceWav(900).toString('base64') });
+  return { payload, sinkCalls, wholeReplyCalls: directCalls };
 }
 
 test.after(() => {
@@ -88,15 +128,10 @@ function wavOf(durationMs: number): Buffer {
 }
 
 test('a voice turn streams clause by clause through the production handler (pack Phase 8)', async () => {
-  const calls: { text: string; startedAt: number }[] = [];
-  const deps = depsWith({
-    speakStream: async ({ text }) => {
-      calls.push({ text, startedAt: Date.now() });
-      return wavOf(Math.max(400, text.length * 100));
-    },
+  const { payload, sinkCalls, wholeReplyCalls } = await runStreamingTurn({
+    synthesize: (text) => wavOf(Math.max(400, text.length * 100)),
   });
 
-  const payload = await handleVoiceTurn(deps, { audioBase64: silenceWav(900).toString('base64') });
   assert.equal(payload.ok, true, JSON.stringify(payload).slice(0, 300));
   assert.ok(payload.reply !== null, 'the fake adapter replied');
 
@@ -104,19 +139,32 @@ test('a voice turn streams clause by clause through the production handler (pack
   assert.ok(payload.stream !== null, 'the stream report is present when a sink is wired');
   assert.ok((payload.stream?.ttsSegments ?? 0) >= 1, `expected at least one clause, got ${payload.stream?.ttsSegments}`);
   const spoken = payload.stream?.clauses ?? [];
-  assert.ok(calls.length >= 1);
-  assert.equal(spoken.length, calls.length, 'every dispatched clause is reported');
+  assert.equal(spoken.length, sinkCalls.length, 'every clause is one sink call');
+  // t11: 「TTS 调用次数 == 块数」. Both halves matter — one call per clause from the sink, and
+  // NOT a second call per clause from anywhere else (the bug this assertion exists for: the
+  // server used to synthesize each clause again when writing the NDJSON events).
+  assert.equal(sinkCalls.length, spoken.length, 'TTS 调用次数 == 块数（sink 侧）');
+  assert.deepEqual(wholeReplyCalls, [], 'and nothing synthesizes the whole reply (or a clause) a second time');
+  assert.deepEqual(spoken.map((clause) => clause.text), sinkCalls, 'the clauses sent to TTS are the ones reported');
   assert.deepEqual(spoken.map((clause) => clause.index), spoken.map((_clause, index) => index), 'indices are 0..n-1 in order');
   assert.ok(spoken.every((clause) => clause.text.trim().length > 0), 'no empty clause is sent to TTS');
   assert.equal(spoken.some((clause) => clause.reason === 'flush' || clause.reason === 'sentence' || clause.reason === 'pause' || clause.reason === 'max'), true);
 
-  // ② The audio the console already consumes is the stitched clause audio, not one TTS blob.
+  // ② Every clause carries its own audio, so a page can play them one by one without asking the
+  // server for anything else — this is what 「逐块播放」 needs and what the payload used to lack.
+  for (const clause of spoken) {
+    assert.ok(typeof clause.audio === 'string' && (clause.audio as string).length > 0, `clause ${clause.index} has no audio`);
+    const decoded = Buffer.from(clause.audio as string, 'base64');
+    assert.ok(Math.abs(readWavInfo(decoded).durationMs - clause.durationMs) < 5, `clause ${clause.index} audio length disagrees with its report`);
+  }
+
+  // ③ The audio the console already consumes is the stitched clause audio, not one TTS blob.
   assert.ok(payload.audio !== null);
   const stitched = Buffer.from(payload.audio as string, 'base64');
   const totalMinutes = spoken.reduce((sum, clause) => sum + clause.durationMs, 0);
   assert.ok(Math.abs(readWavInfo(stitched).durationMs - totalMinutes) < 5, `stitched ${readWavInfo(stitched).durationMs}ms vs sum ${totalMinutes}ms`);
 
-  // ③ The timings come from the pipeline's clock: clause 1's audio is known, and ③/④ are filled.
+  // ④ The timings come from the pipeline's clock: clause 1's audio is known, and ③/④ are filled.
   assert.ok(payload.stream?.firstClauseTextMs !== null && payload.stream?.firstClauseTextMs !== undefined);
   assert.ok((payload.stream?.firstClauseAudioMs ?? -1) >= 0);
   assert.ok((payload.stream?.fourStage.firstTokenToFirstAudioMs ?? -1) >= 0, 'stage ③ is measured');
@@ -126,23 +174,23 @@ test('a voice turn streams clause by clause through the production handler (pack
 });
 
 test('the first clause does not wait for the rest of the reply', async () => {
+  // Clause 1 stays in flight (60 ms) while clause 2 is dispatched and while the model keeps
+  // streaming: a serial pipeline could not produce clause 2's start before clause 1 finished.
   const order: string[] = [];
-  const deps = depsWith({
-    speakStream: async ({ text }) => {
+  const { payload, sinkCalls, wholeReplyCalls } = await runStreamingTurn({
+    synthesize: (text) => {
       order.push(`start:${text}`);
-      if (order.length === 1) {
-        // Clause 1 stays in flight while clause 2 is synthesized and while the model keeps
-        // streaming: a serial pipeline could not produce the second entry below.
-        await new Promise((resolve) => setTimeout(resolve, 60));
-      }
       return wavOf(300);
     },
+    overrides: {},
   });
-  const payload = await handleVoiceTurn(deps, { audioBase64: silenceWav(900).toString('base64') });
   assert.ok((payload.stream?.ttsSegments ?? 0) >= 2, `expected >= 2 clauses, got ${payload.stream?.ttsSegments}`);
-  const [first, second] = order;
-  assert.equal(first, 'start:好的，我记住了。', `clause 1 was dispatched first (order=${order.join(' | ')})`);
-  assert.equal(second, 'start:明天可能有雨，出门记得带把伞，路滑慢点走。', 'and clause 2 was dispatched while clause 1 was still synthesizing');
+  assert.deepEqual(order, [
+    'start:好的，我记住了。',
+    'start:明天可能有雨，出门记得带把伞，路滑慢点走。',
+  ], `clause 1 went first and nothing overtook it (order=${order.join(' | ')})`);
+  assert.equal(sinkCalls.length, payload.stream?.ttsSegments, 'one call per clause');
+  assert.deepEqual(wholeReplyCalls, [], 'the server never synthesizes a second time');
   assert.deepEqual(
     payload.stream?.clauses.map((clause) => clause.text),
     ['好的，我记住了。', '明天可能有雨，出门记得带把伞，路滑慢点走。'],
@@ -151,33 +199,29 @@ test('the first clause does not wait for the rest of the reply', async () => {
 });
 
 test('the sink is never called when TTS is off, and the payload keeps its old shape', async () => {
-  let calls = 0;
-  const deps = depsWith({
-    ttsEnabled: false,
-    speakStream: async () => {
-      calls += 1;
-      return wavOf(200);
-    },
-  });
-  const payload = await handleVoiceTurn(deps, { audioBase64: silenceWav(900).toString('base64') });
-  assert.equal(calls, 0, 'no TTS call at all with 朗读 off');
+  const { payload, sinkCalls, wholeReplyCalls } = await runStreamingTurn({ overrides: { ttsEnabled: false } });
+  assert.equal(sinkCalls.length, 0, 'no TTS call at all with 朗读 off');
+  assert.equal(wholeReplyCalls.length, 0);
   assert.equal(payload.audio, null);
   assert.equal(payload.ttsMs, null);
   assert.equal(payload.stream, null, 'and no stream report either');
 });
 
 test('a clause that fails to synthesize is reported and the turn still completes', async () => {
-  const deps = depsWith({
-    speakStream: async ({ text }) => {
+  const { payload, sinkCalls, wholeReplyCalls } = await runStreamingTurn({
+    synthesize: (text) => {
       if (text.startsWith('明天')) throw new Error('TTS 502');
       return wavOf(400);
     },
   });
-  const payload = await handleVoiceTurn(deps, { audioBase64: silenceWav(900).toString('base64') });
   assert.equal(payload.ok, true, 'the turn is not lost because one clause failed');
   assert.ok((payload.stream?.errors.length ?? 0) >= 1, 'the failure is reported, not swallowed');
   assert.match(payload.stream?.errors[0] as string, /TTS 502/);
   assert.ok(payload.audio !== null, 'the clauses that did synthesize are still returned');
+  const failed = payload.stream?.clauses.find((clause) => clause.index === 1);
+  assert.equal(failed?.audio, null, 'the failed clause carries no audio — never silence pretending to be speech');
+  assert.equal(sinkCalls.length, payload.stream?.ttsSegments, 'and still exactly one call per clause');
+  assert.deepEqual(wholeReplyCalls, []);
 });
 
 test('without a streaming sink the handler keeps the whole-reply behaviour', async () => {
@@ -196,4 +240,31 @@ test('without a streaming sink the handler keeps the whole-reply behaviour', asy
   assert.equal(synthesized[0], payload.reply);
   assert.ok(payload.audio !== null);
   assert.ok(payload.ttsMs !== null);
+});
+
+test('a short acknowledgement does not take a turn on the voice entry (t11)', async () => {
+  // 「嗯。」 is the case the VAD cannot see (docs/design/voice.md §2): the rule has to live in the
+  // voice entry, before the transcript reaches the engine — otherwise a nod is answered with a
+  // paragraph and the conversation state advances.
+  const { payload, sinkCalls } = await runStreamingTurn({
+    overrides: { asr: async () => '嗯。' },
+  });
+  assert.equal(payload.ok, true);
+  assert.equal(payload.reason, 'ASSENT_ONLY', `expected the acknowledgement rule, got ${payload.reason}`);
+  assert.equal(payload.accepted, false, 'no turn was taken');
+  assert.equal(payload.reply, null, 'and she did not reply');
+  assert.equal(payload.transcript, '嗯。', 'the words are still reported, so the page can say what it heard');
+  assert.equal(payload.stream, null, 'no speech was produced');
+  assert.equal(sinkCalls.length, 0, 'and no TTS call was spent on a nod');
+  assert.match(payload.reasonText, /应和/, 'the reason is explained in Chinese');
+});
+
+test('a real sentence still takes a turn on the same path (t11)', async () => {
+  // The counterfactual to the test above: the rule must not swallow ordinary speech.
+  const { payload, sinkCalls } = await runStreamingTurn({
+    overrides: { asr: async () => '西西，明天天气怎么样？' },
+  });
+  assert.notEqual(payload.reason, 'ASSENT_ONLY', 'the rule must not swallow a real sentence');
+  assert.equal(payload.action, 'SPEAK');
+  assert.ok(sinkCalls.length >= 1, 'and the reply was synthesized');
 });

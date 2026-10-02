@@ -26,8 +26,7 @@ import {
   MIN_LOOP_INTERVAL_MS,
   PROACTIVE_PANEL_CSS,
   ProactiveLoop,
-  SEGMENT_TTS_NOTE,
-  STREAMING_TTS_NOTE,
+  segmentTtsNote,
   XIXI_DB_ENTRIES,
   applyAndPersistProactivePatch,
   buildToolChain,
@@ -51,9 +50,9 @@ import {
   type VoiceTurnBody,
 } from './field-test.ts';
 import { toOffsetIso } from '@xixi/contracts';
-// Pack Phase 8: the streaming speech pieces. The chunker is the same class the offline pipeline
-// and the tests use, so 「第一块立刻进 TTS 队列」 has exactly one implementation.
-import { chunkClauses, CLAUSE_CHUNKER_LIMITS } from '../packages/conversation/src/segments.ts';
+// Pack Phase 8: the streaming speech pieces. Chunking itself lives in `handleVoiceTurn` (one
+// `ClauseChunker` for every entry), so this file no longer imports the chunker at all — the
+// clause text it sends to the page comes from the payload the sink produced.
 import { AssentBank, XIXI_PLAYBACK_JS, XIXI_PLAYBACK_THRESHOLDS } from '../services/voice-edge/voice_edge/voice_stream.ts';
 import { concatWav } from './lib/wav.ts';
 
@@ -238,16 +237,25 @@ interface TurnBody {
   readonly audioBase64?: string;
 }
 
-const voiceDeps: VoiceDeps = {
-  python: PYTHON,
-  voiceDir: VOICE_DIR,
-  client,
-  engine,
-  currentSessionId: () => session.sessionId,
-  ttsEnabled: ttsOn,
-  policy,
-  log: (line) => console.log(line),
-};
+/**
+ * The voice dependencies. A function, not a frozen object: `ttsEnabled` and the streaming sink are
+ * read at call time, so flipping 朗读 on the page changes what the next turn does — and the page's
+ * sentence about granularity is derived from the same source (t11).
+ */
+function voiceDeps(): VoiceDeps {
+  const sink = streamingSpeechSink();
+  return {
+    python: PYTHON,
+    voiceDir: VOICE_DIR,
+    client,
+    engine,
+    currentSessionId: () => session.sessionId,
+    ttsEnabled: ttsOn,
+    policy,
+    ...(sink === undefined ? {} : { speakStream: sink }),
+    log: (line) => console.log(line),
+  };
+}
 
 /**
  * Voice turn, delegated to the shared core in `scripts/field-test.ts`.
@@ -258,7 +266,7 @@ const voiceDeps: VoiceDeps = {
  * one place now, so this page and the field-test console cannot drift apart.
  */
 async function handleVoice(body: TurnBody, response: ServerResponse): Promise<void> {
-  const result = await handleVoiceTurn(voiceDeps, body as VoiceTurnBody);
+  const result = await handleVoiceTurn(voiceDeps(), body as VoiceTurnBody);
   // The voice path returns the same reply text; re-deriving the plan with the same pure
   // function the engine uses keeps the page's playback identical to a typed turn.
   const plan = segmentPlan(typeof result.reply === 'string' ? result.reply : null, config.reply);
@@ -280,13 +288,30 @@ async function handleVoice(body: TurnBody, response: ServerResponse): Promise<vo
 const assentBank = new AssentBank((text) => client.synthesize(text));
 
 /**
+ * The streaming TTS sink for this entry: one clause in, that clause's WAV out.
+ *
+ * It is also *the* place this process synthesizes a reply. `streamVoice` used to synthesize each
+ * clause a second time itself, so every clause cost two TTS calls — the reviewer's 「streamVoice
+ * 走 sink」 finding. Now there is exactly one call per clause and the count is asserted in
+ * `tests/console/voice-streaming-console.test.ts`.
+ *
+ * Returns `undefined` when nothing can be synthesized (no key, or 朗读 off): `handleVoiceTurn`
+ * then reports `stream: null` and no audio, instead of pretending it spoke.
+ */
+function streamingSpeechSink(): VoiceDeps['speakStream'] {
+  if (!ttsOn || !client.hasKey) return undefined;
+  return async ({ text }) => Buffer.from(await client.synthesize(text));
+}
+
+/**
  * One voice turn, streamed. Writes newline-delimited JSON events as they happen — the reply's
  * first clause is on the wire before the rest of the reply exists, which is what the browser
  * needs in order to start speaking while she is still generating (pack Phase 8).
  *
- * Events: `turn` (what was heard / what she decided), `clause` (one synthesized clause, base64
- * WAV), `end` (what was played), `error`. The reply text is chunked on the server with the
- * same `ClauseChunker` the offline pipeline uses, so the page and the CLI cannot drift.
+ * Events: `turn` (what was heard / what she decided, including per-clause text and timing),
+ * `clause` (one clause's audio straight from the sink — never re-synthesized here), `end` (what
+ * was played), `error`. Chunking happens inside `handleVoiceTurn` with the same `ClauseChunker`
+ * the offline pipeline uses, so the page and the CLI cannot drift.
  */
 async function streamVoice(body: TurnBody, response: ServerResponse): Promise<void> {
   response.writeHead(200, {
@@ -305,30 +330,36 @@ async function streamVoice(body: TurnBody, response: ServerResponse): Promise<vo
       open = false; // the client hung up (page closed / reloaded)
     }
   };
+  const sink = streamingSpeechSink();
   try {
-    const result = await handleVoiceTurn(voiceDeps, body as VoiceTurnBody);
+    // `voiceDeps()` already installs the sink when it exists, so this call is the whole wiring:
+    // one sink, one synthesis per clause, and the same function `handleVoice` uses.
+    const result = await handleVoiceTurn(voiceDeps(), body as VoiceTurnBody);
     send({ type: 'turn', ...result, sourceLabel: '回应你', audio: null });
+    const clauses = result.stream?.clauses ?? [];
+    const audios: string[] = [];
+    for (const clause of clauses) {
+      // No synthesis here: the audio already exists (`clause.audio`), produced by the sink while
+      // the reply was being generated. A clause that failed is reported as a clause with no audio
+      // and an `errors` entry, never as a silent success.
+      if (clause.audio === null) continue;
+      audios.push(clause.audio);
+      send({ type: 'clause', index: clause.index, text: clause.text, audio: clause.audio, ttsMs: clause.synthMs, of: clauses.length });
+    }
     if (open && result.reply !== null) {
-      const clauses = chunkClauses(result.reply, { maxChars: CLAUSE_CHUNKER_LIMITS.maxChars, minCommaChars: CLAUSE_CHUNKER_LIMITS.minCommaChars });
-      const audios: string[] = [];
-      for (const [index, text] of clauses.entries()) {
-        const ttsStarted = Date.now();
-        const wav = await client.synthesize(text);
-        audios.push(Buffer.from(wav).toString('base64'));
-        send({
-          type: 'clause',
-          index,
-          text,
-          audio: Buffer.from(wav).toString('base64'),
-          ttsMs: Date.now() - ttsStarted,
-          of: clauses.length,
-        });
-      }
       const plan = segmentPlan(result.reply, config.reply);
-      send({ type: 'end', segments: plan.segments, segmentGapMs: plan.gapMs, clauses: clauses.length, audio: audios.length > 0 ? concatWav(audios.map((item) => Buffer.from(item, 'base64')), 0).toString('base64') : null });
+      send({
+        type: 'end',
+        segments: plan.segments,
+        segmentGapMs: plan.gapMs,
+        clauses: clauses.length,
+        ttsMode: sink === undefined ? 'none' : 'streaming',
+        // The same stitched WAV the single-object shape carries, for a caller that wants one blob.
+        audio: audios.length > 0 ? concatWav(audios.map((item) => Buffer.from(item, 'base64')), 0).toString('base64') : null,
+      });
     }
     console.log(
-      `[voice] streaming ${result.action} vad=${result.vadMs}ms asr=${result.asrMs ?? '-'}ms first=${result.firstTokenMs ?? '-'}ms clauses=${result.stream?.ttsSegments ?? chunkClauses(result.reply ?? '').length}`,
+      `[voice] streaming ${result.action} vad=${result.vadMs}ms asr=${result.asrMs ?? '-'}ms first=${result.firstTokenMs ?? '-'}ms clauses=${clauses.length} (one TTS call each)`,
     );
   } catch (error) {
     const consoleError = error instanceof ConsoleError ? error : null;
@@ -472,7 +503,13 @@ const server = createServer((request, response) => {
           // four stores — the note tells the user that persona/history from `npm run chat`
           // does not appear here.
           database: { path: DATA_DIR, entries: XIXI_DB_ENTRIES, note: '四个入口各用不同的库；在 chat 里设的人格与历史不会带到这里' },
-          segmentPlayback: { textSegmented: true, ttsSegmented: true, note: STREAMING_TTS_NOTE },
+          segmentPlayback: (() => {
+            // Derived from the wiring (`streamVoice` → `AssentBank`/`client.synthesize`), so the
+            // page's sentence changes with the runtime 朗读 switch and with a missing key
+            // instead of freezing one version of the truth.
+            const mode: 'streaming' | 'whole-reply' | 'none' = !ttsOn ? 'none' : client.hasKey ? 'streaming' : 'none';
+            return { textSegmented: true, ttsSegmented: mode === 'streaming', mode, note: segmentTtsNote(mode) };
+          })(),
         });
         return;
       }
@@ -645,7 +682,7 @@ ${PROACTIVE_PANEL_CSS}
 </header>
 <div id="log"></div>
 <div class="card">${databaseNoteHtml(DATA_DIR)}</div>
-<div class="card" style="border-color:#5c4a22; background:#2a2314; color:#ffe6b8">${STREAMING_TTS_NOTE}</div>
+<div class="card" style="border-color:#5c4a22; background:#2a2314; color:#ffe6b8">${segmentTtsNote(!ttsOn ? 'none' : client.hasKey ? 'streaming' : 'none')}</div>
 ${proactivePanelHtml()}
 <footer>
   <form id="form">
@@ -827,6 +864,13 @@ async function stopRecording() {
     }
     if (data.reason === 'NO_SPEECH_DETECTED') {
       add('xixi silent', '（没有听清：麦克风里没检测到语音）', data.notes ? data.notes[data.notes.length - 1] : '');
+    } else if (data.reason === 'ASSENT_ONLY') {
+      // Pack Phase 8: a nod is not a turn. Before this branch the page said 「这句不是对西西说的」
+      // — the wording of a *rejected* turn — for the one case where she is listening on purpose.
+      if (data.transcript) add('user', data.transcript);
+      const ackMeta = (data.actionText ?? data.action) + ' · ' + (data.reasonText ?? data.reason) + ' · ' + data.state;
+      add('xixi silent', '（应和：这一轮不算，西西继续听着）', ackMeta);
+      hint.textContent = data.privacy ? data.privacy.note : '应和不算一轮：想让她回话就说一句完整的话。';
     } else {
       if (data.transcript) add('user', data.transcript);
       const stages = data.stages ?? {};

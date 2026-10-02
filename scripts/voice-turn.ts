@@ -18,6 +18,19 @@
  *   node scripts/voice-turn.ts --wav tests/audio-fixtures/direct-question.wav
  *   node scripts/voice-turn.ts --wav a.wav --wav b.wav --wav c.wav   # one voice session
  *   node scripts/voice-turn.ts --wav x.wav --fake                    # offline plumbing test
+ *   node scripts/voice-turn.ts --wav a.wav --trace                   # deltas + same-batch legacy
+ *
+ * Pack Phase 8 (t11) — how to read the four delays this script reports:
+ *
+ *   * **④ 「首段可听总延迟」 is the metric the pack's 首音 target is about**: 「说完到听见第一个字」
+ *     includes the endpoint hold and the model's first token, so it is the number a user feels.
+ *   * **③ 「首 token → 首段可听」 is an attribution quantity only.** It says how much of ④ belongs to
+ *     speech synthesis; it is not the target, and comparing it across the two paths compares two
+ *     different physical quantities (first *clause* vs whole reply).
+ *   * `--legacy-tts` (implied by `--trace`) adds the V0.1 whole-reply synthesis **in the same
+ *     batch, on the same reply text**, which is the only way to say 「首音有没有改善」 honestly:
+ *     measured that way, the same-batch columns show **no improvement in ③** at this model and TTS
+ *     (see `docs/recon/voice-streaming-2026-10-01.md` §结论).
  */
 import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -137,9 +150,18 @@ function argValue(name: string, fallback: string): string {
  * latency report can come from the same batch, on the same reply text, rather than from a
  * different run on a different day. It costs one extra TTS call per turn.
  */
-const legacyTts = args.includes('--legacy-tts');
-/** `--trace` records every model delta with its arrival time (why stage ③ is what it is). */
+const explicitLegacy = args.includes('--legacy-tts');
+/**
+ * `--trace` records every model delta with its arrival time, **and implies `--legacy-tts`**.
+ *
+ * The implication is deliberate (t11): a trace exists to explain a first-audio number, and that
+ * explanation is only checkable against the same-batch whole-reply column. As two independent
+ * flags, a run could land on disk with deltas but no legacy column — the t5 reviewer's own
+ * `%TEMP%\t5-review\m3-*.txt` files are exactly that — so the artefact a reviewer reads could not
+ * support the conclusions drawn from it.
+ */
 const trace = args.includes('--trace');
+const legacyTts = explicitLegacy || trace;
 /**
  * `--min-comma=N` / `--max-chars=N` set the ClauseChunker's thresholds for this batch, so the
  * 「第一块多长」 trade can be measured instead of guessed: a shorter first clause is synthesized
@@ -153,7 +175,7 @@ for (let index = 0; index < args.length; index += 1) {
   if (args[index] === '--wav' && args[index + 1] !== undefined) wavs.push(args[index + 1]);
 }
 if (wavs.length === 0) {
-  console.error('用法：node scripts/voice-turn.ts --wav <file.wav> [--wav <file2.wav> ...] [--fake] [--legacy-tts]');
+  console.error('用法：node scripts/voice-turn.ts --wav <file.wav> [--wav <file2.wav> ...] [--fake] [--trace] [--legacy-tts] [--min-comma N] [--max-chars N]');
   process.exit(2);
 }
 
@@ -417,7 +439,11 @@ const latency = {
     '④ P50': 6816,
   },
   clauseCount: percentiles(results.map((turn) => (turn.clauses === null ? null : turn.clauses.length))),
-  note: '四个延迟的定义与 docs/benchmarks/v01-baseline.md §3.1 逐字对应；③ 在流式下是「第一块」的合成耗时，在旧链路上是「整段回复」的合成耗时 —— 不是同一个物理量，所以两列分开写、不合并',
+  note:
+    '四个延迟的定义与 docs/benchmarks/v01-baseline.md §3.1 逐字对应；③ 在流式下是「第一块」的合成耗时，在旧链路上是「整段回复」的合成耗时 —— 不是同一个物理量，所以两列分开写、不合并。' +
+    '承载指标是 ④（pack 的「首音」就是「说话结束到听见第一个字」，含端点保持与模型首 token），③ 只是归因量。' +
+    'batching：一次运行 = 一批，n 由 --wav 的个数乘运行的遍数决定；--trace 会同时给出 deltas 与 legacy 列（见 FLAGS）。',
+  flags: { trace, legacyTts: explicitLegacy ? 'explicit' : trace ? 'implied-by-trace' : false, batchRuns: 1 },
 };
 
 printEvidence('语音闭环（夹具音频 → VAD → ASR → 对话 → 流式 TTS）', {

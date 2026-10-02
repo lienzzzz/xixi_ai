@@ -38,6 +38,7 @@ import {
   proactivePanelScript,
   restoreProactiveSettings,
   segmentPlan,
+  segmentTtsNote,
 } from '../../scripts/field-test.ts';
 import { openXixiStore } from '@xixi/domain';
 
@@ -399,14 +400,22 @@ test('the console serves the proactive card, its state, and obeys the switch ove
     assert.equal(fieldState.database?.path, join(root, 'data'), 'the console reports the store it is really using');
     assert.ok(Array.isArray(fieldState.database?.entries) && fieldState.database.entries.length >= 4, 'all entry points are listed');
     assert.equal(fieldState.segmentPlayback?.textSegmented, true);
-    assert.equal(fieldState.segmentPlayback?.ttsSegmented, true, 'the honest state after Phase 8: TTS is streamed per clause');
-    assert.match(String(fieldState.segmentPlayback?.note ?? ''), /流式/, 'and the note names the mechanism');
-    assert.match(String(fieldState.segmentPlayback?.note ?? ''), /ClauseChunker/);
+    // t11: 「这台控制台怎么合成」 is derived from the wiring (a TTS sink is installed only with a
+    // key), so the assertion is about that rule rather than about the sentence: mode and flag must
+    // agree, and the note must be exactly `segmentTtsNote(mode)`. The offline fixture has no key,
+    // so the honest mode is `none` — the previous version of this test demanded `streaming` here,
+    // i.e. it demanded a claim the console could not make.
+    const fieldMode = fieldState.segmentPlayback?.mode;
+    assert.ok(fieldMode === 'streaming' || fieldMode === 'whole-reply' || fieldMode === 'none', `unknown mode ${String(fieldMode)}`);
+    assert.equal(fieldState.segmentPlayback?.ttsSegmented, fieldMode === 'streaming');
+    assert.equal(fieldState.segmentPlayback?.note, segmentTtsNote(fieldMode));
     assert.ok(page.includes('本页用的是哪个数据库'), 'the console shows the database block prominently');
     assert.ok(page.includes('data/field-test'), 'and its own path');
     assert.ok(page.includes('不会'), 'and warns that another entry point\'s persona/history is not here');
-    assert.ok(page.includes('边生成边按句读切块'), 'and states the real TTS granularity');
-    assert.doesNotMatch(page, /整条回复一次合成/, 'the stale claim must not survive the change');
+    // The page renders the same derived sentence as the state payload — that is the property that
+    // used to be a copied literal, and the reason a constant could contradict the console.
+    assert.ok(page.includes(segmentTtsNote(fieldMode)), 'the page renders the derived note verbatim');
+    assert.doesNotMatch(page, /整条回复一次合成/, 'the stale whole-reply claim must not survive');
 
     // The shipped default quiet window is 23:30–07:30 (config/xixi.example.yaml), so a drill that is
     // required to be deliverable fails every night between those hours. Pin an empty window first:
@@ -480,13 +489,26 @@ test('the trial page shows segments in order, labels the source, and carries the
     assert.ok(html.includes('主动开口'), 'proactive messages are labelled differently');
     assert.ok(html.includes(`id="${PROACTIVE_PANEL_IDS.card}"`), 'the trial page carries the same proactive card');
     assert.ok(html.includes('data/web-chat'), 'the trial page names its own database');
-    assert.ok(html.includes('边生成边按句读切块'), 'and discloses that TTS is streamed per clause (pack Phase 8)');
+    // t11: the served page and the state payload are built from one derivation
+    // (`segmentTtsNote(mode)`), so the page cannot advertise a granularity the server does not
+    // have — and this fixture is offline, so neither claims streaming.
+    assert.ok(html.includes('只有文字、没有声音') || html.includes('边生成边按句读切块'), 'the page states one of the two real granularities');
     assert.doesNotMatch(html, /整条回复一次合成/, 'the stale whole-reply claim must not survive');
 
     const webState = (await (await fetch(base + '/api/state')).json()) as Record<string, any>;
     assert.equal(webState.database?.path, root, 'the trial page reports the store it is really using');
     assert.ok(Array.isArray(webState.database?.entries) && webState.database.entries.length >= 4, 'all entry points are listed');
-    assert.equal(webState.segmentPlayback?.ttsSegmented, true);
+    // t11: the trial page's granularity is *derived* from the wiring too, and this fixture runs
+    // offline (no key), so the honest answer here is 「没有声音」. The assertion checks the rule —
+    // note === segmentTtsNote(mode), and the flag agrees with the mode — instead of a literal, so
+    // it cannot be satisfied by editing the copy.
+    const webMode = webState.segmentPlayback?.mode;
+    assert.ok(webMode === 'streaming' || webMode === 'whole-reply' || webMode === 'none', `unknown mode ${String(webMode)}`);
+    assert.equal(webState.segmentPlayback?.ttsSegmented, webMode === 'streaming');
+    assert.equal(webState.segmentPlayback?.note, segmentTtsNote(webMode));
+    assert.doesNotMatch(String(webState.segmentPlayback?.note ?? ''), /边生成边按句读切块/, 'a keyless server must not claim streaming TTS');
+    assert.doesNotMatch(html, /边生成边按句读切块/, 'and the served page says the same thing');
+    assert.match(html, /只有文字、没有声音/, 'it says why there is no sound instead');
 
     // The switch and the strength first: cooldown 0 makes the *next* gate reachable below,
     // which is also how this test shows a knob change taking effect immediately. The quiet window is

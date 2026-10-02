@@ -36,6 +36,7 @@ import {
   renderAcceptanceReport,
   retentionPolicy,
   runVad,
+  segmentTtsNote,
   silenceWav,
   type AcceptanceReport,
   type RetentionPolicy,
@@ -284,11 +285,15 @@ test('the page is Chinese, self-describing and carries the boot state', () => {
   for (const marker of ['id="col-sensors"', 'id="col-config"', 'id="col-conversation"', 'id="px-enable"', 'id="px-disable"', 'id="px-cam"', 'id="px-tts-switch"', 'id="px-camera-switch"']) {
     assert.ok(page.includes(marker), `the three-column layout is missing ${marker}`);
   }
-  // t42 acceptance item 3: a page must not let a reader think TTS is segmented too — with pack
-  // Phase 8 that statement flipped: TTS really is streamed per clause now, and the page has to
-  // say so (a page that still said 「整条回复一次合成」 would be the misleading one).
-  assert.ok(page.includes('边生成边按句读切块'), 'the page states the real TTS granularity (streaming)');
-  assert.doesNotMatch(page, /整条回复一次合成/, 'and never repeats the stale whole-reply claim');
+  // t42 acceptance item 3, kept honest under pack Phase 8 (t11): a page must tell the truth about
+  // TTS granularity, and that truth is a function of the wiring (`segmentTtsNote(mode)`), not a
+  // copied sentence. This boot has 朗读 off, so the page must say there is no sound — claiming
+  // either 「边生成边按句读切块」 or 「整条回复一次合成」 would be a claim about a TTS this console
+  // is not running.
+  assert.ok(page.includes(segmentTtsNote('none')), 'the page renders the note derived from its own wiring');
+  assert.ok(page.includes('只有文字、没有声音'), 'and says there is no speech at all');
+  assert.doesNotMatch(page, /整条回复一次合成/, 'the stale whole-reply claim must not survive');
+  assert.doesNotMatch(page, /边生成边按句读切块/, 'and an offline console must not claim streaming TTS');
   assert.ok(page.includes('data/field-test'), 'and names its own database path');
   assert.ok(page.includes('px-quiet-start'), 'and carries the proactive knobs');
   assert.ok(page.includes('延迟分段'), 'the per-stage latency line is part of the UI');

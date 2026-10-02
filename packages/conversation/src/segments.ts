@@ -215,8 +215,14 @@ function isCjk(char: string | undefined): boolean {
   );
 }
 
-/** `v2.6`, `3.14`, `第 3.5 条` — a dotted number, never a sentence end. */
-const DOTTED_NUMBER = /(?:^|[\s(（])(?:v|V|第)?\d+(?:\.\d+)+/g;
+/**
+ * `v2.6`, `3.14`, `第 3.5 条`, `版本是v2.6` — a dotted number, never a sentence end.
+ *
+ * The prefix is `(?:^|[^\d.])` on purpose: it must not require whitespace or a bracket, because
+ * models write 「版本是v2.6」 and 「温度是3.14度」 with no space at all — requiring one left the dot
+ * of such a number unprotected, which is how `flush(at)` could still cut inside it (t5 review).
+ */
+const DOTTED_NUMBER = /(?:^|[^\d.])(?:v|V|第)?\d+(?:\.\d+)+/g;
 
 /**
  * The half-open ranges `[start, end)` that must never be cut inside, because they hold a
@@ -237,10 +243,11 @@ export function unbreakableSpans(text: string): readonly { readonly start: numbe
     spans.push({ start, end: start + match[0].length });
   }
   for (const match of text.matchAll(DOTTED_NUMBER)) {
-    // `(?:^|[\s(（])` puts the marker one character into the match; shift back to the first digit.
-    const lead = /^[\s(（]/.test(match[0]) ? 1 : 0;
-    const start = (match.index ?? 0) + lead;
-    spans.push({ start, end: start + (match[0].length - lead) });
+    // The number always starts at the first `v`/`V`/`第`/digit inside the match; anything before
+    // it is the lookbehind character the pattern needed (there is none only at the very start).
+    const lead = match[0].search(/[vV第\d]/);
+    const start = (match.index ?? 0) + (lead < 0 ? 0 : lead);
+    spans.push({ start, end: start + (match[0].length - (lead < 0 ? 0 : lead)) });
   }
   return spans.sort((left, right) => left.start - right.start);
 }
@@ -301,6 +308,28 @@ export function isDecisivePauseEnd(char: string | undefined): boolean {
   return char !== undefined && NON_STICKY_MARKS.has(char) && PAUSE_MARKS.has(char);
 }
 
+/**
+ * Pull a requested cut position back to a place that is safe to cut **after**.
+ *
+ * `asked` is clamped into the text. If the cut would land inside an unbreakable span (a decimal,
+ * a version, a URL) it retreats to that span's `start`, which is by construction a legal cut
+ * point: no span covers it (spans are non-empty ranges, so `start` is not `> start` of itself),
+ * and everything the caller wanted to say is still in the clause. A position that is not inside a
+ * span is returned unchanged — the caller is the one who picked a mark.
+ *
+ * This exists because stepping back one character at a time is not enough: the position *after*
+ * the dot of `v2.6` passes `isSafeCutIndex` (cutting after `.` is fine as long as it is not a
+ * decimal separator), so a one-character walk-back stops right there and releases 「版本是v2.」.
+ * The retreat has to know about whole spans, which is what this function adds — see
+ * `tests/unit/voice/clause-chunker.test.ts` for the three cases the t5 review reproduced in
+ * `%TEMP%\t5-review\flushat-repro.mjs`.
+ */
+export function retreatInto(asked: number, spans: readonly { readonly start: number; readonly end: number }[]): number {
+  const askedAt = Math.max(0, Math.trunc(Number.isFinite(asked) ? asked : 0));
+  const span = spans.find((candidate) => askedAt > candidate.start && askedAt < candidate.end);
+  return span === undefined ? askedAt : span.start;
+}
+
 export interface ClauseChunk {
   readonly text: string;
   /** Why this clause was returned — the audit trail for a latency number (pack Phase 8). */
@@ -345,11 +374,16 @@ export class ClauseChunker {
    * path uses to send its first clause to TTS the moment its mark arrives, while the model is
    * still generating the sentence that follows (pack Phase 8, `earlyFirstClause`).
    *
-   * `at` is a hint, not an override: it is clamped into the buffer and only honoured when the
-   * character before it passes `isSafeCutIndex`, so a caller that guesses badly gets a shorter
-   * clause rather than one split inside a number or a URL. An empty result means "nothing to
-   * release yet", which is what lets a caller ask on every delta. Never used by
-   * `splitReplyIntoSegments` — the offline splitter stays untouched.
+   * `at` is a hint, not an override, and a bad hint produces a **shorter** clause: the cut is
+   * clamped into the buffer, then pulled back out of any number or URL it landed inside — to the
+   * start of that span when there is one, otherwise to the nearest safe character (see
+   * `retreatInto`). The first version of this method only stepped back one character at a time
+   * while `isSafeCutIndex(head, cut - 1)` was false, which stopped *right after* the dot of
+   * `v2.6`/`3.14`/`example.com` and released 「版本是v2.」 — the t5 review reproduced it in
+   * `%TEMP%\t5-review\flushat-repro.mjs`, and `tests/unit/voice/clause-chunker.test.ts` now pins
+   * the corrected behaviour. An empty result means "nothing to release yet", which is what lets a
+   * caller ask on every delta. Never used by `splitReplyIntoSegments` — the offline splitter
+   * stays untouched.
    */
   flush(at: number): readonly ClauseChunk[];
   flush(at?: number): readonly ClauseChunk[] {
@@ -368,16 +402,19 @@ export class ClauseChunker {
     const raw = Number.isFinite(at) ? Math.trunc(at) : 0;
     const bounded = Math.max(0, Math.min(raw, this.#buffer.length));
     if (bounded === 0) return [];
-    const head = this.#buffer.slice(0, bounded);
-    const spans = unbreakableSpans(head);
-    let cut = bounded;
-    while (cut > 0 && !isSafeCutIndex(head, cut - 1, spans)) cut -= 1;
-    if (cut === 0) return [];
-    const clause = head.slice(0, cut).trim();
+    const clause = this.#buffer.slice(0, bounded).trim();
     if (clause.length === 0) return [];
-    if (clause.length > this.#maxChars) this.#overlong += 1;
+    // The spans are scanned over one character of lookahead, not just the clause: `v2.6` only
+    // looks like a dotted number once the `6` is visible, and a one-character-shorter slice made
+    // 「版本是v2.」 look perfectly safe. The extra character is never released (the cut is ≤ bounded).
+    const lookahead = this.#buffer.slice(0, Math.min(bounded + 1, this.#buffer.length));
+    const cut = retreatInto(bounded, unbreakableSpans(lookahead));
+    if (cut <= 0) return [];
+    const released = this.#buffer.slice(0, cut).trim();
+    if (released.length === 0) return [];
+    if (released.length > this.#maxChars) this.#overlong += 1;
     this.#buffer = this.#buffer.slice(cut);
-    return [{ text: clause, reason: 'sentence' }];
+    return [{ text: released, reason: 'sentence' }];
   }
 
   #drain(atEnd: boolean): ClauseChunk[] {

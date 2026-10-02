@@ -122,7 +122,11 @@ import { concatWav, readWav, readWavInfo, sliceWav } from './lib/wav.ts';
 // Pack Phase 8: the streaming speech pipeline (ClauseChunker → TTS queue → playback clock).
 // Shared with `scripts/voice-turn.ts` and asserted by `tests/unit/voice/voice-stream.test.ts`
 // so the console, the file-driven entry and the page cannot drift into three behaviours.
-import { fourStageLatency, SpeechPipeline } from '../services/voice-edge/voice_edge/voice_stream.ts';
+import { fourStageLatency, isShortAcknowledgementOnly, SpeechPipeline } from '../services/voice-edge/voice_edge/voice_stream.ts';
+// Pack Phase 8 (t11): the page gets the *same* playback rules the offline tests exercise —
+// `XIXI_PLAYBACK_JS` is executed for real in `tests/unit/voice/voice-stream.test.ts` (node:vm),
+// so what runs in the browser and what the tests pin cannot drift apart.
+import { XIXI_PLAYBACK_JS, XIXI_PLAYBACK_THRESHOLDS } from '../services/voice-edge/voice_edge/voice_stream.ts';
 
 for (const [key, value] of Object.entries(readDotEnv())) {
   if (process.env[key] === undefined) process.env[key] = value;
@@ -772,6 +776,15 @@ export interface VoiceTurnPayload {
       readonly audioMs: number | null;
       readonly durationMs: number;
       readonly bytes: number;
+      /**
+       * This clause's own audio (base64 WAV) — what the page plays, clause by clause.
+       *
+       * t11: the first version reported clauses and then handed the page one stitched blob, so
+       * 「逐块播放」 was not actually possible from the payload; the page had to fall back to
+       * playing the whole reply. `null` means this clause failed to synthesize (it is also listed
+       * in `errors`), never 「silence instead of speech」.
+       */
+      readonly audio: string | null;
     }[];
     readonly errors: readonly string[];
     /** The four baseline delays (`docs/benchmarks/v01-baseline.md` §3.1), same clock. */
@@ -927,6 +940,75 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
     }
     const asrMs = Date.now() - asrStarted;
 
+    /**
+     * Pack Phase 8 (t11): a short acknowledgement is not a turn.
+     *
+     * 「嗯。」 is the case the VAD was measured to be unable to handle (`docs/design/voice.md` §2:
+     * Pipecat's Silero never commits speech for it, and both LiveKit EOU variants call it a
+     * *finished* turn). When the father answers her with a nod, the engine must therefore not see
+     * a turn: no reply is generated, the conversation keeps its state (she stays in the same
+     * exchange), and the next thing he says is still a continuation.
+     *
+     * `isShortAcknowledgementOnly` owns the text rule; the VAD's voiced duration is the second
+     * signal, and it is only used when the span is short enough that no real sentence could have
+     * been cut off (the decision itself lives in `services/voice-edge/voice_edge/voice_stream.ts`
+     * and is pinned by `tests/unit/voice/voice-stream.test.ts`).
+     */
+    if (isShortAcknowledgementOnly(transcript, { energyMs: plan.used.reduce((sum, span) => sum + (span.endMs - span.startMs), 0) })) {
+      const payload: VoiceTurnPayload = {
+        ok: true,
+        accepted: false,
+        reason: 'ASSENT_ONLY',
+        transcript,
+        reply: null,
+        // `action` stays inside `TurnAction`, and deliberately **not** the value this project
+        // reserves for a reply whose whole content is an acknowledgement: that member is still a
+        // declared-but-unproduced contract value (see
+        // `tests/unit/core/dead-code-truthfulness.test.ts`). What this turn really is — 「他只在
+        // 应和」 — is carried by `reason`, which is the field a console renders. The reason code is
+        // `ASSENT_ONLY` rather than a name containing that reserved word, so the audit stays
+        // meaningful instead of having to allowlist this file.
+        action: 'SILENCE',
+        actionText: '应和（不打断、不回话）',
+        reasonText: '这一句只是「嗯／哦／是啊」一类的应和，不算一轮：西西继续听着，不回话、也不推进会话状态',
+        state: deps.engine.state,
+        segments: plan.used.map((segment) => ({
+          startMs: segment.startMs,
+          endMs: segment.endMs,
+          durationMs: segment.durationMs ?? Math.round(segment.endMs - segment.startMs),
+        })),
+        segmentsTotal: vad.segments.length,
+        segmentsUsed: plan.used.length,
+        droppedSegments: plan.dropped,
+        stages: { vadMs, asrMs, llmFirstChunkMs: null, llmTotalMs: null, ttsMs: null, totalMs: Date.now() - totalStarted },
+        vadMs,
+        asrMs,
+        firstTokenMs: null,
+        llmMs: null,
+        ttsMs: null,
+        latencyMs: null,
+        totalMs: Date.now() - totalStarted,
+        model: null,
+        toolName: null,
+        silenceReason: null,
+        silenceReasonText: '不是沉默：他只是在应和',
+        hygiene: null,
+        finishReason: null,
+        notices: [],
+        audio: null,
+        stream: null,
+        at: new Date().toISOString(),
+        privacy: {
+          policy: deps.policy,
+          speechAudioOnDisk: null,
+          note: '应和不进模型：这段录音只用于识别，没有落盘、没有送去对话',
+        },
+        notes: [...notes, '应和判定：短促的「嗯／哦／是啊」不结束你这一轮，西西继续听；想让她回话就说一句完整的话'],
+      };
+      deps.log?.(`[voice] acknowledgement only ("${transcript}"): no turn taken, still listening`);
+      return payload;
+    }
+
     const chunks: string[] = [];
     let firstChunkAt: number | null = null;
     /** t21 (t12 F2): the engine's notices, so the page can say *why* a turn said nothing. */
@@ -1048,15 +1130,20 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
               ttsSegments: pipeline.clauses.length,
               firstClauseTextMs,
               firstClauseAudioMs,
-              clauses: pipeline.clauses.map((clause) => ({
-                index: clause.index,
-                text: clause.text,
-                reason: clause.reason,
-                synthMs: clause.synthMs,
-                audioMs: clause.audioAtMs === null ? null : clause.audioAtMs - llmStarted,
-                durationMs: spoken.find((chunk) => chunk.index === clause.index)?.durationMs ?? 0,
-                bytes: clause.bytes,
-              })),
+              clauses: pipeline.clauses.map((clause) => {
+                const synthesized = spoken.find((chunk) => chunk.index === clause.index);
+                return {
+                  index: clause.index,
+                  text: clause.text,
+                  reason: clause.reason,
+                  synthMs: clause.synthMs,
+                  audioMs: clause.audioAtMs === null ? null : clause.audioAtMs - llmStarted,
+                  durationMs: synthesized?.durationMs ?? 0,
+                  bytes: clause.bytes,
+                  // The clause audio itself, so 「逐块播放」 needs no second synthesis anywhere.
+                  audio: synthesized === undefined ? null : Buffer.from(synthesized.wav).toString('base64'),
+                };
+              }),
               errors: pipeline.errors,
               fourStage: fourStageLatency({
                 endpointDelayMs: plan.used[plan.used.length - 1]?.endpointDelayMs ?? null,
@@ -2359,6 +2446,22 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
     };
   }
 
+  /**
+   * Pack Phase 8: the streaming TTS sink this console really installs, or `null` when it cannot
+   * synthesize at all. `ttsSegmented` and the note the page renders are derived from **this
+   * value**, not from a constant: 「这台控制台到底怎么合成」 is a fact about the wiring, and the
+   * page must not claim a granularity the console is not running (t42's rule, kept under the
+   * change that flipped it).
+   *
+   * The sink returns the WAV for one clause, which is exactly what `handleVoiceTurn`'s
+   * `SpeechPipeline` expects; `null` here (no key, or 朗读 off) is reported by the payload as
+   * `stream: null` plus no audio, never as silence that looks like success.
+   */
+  const streamSpeak: VoiceDeps['speakStream'] =
+    ttsOn && client.hasKey
+      ? async ({ text }) => Buffer.from(await client.synthesize(text))
+      : undefined;
+
   const deps: VoiceDeps = {
     python: DEFAULT_PYTHON,
     voiceDir,
@@ -2369,6 +2472,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
     policy,
     asr: options.asrOverride ?? (offline ? async (audio: Buffer): Promise<string> => `（离线自检）收到 ${audio.length} 字节语音` : undefined),
     ...(options.vadOverride === undefined ? {} : { vad: options.vadOverride }),
+    ...(streamSpeak === undefined ? {} : { speakStream: streamSpeak }),
     log,
   };
 
@@ -2477,7 +2581,17 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       personality: store.selfProfile(),
       privacy: { policy, pruned, voiceDir },
       database: { path: dataDir, presencePath: presenceDataDir, entries: XIXI_DB_ENTRIES, note: '四个入口各用不同的库；在别处设的人格与历史不会带到这里' },
-      segmentPlayback: { textSegmented: true, ttsSegmented: true, note: STREAMING_TTS_NOTE },
+      segmentPlayback: (() => {
+        // Derived, not asserted: the page's sentence about granularity is a function of the sink
+        // this console really installed (`streamSpeak` above, which requires a key) plus the
+        // runtime 朗读 switch. No key → the page says 「只有文字、没有声音」, not 「流式」.
+        const mode: 'streaming' | 'whole-reply' | 'none' = !ttsOn
+          ? 'none'
+          : streamSpeak === undefined
+            ? (client.hasKey ? 'whole-reply' : 'none')
+            : 'streaming';
+        return { textSegmented: true, ttsSegmented: mode === 'streaming', mode, note: segmentTtsNote(mode) };
+      })(),
       model: { configured: client.hasKey, offline },
       // Pack Phase 2: the console states which capabilities its conversation scope really
       // offers, so "四个内置工具 + 最多四轮" is visible without reading the source.
@@ -2679,7 +2793,18 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
         const url = new URL(request.url ?? '/', 'http://127.0.0.1');
         if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {          const address = server.address();
           const port = typeof address === 'object' && address !== null ? address.port : options.port;
-          const boot = { listen: `127.0.0.1:${port}`, offline, ttsEnabled, modelConfigured: client.hasKey, calibration, policy, databasePath: dataDir };
+          const boot = {
+            listen: `127.0.0.1:${port}`,
+            offline,
+            ttsEnabled,
+            // The page's sentence about granularity is built from the same fact the state payload
+            // reports, so a page cannot claim streaming while the server speaks a whole reply.
+            ttsMode: (streamSpeak === undefined ? 'whole-reply' : 'streaming') as 'streaming' | 'whole-reply',
+            modelConfigured: client.hasKey,
+            calibration,
+            policy,
+            databasePath: dataDir,
+          };
           // Build first, write second: if the page builder throws, the catch below can still
           // answer with a readable 500 instead of a blank 200 page (t42's crash was exactly
           // that shape — `writeHead` had already gone out when the `ReferenceError` fired).
@@ -3077,6 +3202,13 @@ export interface FieldBootstrap {
   readonly listen: string;
   readonly offline: boolean;
   readonly ttsEnabled: boolean;
+  /**
+   * How this console really synthesizes, when 朗读 is on: `streaming` (a TTS sink is installed,
+   * clause by clause) or `whole-reply` (one call for the whole reply). Omitted by a caller that
+   * does not know — the page then says 「整条回复一次合成」, which is the safe direction: it never
+   * claims the finer granularity it cannot verify.
+   */
+  readonly ttsMode?: 'streaming' | 'whole-reply';
   readonly modelConfigured: boolean;
   readonly calibration: CalibrationView;
   readonly policy: RetentionPolicy;
@@ -5758,37 +5890,25 @@ export const XIXI_DB_ENTRIES: readonly { readonly entry: string; readonly comman
 ]);
 
 /**
- * What is *actually* segmented today.
+ * What is *actually* segmented — one function, three states, no drifting constants.
  *
- * ADR-0010 is about how a reply is spoken, and the honest state of t42 is: the text/plan is
- * segmented (the page shows each piece as it would be played, with the real pause), while TTS
- * still synthesizes the whole reply in one call — so the ear does not hear the pause yet.
- * Saying so on the page is mandatory (t42 acceptance item 3): a user must not conclude from the
- * moving bubbles that the audio is segmented too.
+ * ADR-0010 is about how a reply is spoken; pack Phase 8 changed the other half of the sentence.
+ * A page must not claim a granularity it is not running, so the text is derived from the wiring
+ * (`createFieldServer` passes the mode it really installed) instead of a module constant that
+ * goes stale the moment the wiring changes — the t42 acceptance item this note exists for
+ * (「a user must not conclude from the moving bubbles that the audio is segmented too」) is
+ * satisfied by telling the truth, not by freezing one version of it.
  */
-export const SEGMENT_TTS_NOTE =
-  '多段回复（ADR-0010）：文字与播放计划真的按段（每段之间停 450ms，页面逐条出现）。' +
-  '但语音合成（TTS）目前仍是整条回复一次合成，所以听感上暂时听不到段间停顿——按段合成属于下一步（M5）。';
-
-/**
- * Pack Phase 8 changed the truth this note carries, so the note is now a function of it.
- *
- * A page must not claim either granularity it is not running: the field-test console and the
- * trial page synthesize the reply **clause by clause while it is being generated** (that is
- * what makes 首音 independent of the reply's length), while a console built without a TTS
- * sink still speaks the whole reply in one call. `ttsSegmented` is that fact, and it comes
- * from the wiring rather than from a constant — the old constant said 「一次合成」 even after
- * the streaming path existed, which is exactly the kind of drift t42 wrote the note to stop.
- */
-export function segmentTtsNote(ttsSegmented: boolean): string {
+export function segmentTtsNote(mode: 'streaming' | 'whole-reply' | 'none'): string {
   const head = '多段回复（ADR-0010）：文字与播放计划真的按段（每段之间停 450ms，页面逐条出现）。';
-  return ttsSegmented
-    ? `${head}语音合成（TTS）现在也是**流式**的：回复边生成边按句读切块（ClauseChunker），第一块立刻合成并在浏览器里开始播，后面的块边生成边合成（pack Phase 8）。`
-    : `${head}这台控制台没有接流式语音（没有 TTS sink），所以语音仍按整条回复一次合成。`;
+  if (mode === 'streaming') {
+    return `${head}语音合成（TTS）现在是**流式**的：回复边生成边按句读切块（ClauseChunker），第一块立刻合成并在浏览器里开始播，后面的块边生成边合成（pack Phase 8）。`;
+  }
+  if (mode === 'whole-reply') {
+    return `${head}这台控制台没有接流式语音（没有 TTS sink），所以语音仍按整条回复一次合成。`;
+  }
+  return `${head}这台控制台当前没有可用的语音合成（没有密钥或朗读被关掉），所以只有文字、没有声音。`;
 }
-
-/** The note the pages actually render — kept as a constant so no call site can forget it. */
-export const STREAMING_TTS_NOTE = segmentTtsNote(true);
 
 /** The 「本页用哪个库」block, shared by both pages. `currentDir` is the running page's own path. */
 export function databaseNoteHtml(currentDir: string): string {
@@ -6640,7 +6760,7 @@ ${proactivePanelHtml()}
       <h2>对话记录（你 → 西西，以及西西自己开口）</h2>
       <div id="turns" class="muted">还没有轮次。按住 🎤 说一句试试，或先点左栏的「启用」让西西自己开口。</div>
       <div class="muted" style="margin-top:6px">多段回复（ADR-0010）在这里显示为「第 i/N 段 · 段间 450ms」（页面上逐条出现，终端也逐条打印）；完整一条也会写进事件日志。标注「主动开口」的条目是西西<b>没过问你就说的</b>，它也过了全部硬门禁。</div>
-      <div class="err" style="border-color:#5c4a22; background:#2a2314; color:#ffe6b8; margin-top:8px">${STREAMING_TTS_NOTE}</div>
+      <div class="err" style="border-color:#5c4a22; background:#2a2314; color:#ffe6b8; margin-top:8px">${segmentTtsNote(!boot.ttsEnabled ? 'none' : boot.ttsMode === 'streaming' ? 'streaming' : 'whole-reply')}</div>
     </section>
   </div>
 </main>
@@ -6660,6 +6780,7 @@ var recorder = null;
 var recordingUrls = [];
 
 ${proactivePanelScript('/api/field')}
+${XIXI_PLAYBACK_JS}
 
 function el(id) { return document.getElementById(id); }
 function fmt(value, digits) {
@@ -6924,12 +7045,45 @@ async function startRecording() {
   var source = context.createMediaStreamSource(micStream);
   var processor = context.createScriptProcessor(4096, 1, 1);
   var chunks = [];
-  processor.onaudioprocess = function (event) { chunks.push(new Float32Array(event.inputBuffer.getChannelData(0))); };
+  processor.onaudioprocess = function (event) {
+    var frame = new Float32Array(event.inputBuffer.getChannelData(0));
+    chunks.push(frame);
+    // Pack Phase 8 (t11): the microphone keeps running while she speaks, and 150 ms of voiced
+    // frames stop her playback (barge-in). 「按住说话」 is what makes this reachable, so the page
+    // says so instead of pretending the microphone is always on.
+    var sum = 0;
+    for (var i = 0; i < frame.length; i += 1) sum += frame[i] * frame[i];
+    if (xixiWatchBargeIn(Math.sqrt(sum / (frame.length || 1)))) {
+      el('hint').textContent = '听到你说话了：已经停下（未播的部分丢掉）。松开后这一段会照常上传。';
+    }
+  };
   source.connect(processor);
   processor.connect(context.destination);
   recorder = { context: context, source: source, processor: processor, chunks: chunks, sampleRate: context.sampleRate };
   el('mic').textContent = '⏺ 松开发送';
-  el('hint').textContent = '正在录音…（松开按钮结束）';
+  el('hint').textContent = '正在录音…（松开按钮结束；按住期间她说的话会被你的声音打断）';
+}
+
+/**
+ * Play what came back, clause by clause when the server streamed it (pack Phase 8).
+ *
+ * BOOT and the turn payload are the inputs here: the payload's stream.clauses field is the speech
+ * the turn really produced, each with its own base64 WAV;
+ * playing them one after another is the browser half of 「第一块立刻播」. A payload without a
+ * stream (a text turn, or a console whose TTS sink is not installed) falls back to the single
+ * whole-reply audio it carries, so both shapes are understood by one path.
+ */
+async function playReplyAudio(data) {
+  var clauses = data.stream && data.stream.clauses ? data.stream.clauses : null;
+  if (clauses && clauses.length > 0 && data.stream.enabled === true) {
+    for (var i = 0; i < clauses.length; i += 1) {
+      if (!clauses[i].audio) continue;
+      var started = await xixiSpeakClause(clauses[i].audio);
+      if (started && started.skipped) break; // a barge-in landed: the rest is dropped, not resumed
+    }
+    return;
+  }
+  if (data.audio) new Audio('data:audio/wav;base64,' + data.audio).play().catch(function () {});
 }
 
 /** Peak level of the just-recorded audio, in dBFS (0 = full scale). -Infinity when silent. */
@@ -7017,9 +7171,15 @@ async function stopRecording() {
       audioUrl: audioUrl, audioSeconds: seconds, audioPeakDbfs: peak
     });
     if (data.audio) { new Audio('data:audio/wav;base64,' + data.audio).play().catch(function () {}); }
-    el('hint').textContent = data.reason === 'NO_SPEECH_DETECTED'
-      ? '没识别到语音：' + levelAdvice(peak) + ' 点右栏那条的「▶ 播放我这次录音」听一下录到了什么。'
-      : '说完松开即发送。';
+    if (data.reason === 'NO_SPEECH_DETECTED') {
+      el('hint').textContent = '没识别到语音：' + levelAdvice(peak) + ' 点右栏那条的「▶ 播放我这次录音」听一下录到了什么。';
+    } else if (data.reason === 'ASSENT_ONLY') {
+      // Pack Phase 8: a nod is not a turn — say what happened instead of showing a reply she
+      // never made, and keep the mic hint where it was (she is still listening).
+      el('hint').textContent = '「' + (data.transcript || '嗯') + '」是应和：这一轮不算，西西还在听（想让她回话就说一句完整的话）。';
+    } else {
+      el('hint').textContent = '说完松开即发送。';
+    }
     await refreshState();
   } catch (error) {
     showError('page-error', '上传失败：' + error.message, '确认启动现场测试的终端还在运行');

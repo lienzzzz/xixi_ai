@@ -6,6 +6,7 @@ import {
   CLAUSE_CHUNKER_LIMITS,
   ClauseChunker,
   isSafeCutIndex,
+  retreatInto,
   unbreakableSpans,
   type ClauseChunk,
 } from '../../../packages/conversation/src/segments.ts';
@@ -176,4 +177,41 @@ test('a run of marks is one clause, not one per mark', () => {
   const chunker = new ClauseChunker();
   const chunks = pushAll(chunker, ['真的吗？！', '我不信……', '算了。']);
   assert.deepEqual(chunks.map((chunk) => chunk.text), ['真的吗？！', '我不信……', '算了。']);
+});
+
+test('retreatInto pulls a bad cut out of a number or a URL', () => {
+  // The guard itself, with no chunker around it: `asked` inside a span → the span's start.
+  const version = '版本是v2.6，装好了';
+  assert.equal(retreatInto(version.indexOf('.') + 1, unbreakableSpans(version)), version.indexOf('v'), 'back to the start of v2.6');
+  const decimal = '温度是3.14度';
+  assert.equal(retreatInto(decimal.indexOf('.') + 1, unbreakableSpans(decimal)), decimal.indexOf('3'), 'back to the start of 3.14');
+  const url = '地址是https://example.com/a，打开';
+  assert.equal(retreatInto(url.indexOf('example.com') + 7 + 1, unbreakableSpans(url)), url.indexOf('https'), 'back to the start of the URL');
+  // A position that is not inside a span is left alone: the caller picked a mark.
+  const mark = '明天有小雨，记得带伞';
+  assert.equal(retreatInto(mark.indexOf('，') + 1, unbreakableSpans(mark)), mark.indexOf('，') + 1);
+  assert.equal(retreatInto(0, unbreakableSpans(mark)), 0, 'and 0 stays 0, which the caller reads as 「release nothing」');
+  assert.equal(retreatInto(Number.NaN, unbreakableSpans(mark)), 0);
+});
+
+test('flush(at) retreats out of a number or a URL instead of cutting inside it', () => {
+  // The t5 review's finding (`%TEMP%\t5-review\flushat-repro.mjs`): the walk-back stopped *right
+  // after* the dot of v2.6 / 3.14 / example.com — cutting after a dot looks safe — and released
+  // 「版本是v2.」. A bad hint must produce a **shorter** clause, never a broken number or URL.
+  const cases: readonly (readonly [string, (pending: string) => number, string, string])[] = [
+    ['版本是v2.6，装好了', (p) => p.indexOf('.') + 1, '版本是', 'v2.6，装好了'],
+    ['温度是3.14度，带伞', (p) => p.indexOf('.') + 1, '温度是', '3.14度，带伞'],
+    ['地址是https://example.com/a，打开', (p) => p.indexOf('example.com') + 7 + 1, '地址是', 'https://example.com/a，打开'],
+  ];
+  for (const [text, pick, expectedClause, expectedRest] of cases) {
+    const chunker = new ClauseChunker();
+    assert.deepEqual(pushAll(chunker, [text]), [], `no mark releases this text on its own: ${text}`);
+    const at = pick(chunker.pending);
+    const released = chunker.flush(at);
+    assert.equal(released.length, 1, `${text}: a release happens`);
+    assert.equal(released[0]?.text, expectedClause, `${text}: the clause is the safe prefix`);
+    assert.equal(chunker.pending, expectedRest, `${text}: the number/URL stays whole in the rest`);
+    // The invariant behind the finding: no released clause may end inside an unbreakable run.
+    assert.ok(!/v2\.$|3\.$|example\.$/.test(released[0]?.text ?? ''), `${text}: nothing ends inside it`);
+  }
 });

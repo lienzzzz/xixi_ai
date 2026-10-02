@@ -7,24 +7,32 @@
  *   3. the voice edge detects real speech and decides to interrupt;
  *   4. playback stops and the un-played buffer is dropped.
  *
- * Two layers of evidence, and they answer different questions:
+ * Three layers of evidence, and they answer different questions:
  *
  *   * **the decision** — how long from the moment the user's voice actually begins to the moment
  *     the VAD commits to 「speech started」 (`segmentation.bargeInDecisionMs`). That is the part
- *     our code controls on the input side;
- *   * **the audible stop** (pack Phase 8, `--strict`) — the reply is split into clauses, laid out
- *     on `PlaybackTimeline`, and the script then asks the *listener's* question: at the moment he
- *     started talking, is anything still audible? The answer must be 「no」, and the un-played
- *     remainder must be exactly what the timeline says was dropped. The same rule runs in the
- *     browser (`XIXI_PLAYBACK_JS.xixiStopSpeaking`), so this is a measurement of production code.
+ *     our code controls on the input side, and it is measured on real audio;
+ *   * **the audible stop** (`--strict`) — the reply is split into clauses, laid out on
+ *     `PlaybackTimeline`, and the script then asks the *listener's* question: at the moment he
+ *     started talking, is anything still audible? The answer must be 「no」, the un-played
+ *     remainder must be exactly what the timeline says was dropped, **and the same probe on a
+ *     timeline that was not aborted must answer 「yes」** — without that counterfactual the
+ *     criterion cannot fail and would be decoration (t5 review);
+ *   * **the browser rule** — `XIXI_PLAYBACK_JS` is *executed* (in `node:vm`, by
+ *     `tests/unit/voice/voice-stream.test.ts`) rather than merely grepped, which is the only way
+ *     「the page stops the audio」 can be checked without a browser.
  *
- * What it still cannot measure offline: whether the physical speaker goes silent (§33's
- * P50 < 500 ms target covers that, and needs a device test). The truncation is written out as a
- * WAV so the result is auditable rather than asserted.
+ * What this still cannot measure offline: whether the physical speaker goes silent (§33's
+ * P50 < 500 ms target covers that, and needs a device test). It also cannot interrupt anything by
+ * itself — **reachability**: the microphone only runs while 「按住说话」 is held, so this rule is
+ * reachable exactly when the father is holding the button *and* she happens to be speaking, which
+ * is the regime the page documents and the caveat below repeats. The truncation is written out as
+ * a WAV so the result is auditable rather than asserted.
  *
  * Usage:
- *   node scripts/voice-bargein.ts --bot data/voice/reply-1.wav --user tests/audio-fixtures/followup-turn.wav --at 800
- *   node scripts/voice-bargein.ts --strict          # clauses + audible-stop criterion, same fixtures
+ *   node scripts/voice-bargein.ts                       # fixtures from tests/audio-fixtures
+ *   node scripts/voice-bargein.ts --strict              # …plus the audible-stop criterion
+ *   node scripts/voice-bargein.ts --bot tests/audio-fixtures/backchannel.wav --at 400
  */
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -43,6 +51,7 @@ import {
   pauseWindows,
   playbackStateAt,
   PlaybackTimeline,
+
   truncateOnBargeIn,
 } from '../services/voice-edge/voice_edge/voice_stream.ts';
 
@@ -87,7 +96,17 @@ const strict = args.includes('--strict');
 /** The reply text used to lay the clause timeline out; the real reply lives in `data/voice/`. */
 const replyText = argValue('--reply', '明天有小雨，出门记得带伞。温度大概十几度，多穿一件就不冷了。风不大，路上慢点走。');
 
-const botPath = argValue('--bot', join(REPO_ROOT, 'data', 'voice', 'reply-1.wav'));
+/**
+ * Assistant audio: a **checked-in fixture**, not `data/voice/reply-1.wav`.
+ *
+ * `data/` is gitignored and `reply-1.wav` is rewritten by every `npm run voice:turn`, so the
+ * 「未播音频 4128 ms」-style numbers in this script's output used to change with whatever reply ran
+ * last (t5 review). The decision latency never depended on this file — it comes from the user's
+ * fixture and the VAD — so pinning the bot audio only makes the *playback* numbers reproducible.
+ * Override with `--bot` for a deliberate experiment.
+ */
+const BOT_FIXTURE = join(REPO_ROOT, 'tests', 'audio-fixtures', 'bot-reply-fixture.wav');
+const botPath = argValue('--bot', BOT_FIXTURE);
 const userPath = argValue('--user', join(REPO_ROOT, 'tests', 'audio-fixtures', 'followup-turn.wav'));
 const startsAtMs = Number(argValue('--at', '800'));
 
@@ -131,20 +150,49 @@ const decision = decideBargeIn({
 const { stopsAtMs, droppedMs } = truncateOnBargeIn({ decisionMs: decisionMs ?? 0, playbackOffsetMs: startsAtMs, playbackDurationMs: botDurationMs });
 
 /**
- * The audible-stop check: once playback is aborted at `stopsAtMs`, is anything still playing
- * 200 ms later? 「真的停下」 means the answer is no — and the answer comes from the same
- * `PlaybackTimeline` the browser drives.
+ * The audible-stop check, with its counterfactual.
+ *
+ * 「真的停下」 is a claim we can only make if the *same instant* would have been audible had nobody
+ * interrupted: once aborted, `playbackStateAt` answers 「no」 for every instant by construction, so
+ * a criterion that only asks the aborted timeline cannot fail (t5 review:
+ * `%TEMP%\t5-review\audiblestop-repro.mjs` scanned 10 001 instants and found the question
+ * unfalsifiable). A fixed 200 ms offset is not enough either — this script's own clause layout has
+ * a gap between clause 1 and clause 2 right around 1.2 s, so the probe measured silence for the
+ * wrong reason and the criterion failed for a reason that has nothing to do with barge-in.
+ *
+ * So the probe is anchored to the audio itself: the **first instant after the abort at which the
+ * uninterrupted timeline would still be playing**. On the aborted timeline that same instant must
+ * be silent (playback stopped); on the running timeline it is audible by construction (that is how
+ * it was chosen), which is the counterfactual that makes the criterion falsifiable. Both answers
+ * come from the same `PlaybackTimeline` class the browser drives; the browser *rule* itself is
+ * executed in `tests/unit/voice/voice-stream.test.ts` (node:vm), not grepped.
  */
-const aborted = timeline.abort(stopsAtMs + (decisionMs ?? 0), { playedMs: startsAtMs + (decisionMs ?? 0) });
-const laterState = playbackStateAt(aborted, startsAtMs + (decisionMs ?? 0) + 200);
+const abortAtMs = startsAtMs + (decisionMs ?? 0);
+const running = timeline.metrics();
+const probeAtMs = (() => {
+  const nextSlot = running.slots.find((slot) => slot.startMs >= abortAtMs);
+  if (nextSlot !== undefined) return nextSlot.startMs;
+  const inside = running.slots.find((slot) => slot.endMs > abortAtMs);
+  return inside === undefined ? abortAtMs : Math.max(abortAtMs, inside.startMs);
+})();
+const aborted = timeline.abort(abortAtMs, { playedMs: abortAtMs });
+const laterState = playbackStateAt(aborted, probeAtMs);
+const counterfactualState = playbackStateAt(running, probeAtMs);
 const audibleStop = {
   abortedAtMs: aborted.abortedAtMs,
-  audibleAfter200Ms: laterState.audible,
+  probeAtMs,
+  audibleAfterProbe: laterState.audible,
   playingClauseAfter: laterState.clause,
   playedMs: aborted.playedMs,
   droppedMs: aborted.droppedMs,
   droppedClauses: aborted.droppedClauses,
   totalClauses: aborted.totalClauses,
+  // The counterfactual: the same instant, no interruption. It has to be audible, or the probe is
+  // pointing at a gap and the criterion is measuring nothing.
+  counterfactualNotAborted: counterfactualState.audible,
+  counterfactualClause: counterfactualState.clause,
+  counterfactualNote:
+    '探测点取自主张「未打断时这里必然可听」的第一个瞬间（打断点之后的下一段音频起点）；未打断为可听、打断后为不可听，两者同时成立这条判据才成立',
 };
 
 /** Assent candidates (the assistant's 「嗯」): pauses inside his own sentence, with the decision each gets. */
@@ -188,7 +236,11 @@ printEvidence('打断（离线测量，§14.2 + pack Phase 8）', {
   audibleStop: strict || decisionMs !== null ? audibleStop : null,
   assent: strict ? assent : null,
   vadEvents: segmentation.events,
-  caveat: '离线只能验证「判定」与「播放队列被清空」；扬声器真正静音的延迟需要设备验收（§33 的 P50 < 500ms 不在本次证据内）',
+  caveat:
+    '离线只能验证「判定」与「播放队列被清空」；扬声器真正静音的延迟需要设备验收（§33 的 P50 < 500ms 不在本次证据内）。' +
+    '可达性：麦克风只在「按住说话」按下期间采样（页面这么写，也是这样实现的），所以这条规则可达的条件是「他正按着按钮、而她又恰好在说话」；' +
+    '没有按键时她说完一句不会被打断。助手音频固定为 tests/audio-fixtures/bot-reply-fixture.wav，' +
+    '判定延迟与它无关（它只由用户夹具与 VAD 决定），固定它只是让「丢弃了多少毫秒」可复现。',
 });
 
 if (decisionMs === null) {
@@ -205,7 +257,11 @@ if (strict) {
     process.exit(1);
   }
   if (laterState.audible) {
-    console.error(`FAILED：打断 200ms 后仍有音频在播（第 ${laterState.clause} 段）——「正在播的语音停下」不成立`);
+    console.error(`FAILED：打断后在 ${Math.round(probeAtMs)}ms 仍有音频在播（第 ${laterState.clause} 段）——「正在播的语音停下」不成立`);
+    process.exit(1);
+  }
+  if (!counterfactualState.audible) {
+    console.error(`FAILED：反事实证明不成立——同一时刻（${Math.round(probeAtMs)}ms）未打断也听不到声音，说明探测点落在播放窗口之外，这条判据本身没有意义`);
     process.exit(1);
   }
   if (aborted.droppedMs <= 0) {
@@ -221,6 +277,7 @@ console.log(`\n打断判定延迟 ${decisionMs}ms ≤ ${TARGET_MS}ms 目标；�
 if (strict) {
   console.log(
     `播放队列：${aborted.totalClauses} 段，已听 ${Math.round(aborted.playedMs)}ms，丢弃 ${aborted.droppedClauses.length} 段（${Math.round(aborted.droppedMs)}ms）；` +
-      `打断 200ms 后仍在播：${laterState.audible ? '是' : '否'}；应和候选停顿 ${assent.pauseMs.join('/')}ms → ${assent.decisionAtLongestPause?.reason ?? '无'}`,
+      `探测点 ${Math.round(probeAtMs)}ms：打断后仍在播 ${laterState.audible ? '是' : '否'}／未打断时应为 ${counterfactualState.audible ? '是' : '否'}；` +
+      `应和候选停顿 ${assent.pauseMs.join('/')}ms → ${assent.decisionAtLongestPause?.reason ?? '无'}`,
   );
 }

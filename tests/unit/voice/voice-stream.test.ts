@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 
 import { readWavInfo } from '../../../scripts/lib/wav.ts';
 import {
@@ -433,6 +434,97 @@ test('the served playback snippet carries the barge-in rules and no placeholders
   assert.doesNotMatch(XIXI_PLAYBACK_JS, /<\/script/i, 'and nothing that would close the page script early');
   // The barge-in gate must be longer than a backchannel: that is the whole §14.3 rule.
   assert.ok(XIXI_PLAYBACK_THRESHOLDS.bargeInMs > 120, 'a 120 ms clipped 「嗯」 must not stop her');
+});
+
+/* ---------------------------------------------------------------------------------------
+ * The snippet the browser runs, executed for real (t11)
+ * ------------------------------------------------------------------------------------- */
+
+/** Minimal AudioContext/HTMLAudioElement doubles, enough to drive `XIXI_PLAYBACK_JS`. */
+function runPlaybackSnippet(): {
+  readonly sandbox: Record<string, unknown>;
+  readonly stopped: () => number;
+  readonly started: () => number;
+  readonly clipsPlayed: () => number;
+} {
+  let stopCalls = 0;
+  let startCalls = 0;
+  let clips = 0;
+  const source = (): Record<string, unknown> => ({
+    buffer: null,
+    onended: null,
+    connect: () => undefined,
+    start: () => {
+      startCalls += 1;
+    },
+    stop: () => {
+      stopCalls += 1;
+    },
+  });
+  const context = {
+    state: 'running',
+    resume: () => undefined,
+    createBufferSource: source,
+    destination: {},
+    decodeAudioData: async () => ({ duration: 1.5 }),
+  };
+  const sandbox: Record<string, unknown> = {
+    window: { AudioContext: function AudioContext(): unknown { return context; } },
+    AudioContext: function AudioContext(): unknown { return context; },
+    Audio: function Audio(): { play: () => Promise<void> } {
+      clips += 1;
+      return { play: () => Promise.resolve() };
+    },
+    performance: { now: () => 0 },
+    Date: { now: () => 1_000 },
+    atob: (value: string) => Buffer.from(value, 'base64').toString('binary'),
+    Uint8Array,
+    console,
+  };
+  sandbox['globalThis'] = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(XIXI_PLAYBACK_JS, sandbox);
+  return { sandbox, stopped: () => stopCalls, started: () => startCalls, clipsPlayed: () => clips };
+}
+
+test('the browser playback rules really run (node:vm), and a barge-in drops the queue', async () => {
+  const run = runPlaybackSnippet();
+  const speak = run.sandbox['xixiSpeakClause'] as (audio: string) => Promise<{ skipped?: boolean }>;
+  const stop = run.sandbox['xixiStopSpeaking'] as (reason?: string) => void;
+  const watch = run.sandbox['xixiWatchBargeIn'] as (rms: number) => boolean;
+
+  // Two clauses are speaking; both went through the real scheduling path.
+  const first = await speak(Buffer.from('fake-wav-1').toString('base64'));
+  const second = await speak(Buffer.from('fake-wav-2').toString('base64'));
+  assert.equal(first.skipped, undefined);
+  assert.equal(second.skipped, undefined);
+  assert.equal(run.started(), 2, 'both clauses were started on the audio context');
+
+  // A quiet frame is not a barge-in; enough voiced frames are (the gate is interpolated into the
+  // served source, so this exercises the browser's own constant).
+  const framesNeeded = Math.ceil(XIXI_PLAYBACK_THRESHOLDS.bargeInMs / 20);
+  assert.equal(watch(0.001), false, 'silence does not interrupt her');
+  assert.equal(watch(0.5), false, 'one loud frame is not enough');
+  let interrupted = false;
+  for (let frame = 2; frame < framesNeeded; frame += 1) {
+    assert.equal(watch(0.5), false, `frame ${frame} is still below the gate`);
+  }
+  interrupted = watch(0.5);
+  assert.equal(interrupted, true, 'enough voiced time stops playback');
+  assert.equal(run.stopped(), 2, 'and the queued sources were really stopped');
+
+  // A later clause sees the interruption and is never played: the reply is dropped, not resumed.
+  const afterBargeIn = await speak(Buffer.from('fake-wav-3').toString('base64'));
+  assert.equal(afterBargeIn.skipped, true, 'clauses after a barge-in are not played');
+
+  // The 応和 clip path plays outside that queue.
+  const clip = run.sandbox['xixiPlayClip'] as (audio: string) => void;
+  clip(Buffer.from('fake-wav-4').toString('base64'));
+  assert.equal(run.clipsPlayed(), 1, 'a backchannel clip is a separate Audio element');
+
+  // An explicit stop (e.g. the user presses stop) clears the queue without a barge-in decision.
+  stop('user-stop');
+  assert.ok(run.stopped() >= 2);
 });
 
 /* ---------------------------------------------------------------------------------------
