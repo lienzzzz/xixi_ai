@@ -180,7 +180,7 @@ docs/                     README（地图）、architecture、event-contracts、
   **不代表用户对麦克风说话能否被听到**（口径说明见 [`docs/recon/field-test-report-2026-09-30.md`](docs/recon/field-test-report-2026-09-30.md) 顶部）。
 - **主动性 V2 的六条缺陷已修、并已独立复验**（第三轮 t1 修复 → t2 单独复验 → t3 评审 pass）：内容口径 generic 话题 **18.2%**（目标 ≤20%）、
   热聊接话 8 次；**但 pack 更严的「连续两次没回应后继续主动 = 0」仍不成立**——实测是「显著降频」（被忽视的那一天在连续 ≥2 条未回应后仍开口 2 次），
-  「= 0 还是显著降频」是**待用户定的产品口径**，未定之前不得写成「Phase 5 全通过」。判定表与可重跑命令见
+  口径**已定：显著降频**、不做「= 0」硬停（ADR-0011 §决定 2 的补充，2026-10-01 第五轮 t1 拍定）；多日验收见 `node scripts/eval-proactive-timeline.ts`。判定表与可重跑命令见
   [`docs/verification/t2-timeline-independent-verification-2026-10-01.md`](docs/verification/t2-timeline-independent-verification-2026-10-01.md)。
 - **`onNotice` 已被两个产线入口消费**：`serve-chat.ts`（试用页）与 `field-test.ts`（现场测试控制台）订阅并显示
   `REPLY_HYGIENE` / `UNBACKED_FACT_CLAIM` 与「沉默原因」（`ARTIFACT_ONLY_REPLY` vs `MODEL_SILENCE`）；
