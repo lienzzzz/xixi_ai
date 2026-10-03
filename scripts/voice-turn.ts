@@ -487,7 +487,13 @@ const latency = {
   note:
     '四个延迟的定义与 docs/benchmarks/v01-baseline.md §3.1 逐字对应；③ 在流式下是「第一块」的合成耗时，在旧链路上是「整段回复」的合成耗时 —— 不是同一个物理量，所以两列分开写、不合并。' +
     '承载指标是 ④（pack 的「首音」就是「说话结束到听见第一个字」，含端点保持与模型首 token），③ 只是归因量；把 ③ 的「超出 15%」当成目标是口径错误。' +
-    '同批对照的降幅跨批不可复现（三次独立批次符号都不一致），所以只能写「方向多数为正、幅度不可复现」，不给单批百分比当结论。' +
+    // t21: no canned conclusion here. This note travels inside every artefact, so a hard-coded
+    // sentence ends up contradicting the same file's own recomputation (`--compare` on this artefact
+    // says 「方向不一致（2 快 3 慢）」 while the note used to say 「多数为正」). The direction, the
+    // spread and the two floors are all computed from the artefacts by `--compare`; this note only
+    // says where to look.
+    '同批对照（流式 vs 整段）的方向与幅度跨批不可复现，**结论由 --compare 按产物计算，本文件不预置结论句** —— 见 latency.reproduce 指向的命令；' +
+    '一次运行只看得到一批，单批百分比不是结论，至少要几批并列才能谈方向。' +
     'batching：一次运行 = 一批，n 由 --wav 的个数乘运行的遍数决定；--trace 会同时给出 deltas 与 legacy 列（见 FLAGS）。',
   flags: {
     trace,

@@ -30,10 +30,13 @@
  * in the same document. The 口径 is restated in the design doc's streaming section
  * (`docs/design/voice.md` §7) and in `docs/recon/voice-streaming-2026-10-01.md`.
  *
- * ④ is bounded from below by two things this project does not control: ② (the model's first token;
- * measured P50 ≈ 1.7–2.0 s in these runs, already above 1.5 s on its own) and ③'s floor (MiMo TTS
- * round trip: 2 chars 0.58–1.05 s, 13 chars 0.97–1.19 s, 30 chars 1.61–2.02 s). So a run whose ④ is
- * below 1.5 s cannot be produced by changing the chunking alone.
+ * ④ is bounded from below by two things this project does not control: ② (the model's first token)
+ * and ③ (the synthesis round trip). **Neither floor is written down as a constant here** (t21): the
+ * hand-typed 「② P50 ≈ 1.7–2.0 s」 was contradicted by the very batches it described — the reviewer's
+ * three batches had per-batch ② P50 from 903.5 ms to 8162.5 ms, so most of them sat outside it. Both
+ * floors are now computed from whatever artefacts the caller passes to `--compare`. The historical
+ * single-run probe that motivated 「1.0–1.3 s」 for ③ (MiMo TTS direct probe: 2 chars 0.58–1.05 s,
+ * 13 chars 0.97–1.19 s, 30 chars 1.61–2.02 s) is a memory of one session, not a standing constant.
  */
 
 /** One turn as `scripts/voice-turn.ts` writes it into its evidence file. */
@@ -245,6 +248,15 @@ export interface CrossBatchSummary {
   readonly mostlyBetter: boolean;
   /** The spread of the per-batch ④ deltas, in percent. Reported as a **range**, never a single value. */
   readonly deltaPercentRange: { readonly min: number; readonly max: number } | null;
+  /**
+   * ② (ASR final → first token) across the batches given — the floor on ④ that this project does not
+   * control. **Computed from the artefacts, never written down as a constant** (t21): the hand-typed
+   * 「P50 约 1.7–2.0 s」 was contradicted by the very batches it was describing (per-batch ② P50 over
+   * eight batches ranged 903.5–8162.5 ms, so two of the reviewer's three batches sat *outside* it).
+   */
+  readonly ttft: { readonly medianP50: number; readonly min: number; readonly max: number; readonly batches: number } | null;
+  /** ③'s floor in the same spirit: the per-batch ③ P50 spread the given artefacts actually show. */
+  readonly third: { readonly medianP50: number; readonly min: number; readonly max: number; readonly batches: number } | null;
 }
 
 /**
@@ -261,6 +273,15 @@ export function summarizeBatches(comparisons: readonly BatchComparison[]): Cross
   const percents = usable.map(
     (comparison) => ((comparison.streaming.fourth?.p50 ?? 0) - (comparison.legacy.fourth?.p50 ?? 0)) / (comparison.legacy.fourth?.p50 ?? 1) * 100,
   );
+  // The two floors, taken from the artefacts in hand rather than from a constant (t21).
+  const spread = (pick: (comparison: BatchComparison) => number | null | undefined): { medianP50: number; min: number; max: number; batches: number } | null => {
+    const values = comparisons
+      .map((comparison) => pick(comparison))
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+      .sort((left, right) => left - right);
+    if (values.length === 0) return null;
+    return { medianP50: latencyStats(values)?.p50 ?? 0, min: Math.round(values[0] as number), max: Math.round(values[values.length - 1] as number), batches: values.length };
+  };
   return {
     batches: comparisons.length,
     pairedBatches: ratios.filter((ratio) => ratio !== null).length,
@@ -270,6 +291,8 @@ export function summarizeBatches(comparisons: readonly BatchComparison[]): Cross
     unmoved: ratios.filter((ratio) => ratio === 1).length,
     mostlyBetter: better > worse,
     deltaPercentRange: percents.length === 0 ? null : { min: Number(Math.min(...percents).toFixed(1)), max: Number(Math.max(...percents).toFixed(1)) },
+    ttft: spread((comparison) => comparison.streaming.ttft?.p50),
+    third: spread((comparison) => comparison.streaming.third?.p50),
   };
 }
 
@@ -293,7 +316,16 @@ export function formatCrossBatch(summary: CrossBatchSummary): string {
   );
   lines.push('');
   lines.push(`pack 的 ${VOICE_PACK_TARGET_MS} ms 目标：是 ④（端点后到首段可听），不是 ③；这些批次里没有一批达到。`);
-  lines.push('④ 的下界由 ②（模型首 token，P50 约 1.7–2.0 s）与 MiMo TTS 单次往返（1.0–1.3 s）先卡住。');
+  // Computed, not remembered (t21) — see the module comment for why.
+  const bothFloors = summary.ttft !== null && summary.third !== null;
+  if (bothFloors) {
+    lines.push(
+      `④ 的下界按本次给的 ${summary.ttft?.batches ?? 0} 批产物算：② 首 token 逐批 P50 中位 ${summary.ttft?.medianP50} ms（${summary.ttft?.min}–${summary.ttft?.max} ms）、` +
+        `③ 首段合成逐批 P50 中位 ${summary.third?.medianP50} ms（${summary.third?.min}–${summary.third?.max} ms）——都不是调切块参数能改的量。`,
+    );
+  } else {
+    lines.push('④ 的下界是 ② 首 token 与 ③ 首段合成之和，两者都由模型/供应商侧决定；本次产物里至少一条没有可用数值，所以这里不给数字。');
+  }
   return lines.join('\n');
 }
 
@@ -330,10 +362,24 @@ export function formatComparison(comparisons: readonly BatchComparison[]): strin
   }
   lines.push('结论写法（t12 的要求）：多批并列时只能写方向统计与幅度区间，不给任何单批百分比当结论；');
   lines.push('「方向多数为正」只有在多数批次真的更快时才成立 —— 不成立就写「方向不一致」，见下面这段的计算结果。');
-  lines.push(`④ 的下界不在这条链路里：② 首 token（这几批 P50 约 1.7–2.0 s，单独就已超过 ${VOICE_PACK_TARGET_MS} ms）与 ③ 的地板（MiMo TTS 单次往返 1.0–1.3 s）先卡住；`);
-  lines.push('要把 ④ 压到 1.5 s 以内，必须同时换更快的合成与更快的首 token，调切块参数做不到。');
-  if (comparisons.length > 1) lines.push(formatCrossBatch(summarizeBatches(comparisons)));
-  else lines.push('（只给了 1 批：单批百分比不是结论，至少给 2 批才能谈方向。）');
+  // The two floors are printed from the artefacts in hand, not from remembered constants (t21). The
+  // hand-typed 「② 约 1.7–2.0 s」 was contradicted by the batches it described; a computed number
+  // cannot drift away from the evidence, and it updates itself when more batches are passed in.
+  const floors = summarizeBatches(comparisons);
+  const floorLine = (label: string, spread: { medianP50: number; min: number; max: number; batches: number } | null, what: string): string => {
+    const head = `④ 的下界不在这条链路里：${label}（${what}）`;
+    if (spread === null) return `${head} —— 本次产物里没有可用数值，这里不给数字。`;
+    const readings = `逐批 P50 中位 ${spread.medianP50} ms、区间 ${spread.min}–${spread.max} ms`;
+    if (spread.batches === 1) {
+      return `${head} —— 本次只给了 1 批，读数是 P50 中位 ${spread.medianP50} ms、区间 ${spread.min}–${spread.max} ms；单批数字不足以称「地板」，请把几批产物一起传进来。`;
+    }
+    return `${head} —— 按本次给的 ${spread.batches} 批产物算，${readings}。`;
+  };
+  lines.push(floorLine('② 首 token', floors.ttft, '模型侧，不由语音链路决定'));
+  lines.push(floorLine('③ 首段合成', floors.third, '合成往返，模型供应商侧'));
+  lines.push(`要把 ④ 压到 ${VOICE_PACK_TARGET_MS} ms 以内，必须同时压这两条；调切块参数做不到。`);
+  if (comparisons.length > 1) lines.push(formatCrossBatch(floors));
+  else lines.push('（只给了 1 批：单批百分比不是结论，至少给 2 批才能谈方向；上面两条下界也只是这一批的读数。）');
   return lines.join('\n');
 }
 

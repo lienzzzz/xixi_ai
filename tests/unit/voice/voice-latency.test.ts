@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
+import { printEvidence, REPO_ROOT } from '../../../scripts/lib/harness.ts';
 import {
   batchLabel,
   compareBatch,
@@ -144,15 +148,139 @@ test('the printed table states the ③/④ distinction and refuses a single-batc
   assert.match(text, /方向多数为正.*只有在多数批次真的更快时才成立/, 'and the slogan is made conditional, not quoted');
   assert.match(text, /只给了 1 批/, 'a single batch is refused as a conclusion');
   assert.doesNotMatch(text, /(?<!不可)复现的单批百分比/, 'no single-batch percentage is presented as a finding');
-  // Both floors are named, so nobody expects chunk tuning to reach the target:
-  assert.match(text, /② 首 token/);
-  assert.match(text, /MiMo TTS 单次往返/);
+  // Both floors are named **and computed** (t21): the numbers must be this batch's own readings, so
+  // nobody expects chunk tuning to reach the target and nobody reads a remembered constant.
+  assert.match(text, /② 首 token（模型侧，不由语音链路决定）/, 'stage ② is named as the first floor');
+  assert.match(text, /③ 首段合成（合成往返，模型供应商侧）/, 'stage ③ is named as the second floor');
+  assert.match(text, /本次只给了 1 批，读数是 P50 中位 1500 ms、区间 1500–1500 ms/, 'a single batch is a reading, not a floor');
+  assert.match(text, /单批数字不足以称「地板」/, 'and it says so');
+  assert.match(text, /必须同时压这两条；调切块参数做不到/, 'with the conclusion that chunking cannot reach the target');
+  // The two hand-typed constants that used to live here must be gone (t21): they disagreed with the
+  // very batches they described (per-batch ② P50 over eight batches: 903.5–8162.5 ms).
+  assert.doesNotMatch(text, /1\.7[–-]2\.0/, 'the remembered ② range must not come back');
+  assert.doesNotMatch(text, /MiMo TTS 单次往返/, 'nor a remembered ③ range');
   // And the per-turn rows carry both signs when the data has both.
   assert.match(text, /-1100/, 'the delta column shows the actual per-turn differences');
   assert.match(text, /\+1000/, 'including the turn where streaming was slower');
 });
 
+test('the ②/③ floors come from the artefacts, not from a remembered constant (t21)', () => {
+  // Same batch, different ②: the printed floor must follow the data. This is the whole point of the
+  // fix — a hard-coded 「② 约 1.7–2.0 s」 cannot move when the artefacts say something else.
+  const slow = compareBatch(
+    evidence({ turns: evidence().turns.map((turn) => ({ ...turn, fourStage: { ...turn.fourStage, asrFinalToFirstTokenMs: 8000 } })) }),
+  );
+  const normal = compareBatch(evidence());
+  // A third batch with a much cheaper first token, so the median is not just the average of two.
+  const fast = compareBatch(
+    evidence({
+      source: 'fast.txt',
+      turns: evidence().turns.map((turn) => ({
+        ...turn,
+        fourStage: { ...turn.fourStage, asrFinalToFirstTokenMs: 500, firstTokenToFirstAudioMs: 500 },
+      })),
+    }),
+  );
+  // With three batches the line states the spread over all of them, following the data it was given.
+  const text = formatComparison([slow, normal, fast]);
+  assert.match(text, /按本次给的 3 批产物算，逐批 P50 中位 1500 ms、区间 500–8000 ms/, 'the ② floor is the artefacts’ own spread');
+  assert.match(text, /按本次给的 3 批产物算，逐批 P50 中位 1200 ms、区间 500–1200 ms/, 'and so is the ③ floor');
+
+  // The cross-batch summary exposes the same two spreads for machine checking.
+  const summary = summarizeBatches([slow, normal, fast]);
+  assert.deepEqual(summary.ttft, { medianP50: 1500, min: 500, max: 8000, batches: 3 }, 'every batch contributes to the ② floor');
+  assert.deepEqual(summary.third, { medianP50: 1200, min: 500, max: 1200, batches: 3 });
+  const cross = formatCrossBatch(summary);
+  assert.match(cross, /② 首 token 逐批 P50 中位 1500 ms（500–8000 ms）/, 'the multi-batch line prints the computed spread');
+  assert.match(cross, /③ 首段合成逐批 P50 中位 1200 ms（500–1200 ms）/);
+  assert.doesNotMatch(cross, /1\.7[–-]2\.0|1\.0[–-]1\.3/, 'no remembered constants in the summary either');
+  assert.doesNotMatch(text, /1\.7[–-]2\.0|1\.0[–-]1\.3/, 'nor in the table');
+
+  // With no usable ② at all, it must say so instead of inventing a number.
+  const noTtft = compareBatch(evidence({ turns: evidence().turns.map((turn) => ({ ...turn, fourStage: { ...turn.fourStage, asrFinalToFirstTokenMs: null } })) }));
+  assert.equal(summarizeBatches([noTtft]).ttft, null);
+  assert.equal(summarizeBatches([noTtft]).third?.medianP50, 1200, 'the other floor is unaffected');
+  const missing = formatComparison([noTtft, noTtft]);
+  assert.match(missing, /② 首 token（模型侧，不由语音链路决定） —— 本次产物里没有可用数值，这里不给数字。/, 'an unmeasured floor is reported as unmeasured');
+});
+
+test('a fresh artefact cannot contain a canned conclusion or a remembered floor (t21)', () => {
+  // The regression that closes this task: `voice-turn.ts`'s `latency.note` travels inside *every*
+  // artefact, so a canned sentence there ends up contradicting the same file's own recomputation
+  // (`--compare` said 「方向不一致（2 快 3 慢）」 while the note said 「多数为正」). The note now points at
+  // the command instead of pre-writing the conclusion, and the ②/③ floors are computed.
+  //
+  // The CLI is run for real (offline: `--fake`), which is the only way to assert what it *writes*
+  // rather than what some helper returns.
+  const dir = mkdtempSync(join(tmpdir(), 'xixi-t21-artefact-'));
+  const out = join(dir, 'batch.txt');
+  try {
+    execFileSync(
+      process.execPath,
+      ['scripts/voice-turn.ts', '--fake', '--wav', 'tests/audio-fixtures/direct-question.wav', '--out', out],
+      { cwd: REPO_ROOT, stdio: 'ignore', timeout: 120_000 },
+    );
+    const text = readFileSync(out, 'utf8');
+    assert.ok(text.length > 0, 'the tool wrote an artefact');
+    const parsed = parseBatchEvidence(text, out);
+    assert.ok(parsed.turns.length > 0, 'and it contains the turns');
+    const note = (JSON.parse(text.slice(text.indexOf('{', text.indexOf('===')))) as { latency?: { note?: string; reproduce?: string } }).latency;
+
+    // ① No canned direction. The claim must not appear as a standing sentence in the artefact.
+    assert.doesNotMatch(text, /方向多数为正、幅度不可复现/, 'the old slogan must not be written into artefacts');
+    assert.doesNotMatch(text, /只能写「方向多数为正/, 'nor in that form');
+    // …and the note says where the conclusion comes from instead.
+    assert.match(note?.note ?? '', /结论由 --compare 按产物计算，本文件不预置结论句/, 'the note delegates the conclusion');
+    assert.match(note?.reproduce ?? '', /--compare/, 'and names the command that computes it');
+    // ② No remembered floors.
+    assert.doesNotMatch(text, /1\.7[–-]2\.0/, 'the remembered ② range must not be written into artefacts');
+    assert.doesNotMatch(text, /1\.0[–-]1\.3/, 'nor the remembered ③ range');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the conclusion the artefact points at is the one --compare computes (t21)', () => {
+  // The other half: whatever the note claims, the command must be able to produce it. Two artefacts
+  // from the same offline run are enough — the point is that the numbers are computed from the files,
+  // not remembered. (Built through `printEvidence` so the artefact format is the real one.)
+  const title = '语音闭环（夹具音频 → VAD → ASR → 对话 → 流式 TTS）';
+  const artefact = (seed: number): string => {
+    const lines: string[] = [];
+    const write = (line: string): void => {
+      lines.push(line);
+    };
+    const original = console.log;
+    console.log = (line: unknown) => write(String(line));
+    try {
+      printEvidence(title, {
+        turns: [
+          {
+            wav: 'tests/audio-fixtures/direct-question.wav',
+            action: 'SPEAK',
+            reply: '好的，我记住了。',
+            clauses: [{ index: 0, chars: 8 }],
+            speech: { endpointDelayMs: 500 },
+            legacyTtsMs: 2000 + seed,
+            fourStage: { vadEndToAsrFinalMs: 400, asrFinalToFirstTokenMs: 1000 + seed, firstTokenToFirstAudioMs: 900, totalToFirstAudioMs: 2800 },
+          },
+        ],
+        latency: { command: 'node scripts/voice-turn.ts --fake', note: 'x', reproduce: 'y' },
+      });
+    } finally {
+      console.log = original;
+    }
+    return lines.join('\n');
+  };
+  const comparison = compareBatch(parseBatchEvidence(artefact(0), 'a.txt'));
+  const text = formatComparison([comparison, compareBatch(parseBatchEvidence(artefact(4000), 'b.txt'))]);
+  assert.match(text, /方向：流式更快 \d 批、更慢 \d 批、持平 \d 批/, 'the direction is counted from the artefacts');
+  assert.match(text, /本次只给了|按本次给的 \d+ 批产物算/, 'and the floors are computed from them too');
+  assert.doesNotMatch(text, /1\.7[–-]2\.0|1\.0[–-]1\.3/, 'with no remembered constants anywhere');
+});
+
 test('parseBatchEvidence round-trips what the script writes (BOM tolerated)', () => {
+  // Round-trip: what `voice-turn.ts` puts on disk must parse back into the same turns and command.
   const written = `=== 语音闭环（夹具音频 → VAD → ASR → 对话 → 流式 TTS）===\n${JSON.stringify({ turns: evidence().turns, latency: { command: 'node …' } }, null, 2)}\n`;
   const parsed = parseBatchEvidence(written, 'data/voice/bench/x.txt');
   assert.equal(parsed.turns.length, 2);
