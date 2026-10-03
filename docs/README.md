@@ -1,6 +1,6 @@
 # 西西项目文档地图
 
-> 最后更新：2026-10-03（第五轮集成收口 t8：四条工作的实测数字、口径与已知问题同步进各文档、全量门禁实跑）
+> 最后更新：2026-10-03（第五轮集成收口 t8：四条工作的实测数字、口径与已知问题同步进各文档、全量门禁实跑；追加：登记 V0.3 Phase 0 的 [`v03/ACTUAL_RUNTIME_MAP.md`](v03/ACTUAL_RUNTIME_MAP.md)）
 > 面向：接手本项目的编码 Agent / 维护者
 > 本文件告诉你「先读什么、什么最权威、改代码后必须更新哪些文档」。
 
@@ -90,6 +90,7 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | 9 | [`verification/`](verification/) | **独立验证**报告（不是实现者自述）：三态判定（通过/失败/未测）、可重跑命令 | 按需 |
 | 10 | [`review/`](review/) | **评审**报告：verdict + findings（F 编号 / 严重度）+ 复审结论 | 按需 |
 | 11 | [`../xixi_ai_companion_project_plan.md`](../xixi_ai_companion_project_plan.md) | 方案原文（57 节）。**注意：它是设计意图，不是现状** | 按需 |
+| 12 | [`v03/ACTUAL_RUNTIME_MAP.md`](v03/ACTUAL_RUNTIME_MAP.md) | **V0.3 开工第一份**：Phase 0 的运行时地图（十个概念的定义处/调用点/目标包/迁移步），以及对 pack 审计结论的逐项复核（哪些和今天的代码不符） | 10 min |
 
 本轮新增的报告（都已登记在上表目录里）：
 
@@ -108,6 +109,7 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | [`review/reply-hygiene-review-2026-10-01.md`](review/reply-hygiene-review-2026-10-01.md) | 工具标记 / 英文推理清洗的评审（`REPLY_HYGIENE` 已实现；两条 requiredFix 已落地——试用页与控制台订阅 `onNotice`、沉默原因码 `ARTIFACT_ONLY_REPLY` 上线，逐入口清单见 `progress.md` §4） |
 | [`verification/t4-realism-verification-2026-10-01.md`](verification/t4-realism-verification-2026-10-01.md) | 「真人感」改造的独立验证：三次输入、主口径提问率、铁律未削弱 |
 | [`verification/t7-round5-independent-verification-2026-10-03.md`](verification/t7-round5-independent-verification-2026-10-03.md) | **第五轮四条工作的独立复验**：多日主动性（显著降频口径达标、未回应后不硬停）、话题收口升级（0/91 与反事实 9/91）、**首音延迟未达标（目标不可达）**、有界心情（0 越界 / ±6% / ±0.03 / 门禁同码）。三类证据分开、每个数字带可复跑命令 |
+| [`v03/ACTUAL_RUNTIME_MAP.md`](v03/ACTUAL_RUNTIME_MAP.md) | **V0.3 Phase 0 的运行时地图**：pack 点名的十个概念（`buildToolChain` / `ProactiveLoop` / `createModelComposer` / `createModelDecider` / voice helpers / Memory extractor / 各入口 DB / perception DB / prompt builder / DSH 与直连）各自的定义处、调用点、目标包与迁移步；每行附一条可复跑的 `git grep`。另含对 pack 审计报告 `00_CODE_AUDIT.md` 的逐项复核（15 条：一致 / 偏差，附证据） |
 
 ## 2. 权威性排序（冲突时按这个判）
 
