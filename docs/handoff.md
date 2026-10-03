@@ -22,15 +22,17 @@
 - **0C typecheck 真门禁**：`b6e8dae`——`npm run check:types`（185 错 → 0、零 ts-ignore、抑制仅 6 处具名 cast），并抓出 4 个测试没覆盖的真缺陷（含 `perception-ingest` 读错字段、替身镜像了错键）
 - **0D replay 基础**：`c9d1ad1`——13 项、注入 Clock（**不 mock 全局 Date**，评审用「Date 守卫全抛错」证明 wall clock 读取 0 次）、三条行为基线、跨年同脚本行为一致
 
-**当前在途**：`t17` 修复（t9 评审的三条必修：`GET /api/field/state` 的 note 仍写「四个入口各用不同的库」与 P0-B 相反、`--help` 仍是旧默认、`XIXI_DB_ENTRIES` 丢了 `measurement` 字段）→ `t18` 复审 → `t10` 评审 → `t11` P0 gate（建立 P0 的进度文件，届时才会出现在 `docs/` 下）→ Phase 1（`t12`/`t13`：ContextBuilder 与 MemoryRetriever、关系上下文与纠正闭环）。
+**P0 架构链已复审通过**：`t9` 评审判 needs_revision（F1 高：`GET /api/field/state` 的 note 仍写「四个入口各用不同的库」与 P0-B 相反、F2 `--help` 仍是旧默认、F3 `XIXI_DB_ENTRIES` 丢了 `measurement` 字段）→ `t17` 修复入库 **`13ded0e`**（note 改由 `CANONICAL_STORE_ENTRIES` 推导 + 「旧句不得回潮」断言；help 与注释从 `CANONICAL_DATA_DIR` 插值；补回 `measurement`；runtime manifest 补 `@xixi/contracts` 与 `@xixi/conversation`；latency 走「测量量不进 ReplayReport」路线并加 13 键形状断言；**顺带修掉一个真 TZ 依赖**——原先 Z 锚点那一轮会写下本机 `+08:00`，现由 `StoreOptions.offsetMinutes` 让 replay 全程用 fixture 偏移）→ `t18` 复审 **pass**。
+
+**当前在途**：`t10` 评审 P0 正确性链（B2、九项 preflight、typecheck，含「两个刻意未开的开关该不该开」的裁定）→ `t11` P0 gate（30 分钟以上窗口、建立 P0 的进度文件，届时才会出现在 `docs/` 下）→ Phase 1（`t12`/`t13`：ContextBuilder 与 MemoryRetriever、关系上下文与纠正闭环）。
 
 **V0.3 阶段的操作事实（下一轮接手必读）**：
 1. 门禁顺序：**`npm run check:types` → `npm test` → `npm run check:docs`**；
-2. **多日时间线 `node scripts/eval-proactive-timeline.ts` 要留 ≥30 分钟窗口**（评审实测 23 分 49 秒、单核打满；归因是 tick 数量 300s × 3 天 × 4 场景，**不是抽取回归**）；
+2. **多日时间线 `node scripts/eval-proactive-timeline.ts` 要留 30 分钟以上窗口**（评审两次实测 **23 分 43 秒 / 23 分 49 秒、结论一致**、单核打满；归因是 tick 数量 300s × 3 天 × 4 场景，**不是抽取回归、也不是挂死**）；
 3. 开工先读 **`docs/v03/ACTUAL_RUNTIME_MAP.md`**（运行时地图，含对 pack 审计 4 处过期结论的更正）；
 4. 支持 `--print-wiring` 的是 **chat / voice-device-check / eval-realism / eval-conversation** 这四个（`field-test` 与 `serve-chat` **没有**该开关，别按「所有入口」去 grep）。
 
-**已知风险（下一轮清单）**：`packages/runtime` 的 manifest 未声明它值层面 import 的 `@xixi/contracts` 与 `@xixi/conversation`（`npm ci` 能跑、换 pnpm/PnP 会崩）；`engine.ts` 的 `Date.now()` 只喂 `latencyMs`（不入库、无用例守）。
+**已知风险（下一轮清单）**：`packages/brain-adapter` 的 manifest 未声明它在值层面 import 的 `@xixi/model-adapters`（`tools.ts` 用 `WeatherClient`；既有缺陷，`npm ci` 能跑、换 pnpm/PnP 会崩，连带同步 lock）。（runtime 的 `@xixi/contracts` 与 `@xixi/conversation` 已在 `13ded0e` 补上；`latencyMs` 这个非确定量也已由 13 键形状断言守住。）
 
 ---
 
