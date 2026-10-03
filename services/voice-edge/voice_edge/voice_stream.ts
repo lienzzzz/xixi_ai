@@ -263,8 +263,22 @@ export class SpeechPipeline {
   #clauseHook: ((clause: SynthesizedClause) => void | Promise<void>) | null = null;
   /** Next clause index whose delivery has **completed** — everything below it is done. */
   #deliveredCursor = 0;
-  /** Clauses whose audio exists but which are waiting for their turn in the order. */
-  #queue = new Map<number, SynthesizedClause>();
+  /**
+   * The delivery state of every clause index that has resolved, **in either direction** (B2):
+   * a success the moment its audio exists, a **tombstone** the moment its synthesis rejects.
+   *
+   * Both kinds occupy their slot, because the slot — not the audio — is what the cursor walks.
+   * Before this, a failed clause never entered the queue at all, so `#deliveredCursor` stayed
+   * parked on it and every *successful* clause behind it was held until `flush()` force-fed it
+   * (`docs/00_CODE_AUDIT.md` §3.15, `docs/05_VOICE.md` §9): one failed clause silently turned the
+   * streaming path back into 整段合成.
+   *
+   * A failed slot is a bare tombstone: its error message already went to `#errors` when it failed,
+   * so the delivery state only has to say 「this index is resolved — step over it」.
+   */
+  #slots = new Map<number, { kind: 'success'; chunk: SynthesizedClause } | { kind: 'failed' }>();
+  /** Tail of the pump chain: pumps run one after another, never two over the same cursor. */
+  #pumpTail: Promise<void> = Promise.resolve();
   #delivered = 0;
   #firstDispatched = false;
   #nextIndex = 0;
@@ -305,14 +319,13 @@ export class SpeechPipeline {
    * the synthesis hand-off instead of buffering the whole reply in memory.
    *
    * A clause whose synthesis failed is **not** delivered (there is no audio), and it is reported in
-   * `errors` exactly as before; ordering of the delivered clauses is preserved.
+   * `errors` exactly as before; ordering of the delivered clauses is preserved. Its slot still
+   * resolves, so it delays the clauses behind it by nothing at all (B2).
    */
   onClause(hook: (clause: SynthesizedClause) => void | Promise<void>): void {
     this.#clauseHook = hook;
-    // Anything already synthesized is queued, so registering after `push()` is not a race.
-    for (const chunk of [...this.#audio.values()].sort((left, right) => left.index - right.index)) {
-      if (chunk.index >= this.#deliveredCursor) this.#queue.set(chunk.index, chunk);
-    }
+    // Anything that already resolved is in `#slots`, so registering after `push()` is not a race:
+    // the pump below walks the resolved prefix from the cursor, tombstones included (B2).
     void this.#pump();
   }
 
@@ -322,33 +335,52 @@ export class SpeechPipeline {
   }
 
   /**
-   * Hand over every queued clause that is next in line, and keep going until the next wanted index
-   * is missing. Delivery is strictly index-ordered: clause *n* waits for clause *n−1*, whatever
-   * order synthesis finished in, and each clause is handed over exactly once (the index moves
-   * forward, so a re-queue cannot duplicate it).
+   * Advance along the **resolved** prefix: for each index in turn, a success is handed to the hook
+   * and a failure (tombstone) is stepped over. Returns when the next wanted index has not resolved
+   * yet, so a clause whose synthesis is still running still holds the ones behind it.
+   *
+   * Both kinds of slot advance the cursor. That is the B2 fix: before it, only a success advanced
+   * the cursor, so a failure parked it forever and every clause behind it waited for `flush()`.
+   *
+   * Pumps are **serialised** (`#pumpTail`): `#deliver` may fire while another delivery is being
+   * awaited, and two pumps walking one cursor would hand the same clause over twice.
    */
-  async #pump(): Promise<void> {
-    const hook = this.#clauseHook;
-    if (hook === null) return;
-    while (this.#queue.has(this.#deliveredCursor)) {
-      const chunk = this.#queue.get(this.#deliveredCursor) as SynthesizedClause;
-      this.#queue.delete(this.#deliveredCursor);
-      try {
+  #pump(): Promise<void> {
+    const next = this.#pumpTail.then(async () => {
+      const hook = this.#clauseHook;
+      if (hook === null) return;
+      for (;;) {
+        // Step over every consecutive failure — recorded when it failed, replayed never.
+        while (this.#slots.get(this.#deliveredCursor)?.kind === 'failed') this.#deliveredCursor += 1;
+        const slot = this.#slots.get(this.#deliveredCursor);
+        if (slot === undefined || slot.kind !== 'success') return;
         // Awaited on purpose: a slow consumer back-pressures the hand-off instead of letting the
-        // whole reply pile up in memory.
-        await hook(chunk);
-      } finally {
-        this.#deliveredCursor += 1;
-        this.#delivered += 1;
+        // whole reply pile up in memory. The cursor moves even if the hook throws, so one bad
+        // consumer cannot park the queue on its own clause forever.
+        try {
+          await hook(slot.chunk);
+        } finally {
+          this.#deliveredCursor = slot.chunk.index + 1;
+          this.#delivered += 1;
+        }
       }
-    }
+    });
+    // Keep the chain alive even when a pump rejects, so one bad hook cannot stall every later pump.
+    this.#pumpTail = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
   }
 
-  /** Put a synthesized clause in the delivery queue (index order decides when it goes out). */
+  /**
+   * Record that a clause's audio exists and let the pump walk the resolved prefix (t13). The slot is
+   * already in `#slots`; this is the 「now it can go out」 nudge, replacing the old delivery queue —
+   * a queue holds only successes, which is exactly how a failure could block the clauses behind it.
+   */
   #deliver(chunk: SynthesizedClause): void {
     if (this.#clauseHook === null) return;
     if (chunk.index < this.#deliveredCursor) return;
-    this.#queue.set(chunk.index, chunk);
     void this.#pump();
   }
 
@@ -450,19 +482,16 @@ export class SpeechPipeline {
       this.#flushed = true;
       for (const clause of this.#chunker.flush()) this.#dispatch(clause);
     }
+    // Every synthesis of this turn has now resolved — into audio or into a recorded failure — so
+    // every slot is known and the pump can walk the whole reply. `#deliver` is called for the
+    // successes in index order, and the pump chain is awaited last: a delivery that was already in
+    // flight when this line ran is part of `#pumpTail`, so nothing is left half-handed-over (t13).
     await Promise.allSettled(this.#pending);
-    // Everything synthesized must be handed over before `flush()` resolves, in index order. Pumping
-    // alone is not enough: the queue only advances past the next wanted index, so a clause whose
-    // synthesis finished *after* a later one is parked until the earlier one arrives (t13). Yielding
-    // between pumps lets the pending deliveries that were awaited inside a pump register theirs.
     for (const chunk of [...this.#audio.values()].sort((left, right) => left.index - right.index)) {
       this.#deliver(chunk);
     }
-    for (let round = 0; round < 100; round += 1) {
-      await this.#pump();
-      if (this.#queue.size === 0) break;
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
+    await this.#pump();
+    await this.#pumpTail;
     const from = mode === 'released' ? before : 0;
     return [...this.#audio.entries()]
       .filter(([index]) => index >= from)
@@ -497,13 +526,19 @@ export class SpeechPipeline {
           record.bytes = bytes;
           const chunk: SynthesizedClause = { index, text: clause.text, wav, durationMs, atMs, synthMs: record.synthMs };
           this.#audio.set(index, chunk);
-          // t13: hand this clause to the streaming consumer the moment its audio exists, in
-          // playback order. `void` on purpose — the caller's own back-pressure is expressed by
-          // awaiting the function it was given, not by blocking this synthesis promise.
+          // The slot resolves as a success (B2): the pump may now reach this index. `void` on
+          // purpose — the caller's own back-pressure is expressed by awaiting the function it was
+          // given, not by blocking this synthesis promise.
+          this.#slots.set(index, { kind: 'success', chunk });
           void this.#deliver(chunk);
         })
         .catch((error: unknown) => {
-          this.#errors.push(`clause ${index}（${clause.text.slice(0, 20)}）合成失败：${error instanceof Error ? error.message : String(error)}`);
+          const message = `clause ${index}（${clause.text.slice(0, 20)}）合成失败：${error instanceof Error ? error.message : String(error)}`;
+          // Record the failure once, then leave a tombstone in its slot so the cursor can step over
+          // it (B2). Before the tombstone, this line produced only the string: nothing told the
+          // delivery walk that the index was resolved at all.
+          if (this.#slots.get(index) === undefined) this.#errors.push(message);
+          this.#slots.set(index, { kind: 'failed' });
         }),
     );
   }

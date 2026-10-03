@@ -198,6 +198,87 @@ test('a failed clause is reported, not turned into silence', async () => {
   assert.match(pipeline.errors[0] as string, /TTS 502/);
 });
 
+test('a failed clause never blocks the clauses behind it — they go out while flush is still pending', async () => {
+  // The B2 regression (`docs/00_CODE_AUDIT.md` §3.15, `docs/05_VOICE.md` §9).
+  //
+  // The defect: a clause whose synthesis *rejected* never entered the delivery queue, so the cursor
+  // that decides 「whose turn is it」 stayed parked on it. A later clause that succeeded was then
+  // held until `flush()` force-fed it — on the live path that is the end of the whole reply, so a
+  // single failed clause turned the streaming path back into 整段合成.
+  //
+  // What is asserted is **when** each clause was handed over, not how long anything took: the two
+  // successful clauses are synthesized by hand, and the delivery record carries `afterFlush` — the
+  // value of a flag the test sets immediately before calling `flush()`. With a tombstone for the
+  // failed slot, clause 2 goes out as soon as its audio lands, i.e. `afterFlush === false`; with the
+  // cursor still parked on the failure, the only delivery happens inside `flush()` and the assertion
+  // on the record length fails first (`0 !== 1`), which is what the counterfactual run showed.
+  const clock = testClock();
+  const delivery: { index: number; text: string; afterFlush: boolean }[] = [];
+  let flushStarted = false;
+  // The two successful clauses are synthesized by hand, so the test controls *when* their audio
+  // lands. The one at index 1 is the 第二句 whose delivery the failed 第一句 used to block.
+  let release2: (wav: Buffer) => void = () => undefined;
+  let release3: (wav: Buffer) => void = () => undefined;
+  let synthesis2: Promise<Buffer> = Promise.resolve(wavOf(400));
+  let synthesis3: Promise<Buffer> = Promise.resolve(wavOf(500));
+  const pipeline = new SpeechPipeline(
+    async (text) => {
+      clock.advance(10);
+      if (text.startsWith('第一')) throw new Error('TTS 502');
+      if (text.startsWith('第二')) {
+        synthesis2 = new Promise<Buffer>((resolve) => (release2 = resolve));
+        return synthesis2;
+      }
+      synthesis3 = new Promise<Buffer>((resolve) => (release3 = resolve));
+      return synthesis3;
+    },
+    durationOf,
+    { now: clock.now },
+  );
+
+  // The seam is registered before any text arrives — the live wiring order (t13).
+  pipeline.onClause((clause) => {
+    delivery.push({ index: clause.index, text: clause.text, afterFlush: flushStarted });
+  });
+
+  pipeline.push('第一句。第二句。第三句。');
+  assert.equal(pipeline.clauses.length, 3, 'three clauses were dispatched, one TTS call each');
+  assert.deepEqual(pipeline.errors, [], 'nothing has failed yet: the promises are still in flight');
+
+  // Clause 0 rejects synchronously at dispatch, clause 2's audio arrives a moment later.
+  release2(wavOf(400));
+  await synthesis2; // barrier: every continuation registered for that promise has run
+  // The hand-off is asynchronous by design (the pump awaits the consumer), so let the event loop
+  // drain before looking. A `setImmediate` is a **phase boundary**, not a sleep: every microtask —
+  // the pumps among them — has run by the time it fires, and the wall clock never enters the
+  // verdict. What this asserts is *which* turn it happened in: no `flush()` had started yet.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(delivery.length, 1, 'clause 2 was delivered without waiting for flush()');
+  assert.deepEqual(delivery.map((entry) => entry.index), [1], 'the failed clause 0 is skipped, not waited for');
+  assert.equal(delivery[0]?.afterFlush, false, 'and it went out while the turn was still in flight');
+  assert.equal(delivery[0]?.text, '第二句。');
+  assert.equal(pipeline.delivered, 1, 'the seam counter matches what the consumer actually received');
+  assert.equal(pipeline.errors.length, 1, 'the failure is recorded, not swallowed');
+  assert.match(pipeline.errors[0] as string, /第一句/);
+  assert.match(pipeline.errors[0] as string, /TTS 502/);
+
+  // The same question for the clause behind the one that just went out: it must follow immediately
+  // as its synthesis lands, not queue up behind the tombstone.
+  release3(wavOf(500));
+  await synthesis3;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(delivery.map((entry) => entry.index), [1, 2], 'clause 3 followed clause 2, in order');
+  assert.equal(delivery[1]?.afterFlush, false);
+
+  flushStarted = true;
+  const clauses = await pipeline.flush();
+  assert.deepEqual(delivery.map((entry) => entry.index), [1, 2], 'flush() hands over nothing twice');
+  assert.deepEqual(clauses.map((chunk) => chunk.index), [1, 2], 'and the successful clauses are returned in order');
+  assert.deepEqual(clauses.map((chunk) => chunk.text), ['第二句。', '第三句。']);
+  assert.equal(pipeline.delivered, delivery.length, 'every delivered clause was seen exactly once');
+  assert.equal(pipeline.errors.length, 1, 'the flush call adds no second error');
+});
+
 test('earlyFirstClause releases clause 1 without waiting for the rest of the reply', async () => {
   const clock = testClock();
   const dispatched: string[] = [];
