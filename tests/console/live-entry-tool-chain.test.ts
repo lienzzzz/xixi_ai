@@ -16,10 +16,11 @@
  *   * the offline branches are then *run*, because "the chain is wired in" is only true if the tools
  *     actually execute — a printed report alone would not prove it.
  *
- * V0.3 P0-A note: the six callers now import `buildToolChain` / `CONVERSATION_SCOPE` from
- * `@xixi/runtime` instead. The expected side of this test deliberately keeps importing them from
- * `scripts/field-test.ts`, which makes this file the regression test for the compatibility
- * re-export — if that re-export ever loses the symbols, this test fails to even load.
+ * V0.3 P0-A note: the callers now import `buildToolChain` / `CONVERSATION_SCOPE` from
+ * `@xixi/runtime`; `scripts/field-test.ts` re-exports them as aliases of the runtime's own
+ * declarations (see its compatibility surface). The expected side of this test deliberately keeps
+ * importing them from `scripts/field-test.ts`, which makes this file the regression test for that
+ * compatibility surface — if it ever loses the symbols, this test fails to even load.
  *
  * Run: `npm run test:console` (also part of `npm test`).
  */
@@ -126,15 +127,23 @@ test('四个 live 入口报告的工具链与 console 是同一条', { timeout: 
   }
 });
 
-// V0.3 P0-A: the compatibility re-export in `scripts/field-test.ts` must keep handing out the
-// *same* runtime declaration, not a second copy. The two modules below resolve to the same file
-// (the workspace junction `node_modules/@xixi/runtime` → `packages/runtime`), so identity is a
-// meaningful assertion, and it is what makes the imported expectation above a guard on the old
-// import path: if the re-export is ever dropped, this test cannot even load.
-test('P0-A：field-test 的兼容 re-export 与 @xixi/runtime 是同一份声明', () => {
-  assert.equal(buildToolChain, runtimeBuildToolChain, 'buildToolChain 的 re-export 必须与包导出是同一个函数');
-  assert.equal(CONVERSATION_SCOPE, RUNTIME_SCOPE, 'Conversation scope 的 re-export 必须与包导出是同一个值');
+// V0.3 P0-A: the compatibility surface in `scripts/field-test.ts` must keep handing out the *same*
+// runtime declarations, not a second copy — an alias that silently pointed at a re-implementation
+// would let the console drift from the package. `CONVERSATION_SCOPE` is a primitive, so the value
+// comparison is the whole story there; the identity assertion is what makes the expectation above
+// a guard on the old import path: if the alias ever went missing, this test cannot even load.
+test('P0-A：field-test 的兼容表面与 @xixi/runtime 是同一份声明', () => {
+  assert.equal(buildToolChain, runtimeBuildToolChain, 'buildToolChain 的兼容导出必须与包导出是同一个函数');
+  assert.equal(CONVERSATION_SCOPE, RUNTIME_SCOPE, 'Conversation scope 的兼容导出必须与包导出是同一个值');
   assert.equal(CONVERSATION_SCOPE, 'conversation');
+  // The two are the same object, so this pass is guaranteed *today* — it exists to fail the day
+  // someone replaces the alias with a re-implementation that has drifted from the package.
+  const viaPackage = runtimeBuildToolChain(loadConfig());
+  assert.deepEqual(
+    buildToolChain(loadConfig()).listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name),
+    viaPackage.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name),
+    '两条路径必须给出同一套工具',
+  );
 });
 
 test('文字 CLI 的离线分支真的执行工具，而不是只把链打印出来', { timeout: SPAWN_TIMEOUT_MS }, async () => {

@@ -1,14 +1,18 @@
 /**
  * Shared helpers for scripts: repo paths, `.env` loading and evidence printing.
- * No dependency on any package beyond the domain layer.
+ * No dependency on any package beyond the domain layer and the runtime.
+ *
+ * V0.3 P0-A Step C: `REPO_ROOT` moved to `packages/runtime/src/repo.ts` (the voice runtime needs
+ * it to spawn the Python service, and a package must not import from the scripts directory).
+ * This file re-exports it, so every `import { REPO_ROOT } from './lib/harness.ts'` keeps working.
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 
 import { loadXixiConfig, type XixiConfig } from '@xixi/domain';
+import { REPO_ROOT } from '@xixi/runtime';
 
-export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+export { REPO_ROOT };
 export const DSH_HOME = join(REPO_ROOT, '.dsh');
 export const DSH_PROFILE = 'xixi';
 export const DSH_BIN_JS_HINT = join(REPO_ROOT, '.dsh-bin-hint');

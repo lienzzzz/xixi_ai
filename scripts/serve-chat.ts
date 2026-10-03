@@ -20,7 +20,7 @@ import { MemoryStore, openXixiStore, parseSelfModelSettings, SelfModel } from '@
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
 import {
-  ConsoleError,
+  RuntimeError,
   DEFAULT_LOOP_INTERVAL_MS,
   MIN_LOOP_INTERVAL_MS,
   PROACTIVE_PANEL_CSS,
@@ -470,7 +470,7 @@ async function streamVoice(body: TurnBody, response: ServerResponse): Promise<vo
       `[voice] streaming ${result.action} vad=${result.vadMs}ms asr=${result.asrMs ?? '-'}ms first=${result.firstTokenMs ?? '-'}ms clauses=${clauses.length} (one TTS call each)`,
     );
   } catch (error) {
-    const consoleError = error instanceof ConsoleError ? error : null;
+    const consoleError = error instanceof RuntimeError ? error : null;
     send({
       type: 'error',
       error: consoleError?.message ?? (error instanceof Error ? error.message : String(error)),
@@ -595,7 +595,7 @@ async function readBody(request: IncomingMessage): Promise<TurnBody> {
 
 async function handleTurn(body: TurnBody, response: ServerResponse): Promise<void> {
   const text = (body.text ?? '').trim();
-  if (text.length === 0) throw new ConsoleError('EMPTY_MESSAGE', '没有输入文字', '在输入框里打一句话再按发送');
+  if (text.length === 0) throw new RuntimeError('EMPTY_MESSAGE', '没有输入文字', '在输入框里打一句话再按发送');
   // IDLE 时把这一次点击当作直呼（M2 之前用按钮代替唤醒词），会话开着就按继续处理。
   const addressed = engine.state === 'IDLE';
   // t21 (t12 F2): the engine's notices are the only way to see *why* a turn said nothing —
@@ -737,7 +737,7 @@ const server = createServer((request, response) => {
         // t78: the trial page gets the same runtime 朗读 switch as the console.
         const body = (await readBody(request)) as Record<string, unknown>;
         if (typeof body['enabled'] !== 'boolean') {
-          throw new ConsoleError('TTS_SWITCH_INVALID', 'TTS 开关需要一个布尔值', '页面上的复选框会传 true / false');
+          throw new RuntimeError('TTS_SWITCH_INVALID', 'TTS 开关需要一个布尔值', '页面上的复选框会传 true / false');
         }
         ttsOn = body['enabled'];
         console.log(`[tts] 朗读已${ttsOn ? '打开' : '关闭'}（回复与主动开口都生效）`);
@@ -750,7 +750,7 @@ const server = createServer((request, response) => {
         if (action === 'start') proactiveLoop.start(typeof body['intervalMs'] === 'number' ? body['intervalMs'] : undefined);
         else if (action === 'stop') proactiveLoop.stop();
         else if (action === 'tick') await proactiveLoop.tickOnce();
-        else throw new ConsoleError('UNKNOWN_LOOP_ACTION', `不认识的循环操作「${action}」`, '可用：start（开始自动考虑）、stop（停止）、tick（立刻考虑一次）');
+        else throw new RuntimeError('UNKNOWN_LOOP_ACTION', `不认识的循环操作「${action}」`, '可用：start（开始自动考虑）、stop（停止）、tick（立刻考虑一次）');
         json(response, 200, loopPayload(Number(body['cursor'] ?? 0)));
         return;
       }
@@ -801,7 +801,7 @@ const server = createServer((request, response) => {
       json(response, 404, { error: 'not found' });
     } catch (error) {
       // Readable Chinese errors, never a blank page or a raw stack (§20 audit item).
-      if (error instanceof ConsoleError) {
+      if (error instanceof RuntimeError) {
         json(response, error.status, { ok: false, error: error.message, hint: error.hint, code: error.code });
         return;
       }

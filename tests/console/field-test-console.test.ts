@@ -19,7 +19,7 @@ import { WeatherClient } from '@xixi/model-adapters';
 
 import { concatWav, readWav, readWavInfo, sliceWav } from '../../scripts/lib/wav.ts';
 import {
-  ConsoleError,
+  RuntimeError,
   buildFieldPage,
   buildSpeechAudio,
   createFakeProbeRunner,
@@ -324,7 +324,7 @@ test('the page is Chinese, self-describing and carries the boot state', () => {
 test('voice requests fail with Chinese next steps, not stack traces', async () => {
   const deps = {} as unknown as VoiceDeps;
   await assert.rejects(() => handleVoiceTurn(deps, {}), (error: unknown) => {
-    assert.ok(error instanceof ConsoleError);
+    assert.ok(error instanceof RuntimeError);
     assert.equal(error.code, 'NO_AUDIO');
     assert.match(error.message, /没有收到音频/);
     assert.ok(error.hint.length > 5);
@@ -333,13 +333,13 @@ test('voice requests fail with Chinese next steps, not stack traces', async () =
   });
   const tiny = Buffer.alloc(64).toString('base64');
   await assert.rejects(() => handleVoiceTurn(deps, { audioBase64: tiny }), (error: unknown) => {
-    assert.equal((error as ConsoleError).code, 'AUDIO_TOO_SHORT');
+    assert.equal((error as RuntimeError).code, 'AUDIO_TOO_SHORT');
     return true;
   });
   const notWav = Buffer.alloc(4096, 3).toString('base64');
   await assert.rejects(() => handleVoiceTurn(deps, { audioBase64: notWav }), (error: unknown) => {
-    assert.equal((error as ConsoleError).code, 'BAD_AUDIO');
-    assert.match((error as ConsoleError).hint, /刷新页面|维护者/);
+    assert.equal((error as RuntimeError).code, 'BAD_AUDIO');
+    assert.match((error as RuntimeError).hint, /刷新页面|维护者/);
     return true;
   });
 });
@@ -347,13 +347,13 @@ test('voice requests fail with Chinese next steps, not stack traces', async () =
 test('a missing Python or probe binary is a readable error, not a crash', async () => {
   const missing = join(tempDir(), 'definitely-not-python.exe');
   await assert.rejects(() => runVad(missing, join(REPO_ROOT, 'tests', 'audio-fixtures', 'direct-question.wav')), (error: unknown) => {
-    assert.equal((error as ConsoleError).code, 'VAD_UNAVAILABLE');
-    assert.match((error as ConsoleError).hint, /\.venvs/);
+    assert.equal((error as RuntimeError).code, 'VAD_UNAVAILABLE');
+    assert.match((error as RuntimeError).hint, /\.venvs/);
     return true;
   });
   const runner = defaultProbeRunner(join(REPO_ROOT, 'data', 'field-test', 'device-probe.py'), REPO_ROOT);
   await assert.rejects(() => runner('camera', [], missing), (error: unknown) => {
-    assert.equal((error as ConsoleError).code, 'PYTHON_MISSING');
+    assert.equal((error as RuntimeError).code, 'PYTHON_MISSING');
     return true;
   });
 });
