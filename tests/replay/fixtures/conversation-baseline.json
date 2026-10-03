@@ -1,0 +1,10 @@
+{
+  "name": "conversation-baseline",
+  "start": "2026-10-05T08:00:00+08:00",
+  "steps": [
+    { "at": "+0m", "kind": "user_turn", "text": "西西，明天天气怎么样？", "addressed": true },
+    { "at": "+10s", "kind": "user_turn", "text": "那后天呢？", "addressed": false },
+    { "at": "+10m", "kind": "user_turn", "text": "电视里那个人在说什么？", "addressed": false },
+    { "at": "+11m", "kind": "user_turn", "text": "西西，你还在吗？", "addressed": true }
+  ]
+}

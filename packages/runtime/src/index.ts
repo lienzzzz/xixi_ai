@@ -32,6 +32,30 @@ export {
 } from './perception-ingest.ts';
 
 export {
+  REPLAY_CONFIG,
+  createReplayClock,
+  loadReplay,
+  offsetMinutesOf,
+  parseReplayDocument,
+  parseReplayOffset,
+  runReplay,
+  type ParseReplayOptions,
+  type ReplayClock,
+  type ReplayDecision,
+  type ReplayDocument,
+  type ReplayHealthResult,
+  type ReplayPresenceResult,
+  type ReplayReport,
+  type ReplayRunOptions,
+  type ReplayStep,
+  type ReplayStepKind,
+  type ReplayStepResult,
+  type ReplayTickResult,
+  type ReplayTurnResult,
+  type ReplayWorldResult,
+} from './replay-runtime.ts';
+
+export {
   CONVERSATION_SCOPE,
   buildToolChain,
   type ToolChainOptions,

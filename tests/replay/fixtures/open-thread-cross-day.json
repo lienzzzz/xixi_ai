@@ -1,0 +1,13 @@
+{
+  "name": "open-thread-cross-day",
+  "start": "2026-10-02T08:00:00+08:00",
+  "steps": [
+    { "at": "+0m", "kind": "user_turn", "text": "明天下午我要去镇上办证。", "addressed": true },
+    { "at": "+26h", "kind": "proactive_tick" },
+    { "at": "+29h59m", "kind": "proactive_tick" },
+    { "at": "+30h1m", "kind": "proactive_tick" },
+    { "at": "+30h2m", "kind": "proactive_tick" },
+    { "at": "+30h10m", "kind": "user_turn", "text": "办好了，昨天就办完了。", "addressed": true },
+    { "at": "+54h", "kind": "proactive_tick" }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "name": "memory-return-home-tv",
+  "start": "2026-10-05T08:00:00+08:00",
+  "steps": [
+    {
+      "at": "+0m",
+      "kind": "user_turn",
+      "text": "明天下午我要去镇上办证。",
+      "addressed": true
+    },
+    {
+      "at": "+26h",
+      "kind": "perception",
+      "observation_type": "person.presence",
+      "subject": "father",
+      "value": "present",
+      "confidence": 0.95
+    },
+    {
+      "at": "+26h1m",
+      "kind": "world",
+      "key": "device.tv",
+      "value": "on",
+      "confidence": 1.0,
+      "ttl_sec": 3600
+    },
+    {
+      "at": "+26h2m",
+      "kind": "proactive_tick"
+    },
+    {
+      "at": "+26h35m",
+      "kind": "world",
+      "key": "device.tv",
+      "value": "off",
+      "confidence": 1.0,
+      "ttl_sec": 3600
+    },
+    {
+      "at": "+26h36m",
+      "kind": "proactive_tick"
+    }
+  ]
+}

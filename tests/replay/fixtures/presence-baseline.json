@@ -1,0 +1,8 @@
+[
+  { "at": "+0m", "event": "presence.changed", "present": true, "subject": "father", "confidence": 0.95, "source": "perception.laptop_camera" },
+  { "at": "+20s", "event": "proactive_tick" },
+  { "at": "+2m", "event": "presence.changed", "present": true, "confidence": 0.9 },
+  { "at": "+20m", "event": "presence.changed", "present": false, "subject": "unknown_person", "confidence": 0.8 },
+  { "at": "+21m", "event": "proactive_tick" },
+  { "at": "+21m30s", "event": "system.health", "service": "perception.laptop_camera", "status": "ok", "detail": "回放：检测循环正常" }
+]
