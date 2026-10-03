@@ -155,10 +155,14 @@ let proactiveSnapshot = restoreProactiveSettings(store, config.proactive as unkn
  * 「这页不会惦记」。`config.open_threads` 段控制窗口与次数上限。
  */
 const topicEngine = new TopicEngine({ store, config: config.openThreads, clock: () => new Date() });
+/**
+ * 面板状态：**只读**（pack v03-preflight ②，与现场测试控制台同一个修正）。
+ *
+ * 以前这里会 `topicEngine.reconcile(at)`：刷新一次页面就在写库（提取话题、收口、作废）。
+ * 读接口不写库；对齐发生在写路径上（考虑循环的 tick、以及 `POST /api/proactive/drill`）。
+ */
 function proactivePayload(): ProactiveConsoleState & { readonly ok: true } {
   const at = new Date();
-  // 先与日志对齐再报告（同现场测试控制台）：话题表是投影，「已经问过了」只有日志知道。
-  topicEngine.reconcile(at);
   return {
     ok: true,
     ...proactiveConsoleState({
@@ -502,6 +506,80 @@ function json(response: ServerResponse, status: number, payload: unknown): void 
   response.end(body);
 }
 
+/** 收尾要用的三样东西（收窄成接口，测试可以直接驱动真收尾而不必起一个进程）。 */
+export interface ShutdownDeps {
+  readonly server: { close(): unknown; closeAllConnections?: () => void };
+  readonly extractor: { flush(): Promise<void>; readonly pending: number };
+  readonly store: { close(): void };
+  readonly log?: (line: string) => void;
+}
+
+/** 收尾结果：跑掉了多少轮排队的后台提取。 */
+export interface ShutdownReport {
+  readonly flushed: number;
+}
+
+/**
+ * 退出前的收尾（pack v03-preflight ⑦）：「回复之后还有活没跑」的那部分必须跑完再走。
+ *
+ * 为什么必须有它：`afterTurn` 只把提取**入队**（`setTimeout(run, 0)`，而且是 `unref` 过的宏任务），
+ * 所以「说完最后一句 → 按 Ctrl+C」这一瞬间队列里通常还有一轮。进程默认的 SIGINT 行为是直接终止，
+ * `extractor` 的 `exit` 兜底**不一定来得及**，而且库也不是正常关闭的 —— 记忆会少一条，日志里什么也看不出来。
+ *
+ * 顺序就是它写在代码里的理由：先停止接受新连接（不再有新轮次入队），再跑完队列，最后关库。
+ * `closeAllConnections` 是给浏览器 keep-alive 用的：不关掉它，`server.close()` 会等长连接自己结束，
+ * 于是「Ctrl+C 之后还挂在那里」。
+ */
+export async function shutdownAll(deps: ShutdownDeps): Promise<ShutdownReport> {
+  const log = deps.log ?? ((line: string): void => console.log(line));
+  const flushed = deps.extractor.pending;
+  deps.server.close();
+  deps.server.closeAllConnections?.();
+  await deps.extractor.flush();
+  deps.store.close();
+  log(`[shutdown] 已停止接受新请求，跑掉 ${flushed} 轮排队的后台提取，库已正常关闭`);
+  return { flushed };
+}
+
+/**
+ * 把收尾接到进程信号上：SIGINT（Ctrl+C）与 SIGTERM（`kill` / 任务管理器结束进程）走同一条路。
+ *
+ * 只挂一次（`once`）并用一个开关挡住第二条信号：收尾途中再来一条不许把库关两遍。
+ * `exit` 可注入，于是这条接线可以在测试里被**真触发**（`process.emit('SIGTERM')`）而不结束测试进程；
+ * 生产默认就是 `process.exit`。
+ */
+export function installShutdownHandlers(deps: ShutdownDeps & { readonly exit?: (code: number) => void }): {
+  shutdown: (signal: string) => Promise<void>;
+  dispose: () => void;
+} {
+  const exit = deps.exit ?? ((code: number): void => process.exit(code));
+  const log = deps.log ?? ((line: string): void => console.log(line));
+  let shuttingDown = false;
+  const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log(`\n收到 ${signal}：先跑完排队的后台提取再退出…`);
+    try {
+      await shutdownAll({ server: deps.server, extractor: deps.extractor, store: deps.store, log });
+      exit(0);
+    } catch (error) {
+      log(`[shutdown] 收尾失败：${error instanceof Error ? error.message : String(error)}`);
+      exit(1);
+    }
+  };
+  const onSigint = (): void => void shutdown('SIGINT');
+  const onSigterm = (): void => void shutdown('SIGTERM');
+  process.once('SIGINT', onSigint);
+  process.once('SIGTERM', onSigterm);
+  return {
+    shutdown,
+    dispose: () => {
+      process.removeListener('SIGINT', onSigint);
+      process.removeListener('SIGTERM', onSigterm);
+    },
+  };
+}
+
 async function readBody(request: IncomingMessage): Promise<TurnBody> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(chunk as Buffer);
@@ -713,6 +791,8 @@ const server = createServer((request, response) => {
           request: body,
         });
         console.log(`[proactive] 演练 ${drill.trigger} → ${drill.reasonCode}（分数 ${drill.score}/${drill.threshold}${drill.speak ? `，分 ${drill.segments.length} 段` : ''}）`);
+        // 写路径可以对齐（读接口不行，见 `proactivePayload`）：演练可能真的说出口，话题要跟着日志走。
+        topicEngine.reconcile(new Date());
         json(response, 200, { ok: true, drill, state: proactivePayload() });
         return;
       }
@@ -1132,6 +1212,10 @@ input.focus();
  * the program — importing it must not bind a port.
  */
 if (import.meta.main) {
+  // preflight ⑦: Ctrl+C（SIGINT）与 kill / 任务管理器结束进程（SIGTERM）都走同一条收尾：
+  // 停止接受新连接 → 跑完排队的后台提取 → 关库 → 退出码 0。
+  installShutdownHandlers({ server, extractor, store });
+
   server.on('error', (error: NodeJS.ErrnoException) => {
     if (error.code === 'EADDRINUSE') {
       console.error(`端口 ${PORT} 已被占用（可能已经开着一个 npm run web 或现场测试控制台）。`);

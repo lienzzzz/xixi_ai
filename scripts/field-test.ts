@@ -2316,14 +2316,17 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
    * 下一次 tick（《方案》§11.1 的异步提取）。`config.open_threads` 段控制窗口与次数上限。
    */
   const topicEngine = new TopicEngine({ store, config: config.openThreads, clock: () => new Date() });
+  /**
+   * 面板状态：**只读**（pack v03-preflight ②）。
+   *
+   * 它以前会顺手 `topicEngine.reconcile(at)`（「先与日志对齐，再报告」），于是
+   * `GET /api/field/proactive` —— 一个刷新按钮就会打的读接口 —— 每次都在写库（提取话题、收口、作废），
+   * 并且与常驻考虑循环的 tick 并发跑同一个投影。**读接口不写库**：对齐只发生在写路径上
+   * （考虑循环的每个 tick、以及会写库的 POST，见 `POST /api/field/proactive/drill`），
+   * 面板读到的就是投影当前的真实样子 —— 落后一步也是真话，好过「看一次多一条记录」。
+   */
   function proactivePayload(): ProactiveConsoleState & { readonly ok: true } {
     const at = new Date();
-    /**
-     * 面板**先与日志对齐，再报告**：话题表是投影，而「已经问过了」这件事只有日志知道 ——
-     * 不对齐的话，刚说出口的那条会在面板上显示成「还没问」（下一次 tick 才补上）。
-     * 对齐是幂等的，所以刷新页面多少次都不会多记一件事。
-     */
-    topicEngine.reconcile(at);
     return {
       ok: true,
       ...proactiveConsoleState({
@@ -2984,6 +2987,9 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
             request: body,
           });
           log(`[proactive] 演练 ${drill.trigger} → ${drill.reasonCode}（分数 ${drill.score}/${drill.threshold}${drill.speak ? `，分 ${drill.segments.length} 段` : ''}）`);
+          // 写路径可以对齐：演练真的可能说出口，于是话题表要跟着日志走到 offered。
+          // （读接口不行 —— preflight ②；见 `proactivePayload`。）
+          topicEngine.reconcile(new Date());
           json(response, 200, { ok: true, drill, state: proactivePayload() });
           return;
         }
@@ -3370,12 +3376,21 @@ function proactiveSettingsAuditRows(store: XixiStore): ProactiveSettingsAuditRow
       continue;
     }
     if (parsed['v'] !== PROACTIVE_SETTINGS_AUDIT_VERSION) continue;
-    const source = parsed['settings'];
+    /**
+     * 两种形状都要读得回来：
+     *   * `s` = 紧凑数组（现在写的，布局由 `PROACTIVE_SETTING_KEYS` 决定）；
+     *   * `settings` = 旧的对象形状（早先写进库里、已经在真实数据目录里的那些记录）。
+     */
+    const decoded = decodeProactiveAuditSettings(parsed['s']);
+    const legacy = isMapping(parsed['settings']) ? (parsed['settings'] as Record<string, unknown>) : undefined;
+    if (decoded === null && legacy === undefined) continue;
+    // 变更文案同样是两种键名：`c`（现在写的）与 `changes`（旧记录）。
+    const changes = Array.isArray(parsed['c']) ? (parsed['c'] as string[]) : Array.isArray(parsed['changes']) ? (parsed['changes'] as string[]) : [];
     rows.push({
       at: event.timestamp,
       sequence: event.sequence,
-      changes: Array.isArray(parsed['changes']) ? (parsed['changes'] as string[]) : [],
-      settings: parseProactiveSettings(isMapping(source) ? (source as Record<string, unknown>) : undefined),
+      changes,
+      settings: decoded ?? parseProactiveSettings(legacy),
     });
   }
   return rows;
@@ -3396,9 +3411,16 @@ export function restoreProactiveSettings(store: XixiStore, config?: Readonly<Rec
  *
  * Why not a new event type: `packages/` is outside t42's scope, and `system.health` is the
  * existing versioned "something about the running system changed" record — the same channel
- * `field-test` already uses for its own startup line. The payload is compact (one line of
- * JSON, well inside the 500-char `detail` cap) and carries the *effective* values, so
- * `restoreProactiveSettings` can rebuild them without trusting any other file.
+ * `field-test` already uses for its own startup line. It carries the *effective* values, compactly
+ * (see {@link encodeProactiveAuditSettings}), so `restoreProactiveSettings` can rebuild them without
+ * trusting any other file.
+ *
+ * preflight ① found the trap hidden here: the old payload wrote the whole config-shaped object
+ * (~640 chars once every key was carried), which no longer fits `detail`'s 500-char schema cap — and
+ * the overflow path **truncated the JSON**, i.e. it wrote a record that cannot be parsed back. The
+ * symptom was exactly 「面板上存过的设置，重启后变回了配置文件的值」. So: the settings half is now
+ * compact and bounded, and what gets dropped under pressure is only the human-readable change list —
+ * never the JSON itself.
  */
 export function persistProactiveSettings(
   store: XixiStore,
@@ -3406,18 +3428,12 @@ export function persistProactiveSettings(
   changes: readonly string[],
 ): StoredEvent {
   const compact = compactAuditChanges(changes);
-  const detail = JSON.stringify({
-    v: PROACTIVE_SETTINGS_AUDIT_VERSION,
-    settings: proactiveSettingsToConfig(settings),
-    changes: compact,
-  });
-  // The `system.health` schema caps `detail` at 500 characters. A save that changed many knobs at
-  // once (t74 can move three personality values plus the quotas) must not fail the whole request,
-  // so the change list is trimmed *here* — with a marker, never silently.
-  if (detail.length > 480) {
-    const trimmed = JSON.stringify({ v: PROACTIVE_SETTINGS_AUDIT_VERSION, settings: proactiveSettingsToConfig(settings), changes: compact.slice(0, 3) });
-    return store.recordHealth(PROACTIVE_SETTINGS_SERVICE, 'ok', `${trimmed.slice(0, 470)}…`);
-  }
+  const payload = (kept: readonly string[]): string =>
+    JSON.stringify({ v: PROACTIVE_SETTINGS_AUDIT_VERSION, s: encodeProactiveAuditSettings(settings), c: kept });
+  const room = 480; // 留出余量给 schema 的 500 上限
+  let detail = payload(compact);
+  if (detail.length > room) detail = payload(compact.slice(0, 3));
+  if (detail.length > room) detail = payload([]);
   return store.recordHealth(PROACTIVE_SETTINGS_SERVICE, 'ok', detail);
 }
 
@@ -3427,18 +3443,109 @@ function compactAuditChanges(changes: readonly string[]): readonly string[] {
   return [...changes.slice(0, 5), `…（共 ${changes.length} 项）`];
 }
 
-/** Typed settings → the `config.proactive` shape, so one parser validates both sources. */
+/**
+ * The audit record's settings half, as a **compact array** (preflight ①).
+ *
+ * The layout is derived from {@link PROACTIVE_SETTING_KEYS} and `PROACTIVE_TRIGGERS`, in this order:
+ * `[enabled, …每个数字字段, quietStart, quietEnd, …每个触发源]`. Nothing here is a second list of
+ * key names — that is what keeps it from drifting away from the write-back. It is deliberately not
+ * the readable config shape: 18 keys with their full names do not fit the 500-char `detail` cap, and
+ * an audit record that cannot be parsed back is worse than one that takes a comment to read.
+ */
+function encodeProactiveAuditSettings(settings: ProactiveSettings): readonly (boolean | number | string)[] {
+  return [
+    settings.enabled,
+    ...PROACTIVE_SETTING_KEYS.map(([field]) => settings[field]),
+    formatClockMinutes(settings.quietHours.startMinutes),
+    formatClockMinutes(settings.quietHours.endMinutes),
+    ...PROACTIVE_TRIGGERS.map((trigger) => settings.triggers[trigger]),
+  ];
+}
+
+/** Inverse of {@link encodeProactiveAuditSettings}; `null` = 看不懂（长度不合 = 布局/版本换了）。 */
+function decodeProactiveAuditSettings(value: unknown): ProactiveSettings | null {
+  if (!Array.isArray(value)) return null;
+  const numericCount = PROACTIVE_SETTING_KEYS.length;
+  if (value.length !== 1 + numericCount + 2 + PROACTIVE_TRIGGERS.length) return null;
+  const config: Record<string, unknown> = { enabled: value[0] === true };
+  PROACTIVE_SETTING_KEYS.forEach(([, key], index) => {
+    config[key] = value[index + 1];
+  });
+  config['quiet_hours'] = { start: value[1 + numericCount], end: value[2 + numericCount] };
+  const triggers: Record<string, boolean> = {};
+  PROACTIVE_TRIGGERS.forEach((trigger, index) => {
+    triggers[trigger] = value[3 + numericCount + index] === true;
+  });
+  config['triggers'] = triggers;
+  // 形状对了还要过一遍引擎自己的解析器：它做的是取值域检查，坏值退回默认（永不抛出）。
+  return parseProactiveSettings(config);
+}
+
+/**
+ * 设置里的**数字**字段（`enabled` / `quiet_hours` / `triggers` 各自单独处理）。
+ *
+ * 写成联合类型而不是 `keyof ProactiveSettings`：这张表的每一项都会被当成数字回写/编码，
+ * 若把对象型字段混进来，类型检查会当场拦住（而不是写进 JSON 变成 `[object Object]`）。
+ */
+type ProactiveNumericField =
+  | 'baseCooldownMinutes'
+  | 'continuationCooldownMinutes'
+  | 'maxPer6h'
+  | 'maxPerDay'
+  | 'maxConsultsPerDay'
+  | 'newSessionMinGapMinutes'
+  | 'hotChatMinTurns'
+  | 'hotChatWindowMinutes'
+  | 'topicRepeatWindowHours'
+  | 'genericTopicCooldownHours'
+  | 'unansweredPenalty'
+  | 'explicitRejectPenalty'
+  | 'sameTopicPenalty'
+  | 'unansweredWindowMinutes'
+  | 'negativeFeedbackCooldownMultiplier';
+
+/**
+ * 设置字段 ↔ `config.proactive` 键的**唯一**一张表（pack v03-preflight ①）。
+ *
+ * 为什么必须只有一张：回写（`proactiveSettingsToConfig`）与打补丁（`applyProactiveSettingsPatch`）
+ * 各自抄一份映射时，两份会各漏一半，而症状是两个方向的静默错误——
+ *   * 回写漏键 → 补丁改一个字段，**没写回的字段被 `parseProactiveSettings` 打回出厂默认值**（t63）；
+ *   * 补丁漏键 → 一个列在 `PROACTIVE_PATCH_FIELDS` 里、页面以为能改的字段，**保存成功但什么也没变**。
+ * 这里逐项抄的是 `parseProactiveSettings`（`packages/conversation/src/proactive.ts`）读的键名。
+ */
+const PROACTIVE_SETTING_KEYS: readonly (readonly [ProactiveNumericField, string])[] = Object.freeze([
+  ['baseCooldownMinutes', 'base_cooldown_min'],
+  ['continuationCooldownMinutes', 'continuation_cooldown_min'],
+  ['maxPer6h', 'max_per_6h'],
+  ['maxPerDay', 'max_per_day'],
+  ['maxConsultsPerDay', 'max_consults_per_day'],
+  ['newSessionMinGapMinutes', 'new_session_min_gap_min'],
+  ['hotChatMinTurns', 'hot_chat_min_turns'],
+  ['hotChatWindowMinutes', 'hot_chat_window_min'],
+  ['topicRepeatWindowHours', 'topic_repeat_window_h'],
+  ['genericTopicCooldownHours', 'generic_topic_cooldown_h'],
+  ['unansweredPenalty', 'unanswered_penalty'],
+  ['explicitRejectPenalty', 'explicit_reject_penalty'],
+  ['sameTopicPenalty', 'same_topic_penalty'],
+  ['unansweredWindowMinutes', 'unanswered_window_min'],
+  ['negativeFeedbackCooldownMultiplier', 'negative_feedback_cooldown_multiplier'],
+]);
+
+/**
+ * Typed settings → the `config.proactive` shape, so one parser validates both sources.
+ *
+ * It must carry **every** key `parseProactiveSettings` reads, not only the ones the console page
+ * happens to expose: this object is what a patch is merged into before being parsed again, so a
+ * missing key silently returns to the factory default (preflight ①).
+ */
 export function proactiveSettingsToConfig(settings: ProactiveSettings): Record<string, unknown> {
-  return {
+  const written: Record<string, unknown> = {
     enabled: settings.enabled,
-    base_cooldown_min: settings.baseCooldownMinutes,
-    max_per_6h: settings.maxPer6h,
-    max_per_day: settings.maxPerDay,
-    topic_repeat_window_h: settings.topicRepeatWindowHours,
-    negative_feedback_cooldown_multiplier: settings.negativeFeedbackCooldownMultiplier,
     quiet_hours: { start: formatClockMinutes(settings.quietHours.startMinutes), end: formatClockMinutes(settings.quietHours.endMinutes) },
     triggers: { ...settings.triggers },
   };
+  for (const [field, key] of PROACTIVE_SETTING_KEYS) written[key] = settings[field];
+  return written;
 }
 
 export interface ProactiveSettingsPatchResult {
@@ -3523,13 +3630,10 @@ export function applyProactiveSettingsPatch(current: ProactiveSettings, patch: R
   }
 
   if (patch['enabled'] !== undefined) merged['enabled'] = patch['enabled'] === true || patch['enabled'] === 'true';
-  for (const [field, key] of [
-    ['baseCooldownMinutes', 'base_cooldown_min'],
-    ['maxPer6h', 'max_per_6h'],
-    ['maxPerDay', 'max_per_day'],
-    ['topicRepeatWindowHours', 'topic_repeat_window_h'],
-    ['negativeFeedbackCooldownMultiplier', 'negative_feedback_cooldown_multiplier'],
-  ] as const) {
+  // Numbers go through the same table the write-back uses, so「列在 PROACTIVE_PATCH_FIELDS 里」与
+  // 「真的会被应用」不再可能分家（preflight ①：早先六个声明过的字段保存成功却什么也没改）。
+  for (const [field, key] of PROACTIVE_SETTING_KEYS) {
+    if (!PROACTIVE_PATCH_FIELDS.includes(field)) continue; // 页面不开放的字段：只在回写里带上它的现值
     const value = patch[field];
     if (value === undefined) continue;
     const parsed = typeof value === 'number' ? value : Number(String(value).trim());

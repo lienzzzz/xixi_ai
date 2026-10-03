@@ -290,7 +290,7 @@ export class FakeBrainAdapter implements BrainAdapter {
       const iterator = runAgentLoop(step, messages, {
         registry,
         scope: adapter.#scope,
-        context: { timezone: adapter.#timezone, now: adapter.#now() },
+        context: { timezone: adapter.#timezone, clock: adapter.#now },
       });
       let outcome: AgentLoopResult;
       for (;;) {

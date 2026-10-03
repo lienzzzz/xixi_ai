@@ -62,6 +62,19 @@ export interface ExtractionResult {
   readonly episodic: readonly EpisodicMemory[];
   readonly semantic: readonly SemanticMemory[];
   readonly notes: readonly RelationshipNote[];
+  /**
+   * 这一轮里**单独失败**的步骤（preflight ③）：每一步互不牵连，坏的那条丢自己。
+   *
+   * 空数组 = 全部落地；非空 = 结果里能看出「少写的是哪一步、为什么」，不必去翻进程日志。
+   * 整轮失败（库已关、调用方注入的东西在更外层炸）仍然只由 `#runSafely` 计数。
+   */
+  readonly failures: readonly ExtractionFailure[];
+}
+
+/** 一条被隔离掉的失败：`step` 是产生它的那一步（例如 `self_model.learn:verbosity`）。 */
+export interface ExtractionFailure {
+  readonly step: string;
+  readonly detail: string;
 }
 
 /** 怎么把「跑一次提取」排到回复之后。默认是一个 unref 过的宏任务。 */
@@ -204,9 +217,40 @@ export class TurnMemoryExtractor {
    * 真正干活的同步函数（测试可以直接调它，跳过队列）。
    *
    * 顺序：反馈解释（可能改人格/写覆盖）→ episodic（将来的事、这次纠正）→ semantic（稳定偏好）。
+   *
+   * 每一步**各自**被隔离（preflight ③）：早先这里从头到尾只有调用方一层 `try`，于是
+   * 「一个不认识的人格属性」这种单点失败会让同一轮后面**所有**提取一起消失——记忆里没有痕迹，
+   * 日志里只有一句「这一轮失败」，而那一轮其实大部分活都是好的。现在每步失败只丢自己，
+   * 由 `failures` 如实报出、并经 `onError` 落一行日志（坏的那条必须看得见）。
    */
   runJob(job: PostTurnJob): ExtractionResult {
-    const feedback = interpretFeedbackInput({ text: job.userText, inferredCode: job.inferredCode ?? null });
+    const failures: ExtractionFailure[] = [];
+    /** 跑一步；失败就记进 `failures` 并上报，不打断这一轮里剩下的步骤。 */
+    const attempt = (step: string, run: () => void): void => {
+      try {
+        run();
+      } catch (error) {
+        /**
+         * 库已经关了（进程正在退、存储出故障）**不算「某一步坏了」**：这一轮整轮都写不进去，
+         * 老实往上抛，让 `#runSafely` / `drainOnExit` 把它记成丢掉的一轮（t9 F3 的可见日志）。
+         * 隔离只对「这一轮里某个属性/某条规则坏了」成立 —— 下一条提取不该陪葬，但整轮没救要认。
+         */
+        if (!this.#store.isOpen) throw error;
+        const detail = error instanceof Error ? error.message : String(error);
+        failures.push({ step, detail });
+        try {
+          this.#onError?.(new Error(`[${step}] ${detail}（${job.sessionId}/${job.userEventId ?? '（无轮次事件）'}）`));
+        } catch {
+          // 上报自己炸了也不能把「这一步失败」变成「整轮失败」。
+        }
+      }
+    };
+
+    let parsedFeedback: FeedbackInterpretation | null = null;
+    attempt('feedback.interpret', () => {
+      parsedFeedback = interpretFeedbackInput({ text: job.userText, inferredCode: job.inferredCode ?? null });
+    });
+    const feedback: FeedbackInterpretation | null = parsedFeedback;
     const learned: LearnedDeltaResult[] = [];
     const overrides: SessionOverride[] = [];
     const episodic: EpisodicMemory[] = [];
@@ -217,91 +261,108 @@ export class TurnMemoryExtractor {
       // 落库用**名义值**：权重由 `SelfModel.learn` 按 `sourceType` 乘一次（显式 1.0 / 推断 0.4）。
       // `feedback.deltas` 是已乘权重的视图，拿它落库会把推断乘两遍（0.4 × 0.4）。
       for (const [property, delta] of Object.entries(feedback.nominalDeltas)) {
-        learned.push(
-          this.#selfModel.learn({
-            property,
-            delta,
-            sourceType: feedback.source,
-            evidence: feedback.evidence,
-            confidence: feedback.confidence,
-            at: job.at,
-            sourceEventId: job.userEventId,
-          }),
-        );
+        attempt(`self_model.learn:${property}`, () => {
+          learned.push(
+            this.#selfModel.learn({
+              property,
+              delta,
+              sourceType: feedback.source,
+              evidence: feedback.evidence,
+              confidence: feedback.confidence,
+              at: job.at,
+              sourceEventId: job.userEventId,
+            }),
+          );
+        });
       }
       if (Object.keys(feedback.sessionDeltas).length > 0) {
-        overrides.push(
-          ...this.#selfModel.overrideToday({
-            deltas: feedback.sessionDeltas,
-            reason: `用户说：${feedback.evidence}`,
-            sourceType: feedback.source,
-            sessionId: job.sessionId,
-            at: job.at,
-          }),
-        );
+        attempt('self_model.override_today', () => {
+          overrides.push(
+            ...this.#selfModel.overrideToday({
+              deltas: feedback.sessionDeltas,
+              reason: `用户说：${feedback.evidence}`,
+              sourceType: feedback.source,
+              sessionId: job.sessionId,
+              at: job.at,
+            }),
+          );
+        });
       }
       if (feedback.relationship !== undefined) {
-        notes.push(
-          this.#memory.recordNote({
-            aspect: feedback.relationship.aspect,
-            note: feedback.relationship.note,
-            sourceType: feedback.source,
-            sourceEventId: job.userEventId,
-            confidence: feedback.confidence,
-          }),
-        );
+        attempt('memory.relationship_note', () => {
+          notes.push(
+            this.#memory.recordNote({
+              aspect: feedback.relationship.aspect,
+              note: feedback.relationship.note,
+              sourceType: feedback.source,
+              sourceEventId: job.userEventId,
+              confidence: feedback.confidence,
+            }),
+          );
+        });
       }
       // 一次明确纠正本身就是「发生过的事」（episodic）：将来她可以回答「你上次说我话多」。
-      episodic.push(
-        ...this.#recordOnce({
-          kind: 'correction',
-          summary: `父亲提出：${feedback.relationship?.note ?? feedback.evidence}`,
-          sourceType: feedback.source,
-          sourceEventId: job.userEventId,
-          sessionId: job.sessionId,
-          occurredAt: job.at,
-          importance: 0.9,
-          confidence: feedback.confidence,
-        }),
-      );
-    }
-
-    // 将来的事：复用 Phase 3 的规则提取器（同一套「时间词 + 意愿 + 动作」规则，不另写一套）。
-    if (job.userEventId !== null) {
-      for (const thread of extractOpenThreads({ text: job.userText, at: job.at, sourceEventId: job.userEventId })) {
+      attempt('memory.episodic:correction', () => {
         episodic.push(
           ...this.#recordOnce({
-            kind: 'plan',
-            summary: `记下一件事：${thread.summary}`,
-            sourceType: 'program_extraction',
+            kind: 'correction',
+            summary: `父亲提出：${feedback.relationship?.note ?? feedback.evidence}`,
+            sourceType: feedback.source,
             sourceEventId: job.userEventId,
             sessionId: job.sessionId,
             occurredAt: job.at,
-            importance: thread.importance,
+            importance: 0.9,
+            confidence: feedback.confidence,
           }),
         );
+      });
+    }
+
+    // 将来的事：复用 Phase 3 的规则提取器（同一套「时间词 + 意愿 + 动作」规则，不另写一套）。
+    const userEventId = job.userEventId;
+    if (userEventId !== null) {
+      let threads: ReturnType<typeof extractOpenThreads> = [];
+      attempt('open_threads.extract', () => {
+        threads = extractOpenThreads({ text: job.userText, at: job.at, sourceEventId: userEventId });
+      });
+      for (const thread of threads) {
+        attempt(`memory.episodic:plan:${thread.summary}`, () => {
+          episodic.push(
+            ...this.#recordOnce({
+              kind: 'plan',
+              summary: `记下一件事：${thread.summary}`,
+              sourceType: 'program_extraction',
+              sourceEventId: userEventId,
+              sessionId: job.sessionId,
+              occurredAt: job.at,
+              importance: thread.importance,
+            }),
+          );
+        });
       }
     }
 
     for (const { property, pattern } of SEMANTIC_RULES) {
-      const match = pattern.exec(job.userText);
-      if (match === null) continue;
-      const statement = match[0].trim();
-      if (statement.length === 0 || statement.includes('？') || statement.includes('?')) continue;
-      const existing = this.#memory.semantic({ property, limit: 200 });
-      if (existing.some((entry) => entry.statement === statement)) continue;
-      semantic.push(
-        this.#memory.recordSemantic({
-          property,
-          statement,
-          sourceType: 'explicit_correction',
-          sourceEventId: job.userEventId,
-          confidence: 0.9,
-        }),
-      );
+      attempt(`memory.semantic:${property}`, () => {
+        const match = pattern.exec(job.userText);
+        if (match === null) return;
+        const statement = match[0].trim();
+        if (statement.length === 0 || statement.includes('？') || statement.includes('?')) return;
+        const existing = this.#memory.semantic({ property, limit: 200 });
+        if (existing.some((entry) => entry.statement === statement)) return;
+        semantic.push(
+          this.#memory.recordSemantic({
+            property,
+            statement,
+            sourceType: 'explicit_correction',
+            sourceEventId: job.userEventId,
+            confidence: 0.9,
+          }),
+        );
+      });
     }
 
-    return { job, feedback, learned, overrides, episodic, semantic, notes };
+    return { job, feedback, learned, overrides, episodic, semantic, notes, failures };
   }
 
   /** 同一条轮次、同一个 kind 只记一次（重放/重启不会把记忆写两遍）。 */

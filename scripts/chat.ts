@@ -328,6 +328,12 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
        * quiet — otherwise every reply would appear twice.
        */
       const played: string[] = [];
+      /**
+       * preflight ⑧: 引擎的 `onNotice` 是「这一轮为什么什么也没说 / 被剔掉了什么」的唯一出口
+       * （试用页与控制台早就订阅了，这个终端入口以前没有：`ARTIFACT_ONLY_REPLY`（整句被清洗掉）
+       * 与 `MODEL_SILENCE`（模型自己不说）在这里看起来一模一样）。先收集，这一轮说完再打。
+       */
+      const notices: { readonly code: string; readonly detail: string }[] = [];
       const turn = await engine.respond(
         { sessionId: session.sessionId, text, addressed },
         {
@@ -340,6 +346,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
               await delay(segment.gapMsAfter);
             }
           },
+          onNotice: (notice) => void notices.push({ code: notice.code, detail: notice.detail }),
         },
       );
       const timing = `[${turn.action} ${turn.latencyMs}ms${turn.firstTokenMs === null ? '' : ` 首字${turn.firstTokenMs}ms`} state=${turn.state} linger=${engine.lingerMs}ms 人格=${engine.silenceTolerance}${turn.segments.length > 1 ? ` 分${turn.segments.length}段/间隔${turn.segmentGapMs}ms` : ''}]`;
@@ -353,6 +360,8 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
       } else {
         console.log(`${turn.text ?? ''}\n${timing}`);
       }
+      // 沉默的原因 / 被剔掉的内容（preflight ⑧）：一行一条，带 code，便于对照文档里的原因码。
+      for (const notice of notices) console.log(`[提示 ${notice.code}] ${notice.detail}`);
     } catch (error) {
       console.log(`\n[错误] ${error instanceof Error ? error.message : String(error)}`);
     }

@@ -105,7 +105,8 @@ test('the loop appends the tool result back to the model (model → tool → mod
   const iterator = runAgentLoop(step, [{ role: 'user', content: '？' }], {
     registry,
     scope: 'conversation',
-    context: { timezone: 'Asia/Shanghai', now: new Date('2026-10-01T09:00:00+08:00') },
+    // preflight ⑨: 循环拿到的是一个**时钟**（每次工具调用各读一次），不是回合开始的快照。
+    context: { timezone: 'Asia/Shanghai', clock: () => new Date('2026-10-01T09:00:00+08:00') },
   });
   const chunks: unknown[] = [];
   let outcome;
@@ -162,7 +163,7 @@ test('a model that never stops asking for a tool is stopped after four rounds', 
   const iterator = runAgentLoop(step, [{ role: 'user', content: '？' }], {
     registry,
     scope: 'conversation',
-    context: { timezone: 'Asia/Shanghai', now: new Date() },
+    context: { timezone: 'Asia/Shanghai', clock: () => new Date() },
   });
   let outcome;
   for (;;) {

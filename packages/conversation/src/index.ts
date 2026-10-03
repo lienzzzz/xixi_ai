@@ -53,6 +53,7 @@ export {
 export {
   DEFAULT_EXTRACTION_SCHEDULER,
   TurnMemoryExtractor,
+  type ExtractionFailure,
   type ExtractionResult,
   type ExtractionScheduler,
   type PostTurnJob,
@@ -74,11 +75,16 @@ export {
   DEFAULT_TOPIC_ENGINE_SETTINGS,
   extractOpenThreads,
   followUpHintFor,
+  // preflight ⑥: 这两条早就实现了却没有登记（handoff 记过），于是测试与别的包只能绕过包边界
+  // 按源文件路径导入。`isAnswerAboutThread` 是 ADR-0012 的收口判据、`IgnoredThreadTurn` 是
+  // `ReconcileResult.ignored` 的元素类型，两者都属于这个包的公开面。
+  isAnswerAboutThread,
   openThreadFollowUpComponents,
   parseTopicEngineSettings,
   TOPIC_SOURCES,
   TopicEngine,
   type ExtractOpenThreadInput,
+  type IgnoredThreadTurn,
   type OpenThreadFollowUp,
   type OpenThreadView,
   type ReconcileResult,

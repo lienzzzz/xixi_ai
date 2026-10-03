@@ -458,13 +458,20 @@ export function describeMoodSignal(code: MoodSignalCode): string {
 /**
  * 心情对**主动性与语气**的轻微影响：`-1..1`，0 表示中性。
  *
- * 它是两个维度减去中性后的平均，**再乘一个很小的权重** —— 这一层刻意不返回「最终分数」，
- * 只返回一个**有界偏移**，由消费方决定怎么用（见 `packages/conversation/src/personality.ts`
- * 的 `moodToleranceScale` / `moodProactivityNudge`）。
+ * 它是两个维度**各自减去中性后的偏移相加**（valence 的偏移 + energy 的偏移），再把结果
+ * **夹在 `[-1, 1]`** —— 这一层刻意不返回「最终分数」，只返回一个**有界偏移**，由消费方决定怎么用
+ * （见 `packages/conversation/src/personality.ts` 的 `moodToleranceScale` / `moodProactivityNudge`，
+ * 那边再乘 `MOOD_TONE_SPAN = 0.06`，所以这里的 ±1 就是「最多 ±6%」）。
+ *
+ * 为什么是相加而不是把两个维度取一次平均（preflight ⑤ 的「二者取一」）：夹子只在相加时才起作用 ——
+ * 两个维度各自的偏移都在 `[-0.5, 0.5]`，取平均后永远到不了 ±1，`clamp` 会变成死代码；而今天
+ * 「心情到底」= 满幅 ±6% 这件事已经被 `personality.ts` 的注释与 `MOOD_TONE_SPAN` 一起钉住了
+ * （`moodToneScale` 直接乘这个偏移）。改公式会把线性的幅度**悄悄减半**，那是行为变更，
+ * 不是这一批「小缺陷收口」该做的事：错的是把公式说反的那句注释。
  *
  * 为什么不是直接改人格：人格是长期属性、受 §7.4 的上限与回滚约束，心情不该占用那条路径。
- * 这条偏移**永远小于人格调整的最小步长**（§7.4 隐式反馈 ±0.03），所以「心情好」不会盖过
- * 「父亲说了一句」。
+ * 两个消费方各有自己的界（那也是「心情盖不过人格」的可核对版本）：`moodProactivityNudge` 满幅
+ * ±0.03，正好是 §7.4 里隐式反馈的一步；`moodToneScale` 只把窗口缩放 ±6%，而人格项自己是 0.5..1.5。
  */
 export function moodBias(state: MoodState): number {
   const safe = clampMood(state);

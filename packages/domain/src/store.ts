@@ -457,6 +457,16 @@ export class XixiStore {
     if (this.#closed) throw new DomainError('MIGRATION_FAILED', 'store is closed');
   }
 
+  /**
+   * 库还开着吗（`close()` 之后为 false）。
+   *
+   * 给「一轮提取里某一步失败」与「整轮都写不进去」分层用（preflight ③）：退出兜底要把后者
+   * 记成丢掉的一轮，而它不是任何**一步**的错。
+   */
+  get isOpen(): boolean {
+    return !this.#closed;
+  }
+
   #transaction<T>(work: () => T): T {
     this.#db.exec('BEGIN IMMEDIATE');
     try {
@@ -1036,10 +1046,16 @@ export class XixiStore {
    * (`worldState`, `moodHistory`, the engine's "since the last beat" window) goes through
    * `Date.parse`, and a UTC stamp mixed with local ones shifts every boundary by the offset —
    * measured as an 8-hour error on this machine, which silently dropped same-evening events.
+   *
+   * preflight ④: the caller's `at` goes through {@link moodInstant} **here**, in the one write
+   * funnel, so a `Z`-shaped string cannot introduce a second spelling. `mood_history` is ordered by
+   * the *string* `created_at`, and two spellings of the same instant compare in the wrong order
+   * (`…T14:00:00.000Z` < `…T21:00:00.000+08:00` even though it is an hour later) — that is exactly
+   * how the fifth round's verification made `moodHistory()` report a stale row as the newest one.
    */
   recordMood(input: RecordMoodInput): StoredMood {
     this.#assertOpen();
-    const at = input.at ?? this.#now();
+    const at = input.at === undefined ? this.#now() : moodInstant(input.at);
     const next = clampMood(input.state);
     const before = input.previous === null ? null : clampMood(input.previous);
     const changed =
@@ -1819,6 +1835,26 @@ function parseCursor(json: string): number {
     return 0;
   }
 }
+
+/**
+ * One spelling for a mood timestamp, whichever shape the caller used (preflight ④).
+ *
+ * `mood_history.created_at` is a **string** column and `moodHistory()` orders by it, so two
+ * spellings of the same instant sort against each other instead of against the clock. A string that
+ * already carries a numeric offset is the repo's own convention (`toOffsetIso`) and is left **byte for
+ * byte** alone — normalising must not gratuitously add `.000` to every row; a `Z`-shaped (or
+ * offset-less) string is rewritten with the local offset. A string this machine cannot parse is
+ * stored exactly as given: that is the pre-existing behaviour, and a mood write is not the place to
+ * start throwing at callers.
+ */
+function moodInstant(value: string): string {
+  if (NUMERIC_OFFSET_ISO.test(value)) return value;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? toOffsetIso(new Date(parsed)) : value;
+}
+
+/** `2026-10-01T22:00:00+08:00` / `…T22:00:00.000+08:00` — ISO-8601 with a numeric offset. */
+const NUMERIC_OFFSET_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?[+-]\d{2}:\d{2}$/;
 
 function toMoodChange(row: MoodHistoryRow): MoodChange {
   const before: MoodState = { valence: clampMoodValue(row.before_valence), energy: clampMoodValue(row.before_energy) };

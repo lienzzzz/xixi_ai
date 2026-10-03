@@ -85,6 +85,11 @@ interface VoiceTurnResult {
   readonly action: string;
   /** Pack Phase 2: the tool that backed this voice turn, when one ran. */
   readonly toolName: string | null;
+  /**
+   * preflight ⑧: 引擎这一轮报的 notice（沉默原因 `ARTIFACT_ONLY_REPLY` / 被剔掉的清洗、
+   * 被替换的无据事实、被截断…）。空数组 = 这一轮没有任何要解释的事。
+   */
+  readonly notices: readonly { readonly code: string; readonly detail: string }[];
   readonly accepted: boolean;
   readonly reason: string;
   readonly replyWav: string | null;
@@ -280,6 +285,7 @@ for (const wavPath of wavs) {
       action: 'SILENCE',
       accepted: false,
       toolName: null,
+      notices: [],
       reason: 'NO_SPEECH_DETECTED',
       replyWav: null,
       timings: { vadMs, sourceDurationMs: Math.round(info.durationMs) },
@@ -297,6 +303,7 @@ for (const wavPath of wavs) {
   const asrMs = Date.now() - asrStart;
 
   const chunks: string[] = [];
+  const notices: { readonly code: string; readonly detail: string }[] = [];
   let firstChunkAt: number | null = null;
   const llmStart = Date.now();
   /** `--trace`: every model delta and its arrival time, so a latency number can be explained. */
@@ -334,6 +341,9 @@ for (const wavPath of wavs) {
         if (trace) deltas.push({ atMs: Date.now() - llmStart, chars: chunk.length, text: chunk });
         pipeline?.push(chunk);
       },
+      // preflight ⑧: 引擎的 notice（沉默原因 / 被剔掉的内容）必须进这条入口的产物，
+      // 否则「她为什么没说话」在语音路径上只剩一个 SILENCE，和「模型自己决定不说」分不开。
+      onNotice: (notice) => void notices.push({ code: notice.code, detail: notice.detail }),
     },
   );
   const llmMs = Date.now() - llmStart;
@@ -395,6 +405,7 @@ for (const wavPath of wavs) {
     action: turn.action,
     accepted: turn.accepted,
     toolName: turn.toolName,
+    notices,
     reason: turn.reason,
     replyWav,
     /** Pack Phase 8: one entry per clause that went to TTS, with its own timings. */
@@ -437,6 +448,9 @@ for (const wavPath of wavs) {
           : Math.round((lastUsed.endpointDelayMs ?? 0) + asrMs + (firstChunkAt - llmStart) + ttsMs),
     },
   });
+
+  // preflight ⑧: 让人在终端里也看得见（同一份内容同时进产物 `turns[].notices`）。
+  for (const notice of notices) console.log(`[提示 ${notice.code}] ${notice.detail}`);
 }
 
 let conversationWav: string | null = null;

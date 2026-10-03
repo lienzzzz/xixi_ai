@@ -68,8 +68,19 @@ export interface AgentLoopResult {
 export interface AgentLoopOptions {
   readonly registry: ToolRegistry;
   readonly scope: AgentScope;
-  /** Program truth handed to every tool: timezone and the turn's clock reading. */
-  readonly context: { readonly timezone: string; readonly now: Date };
+  /**
+   * Program truth handed to every tool: the timezone and **the clock a call is stamped with**.
+   *
+   * Pack v03-preflight ⑨: this used to be `now: Date`, one reading taken when the turn began, and
+   * every tool in the loop received that same snapshot — so a call that ran half a minute later
+   * (a long round, a chain of four tool calls) still saw the turn's start. Tools are stamped with
+   * `context.clock()`, read **at the moment the call runs**; the name says what it does, so nobody
+   * can mistake it for a turn-start snapshot again.
+   *
+   * The clock is injectable for the same reason the adapters have one: an offline test with a fixed
+   * clock must stay reproducible.
+   */
+  readonly context: { readonly timezone: string; readonly clock: () => Date };
 }
 
 /**
@@ -123,7 +134,9 @@ export async function* runAgentLoop(
       const execution = await options.registry.execute(call, {
         scope: options.scope,
         timezone: options.context.timezone,
-        now: options.context.now,
+        // Read per call, after the model round that asked for it: 「现在几点」 must be the moment
+        // the tool runs, not the moment the turn started (preflight ⑨).
+        now: options.context.clock(),
       });
       usedTools.push(execution.record.name);
       yield { type: 'tool', name: execution.record.name };

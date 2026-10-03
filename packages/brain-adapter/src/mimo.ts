@@ -314,7 +314,7 @@ export class MimoBrainAdapter implements BrainAdapter {
         const iterator = runAgentLoop(step, messages, {
           registry: adapter.#registry,
           scope: adapter.#scope,
-          context: { timezone: adapter.#timezone, now: adapter.#now() },
+          context: { timezone: adapter.#timezone, clock: adapter.#now },
         });
         let outcome: AgentLoopResult;
         for (;;) {
