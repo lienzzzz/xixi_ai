@@ -37,6 +37,15 @@ export interface TrialPageOptions {
    * synthesis; nothing in these tests hits `/api/voice` on such a process).
    */
   readonly tts?: boolean;
+  /**
+   * Point the child's MiMo client at a **local stub** (`MIMO_BASE_URL`) so a test can exercise
+   * `/api/voice` end to end — real process, real HTTP route, real NDJSON — with **no network and no
+   * key value that matters**. The stub answers ASR and TTS; the caller wires it up. Without this the
+   * route cannot be driven offline: `--fake` replaces only the brain, while ASR/TTS still go through
+   * `MimoClient`, so `client.hasKey` gates the streaming sink and `client.transcribe` needs a socket.
+   * (t20: this is what made the B1 duplicate-clause bug reproducible through the real route.)
+   */
+  readonly ttsBaseUrl?: string;
 }
 
 /** Poll the page until it answers, or throw with the child's output. */
@@ -67,7 +76,12 @@ export async function startTrialPage(options: TrialPageOptions): Promise<TrialPa
   const args = ['scripts/serve-chat.ts', '--fake', '--port', '0', ...(options.tts === true ? [] : ['--no-tts'])];
   const child = spawn(process.execPath, args, {
     cwd: REPO_ROOT,
-    env: { ...process.env, XIXI_WEB_DATA_DIR: options.dataDir, ...(options.env ?? {}) },
+    env: {
+      ...process.env,
+      XIXI_WEB_DATA_DIR: options.dataDir,
+      ...(options.env ?? {}),
+      ...(options.ttsBaseUrl === undefined ? {} : { MIMO_BASE_URL: options.ttsBaseUrl }),
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';

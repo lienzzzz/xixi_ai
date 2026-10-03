@@ -307,7 +307,7 @@ function streamingSpeechSink(): VoiceDeps['speakStream'] {
  * The NDJSON event mapping, as a **pure function** (t13).
  *
  * It exists so the wire format can be asserted without a server: given the incremental clauses the
- * sink produced and the finished payload, it yields the exact events to write. Two properties are
+ * sink produced and the finished payload, it yields the events to write. Two properties are
  * the whole point of the streaming voice path, and both are checked in
  * `tests/console/voice-streaming-console.test.ts`:
  *
@@ -315,6 +315,23 @@ function streamingSpeechSink(): VoiceDeps['speakStream'] {
  *   * the `turn` event carries **counts and timings only** — no base64 audio anywhere on it. A blob
  *     there would mean the browser received everything at once and could not start speaking before
  *     the reply ended.
+ *
+ * ## Exactly once: the two producers must not overlap (t20, B1 blocker)
+ *
+ * Clause events have **one writer pair**, and each clause belongs to exactly one half:
+ *
+ *   * `streamVoice`'s `onClause` hook writes every clause **the moment it is synthesized** — that is
+ *     what makes the first clause reach the browser before the reply exists, and it is the only path
+ *     that can do so. The number it has written is passed in as `sentClauses`;
+ *   * this mapper then writes **the rest** — the clauses that never went through the hook. In the
+ *     current wiring that is none of them, but the mapper stays correct on its own (it is called
+ *     from tests and could be reused by a caller that only maps a finished turn), so it must never
+ *     assume the hook ran.
+ *
+ * Before this, both halves wrote **all** clauses: the wire carried `[0,1,0,1]` for a two-clause reply
+ * (measured through `/api/voice` in a real process, `end.clauses` = 2) and the trial page called
+ * `xixiSpeakClause` twice per clause — every chunk of audio played twice, and the bytes doubled. The
+ * route-level test now merges both channels and asserts each index appears exactly once.
  *
  * `synthesize` is injected purely so the test can assert the mapper never calls it: the audio is
  * produced once, by the sink, while the reply is being generated.
@@ -325,21 +342,27 @@ export function voiceStreamEvents(input: {
   readonly segments: readonly string[];
   readonly segmentGapMs: number;
   readonly ttsMode: 'streaming' | 'none';
+  /** How many clauses the caller's `onClause` hook already wrote, in index order. `0` = none. */
+  readonly sentClauses?: number;
   readonly synthesize?: (text: string) => unknown;
 }): Record<string, unknown>[] {
   const events: Record<string, unknown>[] = [];
   const stitchedAudio: string[] = [];
-  for (const clause of [...input.clauses].sort((left, right) => left.index - right.index)) {
+  const ordered = [...input.clauses].sort((left, right) => left.index - right.index);
+  const written = Math.max(0, Math.min(input.sentClauses ?? 0, ordered.length));
+  ordered.forEach((clause, position) => {
     stitchedAudio.push(clause.audio);
+    // Already on the wire via `onClause` — this mapper must not send it a second time.
+    if (position < written) return;
     events.push({
       type: 'clause',
       index: clause.index,
       text: clause.text,
       audio: clause.audio,
       ttsMs: clause.synthMs,
-      of: input.clauses.length,
+      of: ordered.length,
     });
-  }
+  });
   const stream = input.result['stream'] as { readonly enabled?: boolean; readonly ttsSegments?: number; readonly errors?: readonly string[] } | null | undefined;
   events.push({
     type: 'turn',
@@ -409,6 +432,9 @@ async function streamVoice(body: TurnBody, response: ServerResponse): Promise<vo
   // Clauses are written as they are synthesized: `onClause` is awaited by the delivery chain, so a
   // slow socket back-pressures the hand-off instead of buffering the reply in memory.
   const clauses: VoiceClauseEvent[] = [];
+  // How many `clause` events `onClause` has already put on the wire. Passed to the mapper so the two
+  // writers partition the clauses instead of both sending all of them (t20, B1 blocker).
+  let sentClauses = 0;
   try {
     const result = await handleVoiceTurn(
       {
@@ -416,6 +442,9 @@ async function streamVoice(body: TurnBody, response: ServerResponse): Promise<vo
         onClause: async (clause) => {
           const event: VoiceClauseEvent = { index: clause.index, text: clause.text, audio: clause.audio, durationMs: clause.durationMs, synthMs: clause.synthMs };
           clauses.push(event);
+          // The only writer of this clause's event: `voiceStreamEvents` is told how many went out
+          // here and skips them, so the wire carries each index exactly once (t20, B1).
+          sentClauses += 1;
           send({ type: 'clause', index: event.index, text: event.text, audio: event.audio, ttsMs: event.synthMs, of: null });
         },
       },
@@ -428,6 +457,7 @@ async function streamVoice(body: TurnBody, response: ServerResponse): Promise<vo
       segments: plan.segments,
       segmentGapMs: plan.gapMs,
       ttsMode: sink === undefined ? 'none' : 'streaming',
+      sentClauses,
     });
     for (const event of events) send(event);
     console.log(

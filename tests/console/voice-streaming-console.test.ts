@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -511,4 +512,213 @@ test('both entries say the same granularity as the boot they were served with (t
     await streamingPage.stop();
     rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+/* ---------------------------------------------------------------------------------------
+ * t20: exactly one clause event per clause on the real route (B1 blocker)
+ * ------------------------------------------------------------------------------------- */
+
+/**
+ * A local MiMo stub, inlined here on purpose (t20).
+ *
+ * Why a stub is needed to drive `/api/voice` offline: `--fake` swaps the **brain** only, while ASR
+ * and TTS still go through `MimoClient`. So (a) `client.hasKey` gates the streaming sink and (b)
+ * `client.transcribe` needs a socket. Pointing the child at this stub (via
+ * `startTrialPage({ ttsBaseUrl })`, i.e. `MIMO_BASE_URL`) gives it a real ASR and a real per-clause
+ * TTS call with **no network and nothing that costs money**, so the NDJSON the browser actually
+ * receives can be asserted instead of inferred. It lives in this file rather than its own module so
+ * that the whole t20 fix stays inside the task's declared paths.
+ */
+interface TtsStub {
+  readonly base: string;
+  /** One entry per TTS request, in arrival order: the text the server asked to synthesize. */
+  readonly ttsTexts: readonly string[];
+  /** Byte length of the WAV every TTS call returns, so payload sizes can be compared exactly. */
+  readonly wavBytes: number;
+  stop: () => Promise<void>;
+}
+
+/** The audio every TTS call returns — a real, parseable, signed-in fixture. */
+const STUB_WAV = readFileSync(`${REPO_ROOT}/tests/audio-fixtures/bot-reply-fixture.wav`);
+
+async function startTtsStub(): Promise<TtsStub> {
+  const ttsTexts: string[] = [];
+  const server = createServer((request, response) => {
+    let raw = '';
+    request.setEncoding('utf8');
+    request.on('data', (chunk: string) => {
+      raw += chunk;
+    });
+    request.on('end', () => {
+      const answer = (payload: unknown): void => {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify(payload));
+      };
+      if (raw.includes('mimo-v2.5-tts')) {
+        let text = '';
+        try {
+          const body = JSON.parse(raw) as { messages?: { content?: unknown }[] };
+          const content = body.messages?.[0]?.content;
+          text = typeof content === 'string' ? content : '';
+        } catch {
+          text = '(unparsable request)';
+        }
+        ttsTexts.push(text);
+        answer({ model: 'mimo-v2.5-tts', choices: [{ message: { audio: { data: STUB_WAV.toString('base64') } } }] });
+        return;
+      }
+      // The ASR response: a sentence long enough that the chunker produces more than one clause.
+      answer({ model: 'mimo-v2.5-asr', choices: [{ message: { content: '西西，明天天气怎么样？' } }] });
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const address = server.address();
+  const port = typeof address === 'object' && address !== null ? address.port : 0;
+  return {
+    base: `http://127.0.0.1:${port}`,
+    ttsTexts,
+    wavBytes: STUB_WAV.length,
+    stop: async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+interface ClauseSummary {
+  /** The `index` of every `clause` event, in the order the browser received them. */
+  readonly indices: readonly number[];
+  /** Bytes of audio the wire carried (base64-decoded), summed over the clause events. */
+  readonly sentBytes: number;
+  readonly sentBytesPerIndex: ReadonlyMap<number, number>;
+  /** How many times `xixiSpeakClause` would run — once per clause event, this page has no dedupe. */
+  readonly playCalls: number;
+  readonly eventTypes: readonly string[];
+  readonly endClauses: number | null;
+  /** Bytes of the stitched WAV on `end` (decoded): what one single-blob playback would consume. */
+  readonly stitchedBytes: number;
+}
+
+function summarizeClauses(events: readonly Record<string, unknown>[]): ClauseSummary {
+  const indices: number[] = [];
+  const sentBytesPerIndex = new Map<number, number>();
+  let sentBytes = 0;
+  for (const event of events) {
+    if (event['type'] !== 'clause') continue;
+    const index = Number(event['index']);
+    const audio = typeof event['audio'] === 'string' ? event['audio'] : '';
+    const bytes = Buffer.from(audio, 'base64').length;
+    indices.push(index);
+    sentBytes += bytes;
+    sentBytesPerIndex.set(index, bytes);
+  }
+  const end = events.find((event) => event['type'] === 'end');
+  const stitched = typeof end?.['audio'] === 'string' ? (end['audio'] as string) : '';
+  return {
+    indices,
+    sentBytes,
+    sentBytesPerIndex,
+    playCalls: indices.length,
+    eventTypes: events.map((event) => String(event['type'])),
+    endClauses: end === undefined || end['clauses'] === undefined || end['clauses'] === null ? null : Number(end['clauses']),
+    stitchedBytes: Buffer.from(stitched, 'base64').length,
+  };
+}
+
+/** Drive a real `/api/voice` and return the NDJSON events exactly as the browser receives them. */
+async function streamVoiceOnce(base: string): Promise<{ readonly status: number; readonly events: readonly Record<string, unknown>[] }> {
+  const wav = readFileSync(`${REPO_ROOT}/tests/audio-fixtures/direct-question.wav`);
+  const response = await fetch(`${base}/api/voice`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ audioBase64: wav.toString('base64'), speak: true }),
+  });
+  const text = await response.text();
+  const events = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  return { status: response.status, events };
+}
+
+test('the real /api/voice route sends each clause exactly once (t20, B1)', async () => {
+  // The bug this pins: `onClause` wrote every clause event, and then `voiceStreamEvents` wrote them
+  // all **again** from the same array — the browser got `[0,1,0,1]` for a two-clause reply while
+  // `end.clauses` said 2. The page plays on every `clause` event with no dedupe, so each chunk of
+  // audio was spoken twice and the wire carried double the bytes.
+  const stub = await startTtsStub();
+  const dataDir = mkdtempSync(join(tmpdir(), 'xixi-t20-route-'));
+  const page = await startTrialPage({
+    dataDir,
+    tts: true,
+    env: { MIMO_API_KEY: 'sk-test-not-used' },
+    ttsBaseUrl: stub.base,
+  });
+  try {
+    const { status, events } = await streamVoiceOnce(page.base);
+    assert.equal(status, 200, `route failed: ${page.output().slice(-400)}`);
+    const summary = summarizeClauses(events);
+
+    // ① One event per clause, in playback order — and the count agrees with the payload.
+    assert.ok(summary.indices.length > 0, `expected clause events, got ${summary.eventTypes.join(',')}`);
+    assert.equal(new Set(summary.indices).size, summary.indices.length, `a clause index was sent twice: ${summary.indices.join(',')}`);
+    assert.deepEqual(summary.indices, [...summary.indices].sort((left, right) => left - right), 'and in ascending order');
+    assert.deepEqual(summary.indices, summary.indices.map((_, position) => position), 'indices start at 0 and are contiguous');
+    assert.equal(summary.endClauses, summary.indices.length, 'end.clauses is the truth the wire must match');
+    assert.equal(summary.playCalls, summary.endClauses, 'so the page calls xixiSpeakClause once per clause');
+    // ② The browser plays exactly the bytes the server synthesized — no more. Per-clause audio is the
+    //    raw WAV the stub returned, so the sum of the sent bytes equals the stub's WAV times the
+    //    number of clauses; the stitched blob on `end` is that audio **plus one 44-byte header per
+    //    concatenation**, which is why the comparison adds those headers instead of comparing totals.
+    const perClauseWav = stub.wavBytes;
+    for (const [index, bytes] of summary.sentBytesPerIndex) {
+      assert.equal(bytes, perClauseWav, `clause ${index} carried ${bytes} bytes, expected one WAV (${perClauseWav})`);
+    }
+    //    The stitched blob on `end` is the same audio glued together (it is for a caller that wants
+    //    one WAV; the page never plays it), so it must stay within a couple of headers of the total —
+    //    if clause audio had gone out twice, `sentBytes` would be exactly twice the WAV size.
+    assert.equal(summary.sentBytes, perClauseWav * summary.indices.length, `sent bytes must be ${summary.indices.length} WAVs, not twice that`);
+    assert.ok(
+      Math.abs(summary.stitchedBytes - summary.sentBytes) <= 44 * (summary.indices.length + 1),
+      `stitched ${summary.stitchedBytes} vs sent ${summary.sentBytes} differ by more than the concatenation headers`,
+    );
+    assert.equal(stub.ttsTexts.length, summary.indices.length, `one TTS call per clause: ${JSON.stringify(stub.ttsTexts)}`);
+
+    // ③ The turn event still carries no audio at all (that is what would make the browser wait).
+    const turn = events.find((event) => event['type'] === 'turn');
+    assert.ok(turn !== undefined, 'a turn event is emitted');
+    assert.equal(turn?.['audio'], null);
+    assert.equal(turn?.['clauseAudio'], null);
+  } finally {
+    await page.stop();
+    stub.stop();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('a mapper that is told everything was already sent emits no clause event (t20 partition)', () => {
+  // The pure half of the same rule: the two writers must partition the clauses, so a mapper told that
+  // `onClause` already wrote them all stays silent on the clause channel — and still stitches the
+  // audio for `end`, which is how a single-blob caller keeps its WAV.
+  const clauses = [
+    { index: 0, text: '好的，我记住了。', audio: wavOf(700).toString('base64'), durationMs: 700, synthMs: 190 },
+    { index: 1, text: '明天可能有雨。', audio: wavOf(900).toString('base64'), durationMs: 900, synthMs: 210 },
+  ];
+  const result = { ok: true, reply: '好的，我记住了。明天可能有雨。', action: 'SPEAK', stream: { enabled: true, ttsSegments: 2, errors: [] } };
+  const shared = { result, clauses, segments: ['好的，我记住了。', '明天可能有雨。'], segmentGapMs: 450, ttsMode: 'streaming' as const };
+
+  const allSent = voiceStreamEvents({ ...shared, sentClauses: 2 });
+  assert.deepEqual(allSent.map((event) => event['type']), ['turn', 'end'], 'the hook owned every clause');
+  const end = allSent.find((event) => event['type'] === 'end');
+  assert.ok(typeof end?.['audio'] === 'string' && (end['audio'] as string).length > 0, 'the stitched WAV still travels');
+
+  const noneSent = voiceStreamEvents({ ...shared, sentClauses: 0 });
+  assert.deepEqual(noneSent.filter((event) => event['type'] === 'clause').map((event) => event['index']), [0, 1], 'a mapper on its own still sends every clause');
+
+  const oneSent = voiceStreamEvents({ ...shared, sentClauses: 1 });
+  assert.deepEqual(oneSent.filter((event) => event['type'] === 'clause').map((event) => event['index']), [1], 'and picks up exactly where the hook stopped');
+
+  // Out-of-range counts must not invent or drop clauses (the wire total is what matters).
+  assert.deepEqual(voiceStreamEvents({ ...shared, sentClauses: 99 }).map((event) => event['type']), ['turn', 'end']);
+  assert.deepEqual(voiceStreamEvents({ ...shared, sentClauses: -3 }).filter((event) => event['type'] === 'clause').map((event) => event['index']), [0, 1]);
 });
