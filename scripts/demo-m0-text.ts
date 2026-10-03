@@ -8,14 +8,15 @@
  * Usage: node scripts/demo-m0-text.ts
  */
 import { FakeBrainAdapter, collectTurn } from '@xixi/brain-adapter';
-import { join } from 'node:path';
 
-import { openXixiStore } from '@xixi/domain';
+import { openXixiStore, resolveCanonicalDataDir } from '@xixi/domain';
 
 import { REPO_ROOT, loadConfig, printEvidence } from './lib/harness.ts';
 
 const config = loadConfig();
-const store = openXixiStore({ dataDir: join(REPO_ROOT, 'data', 'demo') });
+// V0.3 P0-B: the demo follows the same default as every other entry (canonical store), so what it
+// writes is visible to `npm run chat`. Set `XIXI_DEMO_DATA_DIR` to keep a demo run out of it.
+const store = openXixiStore({ dataDir: resolveCanonicalDataDir({ legacyEnv: 'XIXI_DEMO_DATA_DIR', cwd: REPO_ROOT }) });
 
 try {
   store.seedSelfProfile(config.personality.base);

@@ -115,15 +115,20 @@ import {
   type VadResult,
 } from '@xixi/runtime';
 import {
+  CANONICAL_STORE_ENTRIES,
   DEFAULT_PRESENCE_TTL_SECONDS,
   MemoryStore,
   openXixiStore,
   parseSelfModelSettings,
+  resolveCanonicalDataDir,
   SelfModel,
   type XixiConfig,
   type StoredEvent,
   type XixiStore,
 } from '@xixi/domain';
+// V0.3 P0-B: the perception edge's stdout records are ingested here (single writer, one
+// transaction) instead of the Python child opening the store itself.
+import { ingestPerceptionLine } from '@xixi/runtime';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
 import { concatWav, readWav, readWavInfo, sliceWav } from './lib/wav.ts';
@@ -2008,7 +2013,13 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   const reportDir = options.reportDir ?? REPORT_DIR;
   const config = loadConfig();
   const client = new MimoClient();
-  const dataDir = options.dataDir ?? join(REPO_ROOT, 'data', 'field-test');
+  /**
+   * V0.3 P0-B: the console's own store is the household canonical one (`XIXI_DATA_DIR`, else
+   * `data/xixi`) unless `--data-dir` says otherwise. The previous default (`data/field-test`) made
+   * the console a second Xixi: a personality set here never reached `npm run chat`, which the audit
+   * (§3.5) and the page's own 「四个入口各用不同的库」 note both called out.
+   */
+  const dataDir = options.dataDir ?? resolveCanonicalDataDir({ cwd: REPO_ROOT });
   const store = openXixiStore({ dataDir });
   store.seedSelfProfile(config.personality.base);
   const policy = retentionPolicy(config);
@@ -2205,10 +2216,15 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   let liveScenario: string | null = 'person-arrives-moves-leaves';
   const liveSensors = new LiveSensors({
     runner: options.liveRunner ?? createPerceptionLiveRunner({ python: () => resolvePerceptionPython(log), serviceDir: PERCEPTION_SERVICE_DIR, repoRoot: REPO_ROOT, log }),
-    // The child needs the store *file* (`perception_edge.run --db <file> --append`), not the dir.
-    presenceDbPath: () => {
-      const opened = getPresenceStore() as { dbPath?: string } | undefined;
-      return opened?.dbPath ?? join(presenceDataDir, 'xixi.sqlite');
+    // V0.3 P0-B: the child prints presence events; **this** is where they enter the canonical store,
+    // through the domain's single-transaction append. The child gets no `--db` any more.
+    ingest: (line) => {
+      const store = getPresenceStore();
+      if (store === undefined) {
+        log('[perception] 在场投影的库打不开，这条在场事件没有入库（见上面的 [presence] 一行）');
+        return;
+      }
+      ingestPerceptionLine(line, { store, log });
     },
     cameraIndex: () => liveCameraIndex,
     log,
@@ -2282,8 +2298,17 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   };
 
   let presenceStore: unknown;
-  /** Where the presence projection is read from (`--presence-data-dir`, default `data`). */
-  const presenceDataDir = options.presenceDataDir ?? join(REPO_ROOT, 'data');
+  /**
+   * Where the presence projection is read from (V0.3 P0-B).
+   *
+   * Default: **the same store as everything else** (`dataDir`, i.e. the canonical store). Before
+   * P0-B this defaulted to `data/`, which is a *different* database from the console's own — so the
+   * console read presence out of one file while Python appended to that same file and the console's
+   * history/personality lived in another (§3.5, and the two-store note in `ACTUAL_RUNTIME_MAP.md`
+   * §1「perception DB」). `--presence-data-dir` can still point somewhere else for a probe, but the
+   * default is now 「one Xixi」: what the camera writes is what the page reads.
+   */
+  const presenceDataDir = options.presenceDataDir ?? dataDir;
   function getPresenceStore(): unknown {
     if (presenceStore === undefined) {
       try {
@@ -3979,7 +4004,6 @@ export interface LiveCameraStartOptions {
   readonly source: 'camera' | 'synthetic';
   readonly scenario?: string | null;
   readonly cameraIndex: number;
-  readonly presenceDbPath: string;
 }
 
 export interface LiveCameraHandle {
@@ -3991,7 +4015,11 @@ export interface LiveCameraHandle {
 /** The seam that lets tests drive the live loop without a camera or Python. */
 export interface LiveCameraRunner {
   start(
-    options: LiveCameraStartOptions & { readonly onLine: (line: string) => void; readonly onExit: (code: number | null) => void },
+    options: LiveCameraStartOptions & {
+      readonly onLine: (line: string) => void;
+      readonly onPresenceEvent: (line: string) => void;
+      readonly onExit: (code: number | null) => void;
+    },
   ): LiveCameraHandle;
 }
 
@@ -4068,8 +4096,12 @@ const CAMERA_UNAVAILABLE_PATTERN = /摄像头不可用|CameraUnavailable|can't b
 export class LiveSensors {
   readonly #options: {
     readonly runner: LiveCameraRunner;
-    readonly presenceDbPath: () => string;
     readonly cameraIndex: () => number;
+    /**
+     * V0.3 P0-B: where a received presence event goes. The console passes the canonical store's
+     * ingest here — the child no longer has a `--db`, so this is the only writer (§3.3).
+     */
+    readonly ingest?: ((line: string) => void) | undefined;
     readonly now?: (() => Date) | undefined;
     readonly log?: ((line: string) => void) | undefined;
   };
@@ -4088,8 +4120,8 @@ export class LiveSensors {
 
   constructor(options: {
     readonly runner: LiveCameraRunner;
-    readonly presenceDbPath: () => string;
     readonly cameraIndex: () => number;
+    readonly ingest?: ((line: string) => void) | undefined;
     readonly now?: (() => Date) | undefined;
     readonly log?: ((line: string) => void) | undefined;
   }) {
@@ -4125,8 +4157,8 @@ export class LiveSensors {
         source: this.#source,
         scenario: this.#scenario,
         cameraIndex: this.#options.cameraIndex(),
-        presenceDbPath: this.#options.presenceDbPath(),
         onLine: (line) => this.#onLine(line),
+        onPresenceEvent: (line) => this.#options.ingest?.(line),
         onExit: (code) => this.#onExit(code),
       });
       this.#running = true;
@@ -4481,6 +4513,12 @@ export function resolvePerceptionPython(log?: ((line: string) => void) | undefin
  * It reuses the shipped detection loop (`perception_edge.run --live`), so the presence events the
  * rest of the system sees are produced by the same code as always — the console only adds a
  * picture on stdout.
+ *
+ * V0.3 P0-B: the child is started **without `--db`/`--append`**. It used to be handed the store file
+ * and append its own `events` + `world_state` rows; now it prints the envelope it built (validated
+ * against the released schema by its own `build_presence_event`) and the console appends it through
+ * `XixiStore.appendPresenceEvent` — one writer, one transaction, event and projection together
+ * (pack `04_RUNTIME_CONSOLIDATION.md` §3). Detection stays in Python; persistence stays in the store.
  */
 export function createPerceptionLiveRunner(options: {
   /** Resolved lazily: the probe costs a Python start, so it only happens when 启用 is pressed. */
@@ -4501,9 +4539,6 @@ export function createPerceptionLiveRunner(options: {
         ...(settings.scenario === null || settings.scenario === undefined ? [] : ['--scenario', settings.scenario]),
         '--camera-index',
         String(settings.cameraIndex),
-        '--db',
-        settings.presenceDbPath,
-        '--append',
         '--quiet-frames',
       ];
       const child = spawn(python, args, {
@@ -4517,7 +4552,12 @@ export function createPerceptionLiveRunner(options: {
         buffered += chunk;
         const lines = buffered.split('\n');
         buffered = lines.pop() ?? '';
-        for (const line of lines) settings.onLine(line);
+        for (const line of lines) {
+          settings.onLine(line);
+          // V0.3 P0-B: presence events travel to the store through this seam — the child has no
+          // database of its own any more. `record` is the child's routing key, checked by the ingest.
+          if (line.includes('"record":"event"')) settings.onPresenceEvent(line);
+        }
       });
       child.stderr?.setEncoding('utf8');
       child.stderr?.on('data', (chunk: string) => {
@@ -4570,19 +4610,16 @@ export function createPerceptionLiveRunner(options: {
 }
 
 /**
- * Which database each entry point uses.
+ * Which database each entry point uses (V0.3 P0-B).
  *
- * Four entry points, four separate SQLite files (by design — a demo must not write into the
- * user's real conversation history). The pages print this **and** their own live path, because
- * "我在 chat 里设的人格/聊过的历史，怎么这里没有" is a guaranteed question otherwise.
+ * The table is no longer hand-written here: `CANONICAL_STORE_ENTRIES` in `@xixi/domain` is the one
+ * source, and the resolver that picks the directory reads the same constants. Keeping a second list
+ * in this file is exactly how the page ended up claiming 「四个入口各用不同的库」 long after that
+ * stopped being the design.
  */
-export const XIXI_DB_ENTRIES: readonly { readonly entry: string; readonly command: string; readonly dir: string }[] = Object.freeze([
-  { entry: '终端对话', command: 'npm run chat', dir: 'data/chat' },
-  { entry: '试用页', command: 'npm run web', dir: 'data/web-chat' },
-  { entry: '语音闭环', command: 'npm run voice:turn', dir: 'data/voice' },
-  { entry: '现场测试控制台', command: 'npm run field-test', dir: 'data/field-test' },
-  { entry: '离线演示', command: 'npm run demo:m0:text', dir: 'data/demo' },
-]);
+export const XIXI_DB_ENTRIES: readonly { readonly entry: string; readonly command: string; readonly dir: string }[] = Object.freeze(
+  CANONICAL_STORE_ENTRIES.map((item) => ({ entry: item.entry, command: item.command, dir: item.dir })),
+);
 
 /**
  * What is *actually* segmented — one function, three states, no drifting constants.
@@ -4615,9 +4652,12 @@ export function databaseNoteHtml(currentDir: string): string {
     (item) => `<li><code>${item.command}</code> → <code>${item.dir}</code>（${item.entry}）${current.endsWith(item.dir) ? ' ← <b>本页</b>' : ''}</li>`,
   ).join('');
   return (
-    `<div class="muted">本页数据库：<code>${current}</code>｜<b>四个入口各用不同的库</b>：` +
+    `<div class="muted">本页数据库：<code>${current}</code>｜<b>household 入口默认连同一个库</b>（V0.3 P0-B：` +
+    `<code>XIXI_DATA_DIR</code>，未设则 <code>data/xixi</code>）：` +
     `<ul style="margin:4px 0 4px 18px; padding:0">${rows}</ul>` +
-    `在 <code>npm run chat</code> 里设的人格与聊过的历史<b>不会</b>带到这里（各自的库互相独立）。</div>`
+    `所以在 <code>npm run chat</code> 里设的人格与聊过的历史，在这里也认；单个入口可用自己的开关隔离` +
+    `（<code>XIXI_CHAT_DATA_DIR</code> / <code>XIXI_WEB_DATA_DIR</code> / <code>--data-dir</code> / ` +
+    `<code>--isolated-store</code>），测试与评测用临时目录。</div>`
   );
 }
 

@@ -45,7 +45,7 @@ import { dirname, join } from 'node:path';
 import { FakeBrainAdapter, type BrainAdapter } from '@xixi/brain-adapter';
 import { ConversationEngine } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
-import { openXixiStore } from '@xixi/domain';
+import { openXixiStore, resolveCanonicalDataDir } from '@xixi/domain';
 // V0.3 P0-A: the tool chain moved to `@xixi/runtime` (pack `04_RUNTIME_CONSOLIDATION.md` §1
 // Step A). This voice entry and the console still must not drift into two chains — they simply
 // share the runtime package's one now instead of the console script's.
@@ -226,14 +226,30 @@ for (let index = 0; index < args.length; index += 1) {
   if (args[index] === '--wav' && args[index + 1] !== undefined) wavs.push(args[index + 1]);
 }
 if (wavs.length === 0) {
-  console.error('用法：node scripts/voice-turn.ts --wav <file.wav> [--wav <file2.wav> ...] [--fake] [--trace] [--legacy-tts] [--min-comma N] [--max-chars N] [--out <file>]');
+  console.error('用法：node scripts/voice-turn.ts --wav <file.wav> [--wav <file2.wav> ...] [--fake] [--trace] [--legacy-tts] [--min-comma N] [--max-chars N] [--out <file>] [--isolated-store]');
   console.error('      node scripts/voice-turn.ts --compare <批次产物.txt> [<更多>]   # 不调 API，只复算对照');
+  console.error('  默认连西西的 household 库（XIXI_DATA_DIR，未设则 data/xixi），所以在 chat 里设的人格这里也认；');
+  console.error('  --isolated-store 用 data/voice 这个独立库跑测量，绝不碰 household 的历史与人格。');
   process.exit(2);
 }
 
 const config = loadConfig();
 const client = useFake ? null : new MimoClient();
-const store = openXixiStore({ dataDir: join(REPO_ROOT, 'data', 'voice') });
+/**
+ * V0.3 P0-B: this entry is a **measurement tool**, not a household entry, so it gets both:
+ *
+ *   * default = the canonical household store (`XIXI_DATA_DIR`, else `data/xixi`), because a
+ *     measurement that runs against a throwaway database reports on a Xixi nobody has;
+ *   * `--isolated-store` = `data/voice`, a store of its own, for a batch that must not touch the
+ *     household history (and `XIXI_VOICE_DATA_DIR` picks a third directory for tests).
+ *
+ * Neither path writes media into the log: only turns/decisions are recorded (铁律 6), and the audio
+ * this script keeps goes to `--out`/`data/voice/bench`, never into the event log.
+ */
+const voiceDataDir = args.includes('--isolated-store')
+  ? resolveCanonicalDataDir({ dataDir: join(REPO_ROOT, 'data', 'voice') })
+  : resolveCanonicalDataDir({ legacyEnv: 'XIXI_VOICE_DATA_DIR', cwd: REPO_ROOT });
+const store = openXixiStore({ dataDir: voiceDataDir });
 store.seedSelfProfile(config.personality.base);
 const session = store.latestSession() ?? store.createSession();
 /**

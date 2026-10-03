@@ -102,12 +102,16 @@ export {
   type PersonalityProperty,
 } from './personality.ts';
 export {
+  CANONICAL_DATA_DIR,
+  CANONICAL_DATA_DIR_ENV,
+  CANONICAL_STORE_ENTRIES,
   DEFAULT_DATA_DIR,
   DEFAULT_DB_FILE,
   DEFAULT_PRESENCE_TTL_SECONDS,
   MOOD_STATE_KEY,
   openXixiStore,
   PRESENCE_KEY,
+  resolveCanonicalDataDir,
   XixiStore,
   type MoodChange,
   type ReadEventsQuery,

@@ -16,7 +16,7 @@ import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter 
 import { CliDshTransport } from '@xixi/brain-dsh';
 import { ConversationEngine, TopicEngine, TurnMemoryExtractor } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
-import { MemoryStore, openXixiStore, parseSelfModelSettings, SelfModel } from '@xixi/domain';
+import { MemoryStore, openXixiStore, parseSelfModelSettings, resolveCanonicalDataDir, SelfModel } from '@xixi/domain';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
 import {
@@ -82,8 +82,12 @@ const VOICE_DIR = join(REPO_ROOT, 'data', 'voice-web');
 
 const config = loadConfig();
 const client = new MimoClient();
-/** `XIXI_WEB_DATA_DIR` is the test/parallel-instance seam (the console has the same one). */
-const DATA_DIR = process.env.XIXI_WEB_DATA_DIR ?? join(REPO_ROOT, 'data', 'web-chat');
+/**
+ * V0.3 P0-B: the trial page defaults to the household canonical store (`XIXI_DATA_DIR`, else
+ * `data/xixi`) — the same one `npm run chat`, the console and the perception ingest use.
+ * `XIXI_WEB_DATA_DIR` stays supported for tests/parallel instances, below the household switch.
+ */
+const DATA_DIR = resolveCanonicalDataDir({ legacyEnv: 'XIXI_WEB_DATA_DIR', cwd: REPO_ROOT });
 const store = openXixiStore({ dataDir: DATA_DIR });
 store.seedSelfProfile(config.personality.base);
 const policy = retentionPolicy(config);

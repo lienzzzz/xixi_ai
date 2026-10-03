@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -52,6 +53,97 @@ import {
 
 export const DEFAULT_DATA_DIR = 'data';
 export const DEFAULT_DB_FILE = 'xixi.sqlite';
+
+/**
+ * The household's canonical store directory (V0.3 P0-B, pack `04_RUNTIME_CONSOLIDATION.md` §2).
+ *
+ * Before this, each live entry opened its own SQLite file (`data/chat`, `data/web-chat`,
+ * `data/voice`, `data/field-test`) and the perception edge wrote a fifth one (`data/`) — so
+ * 「在 chat 里设的人格不会带到控制台」 was true, and being a long-lived companion (one identity, one
+ * history) was not. `data/xixi` is where they all point by default now.
+ *
+ * The name is deliberately a **new** directory: `data/xixi.sqlite` already exists on this machine
+ * from the M6 camera line, and a canonical store must not adopt (or overwrite) a file whose schema
+ * history it did not create.
+ */
+export const CANONICAL_DATA_DIR = 'data/xixi';
+
+/** Environment variable that overrides {@link CANONICAL_DATA_DIR} for every household entry. */
+export const CANONICAL_DATA_DIR_ENV = 'XIXI_DATA_DIR';
+
+/** True when a path may be handed to `openXixiStore` as-is (absolute, or a drive-relative Windows path). */
+function isAbsolutePath(path: string): boolean {
+  return /^([A-Za-z]:[\\/]|\\\\|\/)/.test(path);
+}
+
+/**
+ * Resolve the canonical store directory for a household entry point.
+ *
+ * Precedence, and why:
+ *
+ *   1. `options`/`--data-dir` — an explicit instruction (the console's `--data-dir`, a test's
+ *      temp directory). Nothing may override it.
+ *   2. `XIXI_DATA_DIR` — the household-wide override, so one variable moves every entry at once.
+ *   3. `legacyEnv` (e.g. `XIXI_CHAT_DATA_DIR` / `XIXI_WEB_DATA_DIR`) — the per-entry seam that
+ *      existed before P0-B. Kept **above** the default so a test that sets only its own variable
+ *      still gets its own store, and below `XIXI_DATA_DIR` so the household switch wins when both
+ *      are set (that is what "canonical" has to mean).
+ *   4. `CANONICAL_DATA_DIR` (relative paths resolved against `cwd`, i.e. the repository root when
+ *      scripts are started from there).
+ */
+export function resolveCanonicalDataDir(options: {
+  readonly dataDir?: string | undefined;
+  readonly legacyEnv?: string | undefined;
+  readonly env?: NodeJS.ProcessEnv | Readonly<Record<string, string | undefined>> | undefined;
+  readonly cwd?: string | undefined;
+} = {}): string {
+  const env = options.env ?? process.env;
+  const explicit = options.dataDir;
+  if (typeof explicit === 'string' && explicit.trim().length > 0) return explicit.trim();
+  const household = env[CANONICAL_DATA_DIR_ENV];
+  if (typeof household === 'string' && household.trim().length > 0) {
+    const value = household.trim();
+    return isAbsolutePath(value) ? value : join(options.cwd ?? process.cwd(), value);
+  }
+  const legacy = options.legacyEnv === undefined ? undefined : env[options.legacyEnv];
+  if (typeof legacy === 'string' && legacy.trim().length > 0) {
+    const value = legacy.trim();
+    return isAbsolutePath(value) ? value : join(options.cwd ?? process.cwd(), value);
+  }
+  /**
+   * Under the test runner, "the default store" must never be the one in the repository.
+   *
+   * A test that imports a live entry module (`scripts/serve-chat.ts` builds its store at import time)
+   * would otherwise create and write `data/xixi` — the household database — from `npm test`. Node's
+   * test runner sets `NODE_TEST_CONTEXT`, so that is the signal: fall back to a per-process temp
+   * directory instead. Nothing to configure, and production is untouched (the variable is not set
+   * for `npm run chat` / `web` / `field-test`).
+   */
+  if (env['NODE_TEST_CONTEXT'] !== undefined || env['NODE_ENV'] === 'test') {
+    return join(tmpdir(), `xixi-test-store-${process.pid}`, CANONICAL_DATA_DIR);
+  }
+  return join(options.cwd ?? process.cwd(), CANONICAL_DATA_DIR);
+}
+
+/**
+ * Which entry points share the canonical store, and what each one may still use instead.
+ *
+ * Exported so the pages print the **same** table the code follows (V0.3 P0-B), instead of a
+ * hard-coded list in `scripts/field-test.ts` drifting from the wiring.
+ */
+export const CANONICAL_STORE_ENTRIES: readonly {
+  readonly entry: string;
+  readonly command: string;
+  readonly dir: string;
+  readonly legacyEnv: string | null;
+  /** True when this entry is pure measurement and may be pointed at an isolated store by a flag. */
+  readonly measurement?: boolean;
+}[] = Object.freeze([
+  { entry: '终端对话', command: 'npm run chat', dir: CANONICAL_DATA_DIR, legacyEnv: 'XIXI_CHAT_DATA_DIR' },
+  { entry: '试用页', command: 'npm run web', dir: CANONICAL_DATA_DIR, legacyEnv: 'XIXI_WEB_DATA_DIR' },
+  { entry: '现场测试控制台', command: 'npm run field-test', dir: CANONICAL_DATA_DIR, legacyEnv: null },
+  { entry: '语音闭环（测量）', command: 'npm run voice:turn -- --wav <file> [--isolated-store]', dir: CANONICAL_DATA_DIR, legacyEnv: 'XIXI_VOICE_DATA_DIR', measurement: true },
+]);
 
 /**
  * WorldState key for "is somebody at home". One key for M6; the table is not specialised
@@ -1220,6 +1312,54 @@ export class XixiStore {
     });
 
     const state = this.worldState(PRESENCE_KEY, { now: at });
+    if (state === null) {
+      throw new DomainError('INVALID_WORLD_STATE', 'presence projection vanished right after being written');
+    }
+    return { event: stored, state: { ...state, previousState } };
+  }
+
+  /**
+   * Append a `presence.changed` envelope that came from **outside** this process (V0.3 P0-B).
+   *
+   * Why this exists next to {@link recordPresenceChanged}: the perception edge detects the
+   * transition but must not be the writer — `services/perception-edge` used to open the same SQLite
+   * file and `INSERT` into `events` + `world_state` itself, which made two processes the writers of
+   * one store and put the transaction boundary in Python. Now the edge prints the event it built and
+   * validated (its own `build_presence_event`), and this method is the only writer:
+   *
+   *   * the envelope is **validated here too** (`appendEvent` → `validateEvent`), so a hand-typed or
+   *     drifted line from a child process cannot enter the log;
+   *   * the event log and the projection are written in **one transaction**, exactly like
+   *     `recordPresenceChanged` — a failure rolls both back rather than leaving "an arrival exists
+   *     but the state still says absent";
+   *   * the event's own `event_id` survives (it is already on the wire, and re-keying it would break
+   *     correlation with the child's stdout record).
+   */
+  appendPresenceEvent(envelope: EventEnvelope): { event: StoredEvent; state: WorldState } {
+    this.#assertOpen();
+    const validated = validateEvent(envelope);
+    if (validated.event_type !== 'presence.changed') {
+      throw new DomainError('INVALID_WORLD_STATE', `appendPresenceEvent only accepts presence.changed, got ${validated.event_type}`);
+    }
+    const payload = validated.payload as { present?: unknown };
+    const present = payload.present === true;
+    const previous = this.worldState(PRESENCE_KEY, { now: validated.timestamp });
+    const previousState = previous === null ? null : previous.present ? 'present' : 'absent';
+
+    const stored = this.#transaction(() => {
+      const appended = this.appendEvent(validated);
+      this.setWorldState({
+        key: PRESENCE_KEY,
+        value: present ? 'present' : 'absent',
+        source: validated.source,
+        confidence: validated.confidence,
+        ttlSeconds: DEFAULT_PRESENCE_TTL_SECONDS,
+        timestamp: validated.timestamp,
+      });
+      return appended;
+    });
+
+    const state = this.worldState(PRESENCE_KEY, { now: validated.timestamp });
     if (state === null) {
       throw new DomainError('INVALID_WORLD_STATE', 'presence projection vanished right after being written');
     }

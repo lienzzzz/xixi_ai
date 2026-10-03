@@ -32,7 +32,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter, type ToolCallRecord, type ToolRegistry } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
 import { ConversationEngine } from '@xixi/conversation';
-import { openXixiStore, PERSONALITY_PROPERTIES, personalityProperty, type XixiConfig } from '@xixi/domain';
+import { openXixiStore, PERSONALITY_PROPERTIES, personalityProperty, resolveCanonicalDataDir, type XixiConfig } from '@xixi/domain';
 import { WeatherClient, type MimoClient } from '@xixi/model-adapters';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
@@ -239,8 +239,13 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     return;
   }
 
-  /** `XIXI_CHAT_DATA_DIR` is the test/parallel-instance seam (same idea as the other entries). */
-  const store = openXixiStore({ dataDir: process.env.XIXI_CHAT_DATA_DIR ?? join(REPO_ROOT, 'data', 'chat') });
+  /**
+   * V0.3 P0-B: the household canonical store by default (`XIXI_DATA_DIR`, else `data/xixi`), so the
+   * CLI, the trial page, the console and the perception ingest all read and write **one** Xixi.
+   * `XIXI_CHAT_DATA_DIR` is still honoured (tests and parallel instances), but it now sits *below*
+   * the household switch — see `resolveCanonicalDataDir` for the precedence table.
+   */
+  const store = openXixiStore({ dataDir: resolveCanonicalDataDir({ legacyEnv: 'XIXI_CHAT_DATA_DIR', cwd: REPO_ROOT }) });
   const session = store.latestSession() ?? store.createSession();
   store.seedSelfProfile(config.personality.base);
   if (Object.keys(personalityOverride).length > 0) {

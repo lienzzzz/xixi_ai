@@ -218,7 +218,15 @@ test('a fresh artefact cannot contain a canned conclusion or a remembered floor 
     execFileSync(
       process.execPath,
       ['scripts/voice-turn.ts', '--fake', '--wav', 'tests/audio-fixtures/direct-question.wav', '--out', out],
-      { cwd: REPO_ROOT, stdio: 'ignore', timeout: 120_000 },
+      {
+        cwd: REPO_ROOT,
+        stdio: 'ignore',
+        timeout: 120_000,
+        // V0.3 P0-B: `voice-turn` defaults to the household canonical store now, so a test that
+        // spawns it must point it at its own temporary directory — a test must never create (or
+        // touch) `data/xixi`.
+        env: { ...process.env, XIXI_VOICE_DATA_DIR: join(dir, 'store') },
+      },
     );
     const text = readFileSync(out, 'utf8');
     assert.ok(text.length > 0, 'the tool wrote an artefact');

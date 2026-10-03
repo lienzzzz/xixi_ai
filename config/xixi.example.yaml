@@ -1,5 +1,12 @@
 # 西西第一版配置（对应《方案》第 42 节）。
 # 复制为 config/xixi.yaml 后按需修改；config/xixi.yaml 不进入版本库。
+#
+# 存储位置不在这个文件里（V0.3 P0-B）：所有 household 入口（终端对话 / 试用页 / 现场测试控制台 /
+# 感知入库）默认连同一个 canonical store：
+#   XIXI_DATA_DIR 未设 → data/xixi/xixi.sqlite
+#   XIXI_DATA_DIR=/some/abs/path （或相对当前目录的路径）→ 那一个库
+# 单个入口仍可用自己的开关隔离（XIXI_CHAT_DATA_DIR / XIXI_WEB_DATA_DIR / XIXI_VOICE_DATA_DIR、
+# 控制台的 --data-dir、voice-turn 的 --isolated-store）；测试与评测用临时目录。
 xixi:
   identity:
     name: 西西

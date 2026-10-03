@@ -10,11 +10,15 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 
-import { openXixiStore } from '@xixi/domain';
+import { openXixiStore, resolveCanonicalDataDir } from '@xixi/domain';
 
 import { REPO_ROOT, loadConfig, printEvidence } from './lib/harness.ts';
 
-const DATA_DIR = join(REPO_ROOT, 'data', 'demo-restart');
+/**
+ * V0.3 P0-B: the two phases must still share **one** directory, but it is the canonical store's by
+ * default now (`XIXI_DEMO_RESTART_DATA_DIR` keeps a demo run out of the household history).
+ */
+const DATA_DIR = resolveCanonicalDataDir({ legacyEnv: 'XIXI_DEMO_RESTART_DATA_DIR', cwd: REPO_ROOT });
 const PREFIX = 'EVIDENCE ';
 
 function phase(): 'fresh' | 'resume' {

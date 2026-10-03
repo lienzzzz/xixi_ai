@@ -306,7 +306,8 @@ test('the page is Chinese, self-describing and carries the boot state', () => {
       `and not the other mode's sentence ('${ttsMode}')`,
     );
   }
-  assert.ok(page.includes('data/field-test'), 'and names its own database path');
+  assert.ok(page.includes('data/xixi'), 'and names the canonical store path');
+  assert.ok(page.includes('household 入口默认连同一个库'), 'V0.3 P0-B：页面必须说「同一个库」，不再是「各用不同的库」');
   assert.ok(page.includes('px-quiet-start'), 'and carries the proactive knobs');
   assert.ok(page.includes('延迟分段'), 'the per-stage latency line is part of the UI');
   // User-reported (2026-09-30): pressing the mic button moved it, because the hint text shared the

@@ -34,28 +34,41 @@ function tempDir(prefix: string): string {
 
 /** A fake perception child: it answers with scripted frames and records how it was stopped. */
 function fakeLiveRunner(): LiveCameraRunner & {
-  readonly started: { source: string; cameraIndex: number; dbPath: string }[];
+  readonly started: { source: string; cameraIndex: number; gotDbPath: boolean }[];
+  readonly presenceLines: string[];
   readonly kills: number;
   readonly handles: LiveCameraHandle[];
   push: (line: string) => void;
+  pushPresence: (line: string) => void;
   exit: (code: number | null) => void;
 } {
-  const started: { source: string; cameraIndex: number; dbPath: string }[] = [];
+  const started: { source: string; cameraIndex: number; gotDbPath: boolean }[] = [];
+  const presenceLines: string[] = [];
   const handles: LiveCameraHandle[] = [];
   let killCount = 0;
   let onLine: ((line: string) => void) | null = null;
+  let onPresenceEvent: ((line: string) => void) | null = null;
   let onExit: ((code: number | null) => void) | null = null;
   return {
     started,
+    presenceLines,
     handles,
     get kills() {
       return killCount;
     },
     push: (line) => onLine?.(line),
+    pushPresence: (line) => onPresenceEvent?.(line),
     exit: (code) => onExit?.(code),
     start(options) {
-      started.push({ source: options.source, cameraIndex: options.cameraIndex, dbPath: options.presenceDbPath });
+      // V0.3 P0-B: the child must NOT be handed a store path any more (it used to get `--db` and
+      // append the presence rows itself). `gotDbPath` pins that the seam is gone, not just unused.
+      started.push({
+        source: options.source,
+        cameraIndex: options.cameraIndex,
+        gotDbPath: 'presenceDbPath' in (options as Record<string, unknown>),
+      });
       onLine = options.onLine;
+      onPresenceEvent = options.onPresenceEvent;
       onExit = options.onExit;
       const handle: LiveCameraHandle = {
         pid: 7000 + started.length,
@@ -200,10 +213,12 @@ test('「启用」 starts both halves and considers once immediately; 停用 sto
     assert.equal(started.ok, true);
     assert.equal(started.status.child.running, true, '摄像头在场检测起来了');
     assert.equal(runner.started.length, 1);
+    // V0.3 P0-B: the child no longer receives a database path at all — presence enters the canonical
+    // store through the console's ingest, which is what makes the store single-writer.
     assert.equal(
-      runner.started[0]?.dbPath,
-      join(root, 'presence', 'xixi.sqlite'),
-      'the child appends into the presence store *file* (opened first, so migrations have run)',
+      runner.started[0]?.gotDbPath,
+      false,
+      'the perception child must not be handed a store path any more（它不再自己入库）',
     );
     assert.equal(started.loop.running, true, '主动循环也起来了');
     assert.ok(started.loop.ticks >= 1, `启用后必须立刻先考虑一次（ticks=${started.loop.ticks}）`);

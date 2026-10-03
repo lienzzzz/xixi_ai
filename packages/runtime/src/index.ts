@@ -26,6 +26,12 @@ export {
 } from './repo.ts';
 
 export {
+  ingestPerceptionLine,
+  type PerceptionIngestDeps,
+  type PerceptionIngestOutcome,
+} from './perception-ingest.ts';
+
+export {
   CONVERSATION_SCOPE,
   buildToolChain,
   type ToolChainOptions,

@@ -410,8 +410,8 @@ test('the console serves the proactive card, its state, and obeys the switch ove
     assert.equal(fieldState.segmentPlayback?.ttsSegmented, fieldMode === 'streaming');
     assert.equal(fieldState.segmentPlayback?.note, segmentTtsNote(fieldMode));
     assert.ok(page.includes('本页用的是哪个数据库'), 'the console shows the database block prominently');
-    assert.ok(page.includes('data/field-test'), 'and its own path');
-    assert.ok(page.includes('不会'), 'and warns that another entry point\'s persona/history is not here');
+    assert.ok(page.includes('data/xixi'), 'and the canonical store path');
+    assert.ok(page.includes('household 入口默认连同一个库'), 'V0.3 P0-B：同一个库，且页面这么说');
     // The page renders the same derived sentence as the state payload — that is the property that
     // used to be a copied literal, and the reason a constant could contradict the console.
     assert.ok(page.includes(segmentTtsNote(fieldMode)), 'the page renders the derived note verbatim');
@@ -488,7 +488,7 @@ test('the trial page shows segments in order, labels the source, and carries the
     assert.ok(html.includes('回应你'), 'and labels who is speaking');
     assert.ok(html.includes('主动开口'), 'proactive messages are labelled differently');
     assert.ok(html.includes(`id="${PROACTIVE_PANEL_IDS.card}"`), 'the trial page carries the same proactive card');
-    assert.ok(html.includes('data/web-chat'), 'the trial page names its own database');
+    assert.ok(html.includes('data/xixi'), 'the trial page names the canonical store it really uses');
     // t11: the served page and the state payload are built from one derivation
     // (`segmentTtsNote(mode)`), so the page cannot advertise a granularity the server does not
     // have — and this fixture is offline, so neither claims streaming.
