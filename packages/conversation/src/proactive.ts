@@ -614,6 +614,12 @@ export interface ProactiveGateContext {
 }
 
 export interface ProactiveSignalsView {
+  /**
+   * The table is also read **by signal name** (`scoreProactiveCandidate` and the basis lines walk
+   * `PROACTIVE_SCORE_WEIGHTS` / `PROACTIVE_SIGNALS`), so it says so: every value in this view is a
+   * number, and an unknown name is a programming error rather than a shape change.
+   */
+  readonly [signal: string]: number;
   readonly topic_quality: number;
   readonly personal_relevance: number;
   readonly freshness: number;

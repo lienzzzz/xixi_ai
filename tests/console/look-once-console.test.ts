@@ -58,7 +58,7 @@ function recordingBrain(): { readonly adapter: FakeBrainAdapter; readonly calls:
 test('the frame handed to the brain is the newest one, JPEG, and never wider than the cap (t88)', () => {
   const root = tempDir('xixi-t88-frame-');
   const live = fakeLiveRunner();
-  const sensors = new LiveSensors({ runner: live.runner, presenceDbPath: () => join(root, 'p'), cameraIndex: () => 0, log: () => {} });
+  const sensors = new LiveSensors({ runner: live.runner, cameraIndex: () => 0, log: () => {} });
   try {
     const empty = sensors.imageInput(LOOK_ONCE_MAX_WIDTH);
     assert.ok('refused' in empty, 'without a frame there is nothing to send');

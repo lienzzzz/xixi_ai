@@ -14,10 +14,11 @@
  * What did **not** move: the deterministic gates and scores (they are already package code) and the
  * console's own page/panel rendering — the runtime makes the decision, the console explains it.
  */
+import { join } from 'node:path';
+
 import type { BrainImageInput } from '@xixi/brain-adapter';
 import {
   ConversationEngine,
-  DEFAULT_PROACTIVITY,
   PROACTIVE_INITIATIVE_LABELS,
   PROACTIVE_MODEL_REASON_CODES,
   PROACTIVE_MODEL_REASON_LABELS,
@@ -26,9 +27,7 @@ import {
   PROACTIVE_TRIGGERS,
   ProactiveEngine,
   SILENCE_TOKEN,
-  initiativeKindForTrigger,
   openThreadFollowUpComponents,
-  proactiveThreshold,
   resolveReplyLimits,
   scoreProactiveCandidate,
   splitReplyIntoSegments,
@@ -36,6 +35,7 @@ import {
 import type {
   ConversationState,
   OpenThreadFollowUp,
+  ProactiveCandidate,
   ProactiveDecider,
   ProactiveDelivery,
   ProactiveInitiativeKind,
@@ -50,7 +50,13 @@ import type {
 } from '@xixi/conversation';
 import { DEFAULT_PRESENCE_TTL_SECONDS, openXixiStore, type XixiStore } from '@xixi/domain';
 
-import { RuntimeError } from './errors.ts';
+// The look-once shapes moved to `./errors.ts` in Step B (the composer's `vision` / `onUpload`
+// seams declare them); the repository root moved to `./repo.ts` in Step C. Both are imported
+// here rather than re-declared: this file used to be part of `scripts/field-test.ts`, where the
+// names were file-local, and the extraction left three references dangling (`join`, `REPO_ROOT`,
+// `LookOnce*`) that only a type check could see.
+import type { LookOnceTrigger, LookOnceUploadInfo } from './errors.ts';
+import { REPO_ROOT } from './repo.ts';
 
 
 // --------------------------------------------------------------------------------------
@@ -200,6 +206,18 @@ export const PROACTIVE_TRIGGER_LABELS: Readonly<Record<ProactiveTrigger, string>
 export function formatClockMinutes(minutes: number): string {
   const wrapped = ((Math.round(minutes) % 1440) + 1440) % 1440;
   return `${`${Math.floor(wrapped / 60)}`.padStart(2, '0')}:${`${wrapped % 60}`.padStart(2, '0')}`;
+}
+
+/**
+ * One row of the gate table (`proactiveGateRows`) — moved here verbatim from
+ * `scripts/field-test.ts` in Step B: the function that builds the rows is runtime code now, and a
+ * package cannot import the console's declarations (the dependency would run backwards).
+ */
+export interface ProactiveGateRow {
+  readonly code: ProactiveReasonCode;
+  readonly label: string;
+  /** `passed` = evaluated and allowed; `blocked` = the first gate that fired; `skipped` = never reached. */
+  readonly status: 'passed' | 'blocked' | 'skipped';
 }
 
 /**
@@ -602,7 +620,13 @@ function offlineLineFor(plan: ProactiveCandidatePlan, spoken: readonly string[])
 }
 
 /** Pick an offline line that has not been said recently, rotating with the message count. */
-function pickOfflineLine(trigger: ProactiveTrigger, context: ProactiveCandidateContext): string {
+function pickOfflineLine(
+  trigger: ProactiveTrigger,
+  // Only these two fields are read here, so that is all the parameter asks for. Reusing the whole
+  // `ProactiveCandidateContext` would demand a clock/presence/conversation state this caller does
+  // not have — and never uses.
+  context: { readonly recentLines?: readonly string[]; readonly spokenCount?: number },
+): string {
   const lines = PROACTIVE_OFFLINE_LINES[trigger];
   if (lines.length === 0) return '我在。';
   const recent = context.recentLines ?? [];
@@ -711,7 +735,9 @@ export interface ProactiveLoopEntry {  readonly at: string;
   readonly initiativeKind: ProactiveInitiativeKind;
   readonly initiativeLabel: string;
   readonly speak: boolean;
-  readonly reasonCode: string;
+  /** The gate that decided this entry. Typed as the union (not `string`) because every consumer
+   * indexes `PROACTIVE_GATE_LABELS` / `PROACTIVE_GATE_NEXT_STEPS` with it. */
+  readonly reasonCode: ProactiveReasonCode;
   readonly reasonLabel: string;
   readonly nextStep: string;
   readonly score: number;

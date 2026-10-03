@@ -117,6 +117,12 @@ interface VerifyReport {
   criteria: Record<string, { applies: boolean }>;
   offlineSummary: { structuralFailureClips: number; qualityOnlyFailureClips: number; detectedClips: number } | null;
   boundary: { lowestPassingTierDb: number | null; claim: string };
+  /**
+   * Per-tier summaries (`TierSummary` in the runner): one row per measured tier, `clean` included.
+   * The test reads `tier` / `verdict`; the runner's row carries more counters, which are not asserted
+   * here (the report is read from JSON, so this is a partial view rather than the full shape).
+   */
+  tiers: { tier: string; verdict: string }[];
   clips: { id: string; tier: string; detected: boolean; failures: string[]; transcript: string | null; similarity: number | null; endpointDelayMs: number | null; vadEndpointDelayMs: number | null }[];
   failureList: { id: string; failures: string[] }[];
 }

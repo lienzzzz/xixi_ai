@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  // Shared compiler options for every TypeScript program in this repo.
+  //
+  // This file type-checks only: Node 24 strips types at run time, so there is
+  // no build step and no emit anywhere in the project. `tsconfig.json` layers
+  // the include list on top of these options and is what `npm run check:types`
+  // points at.
+  "compilerOptions": {
+    // Node 24 ships ES2024 plus a few later built-ins; lib mirrors target so
+    // that the checker and the runtime agree on what exists.
+    "target": "es2024",
+    "lib": ["es2024"],
+
+    // `module: nodenext` is the only mode that matches how the code actually
+    // runs: real ESM, real `exports` maps (workspace packages such as
+    // @xixi/runtime point straight at `./src/index.ts`), and no bundler.
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+
+    // Sources import with explicit `.ts` extensions because Node's type
+    // stripping never rewrites specifiers. TypeScript must accept that form;
+    // it is only legal together with `noEmit`.
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+
+    // Mirror the run-time module semantics exactly: an import statement is
+    // kept verbatim unless it is written `import type`, so a named import of a
+    // type-only export is a *run-time* crash and must be a check error.
+    "verbatimModuleSyntax": true,
+
+    // Type stripping cannot erase `enum`, `namespace` or constructor
+    // parameter properties; flagging them here keeps "it type-checks" and
+    // "node can run it" the same statement.
+    "erasableSyntaxOnly": true,
+    "isolatedModules": true,
+
+    // Only @types/node is ambient. Pulling in every @types/* in node_modules
+    // (e.g. the ones vendored by @deepseek-ai/dsh-tools) would add declarations
+    // this project never loads at run time.
+    "types": ["node"],
+
+    // `plugins/xixi-tools/index.js` is a plain-JS DSH plugin package (it only has
+    // a peerDependency on @deepseek-ai/dsh-tools, so it cannot import this repo's
+    // types) and `tests/unit/core/plugin-tools.test.ts` imports it for real.
+    // Without `allowJs` every such import is TS7016 ("implicitly has an 'any'
+    // type") — a hole, not a clean gate. With it, the one JS file reachable from
+    // an import joins the program and its exports are *inferred* (nothing is
+    // emitted and no other JS is included: `include` lists .ts only).
+    // `checkJs` stays off on purpose: the gate is about this repo's TypeScript,
+    // not about re-typing a 337-line plugin whose own contract is its JSON schema.
+    "allowJs": true,
+    "checkJs": false,
+
+    "strict": true,
+    "noUnusedLocals": true,
+    // `noUnusedParameters` is deliberately **not** enabled: it flags parameters that a callback or a
+    // declared interface mandates and this implementation happens not to read. The measured cost of
+    // turning it on today is four call sites, all of them a rename to `_` — so it is a choice, not a
+    // hole in the gate. `noUnusedLocals` (the switch that catches dead imports) is on.
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // Dependency .d.ts files are not ours to fix, and checking them only makes
+    // the gate slower and noisier.
+    "skipLibCheck": true
+  }
+}

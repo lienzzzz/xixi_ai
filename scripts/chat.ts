@@ -26,7 +26,6 @@
  * Commands inside the session: /state /prompt /quiet /resume /exit
  */
 import { createInterface } from 'node:readline';
-import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter, type ToolCallRecord, type ToolRegistry } from '@xixi/brain-adapter';

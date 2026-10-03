@@ -56,13 +56,20 @@ export interface SpeechClause {
   readonly reason: ClauseChunk['reason'];
   /** When the clause text existed (ms, same clock as the caller's). */
   readonly textAtMs: number;
-  /** How long from the clause existing to its TTS request being in flight (ms). */
-  readonly dispatchMs?: number;
+  /**
+   * How long from the clause existing to its TTS request being in flight (ms).
+   *
+   * The four timing fields below are **not** `readonly`: the record is created the moment the
+   * clause exists (that is when the caller needs `textAtMs` and the first-clause hook fires) and
+   * the numbers are filled in as synthesis progresses. Marking them read-only made the writes in
+   * `#dispatch` unrepresentable — the type gate caught exactly that.
+   */
+  dispatchMs?: number;
   /** When its audio existed. `null` while synthesis is still running. */
-  readonly audioAtMs: number | null;
+  audioAtMs: number | null;
   /** Synthesis cost of this clause (ms), measured from the request being sent. */
-  readonly synthMs: number | null;
-  readonly bytes: number;
+  synthMs: number | null;
+  bytes: number;
 }
 
 /** One clause of audio, ready to play. `pcm` is a WAV buffer as the provider returned it. */
@@ -252,7 +259,6 @@ export class SpeechPipeline {
   readonly #synthesize: (text: string) => Promise<Buffer | Uint8Array>;
   readonly #probe: (wav: Buffer | Uint8Array) => number;
   readonly #now: () => number;
-  readonly #startedAtMs: number;
   readonly #pending: Promise<void>[] = [];
   readonly #clauses: SpeechClause[] = [];
   readonly #audio = new Map<number, SynthesizedClause>();
@@ -296,7 +302,6 @@ export class SpeechPipeline {
     this.#early = options.earlyFirstClause === true;
     this.#earlyMinChars = clampLimit(options.earlyFirstClauseMinChars, CLAUSE_CHUNKER_LIMITS.earlyFirstClauseMinChars, 2);
     this.#now = options.now ?? (() => Date.now());
-    this.#startedAtMs = this.#now();
   }
 
   /**
@@ -505,7 +510,6 @@ export class SpeechPipeline {
     const textAtMs = this.#now();
     const record: SpeechClause = { index, text: clause.text, reason: clause.reason, textAtMs, audioAtMs: null, synthMs: null, bytes: 0 };
     this.#clauses.push(record);
-    const started = this.#now();
     // The synthesis promise is created here, synchronously, so the TTS request is already in
     // flight when the model's next delta arrives — the engine never waits for it.
     const task = this.#synthesize(clause.text);

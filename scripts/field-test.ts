@@ -54,22 +54,14 @@ import {
   DshBrainAdapter,
   FakeBrainAdapter,
   MimoBrainAdapter,
-  ToolRegistry,
-  scriptedToolPlan,
   type BrainAdapter,
 } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
 import {
   ConversationEngine,
   DEFAULT_PROACTIVITY,
-  deriveProactiveSignals,
-  initiativeKindForTrigger,
   isWithinQuietHours,
-  PROACTIVE_INITIATIVE_LABELS,
-  PROACTIVE_MODEL_REASON_CODES,
   PROACTIVE_MODEL_REASON_LABELS,
-  PROACTIVE_REASON_CODES,
-  PROACTIVE_SIGNALS,
   PROACTIVE_SIGNAL_LABELS,
   PROACTIVE_TRIGGERS,
   ProactiveEngine,
@@ -77,25 +69,16 @@ import {
   proactiveThreshold,
   readProactiveConsultations,
   readProactiveHistory,
-  readUserTurnTimes,
   resolveReplyLimits,
-  scoreProactiveCandidate,
-  SILENCE_TOKEN,
   splitReplyIntoSegments,
   TOPIC_SOURCES,
   TopicEngine,
   TurnMemoryExtractor,
-  openThreadFollowUpComponents,
-  type OpenThreadFollowUp,
   type TopicEngineStatus,
   type TopicSource,
-  type ProactiveDelivery,
   type ProactiveDecider,
-  type ProactiveModelInput,
   type ProactiveModelReasonCode,
-  type ProactiveInitiativeKind,
   type ProactiveReasonCode,
-  type ProactiveRetiredReasonCode,
   type ProactiveSettings,
   type ProactiveTrigger,
   type ConversationState,
@@ -109,14 +92,11 @@ import {
   type LookOnceTrigger,
   type LookOnceUploadInfo,
   type PresenceView,
-  type ProactiveLoopOptions,
-  type SegmentPlan,
   type SpeechSegment,
   type VadResult,
 } from '@xixi/runtime';
 import {
   CANONICAL_STORE_ENTRIES,
-  DEFAULT_PRESENCE_TTL_SECONDS,
   MemoryStore,
   openXixiStore,
   parseSelfModelSettings,
@@ -131,7 +111,7 @@ import {
 import { ingestPerceptionLine } from '@xixi/runtime';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
-import { concatWav, readWav, readWavInfo, sliceWav } from './lib/wav.ts';
+import { concatWav, readWav, readWavInfo } from './lib/wav.ts';
 // Pack Phase 8: the streaming speech pipeline (ClauseChunker → TTS queue → playback clock).
 // Shared with `scripts/voice-turn.ts` and asserted by `tests/unit/voice/voice-stream.test.ts`
 // so the console, the file-driven entry and the page cannot drift into three behaviours.
@@ -139,7 +119,7 @@ import { fourStageLatency, isShortAcknowledgementOnly, SpeechPipeline } from '..
 // Pack Phase 8 (t11): the page gets the *same* playback rules the offline tests exercise —
 // `XIXI_PLAYBACK_JS` is executed for real in `tests/unit/voice/voice-stream.test.ts` (node:vm),
 // so what runs in the browser and what the tests pin cannot drift apart.
-import { XIXI_PLAYBACK_JS, XIXI_PLAYBACK_THRESHOLDS } from '../services/voice-edge/voice_edge/voice_stream.ts';
+import { XIXI_PLAYBACK_JS } from '../services/voice-edge/voice_edge/voice_stream.ts';
 
 for (const [key, value] of Object.entries(readDotEnv())) {
   if (process.env[key] === undefined) process.env[key] = value;
@@ -211,9 +191,19 @@ export type ProactiveCandidatePlan = runtime.ProactiveCandidatePlan;
 export type ProactiveComposeInput = runtime.ProactiveComposeInput;
 export type ProactiveComposedContent = runtime.ProactiveComposedContent;
 export type ProactiveContentSource = runtime.ProactiveContentSource;
+export type ProactiveGateRow = runtime.ProactiveGateRow;
 export type ProactiveLoopEntry = runtime.ProactiveLoopEntry;
 export type SegmentPlanOptions = runtime.SegmentPlanOptions;
 export type ToolChainOptions = runtime.ToolChainOptions;
+// Declaration-level companions of the re-exported values above: `ProactiveLoop` and `RuntimeError`
+// are classes in the package, and an old caller that only has the console's copy needs the *type*
+// as well (`field-test.ts` re-exports the constructor as a `const`, which carries no type).
+export type ProactiveLoop = runtime.ProactiveLoop;
+export type RuntimeError = runtime.RuntimeError;
+// `SpeechSegment` / `DroppedSegment` are part of the voice seam this console still shares with
+// `scripts/voice-turn.ts`; they are imported from the package above and re-exported here under the
+// same name, exactly like the values.
+export type { DroppedSegment, SpeechSegment };
 
 /** Everything the console says is Chinese and aimed at a non-engineer. */
 export function explainAction(action: string): string {
@@ -270,16 +260,6 @@ export function explainReason(reason: string): string {  switch (reason) {
 
 export function describeOutcome(action: string, reason: string): string {
   return `${explainAction(action)}｜${explainReason(reason)}`;
-}
-
-export interface SegmentPlan {
-  readonly used: SpeechSegment[];
-  readonly dropped: DroppedSegment[];
-  readonly totalSpeechMs: number;
-  readonly gapMs: number;
-  /** True when the plan had to leave segments out (never silent — it is reported). */
-  readonly capped: boolean;
-  readonly capReason: string | null;
 }
 
 // --------------------------------------------------------------------------------------
@@ -701,6 +681,14 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
         totalMs: Date.now() - totalStarted,
         model: null,
         toolName: null,
+        // No speech detected: the model never ran, so there is no model-driven silence and nothing
+        // was removed or truncated. The keys are `null` (not absent) because the contract says
+        // `string | null` — the page reads them unconditionally.
+        silenceReason: null,
+        silenceReasonText: explainSilenceReason(null),
+        hygiene: null,
+        finishReason: null,
+        notices: [],
         audio: null,
         at: new Date().toISOString(),
         privacy: {
@@ -2297,7 +2285,10 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
     log,
   };
 
-  let presenceStore: unknown;
+  // Three states, kept apart on purpose: `undefined` = not opened yet, `null` = opening failed,
+  // otherwise the open store. The *type* is `XixiStore` (not `unknown`) because the ingest seam below
+  // hands this straight to `ingestPerceptionLine`, which needs `appendPresenceEvent`.
+  let presenceStore: XixiStore | null | undefined;
   /**
    * Where the presence projection is read from (V0.3 P0-B).
    *
@@ -2309,7 +2300,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
    * default is now 「one Xixi」: what the camera writes is what the page reads.
    */
   const presenceDataDir = options.presenceDataDir ?? dataDir;
-  function getPresenceStore(): unknown {
+  function getPresenceStore(): XixiStore | undefined {
     if (presenceStore === undefined) {
       try {
         presenceStore = openXixiStore({ dataDir: presenceDataDir });
@@ -2518,6 +2509,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
     const startedAt = Date.now();
     let reply: string | null = null;
     let action = 'SILENCE';
+    let firstTokenMs: number | null = null;
     let provider = engine.adapter.provider;
     let model = engine.adapter.describe().model;
     let segments: readonly string[] = [];
@@ -2550,6 +2542,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       );
       action = turn.action;
       reply = turn.text === null || turn.text.trim().length === 0 ? null : turn.text.trim();
+      firstTokenMs = turn.firstTokenMs;
       provider = turn.provider;
       model = turn.model;
       segments = turn.segments;
@@ -2578,7 +2571,10 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       transcript: question,
       reply,
       state: engine.state,
-      stages: { vad: null, asr: null, firstToken: null, total: latencyMs },
+      // Same shape as every other non-voice turn (see the proactive push below): no VAD/ASR/TTS ran,
+      // so those are `0` / `null`; the model stages are the real ones. The old literal used the keys
+      // `vad` / `asr` / `firstToken` / `total`, so the page printed 「undefined」 for this turn.
+      stages: { vadMs: 0, asrMs: null, llmFirstChunkMs: firstTokenMs, llmTotalMs: latencyMs, ttsMs: null, totalMs: latencyMs },
       segmentsTotal: segments.length,
       segmentsUsed: segments.length,
       droppedSegments: [],
@@ -3551,13 +3547,6 @@ export function applyAndPersistProactivePatch(options: {
   return { settings: patched.settings, changes, rejected: patched.rejected, personality, auditSequence, auditAt };
 }
 
-export interface ProactiveGateRow {
-  readonly code: ProactiveReasonCode;
-  readonly label: string;
-  /** `passed` = evaluated and allowed; `blocked` = the first gate that fired; `skipped` = never reached. */
-  readonly status: 'passed' | 'blocked' | 'skipped';
-}
-
 export interface ProactiveUsage {
   readonly deliveries: number;
   readonly lastDeliveryAt: string | null;
@@ -3830,6 +3819,25 @@ export async function proactiveDrill(options: {
 
 function isMapping(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * How a reply is played: `ADR-0010` segments plus the pause between them.
+ *
+ * This is the *console's* plan (what the page and the terminal print), not the runtime's
+ * `SegmentPlan` in `@xixi/runtime` — that one describes which VAD segments go into one ASR call.
+ * The two used to share the name here, and TypeScript merged them into a single interface; the
+ * V0.3 P0-A move took the runtime copy into the package and left `segmentPlan()` below declaring a
+ * return type it did not satisfy. Restored verbatim from `c8616ed:scripts/field-test.ts`.
+ */
+export interface SegmentPlan {
+  readonly segments: readonly string[];
+  readonly gapMs: number;
+  readonly total: number;
+  /** 「第 2/3 段 · 间隔 450ms」 — what the page and the terminal print next to a segment. */
+  readonly playbackHint: string;
+  /** One line a non-engineer can read before the messages start appearing. */
+  readonly summary: string;
 }
 
 /**
@@ -6387,7 +6395,9 @@ export async function runSelfTest(options: { log?: (line: string) => void } = {}
     });
     try {
       const f2Response = (await (await fetch(`${f2Handle.url}/api/field/acceptance`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).json()) as Record<string, any>;
-      const f2Speaker = (f2Response.report.items as Record<string, any>[]).find((item) => item.id === 'speaker');
+      // `find` may come back empty if the report's structure changed; then the checks below must
+      // fail visibly (「undefined ≠ 'fail'」) instead of crashing the runner on a property read.
+      const f2Speaker = (f2Response.report.items as Record<string, any>[]).find((item) => item.id === 'speaker') ?? {};
       check('F2 回归：能量比 2.69 dB（<10）但分位 11.83 dB（>10）→ 必须判 FAIL', f2Speaker.verdict === 'fail', f2Speaker.summary);
       check('F2 回归：FAIL 的说明里点名能量比与「乐观上界」', String(f2Speaker.summary).includes('能量比') && String(f2Speaker.summary).includes('上界'), String(f2Speaker.summary).slice(0, 120));
       const f2Text = readFileSync(f2Response.report.reportPath as string, 'utf8');

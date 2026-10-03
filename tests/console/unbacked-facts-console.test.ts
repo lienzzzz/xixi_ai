@@ -93,6 +93,9 @@ function composerAnswering(text: string, toolName: string | null) {
     model: 'scripted-1',
     brainSessionId: null,
     latencyMs: 1,
+    // The transport did not report a stop reason; the contract says `string | null`, so the stub says
+    // so explicitly instead of leaving the key out.
+    finishReason: null,
   };
   const screening = realScreeningEngine();
   const engine = {

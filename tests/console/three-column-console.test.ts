@@ -65,7 +65,9 @@ function fakeLiveRunner(): LiveCameraRunner & {
       started.push({
         source: options.source,
         cameraIndex: options.cameraIndex,
-        gotDbPath: 'presenceDbPath' in (options as Record<string, unknown>),
+        // `Object.hasOwn` rather than a cast: the whole point is to ask at run time whether a key the
+        // type no longer declares is present on the object.
+        gotDbPath: Object.hasOwn(options, 'presenceDbPath'),
       });
       onLine = options.onLine;
       onPresenceEvent = options.onPresenceEvent;
@@ -135,7 +137,7 @@ test('the page is three columns: sensors, config, conversation (t78)', () => {
 test('the camera preview keeps the picture in memory and drops old frames (t78)', () => {
   const root = tempDir('xixi-t78-live-');
   const runner = fakeLiveRunner();
-  const sensors = new LiveSensors({ runner, presenceDbPath: () => join(root, 'presence'), cameraIndex: () => 0, log: () => {} });
+  const sensors = new LiveSensors({ runner, cameraIndex: () => 0, log: () => {} });
   try {
     // Nothing has started yet: no picture, and the status says so instead of pretending.
     assert.equal(sensors.status().child.running, false);

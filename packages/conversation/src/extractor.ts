@@ -225,10 +225,16 @@ export class TurnMemoryExtractor {
    */
   runJob(job: PostTurnJob): ExtractionResult {
     const failures: ExtractionFailure[] = [];
-    /** 跑一步；失败就记进 `failures` 并上报，不打断这一轮里剩下的步骤。 */
-    const attempt = (step: string, run: () => void): void => {
+    /**
+     * 跑一步；失败就记进 `failures` 并上报，不打断这一轮里剩下的步骤。
+     *
+     * 返回回调的结果（`T | undefined`，失败时 `undefined`）：调用方需要拿到值时必须走这个返回值，
+     * 不能像以前那样在回调里给外层的 `let` 赋值——闭包里的赋值在 `if (x !== null)` 处不可见，
+     * 类型检查器（正确地）把外层变量收窄成 `null`。行为一字未改：回调仍在同一个 try 里跑。
+     */
+    const attempt = <T>(step: string, run: () => T): T | undefined => {
       try {
-        run();
+        return run();
       } catch (error) {
         /**
          * 库已经关了（进程正在退、存储出故障）**不算「某一步坏了」**：这一轮整轮都写不进去，
@@ -243,14 +249,14 @@ export class TurnMemoryExtractor {
         } catch {
           // 上报自己炸了也不能把「这一步失败」变成「整轮失败」。
         }
+        return undefined;
       }
     };
 
-    let parsedFeedback: FeedbackInterpretation | null = null;
-    attempt('feedback.interpret', () => {
-      parsedFeedback = interpretFeedbackInput({ text: job.userText, inferredCode: job.inferredCode ?? null });
-    });
-    const feedback: FeedbackInterpretation | null = parsedFeedback;
+    const feedback: FeedbackInterpretation | null =
+      attempt('feedback.interpret', () =>
+        interpretFeedbackInput({ text: job.userText, inferredCode: job.inferredCode ?? null }),
+      ) ?? null;
     const learned: LearnedDeltaResult[] = [];
     const overrides: SessionOverride[] = [];
     const episodic: EpisodicMemory[] = [];
@@ -288,12 +294,15 @@ export class TurnMemoryExtractor {
           );
         });
       }
-      if (feedback.relationship !== undefined) {
+      // 收窄一次、存进局部常量再进闭包：`feedback.relationship` 的收窄在回调里不成立（回调可能在
+      // 之后的任意时刻运行），所以「上面判过 undefined」这件事必须用局部变量带进去。
+      const relationship = feedback.relationship;
+      if (relationship !== undefined) {
         attempt('memory.relationship_note', () => {
           notes.push(
             this.#memory.recordNote({
-              aspect: feedback.relationship.aspect,
-              note: feedback.relationship.note,
+              aspect: relationship.aspect,
+              note: relationship.note,
               sourceType: feedback.source,
               sourceEventId: job.userEventId,
               confidence: feedback.confidence,
@@ -335,7 +344,10 @@ export class TurnMemoryExtractor {
               sourceEventId: userEventId,
               sessionId: job.sessionId,
               occurredAt: job.at,
-              importance: thread.importance,
+              // `NewOpenThread.importance` is optional in the domain type (the console creates threads
+              // without one), but every draft `extractOpenThreads` produces carries one. When a caller
+              // ever omits it, fall back to the same neutral floor `importanceOf` uses in topic-engine.
+              importance: thread.importance ?? 0.6,
             }),
           );
         });

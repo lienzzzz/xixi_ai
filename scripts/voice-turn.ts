@@ -307,6 +307,19 @@ for (const wavPath of wavs) {
       reason: 'NO_SPEECH_DETECTED',
       replyWav: null,
       timings: { vadMs, sourceDurationMs: Math.round(info.durationMs) },
+      // No reply means nothing was synthesized and nothing was measured further down the pipe: the
+      // keys are `null` (not missing) because the contract types them as nullable and the report
+      // reads them per turn.
+      clauses: null,
+      legacyTtsMs: null,
+      deltas: null,
+      firstClauseDispatchedMs: null,
+      fourStage: {
+        vadEndToAsrFinalMs: null,
+        asrFinalToFirstTokenMs: null,
+        firstTokenToFirstAudioMs: null,
+        totalToFirstAudioMs: null,
+      },
     });
     continue;
   }

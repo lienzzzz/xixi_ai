@@ -499,7 +499,11 @@ export class ConversationEngine {
     // below and the audited `before` describe this instant. Ordering matters: the
     // window must be current before it is used to decide anything.
     const before = this.#advance(at);
-    const session = this.#store.getSession(input.sessionId);
+    // Not "just a read": this is a guard and it is kept on purpose. `getSession` throws
+    // `UNKNOWN_SESSION` for a session the store has never seen, and `respond()` must keep refusing
+    // such a turn (it was added in f5a54be for exactly that). The *value* is unused, so the binding
+    // is gone — but the call stays.
+    this.#store.getSession(input.sessionId);
     const addressed = input.addressed ?? true;
     const acceptance = this.#fsm.shouldAcceptTurn({ addressed, at: at.getTime() });
     if (!acceptance.accept) {
@@ -526,6 +530,9 @@ export class ConversationEngine {
         // refusal rather than something the model or the hygiene gate did.
         finishReason: null,
         silenceReason: null,
+        // No tool ran on a rejected turn, and the field is `string | null` — so `null`, not a
+        // missing key (a console reading `.toolName` used to get `undefined` here).
+        toolName: null,
         hygiene: null,
         latencyMs: 0,
         firstTokenMs: null,
@@ -1025,7 +1032,6 @@ export const CLOCK_TOLERANCE_MINUTES = 45;
 const NOW_CUE = /(现在|这会儿|这个点|这么晚|都\d|已经|还没|还在|才)/;
 /** Past-tense markers: 「昨天三点半」 is a memory, not a claim about now. */
 const PAST_CUE = /(昨天|昨晚|昨天晚上|前天|上周|上个?月|去年|以前|平时|小时候|当年|那次|那天|当时|刚刚?才)/;
-const TIME_OF_DAY = /(凌晨|清早|早上|上午|中午|下午|傍晚|晚上|深夜|半夜)/;
 /** `凌晨一点半`, `两点多`, `23:30`, `晚上 7 点`, `3 点五十分` — a clock time with an optional period word. */
 const CLOCK_SPOKEN = /(凌晨|清早|早上|上午|中午|下午|傍晚|晚上|深夜|半夜)?\s*([0-9]{1,2})\s*点(?:(半)|([0-9]{1,2}|[零一二两三四五六七八九十]{1,3})\s*分)?([多几])?/;
 const CLOCK_DIGITAL = /(?:^|[^\d])([01]?[0-9]|2[0-3])[:：]([0-5][0-9])(?![\d])/;

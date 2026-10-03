@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { buildEvent } from '@xixi/contracts';
+import { buildEvent, toOffsetIso } from '@xixi/contracts';
 import { fixedClock, openXixiStore } from '@xixi/domain';
 import { ingestPerceptionLine, type PerceptionIngestDeps } from '@xixi/runtime';
 
@@ -31,19 +31,12 @@ function fakeStore(): PerceptionIngestDeps['store'] & { readonly appended: strin
       appended.push(envelope.event_id);
       const present = (envelope.payload as { present?: unknown }).present === true;
       return {
+        // The real `StoredEvent extends EventEnvelope`: the envelope's own fields plus the row's
+        // `sequence`. The double used camelCase keys here, which hid a real defect — the ingest read
+        // `event.eventId`, so production returned `undefined` while this test stayed green.
         event: {
-          eventId: envelope.event_id,
-          eventType: envelope.event_type,
-          schemaVersion: envelope.schema_version,
-          timestamp: envelope.timestamp,
-          source: envelope.source,
-          room: envelope.room,
-          actor: envelope.actor,
-          confidence: envelope.confidence,
-          correlationId: envelope.correlation_id,
-          sessionId: null,
+          ...envelope,
           sequence: appended.length,
-          payload: envelope.payload,
         },
         state: {
           key: 'presence.home',
@@ -156,12 +149,16 @@ test('真相来源是同一个库：事件落库后 world_state(presence.home) �
   const outcome = ingestPerceptionLine(eventLine(true), { store });
   assert.equal(outcome.kind, 'ingested');
 
-  const view = store.worldState('presence.home', { now: at });
+  // `WorldStateQuery.now` is an ISO-8601 **string** on purpose (a `Date` would reach `Date.parse`
+  // through `Date#toString` and lose the milliseconds — see the note on the field itself), so the
+  // test formats the same instant with the repo's own helper.
+  const nowIso = toOffsetIso(at);
+  const view = store.worldState('presence.home', { now: nowIso });
   assert.equal(view?.present, true, '投影跟着事件走');
   assert.equal(store.readEvents({ type: 'presence.changed' }).length, 1, '事件恰好一条');
 
   // The projection is derived data: rebuilding it from the log must land on the same answer.
   store.rebuildWorldStateFromEvents('presence.home');
-  assert.equal(store.worldState('presence.home', { now: at })?.present, true, '投影可以从日志重建');
+  assert.equal(store.worldState('presence.home', { now: nowIso })?.present, true, '投影可以从日志重建');
   store.close();
 });

@@ -11,7 +11,7 @@ import { fixedClock, openXixiStore, type Clock, type XixiConfig, type XixiStore 
 const T0 = new Date('2026-09-29T20:00:00+08:00');
 
 const CONFIG: XixiConfig = {
-  identity: { name: '西西', language: 'zh-CN', timezone: 'Asia/Shanghai' },
+  identity: { name: '西西', language: 'zh-CN', timezone: 'Asia/Shanghai', place: null },
   models: {
     llm: { provider: 'fake', model: 'fake-1', thinking_realtime: false },
     asr: { provider: 'fake', asr: 'fake' } as never,
@@ -187,6 +187,9 @@ test('a silence token split across streamed deltas is still suppressed', async (
             model: 'piecewise-1',
             brainSessionId: null,
             latencyMs: 1,
+            // `BrainTurnResult.finishReason` is `string | null`, not optional: a hand-rolled adapter
+            // must state "the transport did not say" explicitly.
+            finishReason: null,
           }),
         };
       },

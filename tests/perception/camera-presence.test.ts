@@ -195,8 +195,11 @@ test('the Python producer emits events the released TypeScript contract accepts'
     const validated = validateEvent(raw); // ContractError on any drift
     assert.equal(validated.event_type, 'presence.changed');
     assert.equal(validated.schema_version, 1);
-    assert.deepEqual(Object.keys(validated.payload).sort(), ['present', 'source_detail']);
-    assert.equal((validated.payload as { present: boolean }).present, expected);
+    // `validateEvent` types the payload as `JsonValue` (it cannot know each event's schema), so the
+    // test states the shape it is about to walk — once, for both the key check and the value check.
+    const payload = validated.payload as { present: boolean; source_detail: string };
+    assert.deepEqual(Object.keys(payload).sort(), ['present', 'source_detail']);
+    assert.equal(payload.present, expected);
     assert.match(validated.event_id, /^evt_[0-9a-f-]{36}$/);
     assert.match(validated.timestamp, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/);
     assert.ok(!validated.timestamp.endsWith('Z'), '契约拒绝 Z 形式时间戳');

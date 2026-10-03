@@ -130,7 +130,9 @@ const chars = clauses.reduce((sum, clause) => sum + clause.length, 0) || 1;
 const timeline = new PlaybackTimeline();
 for (const [index, text] of clauses.entries()) {
   const durationMs = Math.round((text.length / chars) * botDurationMs);
-  timeline.schedule({ index, text, wav: Buffer.alloc(0), durationMs, atMs: index, synthMs: null });
+  // `synthMs` is this measurement's own fabrication — nothing was synthesized here (the durations are
+  // derived from the text), so the cost is 0, not `null`: `SynthesizedClause.synthMs` is a number.
+  timeline.schedule({ index, text, wav: Buffer.alloc(0), durationMs, atMs: index, synthMs: 0 });
 }
 
 /**

@@ -83,7 +83,9 @@ test('a presence transition writes one event and one projection row', () => {
     assert.equal(validated.event_type, 'presence.changed');
     assert.equal(validated.source, 'perception.laptop_camera');
     assert.equal(validated.confidence, 0.9);
-    assert.deepEqual(Object.keys(validated.payload).sort(), ['present', 'source_detail']);
+    // `validateEvent` can only type the payload as `JsonValue`; this test states the shape it walks.
+    const payload = validated.payload as { present: boolean; source_detail: string };
+    assert.deepEqual(Object.keys(payload).sort(), ['present', 'source_detail']);
 
     // 2) 投影就是 §5.3 要求的五件事
     const state = store.worldState(PRESENCE_KEY);

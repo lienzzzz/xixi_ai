@@ -38,11 +38,33 @@ const FORECAST = {
   },
 };
 
+/**
+ * The shape this test walks on a registered tool: its `name`, the declared `parameters` and the
+ * `execute` seam. Written out rather than imported because `plugins/xixi-tools` is a *plain JS* DSH
+ * plugin package (its only dependency is a peerDependency on `@deepseek-ai/dsh-tools`, so it cannot
+ * import this repo's types). The old version typed both callbacks' arguments as `never`, which made
+ * every real call site a type error — the arguments below are ordinary JSON argument bags.
+ */
+interface RegisteredTool {
+  readonly name: string;
+  readonly parameters: Record<string, unknown>;
+  readonly execute: (args: Record<string, unknown>, ctx: unknown) => Promise<Record<string, unknown>>;
+}
+
 /** A fresh installation per call, so each test gets its own weather cache. */
-function registered(): { name: string; parameters: Record<string, unknown>; output: { schema: unknown; render: (a: unknown, v: never) => unknown }; execute: (args: never, ctx: unknown) => Promise<Record<string, unknown>> }[] {
-  const tools: never[] = [];
-  apply({ tools: { register: (tool: never) => tools.push(tool) } });
-  return tools as never;
+function registered(): RegisteredTool[] {
+  const tools: RegisteredTool[] = [];
+  apply({ tools: { register: (tool: RegisteredTool) => tools.push(tool) } });
+  return tools;
+}
+
+/**
+ * The second parameter of `resolveDefaultPlace(env, reader)` defaults to `readFileSync`, so TypeScript
+ * infers that *overloaded* signature for the injectable seam. These tests inject a smaller reader
+ * (it only ever receives the config path); the cast lives here, once, instead of at three call sites.
+ */
+function asReader(read: (path: string) => string): NonNullable<Parameters<typeof resolveDefaultPlace>[1]> {
+  return read as unknown as NonNullable<Parameters<typeof resolveDefaultPlace>[1]>;
 }
 
 /** Minimal stubbed fetch so the data-source test never leaves the machine. */
@@ -152,7 +174,9 @@ test('the DSH weather tool reports a refusal rather than inventing a forecast', 
 
   const unknownArgument = await registered()
     .find((tool) => tool.name === 'xixi_get_weather')
-    ?.execute({ place: '成都', temperature: 20 } as never, CONTEXT);
+    // An argument the declared schema does not contain: the type has to allow it for this to be the
+    // same call a confused model would make, and the tool body is what refuses it.
+    ?.execute({ place: '成都', temperature: 20 }, CONTEXT);
   assert.match(String(unknownArgument?.error), /不认识的参数/);
   assert.equal(unknownArgument?.temperatureMaxC, undefined);
 });
@@ -177,17 +201,17 @@ test('a failed weather lookup is an error result, not a fabricated day', async (
 
 test('the default place comes from the same configuration source as the direct path', () => {
   // 1) an explicit environment override wins, for one-off runs;
-  assert.equal(resolveDefaultPlace({ XIXI_PLACE: ' 绵阳 ' }, () => ''), '绵阳');
+  assert.equal(resolveDefaultPlace({ XIXI_PLACE: ' 绵阳 ' }, asReader(() => '')), '绵阳');
   // 2) otherwise the configured household place is read from xixi.yaml;
-  const fromConfig = resolveDefaultPlace({ XIXI_REPO_ROOT: '/repo' }, (path: string) => {
+  const fromConfig = resolveDefaultPlace({ XIXI_REPO_ROOT: '/repo' }, asReader((path: string) => {
     assert.equal(path, '/repo/config/xixi.yaml');
     return 'xixi:\n  identity:\n    name: 西西\n    place: 成都\n';
-  });
+  }));
   assert.equal(fromConfig, '成都');
   // 3) and when nothing is configured, the tool asks instead of guessing.
-  assert.equal(resolveDefaultPlace({ XIXI_REPO_ROOT: '/nowhere' }, () => {
+  assert.equal(resolveDefaultPlace({ XIXI_REPO_ROOT: '/nowhere' }, asReader(() => {
     throw new Error('ENOENT');
-  }), '');
+  })), '');
 });
 
 test('the DSH and direct weather clients agree on weather codes and caching', async () => {

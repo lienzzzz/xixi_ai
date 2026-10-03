@@ -48,7 +48,7 @@ import { MimoClient } from '@xixi/model-adapters';
 
 import { REPO_ROOT, printEvidence, readDotEnv } from './lib/harness.ts';
 import { characterSimilarity, FIXTURE_TEXTS } from './lib/similarity.ts';
-import { readWav, readWavInfo, sliceWav } from './lib/wav.ts';
+import { readWav, sliceWav } from './lib/wav.ts';
 
 for (const [key, value] of Object.entries(readDotEnv())) {
   if (process.env[key] === undefined) process.env[key] = value;
@@ -70,6 +70,15 @@ const DEFAULT_MEASURED = ['direct-question', 'followup-turn', 'longer-turn', 'tv
 const DEFAULT_TIERS = [18, 6, 3, 0, -6];
 
 const args = process.argv.slice(2);
+/**
+ * Read a `--flag value` pair.
+ *
+ * Two signatures on purpose: with a `string` fallback the result is always a string (that is what
+ * `--out` needs — the old single signature widened it to `string | null` and `writeFileSync` then
+ * refused it), and without one it stays nullable so an absent flag is visible to the caller.
+ */
+function argValue(name: string, fallback: string): string;
+function argValue(name: string, fallback?: string | null): string | null;
 function argValue(name: string, fallback: string | null = null): string | null {
   const index = args.indexOf(name);
   return index >= 0 && args[index + 1] !== undefined ? (args[index + 1] as string) : fallback;

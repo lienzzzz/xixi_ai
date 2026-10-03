@@ -41,7 +41,6 @@ test('GET /api/field/proactive 不写库：刷新面板不会凭空生出一条�
       source: 'test',
       actor: 'father',
       confidence: 1,
-      session_id: session.sessionId,
       timestamp: toOffsetIso(SPOKEN_AT),
       payload: { session_id: session.sessionId, turn_index: 1, role: 'user', text: HOUSEHOLD_LINE, action: 'SPEAK' },
     }),

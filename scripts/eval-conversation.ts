@@ -31,7 +31,7 @@ import { openXixiStore, type XixiConfig } from '@xixi/domain';
 // V0.3 P0-A: the shared tool chain lives in `@xixi/runtime` now (pack `04_RUNTIME_CONSOLIDATION.md`
 // §1 Step A); `scripts/field-test.ts` keeps a compatibility re-export for un-migrated callers.
 import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
-import { CORPUS, FORBIDDEN_PATTERNS, type Scenario } from '../tests/scenarios/corpus.ts';
+import { CORPUS, FORBIDDEN_PATTERNS } from '../tests/scenarios/corpus.ts';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
 
@@ -76,6 +76,18 @@ interface JudgeScore {
   readonly naturalness: number;
   readonly coherence: number;
   readonly inCharacter: boolean;
+  readonly problems: readonly string[];
+}
+
+/**
+ * What the judge actually returns: `JUDGE_SCHEMA` above is sent to the model *and* used by
+ * `assertSchema`, and it spells the field `in_character`. Casting the raw JSON to `JudgeScore`
+ * (camelCase) claimed a shape the wire never had — the report row below is the camelCase view.
+ */
+interface JudgeOutput {
+  readonly naturalness: number;
+  readonly coherence: number;
+  readonly in_character: boolean;
   readonly problems: readonly string[];
 }
 
@@ -365,7 +377,7 @@ if (useJudge) {
         schema: { name: 'conversation_quality', schema: JUDGE_SCHEMA },
         validate: (value) => assertSchema(JUDGE_SCHEMA, value, 'INVALID_PAYLOAD', 'judge output does not match the rubric schema'),
       });
-      const parsed = judged.json as JudgeScore & { scenario?: string };
+      const parsed = judged.json as JudgeOutput & { scenario?: string };
       judgeScores.push({
         scenario,
         naturalness: parsed.naturalness,

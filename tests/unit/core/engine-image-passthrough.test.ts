@@ -122,7 +122,9 @@ test('a turn without images does not grow an images key (t88)', async () => {
     const session = store.createSession();
     await engine.respond({ sessionId: session.sessionId, text: '你好', addressed: true });
     assert.equal(seen.length, 1);
-    assert.equal('images' in (seen[0] as Record<string, unknown>), false, 'the text path is unchanged (t87 pins the payload byte-for-byte)');
+    // `Object.hasOwn` rather than a cast to `Record<string, unknown>`: the question is whether the
+    // key is present at run time on an object whose type does not declare it.
+    assert.equal(Object.hasOwn(seen[0], 'images'), false, 'the text path is unchanged (t87 pins the payload byte-for-byte)');
   } finally {
     close(store);
   }

@@ -17,6 +17,7 @@ import {
   SUPPORTED_KEYWORDS,
   validateEvent,
   type EventEnvelope,
+  type JsonValue,
 } from '@xixi/contracts';
 
 const SCHEMA_ROOT = join(import.meta.dirname, '..', '..', 'packages', 'contracts', 'schemas');
@@ -30,6 +31,17 @@ function expectCode(code: string, run: () => unknown): ContractError {
     return error;
   }
   throw new Error(`expected ContractError(${code}), nothing was thrown`);
+}
+
+/**
+ * The validated payload, typed as the shape the assertions below walk.
+ *
+ * `validateEvent` returns an `EventEnvelope` whose `payload` is deliberately `JsonValue` — the
+ * contract cannot know which event type it is holding. These tests do, so they say so once, here,
+ * instead of casting at every read.
+ */
+function validatedPayload(event: unknown): Record<string, JsonValue> {
+  return validateEvent(event).payload as Record<string, JsonValue>;
 }
 
 function presenceEvent(present = true): EventEnvelope {
@@ -215,7 +227,7 @@ test('open_thread.changed is an additive event type at the same schema version',
     confidence: 1,
     payload: { thread_id: 'thread_abc1234', status: 'candidate', summary: '明天下午我要去镇上办证' },
   });
-  assert.equal(validateEvent(JSON.parse(JSON.stringify(minimal))).payload.status, 'candidate');
+  assert.equal(validatedPayload(JSON.parse(JSON.stringify(minimal))).status, 'candidate');
 
   // 全部字段（生产写入方就是这么写的：可选字段写 null 而不是省略）。
   const full = buildEvent({
@@ -238,12 +250,12 @@ test('open_thread.changed is an additive event type at the same schema version',
       note: '用户回答：办好了',
     },
   });
-  assert.equal(validateEvent(JSON.parse(JSON.stringify(full))).payload.attempts, 1);
+  assert.equal(validatedPayload(JSON.parse(JSON.stringify(full))).attempts, 1);
 
   // 六个状态都在枚举里；别的取值被拒。
   for (const status of ['candidate', 'offered', 'engaged', 'resolved', 'snoozed', 'exhausted']) {
     assert.equal(
-      validateEvent(
+      validatedPayload(
         JSON.parse(
           JSON.stringify(
             buildEvent({
@@ -255,7 +267,7 @@ test('open_thread.changed is an additive event type at the same schema version',
             }),
           ),
         ),
-      ).payload.status,
+      ).status,
       status,
     );
   }

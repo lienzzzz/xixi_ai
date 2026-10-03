@@ -29,6 +29,9 @@ const response = await transport.turn(
     sessionId: 'sess_verify_provider',
     resumeBrainSessionId: null,
     text: '调用 xixi_get_current_time 工具，然后原样报告它返回的时间戳。',
+    // `null` = no pre-composed task, so the transport composes one from `context` (the DSH adapter's
+    // own default when the conversation layer has not flattened a prompt).
+    task: null,
     context: {
       identityName: '西西',
       personality: { talkativeness: 0.45, verbosity: 0.4 },

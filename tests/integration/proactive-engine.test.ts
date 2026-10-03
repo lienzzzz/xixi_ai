@@ -78,7 +78,6 @@ function answeringTurn(store: XixiStore, sessionId: string, at: Date, turnIndex:
       source: 'test',
       actor: 'father',
       confidence: 1,
-      session_id: sessionId,
       timestamp: toOffsetIso(at),
       payload: { session_id: sessionId, turn_index: turnIndex, role: 'user', text: '嗯，听到了。', action: 'SPEAK' },
     }),

@@ -42,7 +42,9 @@ test('a missing API key fails as MISSING_KEY before any request is attempted', a
       (error as ModelError).detail !== 'could not reach the model endpoint',
   );
   await assert.rejects(
-    () => client.chatJson({ messages: [{ role: 'user', content: '你好' }], schema: { type: 'object' } }),
+    // `chatJson` takes a named schema (`{ name, schema }`), not a bare JSON Schema: the name is what
+    // the provider's `json_schema` response format is keyed by.
+    () => client.chatJson({ messages: [{ role: 'user', content: '你好' }], schema: { name: 'probe', schema: { type: 'object' } } }),
     (error: unknown) => error instanceof ModelError && error.code === 'MISSING_KEY',
   );
   assert.equal(attempted, 0, 'a missing key is refused locally, not sent upstream');

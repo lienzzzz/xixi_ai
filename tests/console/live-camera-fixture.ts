@@ -14,11 +14,11 @@ export interface FakeLiveChild {
   /** Report the process exiting. */
   exit: (code: number | null) => void;
   readonly kills: number;
-  readonly started: { source: string; cameraIndex: number; dbPath: string }[];
+  readonly started: { source: string; cameraIndex: number }[];
 }
 
 export function fakeLiveRunner(): FakeLiveChild {
-  const started: { source: string; cameraIndex: number; dbPath: string }[] = [];
+  const started: { source: string; cameraIndex: number }[] = [];
   let onLine: ((line: string) => void) | null = null;
   let onExit: ((code: number | null) => void) | null = null;
   let killCount = 0;
@@ -32,7 +32,9 @@ export function fakeLiveRunner(): FakeLiveChild {
     exit: (code) => onExit?.(code),
     runner: {
       start(options) {
-        started.push({ source: options.source, cameraIndex: options.cameraIndex, dbPath: options.presenceDbPath });
+        // V0.3 P0-B: the child gets no store path at all (it used to be handed `--db` and append the
+        // presence rows itself), so the record below only carries the detection-loop arguments.
+        started.push({ source: options.source, cameraIndex: options.cameraIndex });
         onLine = options.onLine;
         onExit = options.onExit;
         const handle: LiveCameraHandle = {

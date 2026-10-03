@@ -44,7 +44,16 @@ export interface FeedbackRule {
   readonly relationship?: { readonly aspect: string; readonly note: string };
 }
 
-export const FEEDBACK_RULES: readonly FeedbackRule[] = Object.freeze([
+/**
+ * 规则表本体。
+ *
+ * 单独一个带类型的常量，而不是直接写在 `Object.freeze([...])` 里：字面量数组在冻结表达式里
+ * 会被推断成「四个字面量形状的联合」，其中 `quiet_today` 的空 `deltas: {}` 在联合归一化后变成
+ * `{ verbosity?: undefined; … }`，与 `Record<string, number>` 的索引签名冲突（P0-C 的
+ * `check:types` 撞到的就是这个）。先声明成 `readonly FeedbackRule[]`，每条各自过一遍契约。
+ * 运行期一字未改：`Object.freeze` 收到的还是同一个数组。
+ */
+const FEEDBACK_RULE_LIST: readonly FeedbackRule[] = [
   {
     id: 'quiet_today',
     kind: 'quiet_today',
@@ -77,7 +86,9 @@ export const FEEDBACK_RULES: readonly FeedbackRule[] = Object.freeze([
     deltas: { proactivity: -0.1, talkativeness: -0.05 },
     relationship: { aspect: 'chat_style', note: '嫌太主动：少自己起话题' },
   },
-]);
+];
+
+export const FEEDBACK_RULES: readonly FeedbackRule[] = Object.freeze(FEEDBACK_RULE_LIST);
 
 /** 模型推断用的白名单码 → 偏移。只认 `PROACTIVE_MODEL_REASON_CODES` 里已有的码。 */
 const INFERRED_DELTAS: Readonly<Record<string, Readonly<Record<string, number>>>> = Object.freeze({

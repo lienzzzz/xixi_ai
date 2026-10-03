@@ -44,7 +44,7 @@ import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
 
 import { CORPUS, FORBIDDEN_PATTERNS, type Scenario } from '../tests/scenarios/corpus.ts';
 import { GOLDEN_CONVERSATIONS, type GoldenConversation } from '../tests/scenarios/golden-conversations.ts';
-import { REPO_ROOT, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
+import { REPO_ROOT, loadConfig, readDotEnv } from './lib/harness.ts';
 import {
   bannedTemplatesIn,
   formatPercent,

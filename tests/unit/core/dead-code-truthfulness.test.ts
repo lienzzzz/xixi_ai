@@ -137,5 +137,8 @@ test('every declared action still round-trips through the event contract', () =>
       text: '嗯。',
     },
   });
-  assert.equal(validateEvent(JSON.parse(JSON.stringify(event))).payload.action, 'BACKCHANNEL');
+  // `validateEvent` types the payload as `JsonValue` (the contract cannot know the event type);
+  // this test does, so it states the one field it reads.
+  const payload = validateEvent(JSON.parse(JSON.stringify(event))).payload as { action: string };
+  assert.equal(payload.action, 'BACKCHANNEL');
 });

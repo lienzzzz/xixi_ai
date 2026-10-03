@@ -93,7 +93,9 @@ test('shutdownAll 先停服务、再把排队的后台提取跑完、最后关�
       ['server.close', 'server.closeAllConnections', 'extractor.flush(1)', 'store.close'],
       '顺序：先停止接受新请求 → 跑完队列 → 关库',
     );
-    assert.throws(() => store.mood(), undefined, '库必须已经正常关闭（再用就报错）');
+    // `Error` as the predicate (not `undefined`, which the types reject and which asserted nothing
+    // about *what* was thrown): the store must refuse to be used after `close()`.
+    assert.throws(() => store.mood(), Error, '库必须已经正常关闭（再用就报错）');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
   }
@@ -101,7 +103,6 @@ test('shutdownAll 先停服务、再把排队的后台提取跑完、最后关�
 
 test('SIGTERM 真的接到收尾上：emit 之后跑完队列、退出码 0，第二条信号不会关两遍库（preflight ⑦）', async () => {
   const steps: string[] = [];
-  const exits: number[] = [];
   const lines: string[] = [];
   let flushed = 0;
   const installed = installShutdownHandlers({

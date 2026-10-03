@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  // Entry point for `npm run check:types` (tsc --noEmit -p tsconfig.json).
+  //
+  // Type-check only — Node 24 runs the .ts files directly, so nothing here
+  // produces output and no build step exists.
+  //
+  // The include list is the set of TypeScript sources that ship in the repo:
+  // packages/ (production runtime), apps/ (DSH profile), scripts/ (CLI
+  // entry points), services/ (voice-edge helpers) and tests/. Untracked
+  // scratch trees (data/, .scratch/, .venvs/) are not part of the codebase and
+  // are deliberately not listed; node_modules is excluded by default.
+  "extends": "./tsconfig.base.json",
+  "include": [
+    "packages/**/*.ts",
+    "apps/**/*.ts",
+    "scripts/**/*.ts",
+    "services/**/*.ts",
+    "tests/**/*.ts"
+  ]
+}

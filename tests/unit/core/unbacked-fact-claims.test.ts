@@ -68,6 +68,9 @@ function scriptedAdapter(chunks: readonly BrainTurnChunk[], result: Partial<Brai
           model: 'scripted-1',
           brainSessionId: `scripted-${input.sessionId}`,
           latencyMs: 1,
+          // The base result is a complete `BrainTurnResult`; `finishReason` is `string | null` (not
+          // optional), and `...result` below may still override it per test.
+          finishReason: null,
           ...result,
         })),
       );

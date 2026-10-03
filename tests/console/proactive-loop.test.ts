@@ -13,7 +13,6 @@
  * Run: `npm run test:console` (also part of `npm test`).
  */
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,7 +29,6 @@ import {
 } from '@xixi/conversation';
 import { openXixiStore } from '@xixi/domain';
 
-import { REPO_ROOT } from '../../scripts/lib/harness.ts';
 import { startTrialPage } from './serve-chat-fixture.ts';
 
 import {
@@ -651,7 +649,6 @@ test('lastUserTurnAt reads the fact from the log, and only user turns count', ()
         source: 'test',
         actor: role === 'user' ? 'father' : 'xixi',
         confidence: 1,
-        session_id: session.sessionId,
         timestamp,
         payload: { session_id: session.sessionId, turn_index: turnIndex, role, text, action: 'SPEAK' },
       });

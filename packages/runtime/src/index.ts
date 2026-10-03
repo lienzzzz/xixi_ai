@@ -89,6 +89,7 @@ export {
   type ProactiveComposeInput,
   type ProactiveComposedContent,
   type ProactiveContentSource,
+  type ProactiveGateRow,
   type ProactiveLoopEntry,
   type ProactiveLoopOptions,
 } from './proactive-runtime.ts';

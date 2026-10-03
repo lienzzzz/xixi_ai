@@ -187,12 +187,6 @@ const HOUR = 60;
 /** How many minutes one simulated natural day holds (the wall clock covers all 24 h). */
 const DAY_MINUTES = 24 * HOUR;
 
-/** Local time-of-day as `HH:MM` in the simulation's fixed +08:00 offset. */
-function localClock(of: Date): string {
-  const shifted = new Date(of.getTime() + OFFSET_MINUTES * 60_000);
-  return `${String(shifted.getUTCHours()).padStart(2, '0')}:${String(shifted.getUTCMinutes()).padStart(2, '0')}`;
-}
-
 /** The natural day (1-based) an absolute simulated instant falls on. */
 function dayOfInstant(at: Date): number {
   return Math.floor((at.getTime() - DAY_START.getTime()) / (DAY_MINUTES * 60_000)) + 1;
@@ -1202,7 +1196,6 @@ async function main(): Promise<void> {
   const unanswered = results.get('unanswered') as ScenarioResult;
   const hotChat = results.get('hot-chat') as ScenarioResult;
   const responsiveMetrics = metrics.find((row) => row['scenario'] === 'responsive') as Record<string, unknown>;
-  const unansweredMetrics = metrics.find((row) => row['scenario'] === 'unanswered') as Record<string, unknown>;
   const hotMetrics = metrics.find((row) => row['scenario'] === 'hot-chat') as Record<string, unknown>;
 
   const responsiveCount = responsive.deliveries.length;

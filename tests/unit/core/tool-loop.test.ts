@@ -9,7 +9,6 @@ import {
   createToolRegistry,
   runAgentLoop,
   type AgentStep,
-  type AgentStepOutcome,
   type AgentTool,
   type XixiTool,
 } from '@xixi/brain-adapter';
@@ -91,7 +90,10 @@ test('the loop appends the tool result back to the model (model → tool → mod
 
   const roundTwoMessages: MimoMessage[][] = [];
   const step: AgentStep = {
-    async *call(messages, tools, round): AsyncGenerator<never, AgentStepOutcome, void> {
+    // No hand-written generator annotation: `AgentStep.call` already types it
+    // (`AsyncGenerator<BrainTurnChunk, AgentStepOutcome, void>`), and `never` as the yield type made
+    // the `yield` below a type error — the chunk it yields is exactly what a real step yields.
+    async *call(messages, tools, round) {
       if (round === 1) {
         return { model: 'probe', finishReason: 'tool_calls', rawText: '', spokenText: '', toolCalls: [{ id: 'call_1', name: 'xixi_probe', arguments: '{}' }] };
       }
@@ -147,7 +149,8 @@ test('a model that never stops asking for a tool is stopped after four rounds', 
 
   const roundsSeen: number[] = [];
   const step: AgentStep = {
-    async *call(_messages, tools, round): AsyncGenerator<never, AgentStepOutcome, void> {
+    // Same as above: the yield type comes from `AgentStep`, not from `never`.
+    async *call(_messages, tools, round) {
       roundsSeen.push(round);
       // The model keeps asking for as long as it is offered a tool; only the programme's
       // cap takes the tools away, and that is what ends the turn.

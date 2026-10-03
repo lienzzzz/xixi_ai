@@ -10,7 +10,7 @@
  *
  * 用法：node scripts/check-docs.ts [--quiet]
  */
-import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 
 import { REPO_ROOT } from './lib/harness.ts';

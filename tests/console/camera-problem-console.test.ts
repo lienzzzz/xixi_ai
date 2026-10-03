@@ -37,7 +37,7 @@ function tempDir(prefix: string): string {
 /** A sensors object whose clock the test controls, so the grace window is testable. */
 function sensorsAt(nowMs: () => number): { readonly sensors: LiveSensors; readonly child: ReturnType<typeof fakeLiveRunner> } {
   const child = fakeLiveRunner();
-  const sensors = new LiveSensors({ runner: child.runner, presenceDbPath: () => 'x.sqlite', cameraIndex: () => 0, now: () => new Date(nowMs()), log: () => {} });
+  const sensors = new LiveSensors({ runner: child.runner, cameraIndex: () => 0, now: () => new Date(nowMs()), log: () => {} });
   return { sensors, child };
 }
 

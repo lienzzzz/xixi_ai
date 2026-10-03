@@ -26,6 +26,7 @@
     "verify:provider": "node scripts/verify-provider-route.ts",
     "verify:structured-output": "node scripts/verify-structured-output.ts",
     "check:docs": "node scripts/check-docs.ts",
+    "check:types": "tsc --noEmit -p tsconfig.json",
     "eval:conversation": "node scripts/eval-conversation.ts",
     "eval:conversation:judge": "node scripts/eval-conversation.ts --judge",
     "voice:turn": "node scripts/voice-turn.ts",
@@ -40,6 +41,8 @@
     "js-yaml": "^5.4.2"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-tools": "0.1.7-rc.2"
+    "@deepseek-ai/dsh-tools": "0.1.7-rc.2",
+    "@types/node": "24.19.1",
+    "typescript": "7.0.2"
   }
 }

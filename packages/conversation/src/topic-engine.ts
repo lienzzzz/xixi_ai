@@ -32,7 +32,7 @@ import {
   type XixiStore,
 } from '@xixi/domain';
 
-import { readTopicHistory, TopicHistory, topicOfferedWithin, type TopicHistoryEntry } from './topic-history.ts';
+import { TopicHistory, topicOfferedWithin, type TopicHistoryEntry } from './topic-history.ts';
 
 // ------------------------------------------------------------------ topic shape
 

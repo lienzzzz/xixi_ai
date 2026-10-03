@@ -1,7 +1,7 @@
 import type { JsonValue } from '@xixi/contracts';
 import type { TurnAction } from '@xixi/domain';
 
-import { BrainError, brainErrorCodeFor, toBrainErrorCauseCode } from './errors.ts';
+import { BrainError, toBrainErrorCauseCode } from './errors.ts';
 import {
   createBrainTurnStream,
   flattenPrompt,

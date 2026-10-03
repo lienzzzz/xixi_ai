@@ -157,8 +157,6 @@ const SENTENCE_MARKS = new Set(['。', '！', '？', '!', '?', '…', '．', '.'
 const PAUSE_MARKS = new Set(['，', ',', '、', '；', ';', '：', ':', '—', '～', '~', '|']);
 /** Marks after which a decimal/URL guard applies (the `.` of `3.14` / `example.com`). */
 const DOTTED_PAUSE_MARKS = new Set(['.', '．']);
-const CJK_END_MARKS = new Set(['。', '！', '？', '…', '．']);
-const CJK_PAUSE_MARKS = new Set(['，', '、', '；', '：']);
 
 export const CLAUSE_CHUNKER_LIMITS = Object.freeze({
   /**

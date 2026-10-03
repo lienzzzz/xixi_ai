@@ -1499,8 +1499,10 @@ export class XixiStore {
         `thread ${threadId} is already ${current.status}; a settled thread must not be reopened`,
       );
     }
-    const at = options.at ?? this.#now();
-    const updatedAt = toOffsetIso(at);
+    // `#now()` already returns an offset-ISO string; `toOffsetIso` is only needed for a
+    // caller-supplied `Date`. The old `options.at ?? this.#now()` fed that string to `toOffsetIso`,
+    // which calls `date.getTime()` — a `TypeError` on the first `transition()` that omitted `at`.
+    const updatedAt = options.at === undefined ? this.#now() : toOffsetIso(options.at);
     const next: OpenThread = {
       ...current,
       status,

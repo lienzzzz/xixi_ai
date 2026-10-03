@@ -62,7 +62,11 @@ export function ingestPerceptionLine(line: string, deps: PerceptionIngestDeps): 
     const appended = deps.store.appendPresenceEvent(validated);
     const present = (validated.payload as { present?: unknown }).present === true;
     deps.log?.(`[perception] 在场事件已入库（${validated.event_id}，present=${String(present)}，source=${validated.source}）`);
-    return { kind: 'ingested', eventType: 'presence.changed', eventId: appended.event.eventId, present };
+    // `appended.event` is the domain's `StoredEvent` — the envelope's snake_case `event_id`, not a
+    // camelCase `eventId`. The outcome declares `eventId: string`, so reading the wrong key handed
+    // every caller `undefined`; the integration test's store double had (wrongly) mirrored the
+    // camelCase key, which is why only the type check could see it.
+    return { kind: 'ingested', eventType: 'presence.changed', eventId: appended.event.event_id, present };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     deps.log?.(`[perception] 丢弃一条在场事件：${reason}`);

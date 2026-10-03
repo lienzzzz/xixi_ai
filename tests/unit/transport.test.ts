@@ -43,6 +43,8 @@ test('the composed harness task carries identity, personality, timezone and work
     sessionId: 'sess_1',
     resumeBrainSessionId: null,
     text: '明天天气怎么样？',
+    // No pre-composed task: this request is what `composeTask` is about to build one from.
+    task: null,
     context: {
       identityName: '西西',
       personality: { proactivity: 0.55, warmth: 0.8 },

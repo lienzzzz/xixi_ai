@@ -637,13 +637,21 @@ const startupEvents = eventList.filter((event) =>
   String((event.payload as { source_detail?: string | null }).source_detail ?? '').includes('reason=camera_started'),
 );
 const transitions = eventList.filter((event) => !startupEvents.includes(event));
-const fps = summary?.fps_processed ?? 0;
-const framesProcessed = summary?.frames ?? frames.length;
+/**
+ * The child's `live_summary`, read **after** the run.
+ *
+ * `summary` is assigned inside the child's stdout handler, so control-flow analysis still sees its
+ * initializer (`null`) down here — and optional chaining on that gives `never`. The declared type is
+ * the truth at this point; saying so once beats casting at every read.
+ */
+const finalSummary = summary as SummaryRecord | null;
+const fps = finalSummary?.fps_processed ?? 0;
+const framesProcessed = finalSummary?.frames ?? frames.length;
 const syntheticRun = selfTest;
 const problems: string[] = [...contractProblems];
-if (!syntheticRun && summary !== null && summary.camera !== null && framesProcessed > 0) {
+if (!syntheticRun && finalSummary !== null && finalSummary.camera !== null && framesProcessed > 0) {
   // The camera read loop is the ceiling; the detector must not be the bottleneck.
-  const cameraFps = (summary.camera.fps_measured as number | undefined) ?? 0;
+  const cameraFps = (finalSummary.camera.fps_measured as number | undefined) ?? 0;
   if (cameraFps > 0 && fps < cameraFps * 0.5) {
     problems.push(`处理帧率 ${fps} 明显低于抓帧帧率 ${cameraFps}：检测耗时吃掉了余量`);
   }
@@ -671,14 +679,14 @@ const payload = {
   frames_processed: framesProcessed,
   frames_with_signal: frames.filter((frame) => frame.signal).length,
   fps_processed: fps,
-  camera: summary?.camera ?? null,
+  camera: finalSummary?.camera ?? null,
   detector: {
-    face_backend: summary?.face_backend ?? null,
-    detect_ms_mean: summary?.detect_ms_mean ?? null,
-    detect_ms_p95: summary?.detect_ms_p95 ?? null,
-    counters: summary?.counters ?? null,
+    face_backend: finalSummary?.face_backend ?? null,
+    detect_ms_mean: finalSummary?.detect_ms_mean ?? null,
+    detect_ms_p95: finalSummary?.detect_ms_p95 ?? null,
+    counters: finalSummary?.counters ?? null,
   },
-  events_written_by_python: summary?.events ?? null,
+  events_written_by_python: finalSummary?.events ?? null,
   events_in_log: eventList.length,
   startup_events: startupEvents.length,
   transitions: transitions.length,
@@ -708,8 +716,8 @@ const payload = {
     ).length,
   },
   world_state: projection,
-  privacy: summary?.privacy ?? null,
-  semantic_analysis: summary?.semantic_analysis ?? null,
+  privacy: finalSummary?.privacy ?? null,
+  semantic_analysis: finalSummary?.semantic_analysis ?? null,
   events_delta: after - before,
   contract_problems: contractProblems,
   problems,

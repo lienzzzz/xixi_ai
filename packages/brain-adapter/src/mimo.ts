@@ -7,7 +7,6 @@ import { asAgentTool, type AgentScope, type ToolCallRecord, type XixiTool } from
 import {
   createBrainTurnStream,
   flattenPrompt,
-  splitIntoChunks,
   type BrainAdapter,
   type BrainDescription,
   type BrainTurnChunk,

@@ -174,20 +174,22 @@ export class MoodEngine {
     const application = applyMoodSignals(pulled, signals, this.#settings);
     const moved =
       Math.abs(application.state.valence - before.valence) > 1e-9 || Math.abs(application.state.energy - before.energy) > 1e-9;
-    if (decayedMoved && signals.length === 0) {
-      // 只加证据，不改状态（`time_passed` 的偏移是 0，所以这一步不会动数值）。
-      application.counts.time_passed = 1;
-    }
+    // 只加证据，不改状态（`time_passed` 的偏移是 0，所以这一步不会动数值）。计数对象是只读的，
+    // 所以这里换成带标记的副本，而不是往 `application.counts` 上写。
+    const counts =
+      decayedMoved && signals.length === 0
+        ? { ...application.counts, time_passed: 1 }
+        : application.counts;
 
-    const evidence = mergeEvidence(storedBefore?.evidence ?? {}, application.counts);
-    const dominant = dominantSignal(application.counts);
+    const evidence = mergeEvidence(storedBefore?.evidence ?? {}, counts);
+    const dominant = dominantSignal(counts);
 
     const stored = this.#store.recordMood({
       state: application.state,
       previous: before,
       source: dominant === null ? 'mood:decay' : `mood:${dominant}`,
       summary: summarizeBeat(application, signals.length === 0),
-      signals: application.counts,
+      signals: counts,
       signalCount: application.applied.length,
       droppedCount: application.dropped,
       evidence,

@@ -184,7 +184,6 @@ test('the same loop does greet a fresh arrival (t98)', { timeout: 60_000 }, asyn
       source: 't98',
       actor: 'father',
       confidence: 1,
-      session_id: session.sessionId,
       timestamp: toOffsetIso(new Date(Date.now() - 2 * 60_000)),
       payload: { session_id: session.sessionId, turn_index: 0, role: 'user', text: '我在呢', action: 'SPEAK' },
     }),
