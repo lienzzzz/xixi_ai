@@ -355,3 +355,15 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    凡拿 `Date.now()` 比较当断言，必须先连跑 ≥10 次；正解是改用**次序证据**（自增序号）+
    把重叠证据建立在**有真实间隔的实验输入**上（本轮改成「第 1 块持 320 ms、第 2 块 1 ms」，串行管道必红）。
    **只看一次运行会误判**——同一轮里 captain 看到 1 红 1 绿、评审看到 1 绿 3 红。
+26. **Command Code API 的连接类错误不要当任务失败——等约 1 分钟再重试**（2026-10-04 用户指示）：
+   用户明确：遇到 Command Code API 错误（`ENOTFOUND api.commandcode.ai`、`fetch failed`、插件自动重试 5 次后放弃、偶发 502 或超时）
+   **很可能只是服务端压力大或网络抖动**，正确处置是**等约 1 分钟，再用 `agent_teams_reassign_task` 重派同一个任务给同一位成员**。
+   **判据**：失败回报里出现的是**环境/传输字样**（`ENOTFOUND`、`fetch failed`、`ECONNRESET`、`socket hang up`、`已停止重试`）
+   而不是契约或实现证据时，**不要**走 §9.5 的「另开收尾任务」流程，也**不要**换 provider——那两条是给真的实现失败或配额用尽（§9.23 ①）留的。
+   处置顺序：① 先核现场（`git status` 看它的半成品还在不在、`git log` 看基线）；② 自己核一次网络（直连与代理各一次，例如
+   `Test-NetConnection api.commandcode.ai -Port 443` 与 `Invoke-WebRequest -Proxy http://127.0.0.1:7890`）；
+   ③ 重派并在理由里写明「按工作区现状继续、不要回退已完成的搬运」以及上一位踩过的坑。
+   **本轮实例（t5）**：成员会话在一次传输失败后掉线、任务被自动判 failed，但工作区里它的 5 个新文件与 6 个改动都还在——
+   重派后接着干，而不是重来。**只有同一 provider 跨多个成员连续失败**才考虑换 provider；
+   **若反复出现，用户侧动作**是在**启动 DSH 的那个终端**里导出 `HTTPS_PROXY`/`HTTP_PROXY` 再重启 DSH
+   （DSH 只读环境变量，不读 Windows 系统代理/PAC）。
