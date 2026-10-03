@@ -87,6 +87,11 @@ $env:NODE_USE_ENV_PROXY = '1'   # Node 需要显式开启才读环境变量代�
 ## 7. 常用命令
 
 ```powershell
+npm run check:types      # 类型检查门禁（tsc --noEmit，无构建步骤；Node 24 仍直接跑 .ts）
+                         #   V0.3 P0-C 起生效；CI 顺序＝**先 check:types 再 npm test**
+                         #   tsconfig 覆盖 packages/apps/scripts/services/tests（155 个 .ts，--listFiles 可复核）
+                         #   纪律：**不许用铺 any、ts-ignore、关 strict 或 exclude 难点文件换绿**；
+                         #   抑制要写理由并列清单，启用 noUnusedLocals 暴露的死导入要顺手清掉
 npm test                 # 全部离线测试（unit/integration/perception/console），不花 API 费用
                          #   项数与耗时**以实跑输出为准**（不写死；2026-09-30 实测点 223 项、空载约 20s）
                          #   关键路径曾是单文件 frontend.test.ts（多次 Python 冷启动）；
