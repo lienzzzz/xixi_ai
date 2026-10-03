@@ -356,6 +356,15 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    ② 系统自动派生的 repair / review 任务（本轮 t11/t13/t16/t18）**契约里会混进非路径杂质**（`audio/wav`、`playedMs/droppedMs`、
    `recon/...`、缺前缀的 `voice_stream.ts`……）。成员的正确做法：**如实说明契约文本有杂质 + 在回报正文里列出逐文件清单**
    （t11/t13/t16/t18 都这么做了）；captain 收到后要**转成下一次评审的显式核对项**（已认领任务的 inScope 改不了）。
+   **补充（V0.3 第五轮 t17 换来，更硬的一种杂质）：自动派生任务的 inScope 常常是一串「目录式」名字，而完成校验对
+   `changedPaths` 用的是精确路径匹配——目录条目**不覆盖其下的文件**。** t17 的 inScope 里写着 `packages/runtime/`、`tests/console`
+   之类的条目，于是验收条款点名要改的 `packages/conversation/src/engine.ts`、`packages/runtime/src/replay-runtime.ts`、
+   `tests/console/canonical-store.test.ts` 等**全部落在允许范围外**：改了就在完成校验里报 `is undeclared`、不改又满足不了验收——
+   **契约自相矛盾，成员六条验收全做完、`npm test` 520/520 全绿仍被判 failed**。
+   **处置顺序（captain 本轮照此走通）**：① 先把「已完成且全绿」的产物**按文件提交入库**，别让成员重做；
+   ② 用 `agent_teams_amend_task`（**它是唯一能改 inScope 的入口**，且对已重派的任务仍有效）把**逐文件真实路径**写进 inScope；
+   ③ `agent_teams_reassign_task` 重派同一任务，让成员按修好的契约重新提交完成回报（实现无需改动）。
+   **判据**：成员回报里出现「验收点名要改的文件不在 inScope」时，先按上述三步走，不要让它「改注释绕过」或「另开收尾任务」。
    ③ **计时断言先证明不抖再提交**：本轮一条「两个 `started` 时间戳谁先」的断言在 12 次里红 6 次（同毫秒即红，成员那次全绿是运气）。
    凡拿 `Date.now()` 比较当断言，必须先连跑 ≥10 次；正解是改用**次序证据**（自增序号）+
    把重叠证据建立在**有真实间隔的实验输入**上（本轮改成「第 1 块持 320 ms、第 2 块 1 ms」，串行管道必红）。
