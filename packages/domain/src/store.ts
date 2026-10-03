@@ -168,6 +168,19 @@ export interface StoreOptions {
   /** Override the database file entirely (used by tests for throwaway stores). */
   readonly dbPath?: string;
   readonly clock?: Clock;
+  /**
+   * UTC offset (minutes east) used when **writing** timestamps (V0.3 P0-D, repair round 2).
+   *
+   * Default: this machine's offset at the moment of the write — right for a live household entry,
+   * whose log is about the machine it runs on. A **replay** passes the fixture's own offset instead,
+   * so a replayed artefact does not depend on where it was replayed: without this, the same script
+   * produced `+08:00` timestamps here and `+00:00` timestamps on a UTC machine, which made the
+   * replay a different document per host (and made "the window is judged in +08:00" untrue).
+   *
+   * Only the *rendering* changes: sorting, comparison and expiry all go through `Date.parse`, which
+   * reads the offset, so the instant is never shifted.
+   */
+  readonly offsetMinutes?: number;
 }
 
 /** One row of the `world_state` projection, as stored. */
@@ -521,9 +534,14 @@ export class XixiStore {
 
   #db: DatabaseSync;
   #closed = false;
+  /** UTC offset (minutes east) used to render timestamps; `null` = this machine, per write. */
+  readonly #writeOffsetMinutes: number | null;
 
   constructor(options: StoreOptions = {}) {
     const dataDir = options.dataDir ?? DEFAULT_DATA_DIR;
+    // `null` = render each write in this machine's offset (the live case); a number = the caller's
+    // zone (the replay case) — see `StoreOptions.offsetMinutes`.
+    this.#writeOffsetMinutes = options.offsetMinutes ?? null;
     if (options.dbPath === undefined) mkdirSync(dataDir, { recursive: true });
     this.dbPath = options.dbPath ?? join(dataDir, DEFAULT_DB_FILE);
     this.clock = options.clock ?? systemClock;
@@ -542,7 +560,8 @@ export class XixiStore {
   }
 
   #now(): string {
-    return toOffsetIso(this.clock());
+    const at = this.clock();
+    return this.#writeOffsetMinutes === null ? toOffsetIso(at) : toOffsetIso(at, this.#writeOffsetMinutes);
   }
 
   #assertOpen(): void {
@@ -1054,7 +1073,7 @@ export class XixiStore {
     // `query.now` must be a string: a `Date` here loses its milliseconds on the way into
     // `Date.parse` (see `WorldStateQuery.now`), which silently moves this boundary.
     const now = query.now ?? this.#now();
-    const staleAfter = addSecondsToIso(stored.updatedAt, stored.ttlSeconds);
+    const staleAfter = addSecondsToIso(stored.updatedAt, stored.ttlSeconds, this.#writeOffsetMinutes);
     return {
       ...stored,
       stale: Date.parse(now) >= Date.parse(staleAfter),
@@ -1071,7 +1090,7 @@ export class XixiStore {
       const entry = toWorldStateEntry(row);
       // Same rule as `worldState()` above: the override is a string, not a `Date`.
       const now = query.now ?? this.#now();
-      const staleAfter = addSecondsToIso(entry.updatedAt, entry.ttlSeconds);
+      const staleAfter = addSecondsToIso(entry.updatedAt, entry.ttlSeconds, this.#writeOffsetMinutes);
       return {
         ...entry,
         stale: Date.parse(now) >= Date.parse(staleAfter),
@@ -1926,12 +1945,15 @@ export class XixiStore {
  * timestamp format is fixed by the event contract (docs/design/domain-model.md §2) and the
  * offset must survive the arithmetic, or `stale` would be wrong by the timezone offset.
  */
-function addSecondsToIso(timestamp: string, seconds: number): string {
+function addSecondsToIso(timestamp: string, seconds: number, offsetMinutes: number | null = null): string {
   const base = Date.parse(timestamp);
   if (Number.isNaN(base)) {
     throw new DomainError('INVALID_WORLD_STATE', `cannot parse timestamp "${timestamp}"`);
   }
-  return toOffsetIso(new Date(base + seconds * 1000));
+  const at = new Date(base + seconds * 1000);
+  // V0.3 P0-D: render `staleAfter` in the **same** offset as the row it describes, so a replayed
+  // store (whose writes carry the fixture's offset) does not grow a second zone in its own output.
+  return offsetMinutes === null ? toOffsetIso(at) : toOffsetIso(at, offsetMinutes);
 }
 
 function toWorldStateEntry(row: WorldStateRow): WorldStateEntry {

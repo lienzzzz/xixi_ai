@@ -1,14 +1,16 @@
 /**
- * P0-B: one household store, and the perception child is not a writer.
+ * P0-B / repair round 2: one household store, one source for the sentence about it, and the
+ * perception child is not a writer.
  *
- * Two things are pinned here, both from the audit (§3.5) and pack `04_RUNTIME_CONSOLIDATION.md` §2–3:
+ * Three things are pinned here, all from the audit (§3.5) and pack `04_RUNTIME_CONSOLIDATION.md` §2–3:
  *
  *   1. **Resolution** — every household entry defaults to the canonical store (`XIXI_DATA_DIR`, else
  *      `data/xixi`), the per-entry variables still work for tests/parallel instances, and the
  *      household variable wins over them (otherwise "canonical" would mean nothing).
- *   2. **The spawn line** — the perception child is started without `--db`/`--append`, so it cannot
- *      be a second writer of the store. The assertion runs the real `createPerceptionLiveRunner`
- *      against a script that echoes its own argv, so it fails the day someone adds the flags back.
+ *   2. **The sentence** — the note both pages print is derived from `CANONICAL_STORE_ENTRIES`, and
+ *      the V0.2 claim 「四个入口各用不同的库」 may not come back in either script.
+ *   3. **The command line** — the perception child is started without `--db`/`--append`, so it cannot
+ *      be a second writer of the store.
  */
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync } from 'node:fs';
@@ -17,6 +19,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { CANONICAL_DATA_DIR, CANONICAL_DATA_DIR_ENV, resolveCanonicalDataDir } from '@xixi/domain';
+
+import { XIXI_DB_ENTRIES, databaseNoteHtml, storeNoteText } from '../../scripts/field-test.ts';
 
 test('canonical store：默认 data/xixi，XIXI_DATA_DIR 覆盖它', () => {
   assert.equal(CANONICAL_DATA_DIR, 'data/xixi');
@@ -73,6 +77,42 @@ test('跑测试时默认库落在临时目录，不会写进仓库里的 data/xi
     resolveCanonicalDataDir({ env: { NODE_TEST_CONTEXT: 'child-v8', XIXI_WEB_DATA_DIR: 'data/own' }, legacyEnv: 'XIXI_WEB_DATA_DIR', cwd }),
     join(cwd, 'data', 'own'),
   );
+});
+
+test('note 与页面文案都从同一张表推导：不再有「四个入口各用不同的库」', () => {
+  // The V0.2 sentence outlived the V0.3 design by a commit (pack §3.5 / repair round 2, exit 6). The
+  // guard is two-sided: the sentence is gone from the *code*, and the generated note says what the
+  // entries actually do.
+  assert.equal(XIXI_DB_ENTRIES.length, 4, '清单是四个 household 入口');
+  assert.deepEqual(
+    [...new Set(XIXI_DB_ENTRIES.map((item) => item.dir))],
+    [CANONICAL_DATA_DIR],
+    `每个入口的 dir 都必须是 ${CANONICAL_DATA_DIR}（实测 ${XIXI_DB_ENTRIES.map((i) => i.dir).join(', ')}）`,
+  );
+  // A measurement entry is the one that can be isolated by a flag, and the page says so.
+  const measurement = XIXI_DB_ENTRIES.filter((item) => item.measurement === true);
+  assert.ok(measurement.length >= 1, '至少有一个测量入口（voice-turn）');
+  assert.equal(measurement.every((item) => item.dir === CANONICAL_DATA_DIR), true, '测量入口默认也连同一个库');
+
+  const note = storeNoteText();
+  assert.match(note, /household 入口默认连同一个库/);
+  assert.match(note, new RegExp(CANONICAL_DATA_DIR_ENV));
+  assert.match(note, new RegExp(CANONICAL_DATA_DIR.replace('/', '\\/')));
+  assert.doesNotMatch(note, /四个入口各用不同的库/);
+
+  const page = databaseNoteHtml('data/xixi');
+  assert.doesNotMatch(page, /四个入口各用不同的库/);
+  assert.match(page, /可 <code>--isolated-store<\/code> 隔离/, '测量行必须写明它可以被隔离');
+
+  // The forbidden sentence must not come back as a **claim** anywhere in the two page scripts. The
+  // three surviving hits are the comments that explain why it is gone; a line that makes the claim
+  // (a string in the boot payload or the page HTML) is what this catches.
+  for (const file of ['field-test.ts', 'serve-chat.ts']) {
+    const offenders = readFileSync(join(import.meta.dirname, '..', '..', 'scripts', file), 'utf8')
+      .split(/\r?\n/)
+      .filter((line) => line.includes('四个入口各用不同的库') && !/^\s*(\/\/|\*|\/\*)/.test(line));
+    assert.deepEqual(offenders, [], `${file} 里不得再把这句写成声称（注释里解释历史可以）`);
+  }
 });
 
 test('感知子进程的命令行里不再有 --db / --append（它只负责检测与打印）', async () => {

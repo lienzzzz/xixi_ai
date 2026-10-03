@@ -43,6 +43,7 @@ import {
   retentionPolicy,
   restoreProactiveSettings,
   segmentPlan,
+  storeNoteText,
   type ProactiveConsoleState,
   type VoiceDeps,
   type VoiceTurnBody,
@@ -685,10 +686,10 @@ const server = createServer((request, response) => {
           identity: config.identity,
           adapter: engine.adapter.describe(),
           recent,
-          // Which SQLite file this page writes to (t42 acceptance item 3): four entry points,
-          // four stores — the note tells the user that persona/history from `npm run chat`
-          // does not appear here.
-          database: { path: DATA_DIR, entries: XIXI_DB_ENTRIES, note: '四个入口各用不同的库；在 chat 里设的人格与历史不会带到这里' },
+          // Which SQLite file this page writes to (t42 acceptance item 3). V0.3 P0-B: the note is
+          // derived from `CANONICAL_STORE_ENTRIES` — the entries share one canonical store now, and
+          // the sentence has to say what the code does instead of freezing yesterday's design.
+          database: { path: DATA_DIR, entries: XIXI_DB_ENTRIES, note: storeNoteText() },
           segmentPlayback: (() => {
             // Derived from the wiring (`streamVoice` → `AssentBank`/`client.synthesize`), so the
             // page's sentence changes with the runtime 朗读 switch and with a missing key

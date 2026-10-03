@@ -372,7 +372,7 @@ export class ConversationEngine {
         source: 'brain',
         actor: 'system',
         confidence: acceptance.accept ? 1 : 0.5,
-        timestamp: toOffsetIso(input.at),
+        timestamp: toOffsetIso(input.at, this.#offsetMinutes),
         payload: {
           session_id: input.sessionId,
           turn_index: turnIndex,
@@ -828,6 +828,20 @@ export class ConversationEngine {
       silenceReason: turnSilenceReason,
       toolName: turnAction === 'SILENCE' ? null : turnToolName,
       hygiene: turnHygiene,
+      /**
+       * V0.3 P0-D: **measurement, deliberately not on the injected clock.**
+       *
+       * Everything else this turn reports is a function of the injected `clock` (the FSM's instants,
+       * `conversationState`, the mood beat, the store's timestamps) — that is what makes a replay
+       * reproducible. These two are the exception *on purpose*: they are how long the machine took,
+       * so they must come from the real wall clock even when the run is a replay. A replay that
+       * reported them would leak this machine into a comparable artefact, and two runs of the same
+       * script would disagree in a field that no behaviour change explains.
+       *
+       * The boundary is enforced on the other side: `ReplayTurnResult`
+       * (`packages/runtime/src/replay-runtime.ts`) has no latency field at all, and
+       * `tests/replay/replay-format.test.ts` asserts that shape at compile time.
+       */
       latencyMs: Date.now() - startedAt,
       firstTokenMs: firstChunkAt === null ? null : firstChunkAt - startedAt,
       prompt,

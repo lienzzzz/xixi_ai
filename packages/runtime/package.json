@@ -3,12 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "西西生产运行时：各 live 入口共用的装配点（Step A：工具链与对话作用域）。",
+  "description": "西西生产运行时：各 live 入口共用的装配点（工具链、主动循环、语音共享缝、感知入库、replay）。",
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
     "@xixi/brain-adapter": "*",
+    "@xixi/contracts": "*",
+    "@xixi/conversation": "*",
     "@xixi/domain": "*",
     "@xixi/model-adapters": "*"
   }

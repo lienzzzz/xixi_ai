@@ -9,7 +9,32 @@
 
 ---
 
-## 0. 当前状态（2026-10-03：**第五轮 `xixi-v02-round5` 集成收口中**；第四轮已收口）
+## 0. 当前状态
+
+### 0.1 V0.3（2026-10-04 起，按 `E:\xixi_v03_actual_code_pack`）——**P0 已交付，正在收口**
+
+**范围**：本轮只做 pack 的 **Phase 0 + Phase 1**（pack 自己规定 P0/P1 必须先完成；P2–P7 另起轮次）。团队 `xixi-v03-p0p1`（7 名成员，契约在 `.agent-teams/xixi-v03-p0p1`）。
+
+**P0 五条已交付并入库**：
+- **0E 缺陷批次**：`4f3301f`（先写回归测试再修 `SpeechPipeline` B2）+ `e0ce503`（九项 preflight，含「面板设置重启回滚」的真因＝审计 JSON 644 字超 `system.health` 的 500 字上限被截断成非法串）
+- **0A 运行时抽取**：`dbe7f7f`（Step A）+ `f577d7b`（Step B+C）——`scripts/field-test.ts` **8053 → 6625 行**，旧导出以别名保留、30 个同名导出与包导出 `===` 同一对象，7 个入口迁到 `@xixi/runtime`
+- **0B canonical store + 感知单写者**：`4827498`——`XIXI_DATA_DIR` 默认 `data/xixi`、四个入口同库（同一库文件里同时有 `source=chat` 与 `source=field-test` 的 `system.health`）、Python 不再写库、**测试不再写进 household 库**
+- **0C typecheck 真门禁**：`b6e8dae`——`npm run check:types`（185 错 → 0、零 ts-ignore、抑制仅 6 处具名 cast），并抓出 4 个测试没覆盖的真缺陷（含 `perception-ingest` 读错字段、替身镜像了错键）
+- **0D replay 基础**：`c9d1ad1`——13 项、注入 Clock（**不 mock 全局 Date**，评审用「Date 守卫全抛错」证明 wall clock 读取 0 次）、三条行为基线、跨年同脚本行为一致
+
+**当前在途**：`t17` 修复（t9 评审的三条必修：`GET /api/field/state` 的 note 仍写「四个入口各用不同的库」与 P0-B 相反、`--help` 仍是旧默认、`XIXI_DB_ENTRIES` 丢了 `measurement` 字段）→ `t18` 复审 → `t10` 评审 → `t11` P0 gate（建立 P0 的进度文件，届时才会出现在 `docs/` 下）→ Phase 1（`t12`/`t13`：ContextBuilder 与 MemoryRetriever、关系上下文与纠正闭环）。
+
+**V0.3 阶段的操作事实（下一轮接手必读）**：
+1. 门禁顺序：**`npm run check:types` → `npm test` → `npm run check:docs`**；
+2. **多日时间线 `node scripts/eval-proactive-timeline.ts` 要留 ≥30 分钟窗口**（评审实测 23 分 49 秒、单核打满；归因是 tick 数量 300s × 3 天 × 4 场景，**不是抽取回归**）；
+3. 开工先读 **`docs/v03/ACTUAL_RUNTIME_MAP.md`**（运行时地图，含对 pack 审计 4 处过期结论的更正）；
+4. 支持 `--print-wiring` 的是 **chat / voice-device-check / eval-realism / eval-conversation** 这四个（`field-test` 与 `serve-chat` **没有**该开关，别按「所有入口」去 grep）。
+
+**已知风险（下一轮清单）**：`packages/runtime` 的 manifest 未声明它值层面 import 的 `@xixi/contracts` 与 `@xixi/conversation`（`npm ci` 能跑、换 pnpm/PnP 会崩）；`engine.ts` 的 `Date.now()` 只喂 `latencyMs`（不入库、无用例守）。
+
+---
+
+### 0.2 V0.2 第五轮（2026-10-03：**第五轮 `xixi-v02-round5` 集成收口中**；第四轮已收口）
 
 **第五轮在做什么（2026-10-01 用户批准）**：按用户「主动性高一些、像人、可以有自己的性格感情但不极端」的诉求，做四条：
 ① **主动性口径拍定**：采纳「**显著降频**」，**不做**「连续两次未回应后 = 0」的硬停（理由：硬停与 ADR-0011 的两层设计冲突、

@@ -96,6 +96,8 @@ import {
   type VadResult,
 } from '@xixi/runtime';
 import {
+  CANONICAL_DATA_DIR,
+  CANONICAL_DATA_DIR_ENV,
   CANONICAL_STORE_ENTRIES,
   MemoryStore,
   openXixiStore,
@@ -972,7 +974,8 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
 // --------------------------------------------------------------------------------------
 
 /**
- * The on-machine probe, written to `data/field-test/device-probe.py` at runtime.
+ * The on-machine probe, written next to the console's own store at runtime (`data/xixi/device-probe.py`
+ * by default — it follows `--data-dir` / `XIXI_DATA_DIR`).
  *
  * It is a single file with four modes because the three devices need three
  * different Windows stacks (pycaw for endpoint mute/volume, sounddevice/soundcard
@@ -986,7 +989,8 @@ export async function handleVoiceTurn(deps: VoiceDeps, body: VoiceTurnBody): Pro
  * (`rms > 0.005`) reported `ok` even with the speakers muted — it was a false PASS.
  */
 export const DEVICE_PROBE_PY = String.raw`
-"""现场测试控制台的设备探测程序（由 scripts/field-test.ts 运行时生成在 data/field-test/）。
+"""现场测试控制台的设备探测程序（由 scripts/field-test.ts 运行时生成在控制台自己的库目录里，
+默认 data/xixi/，随 --data-dir / XIXI_DATA_DIR 走）。
 
 用法: python device-probe.py <mode> <repoRoot> [args...]
   mode = endpoints | mic | speaker | camera
@@ -2321,7 +2325,10 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
    * endpoint volume). pycaw is used read-only here: nothing in this repo writes these
    * settings, the console only *suggests* 0 dB when the measured noise floor is high.
    */
-  const probePath = join(REPO_ROOT, 'data', 'field-test', 'device-probe.py');
+  // V0.3 P0-B: the probe script is a *generated helper*, not data — it goes beside whichever store
+  // this console is really using (`--data-dir` / `XIXI_DATA_DIR` / canonical), so the path in the log
+  // never claims a directory the console does not write to.
+  const probePath = join(dataDir, 'device-probe.py');
   mkdirSync(dirname(probePath), { recursive: true });
   if (!existsSync(probePath)) writeFileSync(probePath, DEVICE_PROBE_PY, 'utf8');
   const endpointsRunner = options.probeRunner ?? defaultProbeRunner(probePath, REPO_ROOT);
@@ -2401,7 +2408,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
       identity: config.identity,
       personality: store.selfProfile(),
       privacy: { policy, pruned, voiceDir },
-      database: { path: dataDir, presencePath: presenceDataDir, entries: XIXI_DB_ENTRIES, note: '四个入口各用不同的库；在别处设的人格与历史不会带到这里' },
+      database: { path: dataDir, presencePath: presenceDataDir, entries: XIXI_DB_ENTRIES, note: storeNoteText() },
       segmentPlayback: (() => {
         // Derived, not asserted: the page's sentence about granularity is a function of the sink
         // this console really installed (`streamSpeak` above, which requires a key) plus the
@@ -4624,10 +4631,44 @@ export function createPerceptionLiveRunner(options: {
  * source, and the resolver that picks the directory reads the same constants. Keeping a second list
  * in this file is exactly how the page ended up claiming 「四个入口各用不同的库」 long after that
  * stopped being the design.
+ *
+ * The type is the entries' own shape (`typeof CANONICAL_STORE_ENTRIES[number]`), so a field added
+ * to the source — `measurement`, `legacyEnv` — reaches the pages without a second declaration here.
  */
-export const XIXI_DB_ENTRIES: readonly { readonly entry: string; readonly command: string; readonly dir: string }[] = Object.freeze(
-  CANONICAL_STORE_ENTRIES.map((item) => ({ entry: item.entry, command: item.command, dir: item.dir })),
-);
+export const XIXI_DB_ENTRIES: readonly {
+  readonly entry: string;
+  readonly command: string;
+  readonly dir: string;
+  /** `legacyEnv` is dropped: the page has no business printing an environment variable it does not read. */
+  readonly measurement?: boolean;
+}[] = CANONICAL_STORE_ENTRIES.map((item) => ({
+  entry: item.entry,
+  command: item.command,
+  dir: item.dir,
+  ...(item.measurement === true ? { measurement: true } : {}),
+}));
+
+/**
+ * The one-sentence 「these entries share a store」 note both pages print.
+ *
+ * Derived from `CANONICAL_STORE_ENTRIES` (the same table the page lists) and from
+ * `CANONICAL_DATA_DIR` / `CANONICAL_DATA_DIR_ENV`, so the sentence cannot survive a change to the
+ * wiring: the hard-coded 「四个入口各用不同的库」 this replaces was true in V0.2 and false the moment
+ * P0-B landed — it outlived the design by a single commit, which is exactly the failure mode
+ * `docs/README.md` §5.1 warns about.
+ */
+export function storeNoteText(
+  entries: readonly { readonly dir: string; readonly measurement?: boolean }[] = CANONICAL_STORE_ENTRIES,
+): string {
+  const shared = entries.filter((item) => item.dir === CANONICAL_DATA_DIR).length;
+  const isolatable = entries.filter((item) => item.measurement === true).length;
+  return (
+    `household 入口默认连同一个库（${CANONICAL_DATA_DIR_ENV}，未设则 ${CANONICAL_DATA_DIR}）：` +
+    `${shared} 个入口共用它，人格与历史互通；` +
+    `单个入口可用自己的开关隔离（各自的 *DATA_DIR 环境变量、--data-dir${isolatable > 0 ? '、测量入口的 --isolated-store' : ''}），` +
+    '测试与评测走临时目录。'
+  );
+}
 
 /**
  * What is *actually* segmented — one function, three states, no drifting constants.
@@ -4656,16 +4697,16 @@ export function databaseNoteHtml(currentDir: string): string {
   // field was missing (t42's `ReferenceError: dataDir is not defined` took the whole console
   // down). An unknown path renders as 「未知」 rather than throwing.
   const current = typeof currentDir === 'string' && currentDir.length > 0 ? currentDir : '（未知）';
-  const rows = XIXI_DB_ENTRIES.map(
-    (item) => `<li><code>${item.command}</code> → <code>${item.dir}</code>（${item.entry}）${current.endsWith(item.dir) ? ' ← <b>本页</b>' : ''}</li>`,
-  ).join('');
+  const rows = XIXI_DB_ENTRIES.map((item) => {
+    // Exit 6 of the V0.3 repair round: a measurement entry is the one that can be pointed at its own
+    // store with a flag, and the page has to say so — otherwise a reader assumes `npm run voice:turn`
+    // measures the household Xixi when it happens to be running against a private one.
+    const isolatable = item.measurement === true ? '，可 <code>--isolated-store</code> 隔离' : '';
+    return `<li><code>${item.command}</code> → <code>${item.dir}</code>（${item.entry}）${isolatable}${current.endsWith(item.dir) ? ' ← <b>本页</b>' : ''}</li>`;
+  }).join('');
   return (
-    `<div class="muted">本页数据库：<code>${current}</code>｜<b>household 入口默认连同一个库</b>（V0.3 P0-B：` +
-    `<code>XIXI_DATA_DIR</code>，未设则 <code>data/xixi</code>）：` +
-    `<ul style="margin:4px 0 4px 18px; padding:0">${rows}</ul>` +
-    `所以在 <code>npm run chat</code> 里设的人格与聊过的历史，在这里也认；单个入口可用自己的开关隔离` +
-    `（<code>XIXI_CHAT_DATA_DIR</code> / <code>XIXI_WEB_DATA_DIR</code> / <code>--data-dir</code> / ` +
-    `<code>--isolated-store</code>），测试与评测用临时目录。</div>`
+    `<div class="muted">本页数据库：<code>${current}</code>｜<b>${storeNoteText()}</b>` +
+    `<ul style="margin:4px 0 4px 18px; padding:0">${rows}</ul></div>`
   );
 }
 
@@ -6459,9 +6500,11 @@ const FIELD_TEST_USAGE = `西西 · 现场测试控制台 —— 用法
   npm run field-test -- --no-tts          关闭回复朗读
   npm run field-test -- --dsh             走 DSH Harness 路径（慢，实时对话不建议）
   npm run field-test -- --no-open         不自动打开浏览器（非交互终端本来就不会打开）
-  npm run field-test -- --data-dir data/field-test-alt  换控制台自己的库（self_profile / 事件日志；默认 data/field-test）
-  npm run field-test -- --presence-data-dir data/presence-alt
-                                                        换在场状态投影读的库（默认 data，与感知边共用）
+  npm run field-test -- --data-dir ${CANONICAL_DATA_DIR}-alt          换控制台自己的库（self_profile / 事件日志 /
+                                                                      在场投影；默认 ${CANONICAL_DATA_DIR}）
+  npm run field-test -- --presence-data-dir ${CANONICAL_DATA_DIR}-presence-alt
+                                                                      只换在场投影读的库（默认与主库同一个
+                                                                      ${CANONICAL_DATA_DIR}；P0-B 起不再单开一个库）
 
   node scripts/field-test.ts --self-test      离线自检：隐私 / 多段语音 / 页面 / 报告 / 设备口径，不碰麦克风、不联网
                                               exit 0 = 全过；有任何一项失败会 exit 1。
@@ -6492,9 +6535,12 @@ export interface FieldCliOptions {
   readonly ttsEnabled: boolean;
   readonly useDsh: boolean;
   readonly openBrowser: boolean;
-  /** `--data-dir`: the console's own store (self_profile, event log). `null` = default `data/field-test`. */
+  /**
+   * `--data-dir`: the console's own store (self_profile, event log, presence projection).
+   * `null` = the household canonical store (`XIXI_DATA_DIR`, else `${CANONICAL_DATA_DIR}`).
+   */
   readonly dataDir: string | null;
-  /** `--presence-data-dir`: the store the presence projection is read from. `null` = default `data`. */
+  /** `--presence-data-dir`: where the presence projection is read. `null` = the same store as `dataDir`. */
   readonly presenceDataDir: string | null;
 }
 

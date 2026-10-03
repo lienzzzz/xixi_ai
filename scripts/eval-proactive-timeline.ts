@@ -11,7 +11,7 @@
  *
  * 为什么信它：**它跑的是生产部件，不是另写一套引擎**。
  *
- *   - 候选与 tick 语义 = 常驻考虑循环 `ProactiveLoop.tickOnce`（scripts/field-test.ts）本体，
+ *   - 候选与 tick 语义 = 常驻考虑循环 `ProactiveLoop.tickOnce`（P0-A Step B 起在 `@xixi/runtime`）本体，
  *     含 t9 F1 的修复（被扣分的候选不再吃光 tick）与 F5 的生产通路（对话开着时话题池候选
  *     变成 `conversation_continuation`）；
  *   - 「热聊」的判定 = 引擎自己的 `isHotChat`（对话还开着 + 窗口内至少 N 次用户轮次 → 热聊接话
@@ -89,8 +89,11 @@ import {
   type ProactiveSettings,
 } from '@xixi/conversation';
 import { openXixiStore, type XixiStore } from '@xixi/domain';
+// V0.3 repair round 2: the loop is package code now (P0-A Step B moved it), so this entry imports
+// it from the runtime instead of reaching back into the console script. Behaviour is identical —
+// `scripts/field-test.ts` re-exports that same object (`field-test.ProactiveLoop === runtime.ProactiveLoop`).
+import { ProactiveLoop } from '@xixi/runtime';
 
-import { ProactiveLoop } from './field-test.ts';
 import { loadConfig, REPO_ROOT } from './lib/harness.ts';
 
 // ------------------------------------------------------------------ CLI

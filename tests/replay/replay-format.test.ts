@@ -17,7 +17,7 @@ import { test } from 'node:test';
 
 import { toOffsetIso } from '@xixi/contracts';
 
-import { loadReplay, parseReplayDocument, parseReplayOffset, runReplay } from '@xixi/runtime';
+import { loadReplay, parseReplayDocument, parseReplayOffset, runReplay, type ReplayTurnResult } from '@xixi/runtime';
 
 import { anchorAt, echoAdapter, fixturePath, scriptWindow } from './replay-fixtures.ts';
 
@@ -213,5 +213,62 @@ test('a run removes the scratch store it created, and leaves a caller-supplied o
     report.close();
     assert.equal(existsSync(join(mine, 'xixi.sqlite')), true, '`close()` left the caller\'s directory alone');
     rmSync(mine, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Repair round 2, item 5: **measurement stays off the replay surface.**
+ *
+ * `ConversationEngine` reports `latencyMs` / `firstTokenMs` from the wall clock *on purpose* (see the
+ * comment on those two fields): they say how long this machine took, not what the behaviour was. A
+ * replay that carried them would fold the host into a comparable artefact, so `ReplayTurnResult` has
+ * no such field at all.
+ *
+ * The guard is a **compile-time** one: the list below is `Object.keys` of a real turn, and
+ * `TurnShape` is pinned against `ReplayTurnResult` with `satisfies` — adding a latency-ish field to
+ * the interface makes the `satisfies` check the only place that has to change, so the decision gets
+ * read at review time instead of shipping silently.
+ */
+type TurnShape = keyof ReplayTurnResult;
+test('the replayed turn shape carries no latency field (measurement is not behaviour)', async () => {
+  const report = await runReplay({
+    // The array shape (the pack's `§4` snippet) is the one whose steps are plain JSON, so it is also
+    // the only shape an inline step can carry `event`/`text` in — `runReplay` takes that as JSON text.
+    replay: JSON.stringify([{ at: '+0m', event: 'conversation.turn', text: '在吗？' }]),
+    adapter: echoAdapter(),
+    start: LOCAL_ANCHOR,
+  });
+  try {
+    const turn = report.turns[0];
+    assert.ok(turn !== undefined, '这条脚本应当产出一轮');
+
+    // The shape is asserted from a real run, so it cannot drift from the interface…
+    const keys = Object.keys(turn).sort();
+    assert.deepEqual(keys, [
+      'accepted',
+      'action',
+      'addressed',
+      'at',
+      'history',
+      'kind',
+      'offset',
+      'reason',
+      'reply',
+      'segments',
+      'state',
+      'step',
+      'text',
+    ]);
+    // …and the interface itself is pinned to those keys here: a new field breaks this line.
+    const pinned: ReadonlyArray<TurnShape> = [
+      'accepted', 'action', 'addressed', 'at', 'history', 'kind', 'offset', 'reason', 'reply',
+      'segments', 'state', 'step', 'text',
+    ] satisfies ReadonlyArray<keyof ReplayTurnResult>;
+    assert.equal(pinned.length, 13, 'ReplayTurnResult 的字段数是这份清单的长度；加字段就要同时改这里');
+    for (const banned of ['latencyMs', 'firstTokenMs', 'elapsedMs', 'durationMs', 'ttfbMs']) {
+      assert.equal(keys.includes(banned), false, `replay 的轮次形状不得含有测量字段 ${banned}`);
+    }
+  } finally {
+    report.close();
   }
 });

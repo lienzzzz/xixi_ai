@@ -339,6 +339,22 @@ export interface ReplayTurnResult {
   readonly history: readonly string[];
 }
 
+/**
+ * **`latencyMs` is deliberately not part of a replay report** (V0.3 P0-D decision, repaired round 2).
+ *
+ * The engine's own `ConversationTurn` carries `latencyMs` / `firstTokenMs` measured with
+ * `Date.now()` against a wall-clock `startedAt` (`packages/conversation/src/engine.ts`, the
+ * `latencyMs: Date.now() - startedAt` line). Those are **measurement**, not behaviour: a replay that
+ * injected a script clock everywhere else must not then report a number that came from the machine
+ * it happened to run on — two runs of the same script would disagree, and the disagreement would
+ * look like a behaviour change.
+ *
+ * So the rule is: measurement stays out of the replay surface (the report above simply has no such
+ * field), and the guard against someone adding one later is a compile-time assertion in
+ * `tests/replay/replay-format.test.ts` (`ReplayTurnResult` must not contain a latency-ish key).
+ */
+export type ReplayLatencyPolicy = 'measurement-excluded';
+
 export interface ReplayPresenceResult {
   readonly kind: 'presence.changed';
   readonly step: number;
@@ -630,7 +646,7 @@ export async function runReplay(options: ReplayRunOptions): Promise<ReplayReport
 
   const ownDataDir = options.dataDir === undefined;
   const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), 'xixi-replay-'));
-  const store = openXixiStore({ dataDir, clock: clock.clock });
+  const store = openXixiStore({ dataDir, clock: clock.clock, offsetMinutes: clock.offsetMinutes });
   store.seedSelfProfile({ ...(options.profile ?? DEFAULT_REPLAY_PROFILE) });
   const session = store.createSession();
 
