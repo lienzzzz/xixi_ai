@@ -50,9 +50,15 @@
   **不许给单批百分比、也不许写「方向多数为正」**（复算：`node scripts/voice-turn.ts --compare <产物…>` 接五份产物，见 recon §二-B）；
   ④ 真正可证伪的是 `npm run voice:bargein --strict` 与 `node:vm` 那条浏览器规则用例，不是那个探测点反事实（t12 的 R4：它在结构上恒真）。
   **另两条必读**：HEAD 上那条「clause 2 is dispatched while clause 1 is still synthesizing」用例曾是已知 flaky（同毫秒即红，12 次里 6 次红），
-  **t15 已修**（改用派发序号 + 有真实间隔的重叠证据，改后 12 次全绿）；**B1 是已知 blocker**——`serve-chat.ts` 的 onClause 与
-  `voiceStreamEvents` 各发一次 clause 事件，线上每个序号出现两遍、浏览器会把同一块音频播两遍，**t20 正在修**，
-  在 t20 交付前**不得**把「流式逐块播放」写成已验收。
+  **t15 已修**（改用派发序号 + 有真实间隔的重叠证据，改后 12 次全绿）；**B1 已由 t20 修好**——原状是 `serve-chat.ts` 的 onClause 与
+  `voiceStreamEvents` 各发一次 clause 事件（线上序号 `[0,1,0,1]`、浏览器把同一块音频播两遍），修法是「hook 仍是唯一即时发送方、
+  映射用 `sentClauses` 跳过已发的前 N 条」，并补了**路由级断言**（序号不重复、升序连续、`playCalls === end.clauses`、每块字节数等于桩的那一份）
+  与**突变验证**（把 `sentClauses` 置 0 → 用例红并报 `a clause index was sent twice: 0,1,0,1`）。**B2 仍未修**（已知未覆盖缺陷：
+  失败块不推进 cursor，后继已成功的块被憋到 `flush()` 才发；现有用例只钉「失败块被如实报告」，没钉「后继块何时发出」）。
+  **两条与门禁有关的事实**：① t20 新增的路由用例会跑一次真实 Python VAD（约 4.4 秒），全量门禁从约 26 秒变成 **37–40 秒**——
+  这是**为拿真进程证据付的代价**，按 §9.9 不许靠删断言或移出默认门禁换速度（若要提速，正解是给一个不跑 VAD 的等价入口，另开任务）；
+  ② `startTrialPage({ ttsBaseUrl })` 是 t20 新增的测试入口（只经 `MIMO_BASE_URL` 影响子进程），所以**离线驱动 `/api/voice` 现在可行**，
+  写文档时应带上一句（`testing.md` 或 `design/voice.md` §6.4 的复现清单）。
 
 **怎么走到这里的**：① 第一轮 `xixi-v02-p0p1`（P0/P1/P5 收口，已归档）；② 第二轮 `xixi-v02-round2`
 （t21 快照收口 + t3 在途，用户暂停后归档）；③ 第三轮 `xixi-v02-round3`（成员 opencode-go/deepseek-v4.1-flash）
