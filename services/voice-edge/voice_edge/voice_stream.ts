@@ -25,6 +25,12 @@
  * Timing vocabulary follows `docs/benchmarks/v01-baseline.md` §3.1 exactly, so a before/after
  * number is comparable: ① VAD end → ASR final, ② ASR final → first token,
  * ③ first token → first audible **clause** (V0.1: whole reply), ④ total to first audio.
+ *
+ * The design half of this module — the chain, the chunker's four triggers, which of ③/④ owns the
+ * pack's 1.5 s target, and the two commands that produce and recompute a batch — is
+ * `docs/design/voice.md` §6; the measured numbers are `docs/recon/voice-streaming-2026-10-01.md`.
+ * Read §6.3 before quoting any latency number: 「③ 超出 15%」 and 「④ 是目标的 3.5 倍」 are statements
+ * about *different* stages.
  */
 
 // Relative on purpose: `@xixi/conversation` exposes only its package entry (`.`), and adding

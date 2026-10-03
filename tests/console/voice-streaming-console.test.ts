@@ -226,41 +226,83 @@ test('the first clause does not wait for the rest of the reply', async () => {
   );
 });
 
-test('clause 2 is dispatched while clause 1 is still synthesizing (start/end evidence)', async () => {
-  // t13: the test above asserts texts and a call count — it says nothing about *when* the second
-  // dispatch happened, so a serial pipeline would have passed it too. This run holds clause 1 in
-  // flight (80 ms) and records the start and end instants of each sink call: clause 2 must have been
-  // dispatched **inside** clause 1's window.
-  const started: { index: number; atMs: number }[] = [];
-  const finished: { index: number; atMs: number }[] = [];
+/** One sink call: when it was dispatched, when it finished, and in which order. */
+export interface SinkEvent {
+  readonly kind: 'start' | 'finish';
+  readonly index: number;
+  readonly atMs: number;
+  /** 1-based position in the **synchronously recorded** log — the resolution-free ordering evidence. */
+  readonly seq: number;
+}
+
+/**
+ * The property 「clause 2 is dispatched while clause 1 is still synthesizing」, asserted from
+ * recorded events.
+ *
+ * Why it is written this way (t15): the first version compared two `Date.now()` readings
+ * (`started[0].atMs < started[1].atMs`). Both sinks are invoked from the same synchronous turn of
+ * the event loop, so **half the runs put them in the same millisecond** and the assertion failed —
+ * measured: 6 of 12 consecutive runs red with `1790982509710 < 1790982509710`. Clock resolution is
+ * not the property we care about, and a test must not depend on it.
+ *
+ * Two independent readings replace it:
+ *   * **order** — a `seq` counter, incremented synchronously at the top of each sink call. It cannot
+ *     be affected by millisecond rounding, and a pipeline that dispatched clause 2 first is caught
+ *     by it;
+ *   * **overlap** — the real gap between the two calls. Clause 1 is held for `slowMs`, clause 2
+ *     finishes in ~1 ms, so 「clause 2 started while clause 1 was still running」 is a **hundreds of
+ *     milliseconds** fact; the threshold below is 200 ms, which tolerates ordinary jitter and still
+ *     fails loudly for a serial pipeline (its clause 2 starts only after clause 1 ends).
+ *
+ * Nothing here sleeps to make flakiness go away, retries, or relaxes a timeout: the slow clause is
+ * the *input* of the experiment (a TTS call that takes time is the normal case), and both readings
+ * are of facts the pipeline either has or does not have.
+ */
+export function assertClauseOverlap(events: readonly SinkEvent[], options: { readonly slowMs: number; readonly clauses: number }): void {
+  const starts = events.filter((event) => event.kind === 'start');
+  const finishes = events.filter((event) => event.kind === 'finish');
+  const first = starts[0];
+  const second = starts[1];
+  const firstFinish = finishes.find((event) => event.index === 0);
+
+  assert.ok(first !== undefined && second !== undefined, `expected the sink to be called at least twice, got ${starts.length}`);
+  // ① Order, without any clock: the seq counter is assigned before the first await.
+  assert.equal(first.index, 0, 'clause 1 was dispatched first');
+  assert.equal(second.index, 1, 'and clause 2 second');
+  assert.ok(first.seq < second.seq, `dispatch order by sequence: clause 1 (seq ${first.seq}) before clause 2 (seq ${second.seq})`);
+  // …and the same fact the other way round: swapping the two dispatches would invert these indices.
+  assert.deepEqual(starts.map((event) => event.index), [0, 1], 'no dispatch overtook another');
+  // ② Overlap, with a gap far larger than any plausible jitter (see the doc comment).
+  assert.ok(firstFinish !== undefined, 'clause 1 finished');
+  assert.ok(
+    second.atMs < firstFinish.atMs - 200,
+    `clause 2 must start while clause 1 is still synthesizing: clause 2 at ${second.atMs}, clause 1 finished at ${firstFinish.atMs} (held for ${options.slowMs} ms)`,
+  );
+  // ③ …and each clause reached the playback seam exactly once, in order.
+  assert.equal(finishes.length, options.clauses, 'every clause finished');
+}
+
+test('clause 2 is dispatched while clause 1 is still synthesizing (event-order + overlap evidence)', async () => {
+  // t13/t15: the test above asserts texts and a call count — it says nothing about *when* the second
+  // dispatch happened, so a serial pipeline would pass it too. This one holds clause 1 in flight and
+  // records an ordered event log.
+  const slowMs = 320;
+  const events: SinkEvent[] = [];
+  let seq = 0;
   let index = 0;
   const { payload, seam } = await runStreamingTurn({
-    synthesizeProvider: () => async (text: string) => {
+    synthesizeProvider: () => async () => {
       const mine = index;
       index += 1;
-      started.push({ index: mine, atMs: Date.now() });
-      await new Promise((resolve) => setTimeout(resolve, mine === 0 ? 80 : 5));
-      finished.push({ index: mine, atMs: Date.now() });
-      void text;
+      events.push({ kind: 'start', index: mine, atMs: Date.now(), seq: (seq += 1) });
+      await new Promise((resolve) => setTimeout(resolve, mine === 0 ? slowMs : 1));
+      events.push({ kind: 'finish', index: mine, atMs: Date.now(), seq: (seq += 1) });
       return wavOf(300);
     },
   });
 
-  assert.ok(started.length >= 2, `expected the sink to be called at least twice, got ${started.length}`);
-  assert.equal(seam.length, started.length, 'and the seam delivered exactly those clauses');
-  assert.equal(started[0]?.index, 0, 'clause 1 went first');
-  assert.equal(started[1]?.index, 1);
-  // The evidence, in two independent readings of the same fact:
-  const firstFinish = finished.find((entry) => entry.index === 0)?.atMs ?? 0;
-  const secondStart = started.find((entry) => entry.index === 1)?.atMs ?? 0;
-  assert.ok(
-    (started[0]?.atMs ?? 0) < secondStart,
-    `clause 2 started after clause 1 started (${started[0]?.atMs} < ${secondStart})`,
-  );
-  assert.ok(
-    secondStart < firstFinish,
-    `clause 2 was dispatched BEFORE clause 1 resolved (${secondStart} < ${firstFinish}) — a serial pipeline cannot do that`,
-  );
+  assertClauseOverlap(events, { slowMs, clauses: 2 });
+  assert.equal(seam.length, 2, 'and the seam delivered exactly those clauses');
   assert.ok((payload.stream?.ttsSegments ?? 0) >= 2);
 });
 

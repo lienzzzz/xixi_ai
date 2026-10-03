@@ -389,6 +389,13 @@ node scripts\voice-turn.ts --wav tests/audio-fixtures/direct-question.wav
 而 TTS 最大 10771 ms 的那一轮（英文推理泄漏，见 §4），首字只有 3545 ms。
 逐轮值见 `docs/benchmarks/v01/raw-voice-metrics-4batches.txt`。
 
+**这四段口径的沿用范围（t16 补）**：pack Phase 8 的 1.5 s 目标指的是 **④（端点后到首段可听）**，
+不是 ③；③ 在流式链路上是「第一块」的合成、在本节是「整段回复」的合成，两者不可直接比。
+改造后的同口径实测、逐轮配对表与复算命令见
+[`../recon/voice-streaming-2026-10-01.md`](../recon/voice-streaming-2026-10-01.md)（口径抬头与判据在
+[`../design/voice.md`](../design/voice.md) §6.3）。本节数字是 V0.1 的**历史**基线，跨版本的对比请按同口径重跑，
+不要与流式那一列直接相减。
+
 ### 3.2 真实语音闭环 × 4 批 × 5 夹具（n = 20 轮，其中 16 轮有音频输出）【实测】
 
 ```powershell
@@ -474,8 +481,8 @@ E:\worker2\.venvs\voice-pipecat\Scripts\python.exe -m voice_edge.segment ..\..\t
 | 项目 | 状态 | 原因与依据 |
 |---|---|---|
 | 真实麦克风→扬声器闭环下的四个延迟 | **【未测】** | 本机麦克风自噪偏高：2026-09-30 现场实测噪声底 −42.26 dBFS（勘测实测 −30.86 dBFS），播放窗比静音窗只高 **5.16 dB**（判据要求 ≥10 dB），失败原因是「本机麦克风自噪」，不是扬声器。见 `docs/recon/field-test-report-2026-09-30.md` |
-| 扬声器真正静音的打断延迟（§33 P50 < 500 ms） | **【未测】** | 只能设备测试；离线只能测判定层。见 `docs/design/voice.md` §4/§6 |
-| 噪声条件下的端到端延迟 | **【未测】（本轮）** | 本轮只跑干净夹具。噪声档的端点延迟恶化数字是**既有实测**（6 dB SNR 档 1056/1376/1472/1088 ms、0 dB 档 followup-turn 无 VAD 事件），出处 `docs/design/voice.md` §6，本次未复测 |
+| 扬声器真正静音的打断延迟（§33 P50 < 500 ms） | **【未测】** | 只能设备测试；离线只能测判定层。见 `docs/design/voice.md` §4/§7 |
+| 噪声条件下的端到端延迟 | **【未测】（本轮）** | 本轮只跑干净夹具。噪声档的端点延迟恶化数字是**既有实测**（6 dB SNR 档 1056/1376/1472/1088 ms、0 dB 档 followup-turn 无 VAD 事件），出处 `docs/design/voice.md` §7「未实现 / 未验收」的「噪声条件下的端点延迟变差」那条（推导与负结论在 §1.1（5）（6）），本次未复测 |
 | 常驻语音服务的延迟（无 Python 冷启动） | **【未测】** | 尚未实现 |
 
 **结论**：本节的四个延迟是「夹具音频进、真实 ASR/LLM/TTS 出」的数字，

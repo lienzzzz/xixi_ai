@@ -20,21 +20,27 @@
  *   node scripts/voice-turn.ts --wav x.wav --fake                    # offline plumbing test
  *   node scripts/voice-turn.ts --wav a.wav --trace                   # deltas + same-batch legacy
  *
- * Pack Phase 8 (t11) — how to read the four delays this script reports:
+ * Pack Phase 8 — how to read the four delays this script reports (t9 rewrote this after two reviews):
  *
  *   * **④ 「首段可听总延迟」 is the metric the pack's 首音 target is about**: 「说完到听见第一个字」
  *     includes the endpoint hold and the model's first token, so it is the number a user feels.
  *   * **③ 「首 token → 首段可听」 is an attribution quantity only.** It says how much of ④ belongs to
  *     speech synthesis; it is not the target, and comparing it across the two paths compares two
- *     different physical quantities (first *clause* vs whole reply).
- *   * `--legacy-tts` (implied by `--trace`) adds the V0.1 whole-reply synthesis **in the same
- *     batch, on the same reply text**, which is the only way to say 「首音有没有改善」 honestly:
- *     measured that way, the same-batch columns show **no improvement in ③** at this model and TTS
- *     (see `docs/recon/voice-streaming-2026-10-01.md` §结论).
+ *     different physical quantities (first *clause* vs whole reply). Quoting 「超出 15 %」 (a ③
+ *     statement) as if it were the target is the mistake this header now rules out.
+ *   * `--legacy-tts` (implied by `--trace`) adds the V0.1 whole-reply synthesis **in the same batch,
+ *     on the same reply text**, which is the only way to say 「首音有没有改善」 honestly. What three
+ *     independent batches then showed is that the **sign and size are not reproducible**: one run had
+ *     streaming 16 % worse, others a few percent better (t12). So the honest conclusion is 「方向多数
+ *     为正、幅度不可复现」 — never a single batch's percentage.
+ *   * `--out <path>` (default `data/voice/bench/voice-turn-batch.txt`) writes the evidence this run
+ *     produced, so the whole-reply column has an artefact too — that absence is what t5 found.
+ *   * `--compare <file …>` reprints the paired table from those artefacts with **no API call**. It is
+ *     the recomputation command the report names, and it states the ③/④ distinction on every run.
  */
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 import { FakeBrainAdapter, type BrainAdapter } from '@xixi/brain-adapter';
 import { ConversationEngine } from '@xixi/conversation';
@@ -47,6 +53,11 @@ import { concatWav, readWavInfo, readWav } from './lib/wav.ts';
 // The same class the console and the page use, so 「第一块立刻进 TTS 队列」 has one home.
 import { fourStageLatency, percentiles, SpeechPipeline } from '../services/voice-edge/voice_edge/voice_stream.ts';
 import { CLAUSE_CHUNKER_LIMITS } from '../packages/conversation/src/segments.ts';
+// The paired-comparison rules live in `scripts/lib/voice-latency.ts` — a library this CLI and
+// `tests/unit/voice/voice-latency.test.ts` both import, so the `--compare` output and the assertions
+// about it cannot drift apart (t9; moved out of `tests/` in t16 so that production code no longer
+// imports from a test directory).
+import { compareBatch, formatComparison, parseBatchEvidence } from './lib/voice-latency.ts';
 // Shared with the field-test console: the multi-segment planner and the
 // speech-only slicer, so "use every segment" lives in exactly one place.
 // `buildToolChain`/`CONVERSATION_SCOPE` come from the same file for the same reason:
@@ -170,12 +181,46 @@ const legacyTts = explicitLegacy || trace;
  */
 const minComma = Number(argValue('--min-comma', String(CLAUSE_CHUNKER_LIMITS.minCommaChars)));
 const maxChars = Number(argValue('--max-chars', String(CLAUSE_CHUNKER_LIMITS.maxChars)));
+/**
+ * `--out <path>` lands this run's evidence where a later batch can be paired against it (t9).
+ *
+ * Why it exists: the reviews kept asking for raw n=12 artefacts, and before this flag the only way
+ * to keep one was shell redirection — which PowerShell writes as UTF-16, so the next reader could
+ * not even parse it (`%TEMP%\t5-review\m3-*.txt`). Writing the file from inside the script makes the
+ * artefact, the command that produced it and its encoding a single, repeatable step.
+ */
+const outPath = argValue('--out', join(REPO_ROOT, 'data', 'voice', 'bench', 'voice-turn-batch.txt'));
+/**
+ * `--compare <file> [<file> …]` prints the paired streaming-vs-whole-reply table from **evidence
+ * files on disk** — no API call, no audio, no key. It is the recomputation command: every number in
+ * the report can be rebuilt from the artefacts it names.
+ *
+ * Every following bare argument is another artefact (t13 found this the hard way: taking only the
+ * argument right after the flag silently compared one batch and dropped the rest, which is exactly
+ * the 「只报一批」 problem this whole task exists to fix).
+ */
+const compareInputs: string[] = [];
+for (let index = 0; index < args.length; index += 1) {
+  if (args[index] !== '--compare') continue;
+  for (let next = index + 1; next < args.length && !args[next].startsWith('--'); next += 1) {
+    compareInputs.push(args[next] as string);
+  }
+}
+if (compareInputs.length > 0) {
+  const comparisons = compareInputs.map((file) => {
+    const absolute = file.includes(':') || file.startsWith('.') ? file : join(REPO_ROOT, file);
+    return compareBatch(parseBatchEvidence(readFileSync(absolute, 'utf8').replace(/^\uFEFF/, ''), file));
+  });
+  console.log(formatComparison(comparisons));
+  process.exit(0);
+}
 const wavs: string[] = [];
 for (let index = 0; index < args.length; index += 1) {
   if (args[index] === '--wav' && args[index + 1] !== undefined) wavs.push(args[index + 1]);
 }
 if (wavs.length === 0) {
-  console.error('用法：node scripts/voice-turn.ts --wav <file.wav> [--wav <file2.wav> ...] [--fake] [--trace] [--legacy-tts] [--min-comma N] [--max-chars N]');
+  console.error('用法：node scripts/voice-turn.ts --wav <file.wav> [--wav <file2.wav> ...] [--fake] [--trace] [--legacy-tts] [--min-comma N] [--max-chars N] [--out <file>]');
+  console.error('      node scripts/voice-turn.ts --compare <批次产物.txt> [<更多>]   # 不调 API，只复算对照');
   process.exit(2);
 }
 
@@ -441,18 +486,48 @@ const latency = {
   clauseCount: percentiles(results.map((turn) => (turn.clauses === null ? null : turn.clauses.length))),
   note:
     '四个延迟的定义与 docs/benchmarks/v01-baseline.md §3.1 逐字对应；③ 在流式下是「第一块」的合成耗时，在旧链路上是「整段回复」的合成耗时 —— 不是同一个物理量，所以两列分开写、不合并。' +
-    '承载指标是 ④（pack 的「首音」就是「说话结束到听见第一个字」，含端点保持与模型首 token），③ 只是归因量。' +
+    '承载指标是 ④（pack 的「首音」就是「说话结束到听见第一个字」，含端点保持与模型首 token），③ 只是归因量；把 ③ 的「超出 15%」当成目标是口径错误。' +
+    '同批对照的降幅跨批不可复现（三次独立批次符号都不一致），所以只能写「方向多数为正、幅度不可复现」，不给单批百分比当结论。' +
     'batching：一次运行 = 一批，n 由 --wav 的个数乘运行的遍数决定；--trace 会同时给出 deltas 与 legacy 列（见 FLAGS）。',
-  flags: { trace, legacyTts: explicitLegacy ? 'explicit' : trace ? 'implied-by-trace' : false, batchRuns: 1 },
+  flags: {
+    trace,
+    legacyTts: explicitLegacy ? 'explicit' : trace ? 'implied-by-trace' : false,
+    batchRuns: 1,
+    /** Where this run's evidence was written, so a later `--compare` can name it (t9). */
+    wrote: outPath,
+  },
+  reproduce:
+    `node scripts/voice-turn.ts --compare ${outPath}` +
+    `   # 不调 API：把这一批的流式与整段逐轮配对重算，并打印 ③/④ 的口径说明`,
 };
 
-printEvidence('语音闭环（夹具音频 → VAD → ASR → 对话 → 流式 TTS）', {
+const evidence = {
   adapter: adapter.describe(),
   sessionId: session.sessionId,
   turns: results,
   stitchedReplyWav: conversationWav,
   latency,
   note: 'e2e 估算含 VAD 端点延迟；每段文件的 segmentsTotal/segmentsUsed/droppedSegments 说明是否丢弃了语音段（不再静默丢弃）；真实麦克风与扬声器验收见 docs/recon/field-test-report-<日期>.md（§33 的 P50 < 500ms 打断目标不在本次证据内）',
-});
+};
+
+printEvidence('语音闭环（夹具音频 → VAD → ASR → 对话 → 流式 TTS）', evidence);
+
+/**
+ * The artefact itself (t9): the same document the console just printed, on disk, in UTF-8.
+ *
+ * `data/` is gitignored, so this is a *reproducible* artefact rather than a committed one: the
+ * `latency.command` field inside it is the command that produced it, and `--compare` reads any number
+ * of such files. `--trace` runs carry the per-delta trace; it is stored compactly (arrival + size)
+ * because the full text of every delta is already in `turns[].reply`.
+ */
+const serializable = JSON.parse(JSON.stringify(evidence)) as { turns: { deltas?: readonly { atMs: number; chars: number; text: string }[] | null }[] };
+for (const turn of serializable.turns) {
+  if (Array.isArray(turn.deltas)) {
+    turn.deltas = turn.deltas.map((delta) => ({ atMs: delta.atMs, chars: delta.chars, text: '' }));
+  }
+}
+mkdirSync(dirname(outPath), { recursive: true });
+writeFileSync(outPath, `=== 语音闭环（夹具音频 → VAD → ASR → 对话 → 流式 TTS）===\n${JSON.stringify(serializable, null, 2)}\n`, 'utf8');
+console.log(`\n[evidence] 本批产物已写入 ${outPath}（--compare ${outPath} 可复算对照，不调 API）`);
 store.recordHealth('voice-edge', 'ok', `voice turn batch of ${wavs.length}`);
 store.close();

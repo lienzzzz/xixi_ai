@@ -118,6 +118,10 @@ export function normalizeReplyText(text: string): string {
  * ClauseChunker — the *streaming* splitter (pack Phase 8)
  * ======================================================================================
  *
+ * Design and measurement live in `docs/design/voice.md` §6.2 (the four triggers, and the two things
+ * that must never be cut) and `docs/recon/voice-streaming-2026-10-01.md`; the tests that pin this
+ * class are `tests/unit/voice/clause-chunker.test.ts`.
+ *
  * `splitReplyIntoSegments` above splits a reply **after it is complete**; it is the
  * playback planner (ADR-0010) and stays exactly that. A voice turn needs something
  * different: text arrives as model deltas, and the first clause must reach TTS while

@@ -6,7 +6,7 @@
 
 方案 §14.1 画的链路是 `Mic → AEC → NS → AGC → VAD → Wake Word → Speaker Verification → Turn Detection → ASR → 对话 → TTS`。
 **当前实现覆盖 `去直流 → 高通 → （可选）谱减法去噪 → VAD → ASR → 对话 → TTS` 与打断判定**；
-唤醒词、说话人验证、Turn Detection 都不存在（见 §6）。
+唤醒词、说话人验证、Turn Detection 都不存在（见 §7）。
 
 ## 1. 选型与基线（ADR-0007）
 
@@ -308,7 +308,7 @@ F2 修复后该列**不再恒为 0**）：**
 recon §2.3 实测往返延迟：**WASAPI 42.9 ms vs MME 229.6 ms**（同一扫频、同一夹具电平，3 次重复）。
 因此 `voice_edge.calibrate` 的默认设备选择按 `Windows WASAPI > MME > DirectSound > WDM-KS` 排名
 （`HOST_API_PREFERENCE`），现场测试的实时链路也应显式选 WASAPI 设备；MME 的 230 ms 会直接
-吃进 §33 的 P50 < 500 ms 打断目标。注意这仍**没有**端到端对话延迟的实测（§6）。
+吃进 §33 的 P50 < 500 ms 打断目标。注意这仍**没有**端到端对话延迟的实测（§7）。
 
 
 ## 2. 为什么 backchannel（「嗯。」）不能交给 VAD —— 这是 M2 必须自己做的部分
@@ -375,7 +375,7 @@ recon §2.3 实测往返延迟：**WASAPI 42.9 ms vs MME 229.6 ms**（同一扫�
 **噪声下的变化**：`bargeInDecisionMs` 的真值离家是前端调理后的能量门限（§1.1（3）），
 所以噪声底抬高时判据本身也会变严；同一支夹具在 6 dB SNR 下 `bargeInDecisionMs` 变为 **0 ms**、
 `followup-turn` 在 0 dB 档则不再提交 `STARTING`（见 `data/voice/frontend-vad-grid.json`）。
-即：**打断判定在噪声下不是变慢而是变得不可靠**，这是 §6 的未验收项。）
+即：**打断判定在噪声下不是变慢而是变得不可靠**，这是 §7 的未验收项。）
 
 **尚未验收的部分**：以上全部是「判定层」的证据。`scripts/voice-bargein.ts` 的 `caveat` 字段与 ADR-0007 都明确写着：
 **扬声器真正静音的延迟无法离线测量**，需要设备测试（§33 的 P50 < 500 ms 目标因此**尚未验收**）。
@@ -416,7 +416,81 @@ LiveKit 全套导入 3799.6 ms、峰值 RSS 398.4 MB、turn detector 权重 **41
 即每轮多付约 60–90 ms（离线）——相对 §5 的 LLM 首字 1.7–2.3 s 可忽略，但它落在**语音开始延迟**的路径上，
 常驻服务化时应把这个滤波放进流式管道（零相位滤波会带来约一个 hop 的延迟，需要重新测）。
 
-## 6. 未实现 / 未验收（写清楚，别当成已完成）
+## 6. 流式语音输出（pack Phase 8）
+
+> 这一节为 `docs/README.md` §3 更新触发表里提到的「`voice_stream.ts`（切块与流式合成）→ design/voice.md 的流式段」
+> 提供真实落点：在此之前的引用指向一个不存在的节。四段延迟的口径出自
+> [`../benchmarks/v01-baseline.md`](../benchmarks/v01-baseline.md) §3.1，实测数字与逐轮配对的复算命令在
+> [`../recon/voice-streaming-2026-10-01.md`](../recon/voice-streaming-2026-10-01.md)。
+
+### 6.1 链路与代码位置
+
+```text
+ASR final → 模型 token 流 → ClauseChunker 切块 → TTS 队列（逐块）→ 播放时间线 → 浏览器逐块播
+```
+
+| 环节 | 代码 | 要点 |
+|---|---|---|
+| 切块 | `packages/conversation/src/segments.ts` 的 `ClauseChunker` | 与离线分段器 `splitReplyIntoSegments` 同在 `segments.ts`，但职责不同：前者对着**未生成完**的 delta 流，后者对着**已成篇**的回复 |
+| 流式管线 | `services/voice-edge/voice_edge/voice_stream.ts` 的 `SpeechPipeline` | `push()` 不阻塞模型流；`earlyFirstClause` 让第一块在句末标点或 ≥10 字逗号前缀处立刻进 TTS；`onClause` 按块序把音频交给调用方 |
+| 对话入口接线 | `scripts/field-test.ts` 的 `handleVoiceTurn`（`speakStream` / `onClause` 接缝） | 两条页面与 `scripts/voice-turn.ts` 共用这一条路径，不各自实现 |
+| 浏览器播放 | `XIXI_PLAYBACK_JS`（同一模块导出）与 `scripts/serve-chat.ts` 的 NDJSON 路由 | `clause` 事件逐块下发；`turn` 事件只带计数与时间戳、**不带任何 base64 音频**；`end` 事件带段计划与拼接 WAV |
+| 打断 / 应和 | `PlaybackTimeline`、`decideBargeIn`、`decideAssent`、`AssentBank`（同一模块） | 判定在 Node 与浏览器两侧同源；可听停止的**可证伪**证据在 `tests/unit/voice/voice-stream.test.ts` 的 node:vm 用例 |
+
+### 6.2 ClauseChunker 的四条触发条件
+
+1. **句末标点**（`。！？…` 等）——出现即切，且一整串标点只切一次；
+2. **合理逗号 + 最低字数**——逗号只在「已达最大等待字数」时作泄压阀（默认 `minCommaChars` 12），
+   低于该长度不切：切出「好的，」这种碎片只多一次 TTS 往返，对首音没有收益；
+3. **最大等待字符数**——默认 `maxChars` 40；没有标点也必须开口；
+4. **`flush()`**——流结束（或首次早放行）时把剩余文本作为最后一块。
+
+不许切坏的两类：小数点/版本号（`3.14`、`v2.6`）与 URL。实际机制是**标点/字符集合 + 正则跨度**，
+不需要分词器：小数与版本号用 `DOTTED_NUMBER`（可选 `v`/`V`/`第` 前缀 + 数字点串）配合「前一个字符既不是数字也不是点」
+的字符集前缀匹配，URL 用 `(?:https?://|www\.)` 开头的正则，**故意在句末标点与 CJK 处停下**（否则
+「地址是 https://example.com/a，打开就能看到。」会把后半句一并吞掉）。二者被折叠成半开区间
+（`unbreakableSpans`），`isSafeCutIndex` 判断某个切点是否落在区间内部，`retreatInto` 在冲突时把切点
+**退到该区间的起点**——三个纯函数就是可测的判据（`flush(at)` 的请求位置若落在区间内部同样会被退开；
+t5 评审复现过「退一格」仍会切出「版本是v2.」的缺陷，修的就是这条）。
+判据本质是「正则跨度 + 字符集合」，不是「受控词表」：写成词表会误导读者去找一个并不存在的词典文件
+（受控词表在收口判据那边，见 `docs/adr/0012`，与切块是两件事）。
+
+### 6.3 口径：pack 的 1.5 s 是 ④，不是 ③
+
+| | 定义 | 与 1.5 s 目标的关系 |
+|---|---|---|
+| ① | VAD end → ASR final | 两条链路共用（同一段录音、同一次识别） |
+| ② | ASR final → 首个模型 token | 两条链路共用（同一次模型流）。**P50 约 1.7–2.0 s，单独就已超过 1.5 s** |
+| ③ | 首个 token → 首个可听音频 | **归因量**：流式那边是「第一块」，旧链路那边是「整段回复」，两者不是同一个物理量，不能直接比 |
+| ④ | ①+②+③+端点保持 | **承载指标**：pack 说的「说完一句到听见第一个字」只有 ④ 是这个量 |
+
+③ 的地板是合成往返（MiMo TTS 实测：2 字 0.58–1.05 s、13 字 0.97–1.19 s、30 字 1.61–2.02 s），
+④ 还要再叠加 ②。因此「把 ③ 调到 1.5 s 以内」与「把 ④ 调到 1.5 s 以内」是两件事，写结论时必须点名是哪一个。
+
+### 6.4 怎么测、怎么复算
+
+真实调用（花钱，手动/夜间跑）：
+
+```powershell
+node scripts/voice-turn.ts --wav tests/audio-fixtures/direct-question.wav --wav tests/audio-fixtures/followup-turn.wav --wav tests/audio-fixtures/longer-turn.wav --wav tests/audio-fixtures/tv-dialogue.wav --trace --out data/voice/bench/my-batch.txt
+```
+
+`--trace` 蕴含 `--legacy-tts`（同一次运行、同一段回复文本上再整段合成一次），`--out` 把这一批的证据
+（UTF-8、无 BOM，含每条 turn 的 `legacyTtsMs` 与四段 `fourStage`，并在 `latency.flags.wrote` 里回写自己的路径）
+写到磁盘——**整流式与整段两列因此都有落盘产物**。
+
+不花钱的复算（只读产物，判定规则在 `scripts/lib/voice-latency.ts`，单测在 `tests/unit/voice/voice-latency.test.ts`）：
+
+```powershell
+node scripts/voice-turn.ts --compare data/voice/bench/my-batch.txt data/voice/bench/other-batch.txt
+```
+
+输出包含：口径抬头（① ② ③ ④ 的定义与公式，并写明 1.5 s 属于 ④）、每批**逐轮**配对表（`①asr ②ttft ③流式
+③整段 ④流式 ④整段 Δ④`）、每段的 n/P50/P90/极值、以及多批汇总。**结论只能按多批汇总写**：方向统计 +
+幅度区间；单批百分比不是结论（三批独立对照的符号都不一致，见 recon §二的并列表）。空载 `--compare`
+在几秒内跑完，属于离线操作，不进 `npm test`（`npm test` 不含真实调用）。
+
+## 7. 未实现 / 未验收（写清楚，别当成已完成）
 
 - 唤醒词与搭话判定（M2）；`features.wake_word: false`。
 - 说话人验证 / 声纹（M2；`features.speaker_verification: false`）。
@@ -451,8 +525,12 @@ LiveKit 全套导入 3799.6 ms、峰值 RSS 398.4 MB、turn detector 权重 **41
 | `services/voice-edge/voice_edge/segment.py` | §1（实测表）、§1.1（3）（门限）、§5（`loadMs`/`processMs`、前端成本、帧长） |
 | `services/voice-edge/voice_edge/loopback.py` | §3（Python 路径、判据与实测结论） |
 | `scripts/verify-voice-noise.ts` | §1.1（6）（边界表、失败规则）；`docs/testing.md` 的脚本表 |
-| `scripts/voice-turn.ts` | §3（只上传语音段）、§5（分段耗时字段与 e2e 公式） |
+| `scripts/voice-turn.ts` | §3（只上传语音段）、§5（分段耗时字段与 e2e 公式）、§6（`--out` / `--compare` 与四段口径） |
+| `scripts/lib/voice-latency.ts`（配对对照的判定规则） | §6.3（③ 与 ④ 的分工）、§6.4（复算命令与「单批不是结论」） |
+| `tests/unit/voice/voice-latency.test.ts` | §6.4（改了输出格式时同步说明） |
+| `packages/conversation/src/segments.ts` 的 `ClauseChunker` | §6.2（触发条件与不许切坏的两类）、ADR-0010（离线分段器） |
+| `services/voice-edge/voice_edge/voice_stream.ts` 的 `SpeechPipeline` / `PlaybackTimeline` / `XIXI_PLAYBACK_JS` | §6.1（链路与代码位置）、§6.2（早放行） |
 | `scripts/voice-bargein.ts` | §4（判定延迟、截断证据、未验收项） |
 | `scripts/serve-chat.ts` 的 `/api/voice` 或前端采集参数 | §3（浏览器路径、AEC/NS/AGC、落盘文件） |
-| 新增唤醒词 / 说话人验证 / 常驻语音服务 | §2（M2 的结论是否仍成立）、§6（未实现清单） |
+| 新增唤醒词 / 说话人验证 / 常驻语音服务 | §2（M2 的结论是否仍成立）、§7（未实现清单） |
 | 换 VAD 框架或调 `stop_secs`/`min_volume` | §1、§2，并更新 [recon/pipecat-spike-2026-09-29.md](../recon/pipecat-spike-2026-09-29.md) 的复测记录 |
