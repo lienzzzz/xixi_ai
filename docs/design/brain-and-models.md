@@ -1,6 +1,6 @@
 # 大脑与模型：`BrainAdapter`、MiMo 直连、DSH Harness
 
-> 最后更新：2026-09-30
+> 最后更新：2026-10-03（第五轮收口：新增 §5b「心情怎么演化、怎么进提示词」与 §8 的三条「没有」）
 > 权威来源：`packages/brain-adapter/src/{types,mimo,dsh,tools,errors,scripted,fake}.ts`、`packages/model-adapters/src/{mimo,weather,errors}.ts`、`apps/brain-dsh/src/transport.ts`、`apps/brain-dsh/profile/cordis.patch.yml`、`plugins/xixi-tools/index.js`、`scripts/verify-structured-output.ts`、[recon/mimo-api-probe-2026-09-29.md](../recon/mimo-api-probe-2026-09-29.md)、ADR-0002/0005/0008、[progress.md](../progress.md) §2.3/§2.6/§2.10/§2.11
 > 若与代码不一致，以代码为准，并请立即修正本文件
 
@@ -183,6 +183,42 @@ resume 的两个硬约束（相同 cwd、相同 profile）在 `CliDshTransport` 
 - `tool_choice` 在 `MimoClient.#body` 里被硬编码为 `'auto'`：实测其它取值（`required`/具名/`none`）全被静默忽略
   （recon §3），所以**不能把「必须调用工具」当硬门禁**，只能提示词驱动 + 自行校验 `tool_calls`。
 
+## 5b. 心情怎么演化、怎么进提示词（第五轮 t4）
+
+**这一层回答「她此刻是什么口气」，不回答「她是谁」**——人格三层（基线 / 学习偏移 / 当天覆盖）管后者，
+心情是短期的、自己回落的，**两项都不写进 `self_profile` 系列表**。
+
+- **状态与演化**：两个**有界**标量 `valence` / `energy`（都落 `[0,1]`，唯一写入路径是 `packages/domain/src/mood.ts`
+  的 `clampMood`）+ 8 条**封闭**信号（被夸 / 被嫌 / 被明确叫停、一次主动开口被回应与否、家里有人回来、
+  连续 6 小时无人、按小时回落与时段牵引）。信号全部从**原始事件**算出来（`conversation.turn` /
+  `proactive.decision` / `presence.changed`），不读模型输出、不存用户原话进状态（铁律 5），
+  **也不需要新的事件类型**（契约枚举是已发布的，铁律 10）。
+- **注入方式与分层**：模型看到的只有 `moodProse()` 渲染的**散文**（状态描述 + 语气指引），
+  拼进 `system` 的一个 `mood` 段；`valence` / `energy` / `updatedAt` 这些**数值只进 `AssembledPrompt.sections[].debug`**
+  （给面板与评审核对），**不拼进 `system` / `user`**（pack §23：不要把情绪数值暴露给 prompt）。
+  不传 `mood` 时整段不出现，提示词与加这一层之前**逐字相同**（旧调用方不必知道它存在）。
+  散文末尾**恒定**带一句边界：「这只是你此刻的情绪，只影响你说话的样子：不要因此说出你没做过的事，
+  也不要描述身体上的感觉。」——这就是「不能编造『我今天出去买菜了』」的可执行版本。
+- **与人格的量级关系（可核对，不是靠自觉）**：心情**乘**在人格算出来的量上——
+  对话窗口的缩放最多 **±6%**（`MOOD_TONE_SPAN`，人格那侧是 0.5–1.5 倍即 ±50%），
+  主动性软偏移最多 **±0.03**（`MOOD_PROACTIVITY_NUDGE`，刻意取 §7.4 隐式反馈的最小步长，所以心情永远盖不过
+  「父亲说了一句」）。
+- **不越硬底线**：`ProactiveGateContext` 里**没有**心情字段，硬门禁（静默时段 / 额度 / DND / 隐私与同意 /
+  场景与音频路径）在评分之前就返回——「心情不好就不回话」在这套设计里不是被禁止，而是**没有入口**
+  （独立复算：同一输入在心情高低两侧得同一个 `reasonCode`）。
+- **可查看 / 可复位**：`XixiStore.mood()` / `moodHistory()` / `moodSnapshot()` / `resetMood(reason)` / `moodSchemaVersion()`；
+  复位留一行 `reset=true` 的历史（不是删行）。
+- **尚未实现（不得写成已实现）**：① **控制台没有心情面板**；② **心情没有接进主动引擎的软评分**
+  （`moodProactivityNudge()` 在产线里**没有消费点**，唯一真实去处是对话窗口的 ±6%）；
+  ③ **心情没有写进 `conversation.decision`**（那要动已发布契约的 `additionalProperties: false` payload）。
+- **两条已知问题（第五轮 t7 交回，只记录）**：`store.resetMood(reason, at)` 若收到 `Z` 写法会让 `moodHistory()`
+  的字符串序错位（生产路径走 `toOffsetIso`、今天不受影响）；`moodBias` 是**相加后夹**而不是平均，
+  所以 `(1,0)` 与 `(0,1)` 都读成中性，而代码注释写着「平均」——注释与公式二者取一改。
+
+**口径、证法与逐项数字**：[`../adr/0013`](../adr/0013-bounded-mood-state.md)、
+[`../verification/t7-round5-independent-verification-2026-10-03.md`](../verification/t7-round5-independent-verification-2026-10-03.md) §2.4、
+[`../progress.md`](../progress.md) §2.20 ④。
+
 ## 6. 结构化输出：`chatJson` 策略与「为什么必须本地校验」
 
 `MimoClient.chatJson`（`packages/model-adapters/src/mimo.ts`）：
@@ -277,6 +313,8 @@ FatherModel/RelationshipModel/FutureHooks 恢复（这些领域对象尚不存�
 - **`SILENCE_ARTIFACT_ONLY` 不存在**：那是评审提出的候选原因码（给「整轮只剩制品 → 沉默」一个可区分的原因）——
   实际落地的名字是 **`ARTIFACT_ONLY_REPLY`**（`ConversationTurn.silenceReason`，与 `MODEL_SILENCE` 并列），
   候选名从来没有进过代码。
+- **心情（§5b）的三条「没有」**：没有控制台面板；没有接进主动引擎的软评分（`moodProactivityNudge()` 在产线里没有消费点）；
+  没有写进 `conversation.decision`（那要动已发布契约）。两条已知问题（`resetMood` 的 `Z` 写法、`moodBias` 注释与公式不符）见 §5b 末尾。
 - `MimoClient.#post` 会把「缺密钥」误标成 `NETWORK`（§7 的 KNOWN GAP）。
 - `brain-adapter` 无 type check（无 `tsc --noEmit`），类型错误只在运行时暴露（progress §6）。
 

@@ -1,6 +1,6 @@
 # 对话层：FSM、提示词组装与沉默
 
-> 最后更新：2026-09-30
+> 最后更新：2026-10-03（第五轮收口：§6 的「音频出口」改成流式切块现状 + 新增「未完话题收口判据」行，§7 同步）
 > 权威来源：`packages/conversation/src/{fsm,prompt,engine,personality,segments,proactive}.ts`、`packages/brain-adapter/src/{types,tools,mimo}.ts`、`packages/contracts/schemas/events/conversation.decision.v1.json`、`packages/domain/src/store.ts`
 > 若与代码不一致，以代码为准，并请立即修正本文件
 
@@ -424,7 +424,8 @@ decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值�
 |---|---|
 | 唤醒词与搭话判定（§13 完整版） | §13 的 **POC 判定规则已实现**（`shouldAcceptTurn`，见 §1）；**唤醒词检测本身无代码**——`addressed` 由 UI 按钮/语料给出（M2） |
 | 主动开口（§15） | **两层，自 2026-10-01 起（[ADR-0011](../adr/0011-proactive-decision-ownership.md)）**：① **硬底线由程序判定，模型不能加宽**——静默时段 / 当日与 6 小时**次数**额度（次数是当前唯一的费用代理；**金额级费用上限尚未实现**）/ DND / 隐私与同意 / 场景与音频路径 / 同一候选重复 / 触发源关闭；② 底线之上**由模型读空气决定说不说**，确定性那一半只**提议**：社会预算分（话题质量分 / 相关性 / 新鲜度 / 读空气 / 互动度 / 基础主动性 − 打扰代价（冷却）/ 话题重复惩罚 / 未回应惩罚）+ 一个 `recommendation`（`speak` / `hold`）。**冷却、话题重复、未回应都是「打分」而不是一票否决**：强候选可以紧接着弱候选过线，热聊中的接话不受冷却限制（pack §14.3）。每次判定落一条 `proactive.decision`（`speak` / `reason_code` / 分数 / 阈值 / 每个信号 / `primary_signal` / 程序渲染的中文 `basis` / `decided_by`；模型拒绝时只从固定白名单取一个 code），**不存模型推理**（铁律 5）；投递「先记后播」，崩溃不重发。候选生成与两个**按需**调用方（控制台演练、常驻考虑循环 `ProactiveLoop`——控制台与试用页各一个实例，默认关闭）已落地；**仍缺**：无人值守的常驻守护进程（页面进程一退就停），以及模型侧候选评估（三个适配器的 `evaluateProactiveCandidate` 仍抛 `NOT_IMPLEMENTED(M5)`；「读空气」目前发生在调用方的模型路径上）。核对：`git grep -n "\.consider(" -- scripts packages`、`git grep -n "new ProactiveLoop" -- scripts` |
-| 多段回复（一轮说 1~8 段） | **引擎侧已落地（t41）**：`packages/conversation/src/segments.ts` 的确定性分段器 + `RespondHooks.onSegment` 逐段播放 + §5 的 ⑨′ 步，`config` 的 `reply` 段已被读取；契约与可测条款见 §7 与 [ADR-0010](../adr/0010-multi-segment-replies.md)（**上限 3 → 8、容量 180 → 480 字**，见其修订记录）。**已接的**：`scripts/chat.ts`（订正 2026-09-30）传 `onSegment`，终端里逐段打印、段间真等 `gapMs`。**未接的**：音频出口——试用页 `scripts/serve-chat.ts` 与 `scripts/voice-turn.ts` 仍只传 `onTextChunk` 并用 `synthesize(turn.text)` 一次合成整段，所以扬声器里目前仍是单段合成（核对：`git grep -n "onSegment" -- scripts packages`，生产入口只命中 `scripts/chat.ts`） |
+| 多段回复（一轮说 1~8 段） | **引擎侧已落地（t41）**：`packages/conversation/src/segments.ts` 的确定性分段器 + `RespondHooks.onSegment` 逐段播放 + §5 的 ⑨′ 步，`config` 的 `reply` 段已被读取；契约与可测条款见 §7 与 [ADR-0010](../adr/0010-multi-segment-replies.md)（**上限 3 → 8、容量 180 → 480 字**，见其修订记录）。**已接的**：`scripts/chat.ts`（订正 2026-09-30）传 `onSegment`，终端里逐段打印、段间真等 `gapMs`；**语音出口自第五轮起走另一条路**——按句读**流式切块并逐块合成**（`onClause` 接缝，见 [`design/voice.md`](voice.md) §6 与 `progress.md` §2.20 ③），**不是**「等整段合成完再一次播」。**未接的**：`scripts/voice-turn.ts` 是**测量入口**，它仍用整段 `synthesize(turn.text)` 作对照列（`--legacy-tts`）。核对：`git grep -n "onSegment" -- scripts packages`、`git grep -n "onClause" -- scripts` |
+| 未完话题的收口判据（§10，第五轮 t2 升级） | **已落地**：被主动问过的那件事，只有回答里**提到那件事的对象词**（话题里没有对象词时用有辨识度的动作词）才算回答；对不上的轮次进 `ReconcileResult.ignored`（**不写事件、不改状态**，话题留在 `offered`，窗口内还能再问一次）。判据的单位是**词 / 对象**而不是字——第四轮的字级判据会被「共享一个内容字」的无关句误收口（13 句探针里两个靶子各 1/13），**第五轮升级后实测 0/91**、真答案召回 **15/15**（把升级前的引擎换回来跑同一路径 = **9/91**，见 `progress.md` §2.20 ②）。判据、词表边界与取舍见 [ADR-0012](../adr/0012-open-thread-closure-criterion.md)。核对：`git grep -n "isAnswerAboutThread" -- packages`、`node --test tests/unit/core/topic-engine.test.ts` |
 | 制品清洗（工具标记 / 英文推理） | **程序层已落地（t7）**：`sanitizeSpokenReply()` 在进 TTS / 日志 / 工作记忆前剔除 `<tool_call>…` 与外文自我推理，整轮只剩制品 → 沉默（原因码 `ARTIFACT_ONLY_REPLY`，与 `MODEL_SILENCE` 可区分）；剔除量 > 0 时发 `REPLY_HYGIENE` 通知（见 §3 的第二条闸门）。**订阅覆盖（逐入口）**：试用页与控制台已订阅 `onNotice` 并显示沉默原因；文字 CLI 与语音轮次未订阅（见 `docs/progress.md` §4） |
 | 长期记忆与关系（§10/§18） | 工作记忆只有 `recentTurns(limit 8)`；长期记忆属 M4 |
 | 回溯打断时的语义截断 | 只有 VAD 判定层面的离线测量（`scripts/voice-bargein.ts`） |
@@ -435,10 +436,13 @@ decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值�
 
 **引擎侧已实现（t41）**：`packages/conversation/src/segments.ts` 的确定性分段器、`RespondHooks.onSegment`
 逐段播放、§5 的 ⑨′ 步与 M1–M9 的断言（`tests/unit/core/reply-segments.test.ts`、
-`tests/integration/conversation-engine.test.ts`）。**出口侧只接了文本这一路**（订正 2026-09-30）：`scripts/chat.ts`
-已用 `onSegment` 逐段打印、段间真等 `gapMs`；**音频出口还没接线**——试用页 `scripts/serve-chat.ts` 与
-`scripts/voice-turn.ts` 仍把整段交给 `onTextChunk` 一次合成，所以真机扬声器里的「分段说话」要等它们改用
-`onSegment` 才会出现（见 §6；核对：`git grep -n "onSegment" -- scripts packages`）。
+`tests/integration/conversation-engine.test.ts`）。**出口侧两条路都在**（订正 2026-10-03）：`scripts/chat.ts`
+用 `onSegment` 逐段打印、段间真等 `gapMs`；**音频出口自第五轮起走流式切块**——模型 token 流经 `ClauseChunker`
+按句读切块、逐块合成、由 `onClause` 接缝交给两条页面逐块播（见 [`design/voice.md`](voice.md) §6 与
+`progress.md` §2.20 ③）。**注意措辞**：这条接线**没有端到端听感验收**，且有一个已知未覆盖缺陷（B2：失败块之后的后继块被憋到 `flush()`），
+所以只能写「接线成立 + B1 已修 + B2 是已知未覆盖缺陷」。`scripts/voice-turn.ts` 是**测量入口**，
+它仍用整段 `synthesize(turn.text)` 作对照列（`--legacy-tts`）。核对：`git grep -n "onSegment" -- scripts packages`、
+`git grep -n "onClause" -- scripts`。
 下表同时是契约与现状判据，按 [ADR-0010](../adr/0010-multi-segment-replies.md) 实现。
 
 语义：一次用户轮次最多 **8 段**依次说出（段间留自然停顿），但**仍然只是「一轮」**——

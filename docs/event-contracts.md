@@ -1,6 +1,6 @@
 # 事件契约（`xixi.event.v1`）
 
-> 最后更新：2026-09-30
+> 最后更新：2026-10-03（第五轮收口：§1 的事件类型计数改成**六个**，§5 补齐 `conversation.decision` / `proactive.decision` / `open_thread.changed` 三张 payload 表）
 > 权威来源：[`packages/contracts`](../packages/contracts)（schema 文件 + `src/*.ts`）；若与代码不一致，以代码为准并立即修正本文
 > 本文描述**已经实现并被测试覆盖**的规则，不是设计意图。
 > 上游依据：《方案》§23.2（统一 Envelope）、§19.1（Actor）、§47.3（Schema Version）、§55（沉默是一等输出）。
@@ -17,7 +17,7 @@ TS 类型在 [`src/envelope.ts`](../packages/contracts/src/envelope.ts)。
 | `schema` | string | **常量** `"xixi.event.v1"`（`EVENT_SCHEMA`）。不是自由文本 |
 | `schema_version` | number | **常量** `1`（`SCHEMA_VERSION`）；语义见 §3 |
 | `event_id` | string | 正则 `^evt_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
-| `event_type` | string | 必须是注册表里的三个类型之一（enum 与注册表有漂移测试） |
+| `event_type` | string | 必须是注册表里的**六个**类型之一（`presence.changed` / `conversation.turn` / `conversation.decision` / `proactive.decision` / `open_thread.changed` / `system.health`；enum 与注册表有漂移测试）。**新增类型不必升 `SCHEMA_VERSION`**——信封仍是 `xixi.event.v1`，每个 payload 各自带版本 |
 | `timestamp` | string | 正则 `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?[+-]\d{2}:\d{2}$`，见 §4 |
 | `source` | string | 非空、≤120 字符。生产者的名字，如 `brain-dsh` / `simulator.poc` |
 | `room` | string \| null | ≤120 字符；未知或不属于任何房间时为 `null` |
@@ -101,6 +101,9 @@ schema 文件在 `packages/contracts/schemas/events/`。
 | `event_type` | payload 文件 | 必填 | 取值约束 |
 |---|---|---|---|
 | `presence.changed` | `presence.changed.v1.json` | `present`, `source_detail` | `present: boolean`；`source_detail: string \| null`（≤200）。M0 只用于契约验证，摄像头属 M6 |
+| `conversation.decision` | `conversation.decision.v1.json` | `session_id`, `turn_index`, `accepted`, `reason`, `action`, `fsm_state` | `accepted: boolean`；`reason` ∈ `ACCEPTED_WAKE_OR_DIRECT \| ACCEPTED_CONTINUATION \| REJECTED_NOT_ADDRESSED \| REJECTED_SUSPENDED`；`fsm_state` ∈ `IDLE \| ENGAGING \| ACTIVE \| LINGERING \| SUSPENDED`；可选 `acceptance_score`（**当前是 `accepted` 的 0/1 镜像**，不是校准分数）、`linger_ms`、`silence_tolerance`。**不含本轮用户原话、不含模型推理** |
+| `proactive.decision` | `proactive.decision.v1.json` | `candidate_id`, `trigger`, `speak`, `reason_code` | 一次主动开口（或被拦）的判定记录：`reason_code` 是自由 string（新码无需迁移）、`score` / `threshold` / 9 个信号 / `basis`（程序渲染的中文依据，≤12 条）/ `decided_by` / `model_reason_code` / `model_consulted` 全部可选；**不含用户原话、不含模型推理**（新增字段一律可选，旧事件仍必须校验通过） |
+| `open_thread.changed` | `open_thread.changed.v1.json` | `thread_id`, `status`, `summary` | `thread_id` 正则 `^thread_[a-z0-9]{4,32}$`；`status` ∈ `candidate \| offered \| engaged \| resolved \| snoozed \| exhausted`；可选 `previous_status` / `subject` / `follow_after` / `expire_at` / `follow_up_hint` / `importance` / `attempts` / `source_event_id` / `note`。这是**加**事件类型：`schema_version` 仍是 1，旧事件照旧校验 |
 | `conversation.turn` | `conversation.turn.v1.json` | `session_id`, `turn_index`, `role`, `action`, `text` | `session_id` 正则 `^sess_<uuid>$`；`turn_index: integer ≥ 0`；`role: "user" \| "assistant"`；`action: SPEAK \| BACKCHANNEL \| WAIT \| SILENCE \| TOOL`；`text: string \| null`（≤8000）；可选 `tool_name: string \| null`（≤120） |
 | `system.health` | `system.health.v1.json` | `service`, `status`, `detail` | `service`: 1–120 字符；`status: "ok" \| "degraded" \| "down"`；`detail: string \| null`（≤500） |
 
@@ -185,7 +188,7 @@ payload_json TEXT NOT NULL                   -- payload 原样序列化
 | 改动 | 必须同步 |
 |---|---|
 | 新增/修改 `packages/contracts/schemas/**` | 本文 §1~§4 的字段表、[`design/domain-model.md`](design/domain-model.md) 的事件小节，并把注册表与新 schema 一起更新（`src/events.ts`） |
-| 新增事件类型 | 本文 §1 的「三个类型」计数与类型清单、信封 enum、`registry…stay in sync` 漂移测试、`design/domain-model.md` |
+| 新增事件类型 | 本文 §1 的**类型计数**（现在写的是六个）与 §5 的类型清单、信封 enum、`registry…stay in sync` 漂移测试、`design/domain-model.md`（**不必升 `SCHEMA_VERSION`**） |
 | 修改 `SCHEMA_VERSION` | 本文 §3、[`design/domain-model.md`](design/domain-model.md)，并新增版本化 schema 文件（**绝不原地改已发布文件**） |
 | 修改 `events` 表结构 | 本文 §7（存储与查询）、新迁移文件、[`design/domain-model.md`](design/domain-model.md) |
 | 修改 `appendEvent` / `readEvents` / `recentTurns` 行为 | 本文 §7、[`design/domain-model.md`](design/domain-model.md) |

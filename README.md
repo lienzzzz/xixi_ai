@@ -6,11 +6,16 @@
 **不可替换**的是长期状态与行为策略（WorldState、Memory、FutureHook、SelfModel、RelationshipModel、
 RoutineModel、Proactive policy、Conversation state）。
 
-当前进度（2026-10-01）：**M0 文本 Harness 已验收；噪声鲁棒语音前端、摄像头在场检测（M6）、
-现场测试控制台、主动开口（主动性 V2：硬底线 + 模型读空气）与多段回复均已落地并真机验证**；
+当前进度（2026-10-03，第五轮收口）：**M0 文本 Harness 已验收；噪声鲁棒语音前端、摄像头在场检测（M6）、
+现场测试控制台、主动开口（主动性 V2：硬底线 + 模型读空气）、多段回复与 pack Phase 8 的流式语音输出均已落地**；
 「真人感」改造（提示词改成「身份与说话方式」、回复容量 180 → 480 字、制品清洗）已落地并有**同口径的前后对比**
 （见 [`docs/benchmarks/realism-metrics.md`](docs/benchmarks/realism-metrics.md)）；
-记忆（M4）、唤醒词（M2）、模型驱动的人格学习（M3）与完整 M5 尚未开始。
+第五轮新增**有界的心情状态**（短期的情绪，权重远小于人格：语气 ±6%、主动性软偏移 ±0.03、硬底线拿不到它，
+见 [`docs/adr/0013`](docs/adr/0013-bounded-mood-state.md)）；
+**流式语音的首音目标（pack 的 ≤1.5 秒）没有达标，而且本机栈下不可达**（8 批 n=32 实测 ④ / 1500 ms = **[3.14, 7.33] 倍**、池化 3.73 倍、**没有一批接近**；
+这是**目标不可达**，不是实现缺陷，见 [`docs/progress.md`](docs/progress.md) §2.20 ③）；
+**长期记忆与人格学习（M3/M4）已由 pack Phase 4 落地**（逐入口覆盖与权重口径见 [`docs/progress.md`](docs/progress.md) §2.19），
+唤醒词（M2）与完整 M5（事件回放）尚未开始。
 
 > 完整设计与实施方案见 [`xixi_ai_companion_project_plan.md`](xixi_ai_companion_project_plan.md)；
 > 编码约定见 [`AGENTS.md`](AGENTS.md)；**接手顺序**见 [`docs/README.md`](docs/README.md)（文档地图）
@@ -69,8 +74,10 @@ npm run eval:conversation:judge            # 对话质量评测（含评审模�
 | 人格基线持久化 | 重启只补缺不覆盖（§33「重启后持久人格恢复 100%」） |
 | **噪声鲁棒语音前端** | 去直流 + 120 Hz 零相位高通 + 噪声底自适应门限；`npm run voice:noise`：**SNR ≥ 3 dB 时 4 条夹具全部检出、平均字符相似度 0.805** |
 | **摄像头在场检测（M6）** | `node scripts/verify-camera-presence.ts --seconds 20`：本地抓帧 → 帧差动 + YuNet → `presence.changed` + world_state 投影；真机 640×480 约 39 fps |
-| **多段回复（ADR-0010）** | `segments.ts` 纯函数分段器（**最多 8 段、块长 ≤60 字 → 容量 480 字**，段间 250–1200ms 默认 450；容量内每段 ≤60，`>8` 组时尾段合并并置 `mergedOverflow`，**该段可超 60**——反例 279 字 → 8 段、最长 62）；文字与播放计划真按段，**TTS 仍整条合成** |
-| **主动开口（ADR-0009 + ADR-0011）** | **两层**：硬底线（静默时段 / 6h 与当日**次数**额度 / DND / 隐私与同意 / 场景与音频路径）由程序判定，模型不能绕过；底线之上**由模型读空气决定说不说**，确定性社会预算只给候选与建议（`BELOW_RECOMMENDATION` 是建议不是否决）+ `proactive.decision` 审计 + 先记后播。**金额级费用上限尚未实现**（次数额度是当前的费用代理） |
+| **多段回复（ADR-0010）** | `segments.ts` 纯函数分段器（**最多 8 段、块长 ≤60 字 → 容量 480 字**，段间 250–1200ms 默认 450；容量内每段 ≤60，`>8` 组时尾段合并并置 `mergedOverflow`，**该段可超 60**——反例 279 字 → 8 段、最长 62）；文字与播放计划真按段；**语音出口另有一条流式切块的路**（见下面一行） |
+| **流式语音输出（pack Phase 8）** | **接线成立 + B1 已修 + B2 是已知未覆盖缺陷**（**不得写成「流式逐块播放已验收」**）：模型 token 流 → `ClauseChunker` 按句读切块 → TTS 队列逐块合成 → 浏览器逐块播（`onClause` 接缝，两条页面共用 `scripts/field-test.ts` 的路径）。实测（8 批 n=32）：**首音目标 ≤1.5 s 未达标且本机不可达**——④ / 1500 ms 逐批 **[3.14, 7.33] 倍**、池化 3.73 倍、没有一批接近；④ 的下界由 ② 模型首 token（逐批 P50 903.5–8162.5 ms）与 ③ 首段合成（逐批 P50 1393–2582.5 ms）挡住。复算：`node scripts/voice-turn.ts --compare <产物…>`（不调 API）。口径与切块规则见 [`docs/design/voice.md`](docs/design/voice.md) §6 |
+| **有界的心情状态（第五轮 t4）** | 两个**有界**标量（valence / energy）+ 8 条封闭信号，由原始事件演化、按小时回落；注入提示词的是**散文**（数值只进 `sections[].debug`）；影响轻微（语气 ±6%、主动性软偏移 ±0.03）且**硬底线拿不到它**；可查看 / 可复位（复位留一行 `reset=true`）。独立复算：0 越界、语气 ∈[0.94,1.06]、软偏移 ∈[±0.03]、门禁同码、散文无数字与经历句式。见 [`docs/adr/0013`](docs/adr/0013-bounded-mood-state.md) |
+| **主动开口（ADR-0009 + ADR-0011）** | **两层**：硬底线（静默时段 / 6h 与当日**次数**额度 / DND / 隐私与同意 / 场景与音频路径）由程序判定，模型不能绕过；底线之上**由模型读空气决定说不说**，确定性社会预算只给候选与建议（`BELOW_RECOMMENDATION` 是建议不是否决）+ `proactive.decision` 审计 + 先记后播。**金额级费用上限尚未实现**（次数额度是当前的费用代理）。**口径已定＝显著降频**（不做「连续两次没回应后 = 0」的硬停，[`docs/adr/0011`](docs/adr/0011-proactive-decision-ownership.md) 决定 2 的补充）；多日验收 `node scripts/eval-proactive-timeline.ts`（三天、M1–M6 进退出码） |
 | **不编造可核查的事实** | 提示词 `HARD_POLICY` 的「可核查的具体事实」那条（关键词锚点，不再按编号引用）+ 引擎层闸门（无工具却出现具体数值就扣住并改说修复句）；台账核对「含具体值的轮次都伴随工具调用」 |
 | **制品清洗（`REPLY_HYGIENE`）** | 工具调用标记与外文推理在进 TTS / 日志 / 工作记忆前被程序剔除（`sanitizeSpokenReply`）；整轮只剩制品 → 沉默，并写原因码 **`ARTIFACT_ONLY_REPLY`**（与「模型自己选择沉默」`MODEL_SILENCE` 可区分）。`REPLY_HYGIENE` / `UNBACKED_FACT_CLAIM` 两类 `onNotice` 审计通知已被**试用页（`serve-chat.ts`）与现场测试控制台（`field-test.ts`）**订阅并在页面显示；文字 CLI（`chat.ts`）与语音轮次（`voice-turn.ts`）未订阅（逐入口清单见 `docs/progress.md` §4） |
 | **工具链覆盖（逐入口）** | `scripts/field-test.ts` 的 `buildToolChain()` 是唯一出口（注册表默认四个内置工具：时间 / 天气 / 新闻桩 / 提醒桩——提醒桩是只写内存 sink 的 `risk: write`；同一权限策略、同一四轮上限、可见性再由 `listForAgent(scope)` 过滤）。四个 live 入口——文字 CLI `scripts/chat.ts`、设备自检 `scripts/voice-device-check.ts`、真人感评测 `scripts/eval-realism.ts`、对话评测 `scripts/eval-conversation.ts`——已改用它（此前只有控制台走这条链）；离线自证是每个入口的 `--print-wiring`（打印 `{entry,language,maxToolRounds,tools,permissions}` 后退出，不调模型、不建库）。设备自检没有离线端到端证据（需真实 WAV + 硬件 + 真实 ASR），见 `docs/progress.md` §2.10 |
@@ -172,16 +179,26 @@ docs/                     README（地图）、architecture、event-contracts、
 
 ## 明确的未完成项
 
-- **M2 唤醒词 / M3 模型驱动的人格学习 / M4 记忆 / 完整 M5**（候选生成器与常驻守护进程）均未开始，按 §45 顺序推进。
+- **M2 唤醒词 / 完整 M5**（事件回放、候选生成器与常驻守护进程）均未开始，按 §45 顺序推进
+  （**M4 记忆与 M3 的推断式人格学习已由 pack Phase 4 落地**，见 `docs/progress.md` §2.19）。
 - 没有 `tsc --noEmit` 类型检查门；类型错误只会在运行时暴露。
 - `tests/scenarios/` 有语料（`corpus.ts`）但没有 `*.test.ts`；`tests/replay/` 仍为空（§32/§22.3 属 M5）。
 - **真人实测项（只有本机能做）**：真人站在镜头前能否被检出（`--require-transition`）、真人对着麦克风说话的实际识别率。
 - 现场验收的**扬声器**项在修正口径后判 FAIL：能量比 2.41 dB < 10 dB，测的是「笔记本扬声器→笔记本麦克风」的**回采余量**，
   **不代表用户对麦克风说话能否被听到**（口径说明见 [`docs/recon/field-test-report-2026-09-30.md`](docs/recon/field-test-report-2026-09-30.md) 顶部）。
 - **主动性 V2 的六条缺陷已修、并已独立复验**（第三轮 t1 修复 → t2 单独复验 → t3 评审 pass）：内容口径 generic 话题 **18.2%**（目标 ≤20%）、
-  热聊接话 8 次；**但 pack 更严的「连续两次没回应后继续主动 = 0」仍不成立**——实测是「显著降频」（被忽视的那一天在连续 ≥2 条未回应后仍开口 2 次），
-  口径**已定：显著降频**、不做「= 0」硬停（ADR-0011 §决定 2 的补充，2026-10-01 第五轮 t1 拍定）；多日验收见 `node scripts/eval-proactive-timeline.ts`。判定表与可重跑命令见
-  [`docs/verification/t2-timeline-independent-verification-2026-10-01.md`](docs/verification/t2-timeline-independent-verification-2026-10-01.md)。
+  热聊接话 8 次；**口径已定＝显著降频**（不做「= 0」硬停，[`docs/adr/0011`](docs/adr/0011-proactive-decision-ownership.md) 决定 2 的补充 + 第五轮 t1 拍定），
+  **而 pack 更严的「连续两次没回应后继续主动 = 0」仍不成立**（这是事实，不是待决问题）；多日验收见 `node scripts/eval-proactive-timeline.ts`。判定表与可重跑命令见
+  [`docs/verification/t2-timeline-independent-verification-2026-10-01.md`](docs/verification/t2-timeline-independent-verification-2026-10-01.md)（第三轮）与
+  [`docs/verification/t7-round5-independent-verification-2026-10-03.md`](docs/verification/t7-round5-independent-verification-2026-10-03.md) §2.1（第五轮自驱三天 12/12/12 与 5/5/5、惩罚置 0 则 11/11/11 = 降 54.5%）。
+- **流式语音的首音目标（pack ≤1.5 秒）未达标**：8 批 n=32 的 ④ / 1500 ms = **[3.14, 7.33] 倍**（池化 3.73 倍），**没有一批接近**；
+  下界由 ② 模型首 token 与 ③ 合成往返挡住 —— **目标不可达，不是实现缺陷**。同批对照（流式 vs 整段）方向**不一致**（3 快 5 慢、−16.1% 到 +27.3%），
+  **不许写「方向多数为正」也不许拿单批百分比当结论**；`data/voice/bench/` 下较早产物的 `note` 是生成时的旧文本，**结论以 `--compare` 现算为准**。
+- **流式逐块播放没有端到端验收**：接线成立、B1 已修（每块只发一次），**B2 是已知未覆盖缺陷**（失败块之后的后继块被憋到 `flush()` 才发）；
+  只能写「接线成立 + B1 已修 + B2 是已知未覆盖缺陷」。
+- **有界心情的两条已知问题**（第五轮 t7 交回，本轮只记录）：`store.resetMood` 收到 `Z` 写法会让 `moodHistory()` 的字符串序错位
+  （生产路径走 `toOffsetIso`、今天不受影响）；`moodBias` 是相加后夹而不是平均，而 `mood.ts` 的注释写着「平均」。
+  另有两条「尚未实现」：**控制台没有心情面板**、**心情没有接进主动引擎的软评分**（`moodProactivityNudge()` 在产线里没有消费点）。
 - **`onNotice` 已被两个产线入口消费**：`serve-chat.ts`（试用页）与 `field-test.ts`（现场测试控制台）订阅并显示
   `REPLY_HYGIENE` / `UNBACKED_FACT_CLAIM` 与「沉默原因」（`ARTIFACT_ONLY_REPLY` vs `MODEL_SILENCE`）；
   **文字 CLI（`chat.ts`）与语音轮次（`voice-turn.ts`）仍未订阅**。

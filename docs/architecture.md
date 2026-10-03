@@ -1,6 +1,6 @@
 # 架构（当前实现）
 
-> 最后更新：2026-09-30
+> 最后更新：2026-10-03（第五轮收口：新增迁移 005 与 `mood_state` / `mood_history` 两张表）
 > 权威来源：`packages/**`、`apps/brain-dsh/**`、`services/{voice-edge,perception-edge}/**`、`scripts/**`、`tests/**`；`docs/progress.md`（结论与数字）、`docs/recon/*`（外部系统实测）、`docs/adr/0001`~`0010`（**不写死区间**：以 `ls docs/adr` 的实际内容为准）
 > 若与代码不一致，以代码为准，并请立即修正本文件
 
@@ -185,8 +185,9 @@ flowchart LR
 唯一写库的包是 `packages/domain`（`node:sqlite`，`PRAGMA journal_mode=WAL`、`foreign_keys=ON`、`busy_timeout=5000`）。
 迁移文件是 [`001_initial.sql`](../packages/domain/src/migrations/001_initial.sql)、
 [`002_world_state.sql`](../packages/domain/src/migrations/002_world_state.sql)、
-[`003_open_threads.sql`](../packages/domain/src/migrations/003_open_threads.sql) 与
-[`004_memory.sql`](../packages/domain/src/migrations/004_memory.sql)，字段级说明见 [`design/domain-model.md`](design/domain-model.md)。
+[`003_open_threads.sql`](../packages/domain/src/migrations/003_open_threads.sql)、
+[`004_memory.sql`](../packages/domain/src/migrations/004_memory.sql) 与
+[`005_mood.sql`](../packages/domain/src/migrations/005_mood.sql)（有界的心情，第五轮），字段级说明见 [`design/domain-model.md`](design/domain-model.md)。
 
 | 表 | 角色 | 关键列 |
 |---|---|---|
@@ -201,6 +202,14 @@ flowchart LR
 `relationship_notes`（相处方式）、`self_profile_learned`（学习偏移的累计值）、`session_overrides`（只对当天生效的覆盖）。
 共同点：**都是推导、不是事实**——每行带 `source_event_id` 指回 `conversation.turn`（铁律 4），
 且写入**不新增事件类型**；可查看/编辑/删除目前只有领域 API、没有 UI（见 `progress.md` §4 第 21 条）。
+
+**第五轮新增的两张表（迁移 005，有界的心情）**：`mood_state`（**当前一行**，`key = 'mood.now'`：`valence` / `energy` 两个
+`[0,1]` 有界标量 + 累计证据 JSON + 最近评估时刻 + 事件序号游标 + 为什么变）与 `mood_history`（**变更记录**：每次真的变了才写一行，
+带 before/after/delta 与信号计数，复位也留一行 `reset=true`）。共同点与上面那六张一样：**心情是投影/派生状态，不是新的事实类型**——
+原始事实仍然只有 `events`（`conversation.turn` / `proactive.decision` / `presence.changed`），
+心情可以按 `mood.ts` 的确定性规则重放重建，**没有新增事件类型**（契约的枚举是已发布的，铁律 10）。
+边界来自代码而不是库：所有写入路径都返回同一个 `clampMood`（`[0,1]`），读路径再夹一次；
+口径、证法与已知问题见 [`adr/0013`](adr/0013-bounded-mood-state.md) 与 `progress.md` §2.20 ④。
 
 事件类型注册在 `packages/contracts/src/events.ts`（**6 类**）：`presence.changed`、`conversation.turn`、
 `conversation.decision`、`proactive.decision`、`open_thread.changed`、`system.health`——**新增事件类型不需要升 `SCHEMA_VERSION`**

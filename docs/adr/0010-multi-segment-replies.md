@@ -72,8 +72,10 @@
 - **已落地**（订正 2026-09-30）：一个确定性分段器（纯函数，覆盖 M1/M2/M4/M5 的边界）、`RespondHooks.onSegment`
   的逐段播放（含段间 `gapMs`），以及「一轮只推进一次」的断言（M6/M7/M8）——见
   `tests/unit/core/reply-segments.test.ts` 与 `tests/integration/conversation-engine.test.ts`。
-- **仍需**：把**音频出口**接到 `onSegment`——`scripts/chat.ts` 已经接了（终端逐段），但试用页
-  `scripts/serve-chat.ts` 与 `scripts/voice-turn.ts` 仍整段合成（核对：`git grep -n "onSegment" -- scripts packages`，见归属段）。
+- **仍需**：把**音频出口**接到 `onSegment`——`scripts/chat.ts` 已经接了（终端逐段），试用页与语音脚本后来**走了另一条路**
+  （第五轮：按句读**流式切块** + `onClause` 逐块合成与播放，见 `docs/design/voice.md` §6；
+  措辞只能写「接线成立 + B1 已修 + B2 是已知未覆盖缺陷」）；`scripts/voice-turn.ts` 仍整段合成作对照列。
+  （核对：`git grep -n "onSegment" -- scripts packages`、`git grep -n "onClause" -- scripts`。）
 - **事件契约无需改动**：`conversation.turn` 与 `conversation.decision` 的形状不变，既有审计测试继续成立。
 - `config/xixi.example.yaml` 的 `reply` 段已被读取：`packages/conversation/src/segments.ts` 的 `resolveReplyLimits()`
   只在上限内夹紧，`ConversationEngine` 构造时读入；改本 ADR 的上限或默认值时必须同步改它，否则两边不一致。

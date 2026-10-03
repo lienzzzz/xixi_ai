@@ -1,6 +1,6 @@
 # 西西项目文档地图
 
-> 最后更新：2026-10-01（第四轮集成收口 t5：文档与代码逐处对齐、全量门禁实跑）
+> 最后更新：2026-10-03（第五轮集成收口 t8：四条工作的实测数字、口径与已知问题同步进各文档、全量门禁实跑）
 > 面向：接手本项目的编码 Agent / 维护者
 > 本文件告诉你「先读什么、什么最权威、改代码后必须更新哪些文档」。
 
@@ -44,21 +44,34 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
   现场测试控制台 → `data/field-test/`（chat 与试用页可用 `XIXI_CHAT_DATA_DIR` / `XIXI_WEB_DATA_DIR` 覆盖；
   控制台用 `--data-dir` / `--presence-data-dir`）。**在 chat 里设的人格与历史不会带到控制台**——
   别以为功能没生效，要在哪个入口用就在哪个入口再设一次（或改 `config/xixi.example.yaml` 的基线再 seed）。
-- **本轮新增的两项特性怎么用**：① **多段回复**（`config/xixi.example.yaml` 的 `reply`：`max_segments: 8`、
+- **对话相关特性的怎么用**：① **多段回复**（`config/xixi.example.yaml` 的 `reply`：`max_segments: 8`、
   `segment_max_chars: 60`、`gap_ms: 450`；**「块长」与「容量」是两件事**：块长 60 字 = 一次播报的粒度，
   容量 = 8 × 60 = **480 字**。贪心按句边界打包，`≤8` 组时每段 `≤60`；`>8` 组时自第 7 组起合并进最后一段、
   `mergedOverflow = true`，该段**可以超过 60 字**（最小反例 279 字 = 9 句 × 31 → 8 段、最长 62；
-  断言在 `tests/unit/core/reply-segments.test.ts`）。终端 `npm run chat` 已接逐段播放，试用页/语音脚本仍整段合成）；
+  断言在 `tests/unit/core/reply-segments.test.ts`）。终端 `npm run chat` 已接逐段播放；**语音出口自第五轮起走另一条路**
+  （按句读流式切块 + 逐块合成与播放，见 [`design/voice.md`](design/voice.md) §6）；
   ② **主动性**（人格 `proactivity` 默认 **0.85** → 确定性评分只给候选与依据；**硬底线仍由程序判定**：
   静默时段 / 6 小时与当日**次数**额度 / 隐私与同意——**金额级费用上限尚未实现**；
   底线之上是否开口由模型读空气决定，见 [`adr/0011`](adr/0011-proactive-decision-ownership.md)；
-  控制台「配置」栏可调高/调低，**一键关闭**就是不开「自动考虑」开关或点停用；每次开口/被拦都落
-  `conversation.decision` 事件，可回答「为什么今天没说话」）。
+  控制台「配置」栏可调高/调低，**一键关闭**就是不开「自动考虑」开关或点停用；每次开口/被拦都落一条
+  **`proactive.decision`** 事件（`conversation.decision` 是「这一轮对话被不被接受」，两者不同），可回答「为什么今天没说话」）。
+- **第五轮新增的有界心情怎么用**：默认开着、不需要配置；它由事件自己演化并按小时回落，给模型的是一段**散文**
+  （数值只在调试视图里）。想复现「心情在边界内」这件事：`node --test tests/unit/domain.test.ts`
+  与 `node --test tests/integration/mood-state.test.ts`；口径与已知问题见 [`adr/0013`](adr/0013-bounded-mood-state.md)。
 - **「真人感」改造成什么样了（含前后对比）**：稳定前缀改成「身份与说话方式」的散文（0 条编号）+ 压缩安全段，
   回复容量 180 → 480 字，工具标记与英文推理在**程序层**被剔除（`REPLY_HYGIENE` 通知）。
   可重跑的对比与数字见 [`benchmarks/realism-metrics.md`](benchmarks/realism-metrics.md)：
   改造前的转录不用花钱就能复算——
   `node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v01-vanilla.json`。
+- **第五轮新增的两件事怎么判读**（2026-10-03）：
+  ① **主动性口径已定＝显著降频**（不做「连续两次没回应后 = 0」的硬停，[`adr/0011`](adr/0011-proactive-decision-ownership.md) 决定 2 的补充）；
+  多日验收 `node scripts/eval-proactive-timeline.ts`（默认三天、M1–M6 进退出码）。**「= 0」这句话在真产物上不成立**，这是事实、不是待决问题。
+  ② **流式语音的首音目标（pack ≤1.5 秒）未达标且本机不可达**：8 批 n=32 的 ④ / 1500 ms = **[3.14, 7.33] 倍**（池化 3.73 倍），
+  下界由模型首 token 与合成往返挡住。**不要因为达不到 1.5 秒判代码不合格**，也不要用 ③ 的「超 15%」口径冒充它；
+  同批对照（流式 vs 整段）方向**不一致**（3 快 5 慢），**不许写「方向多数为正」**。口径与复算命令见 [`design/voice.md`](design/voice.md) §6。
+- **有界的心情状态（第五轮）**：短期的情绪（不是人格），由原始事件演化、按小时回落；注入提示词的是散文（数值只在 `sections[].debug`）；
+  影响轻微（语气 ±6%、主动性软偏移 ±0.03，**都乘在人格之上**），**硬底线拿不到它**；可查看 / 可复位。
+  散文里**没有数字与参数名**，且每次恒带「不要因此说出你没做过的事」——见 [`adr/0013`](adr/0013-bounded-mood-state.md)。
 
 **还没验的部分**：M6 的**真人**在场自测尚未由人跑过（合成场景已测），命令见 `progress.md` 的「未完成项」。
 
@@ -94,6 +107,7 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | [`review/p1-prompt-length-review-2026-10-01.md`](review/p1-prompt-length-review-2026-10-01.md) 与 [`…-rereview`](review/p1-prompt-length-rereview-2026-10-01.md) | P1 提示词与长度策略的评审与复审（F1 文档漂移 → 由本收口任务执行；F2 口径 / F3 安全措辞 / F4 claim 已修） |
 | [`review/reply-hygiene-review-2026-10-01.md`](review/reply-hygiene-review-2026-10-01.md) | 工具标记 / 英文推理清洗的评审（`REPLY_HYGIENE` 已实现；两条 requiredFix 已落地——试用页与控制台订阅 `onNotice`、沉默原因码 `ARTIFACT_ONLY_REPLY` 上线，逐入口清单见 `progress.md` §4） |
 | [`verification/t4-realism-verification-2026-10-01.md`](verification/t4-realism-verification-2026-10-01.md) | 「真人感」改造的独立验证：三次输入、主口径提问率、铁律未削弱 |
+| [`verification/t7-round5-independent-verification-2026-10-03.md`](verification/t7-round5-independent-verification-2026-10-03.md) | **第五轮四条工作的独立复验**：多日主动性（显著降频口径达标、未回应后不硬停）、话题收口升级（0/91 与反事实 9/91）、**首音延迟未达标（目标不可达）**、有界心情（0 越界 / ±6% / ±0.03 / 门禁同码）。三类证据分开、每个数字带可复跑命令 |
 
 ## 2. 权威性排序（冲突时按这个判）
 
@@ -122,7 +136,7 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | `packages/domain/src/personality.ts`（属性集合） | `design/domain-model.md`、`config/xixi.example.yaml`、`design/conversation.md` 的指令映射 |
 | `packages/conversation/src/fsm.ts`（状态/超时/判定） | `design/conversation.md`、`tests/unit/conversation-fsm.test.ts` |
 | `packages/conversation/src/prompt.ts`（§26 顺序/指令） | `design/conversation.md`、`tests/unit/prompt.test.ts` |
-| `packages/conversation/src/segments.ts`（段数上限/块长/容量） | `design/conversation.md` §7、[`adr/0010`](adr/0010-multi-segment-replies.md) 的修订记录、本文件 §0 与 `README.md` 的「多段回复」行 |
+| `packages/conversation/src/segments.ts`（段数上限/块长/容量，以及流式那边的 `ClauseChunker`） | `design/conversation.md` §7、[`adr/0010`](adr/0010-multi-segment-replies.md) 的修订记录、本文件 §0 与 `README.md` 的「多段回复」行；**切块（流式）那部分**同步 [`design/voice.md`](design/voice.md) §6.2 |
 | `packages/conversation/src/topic-engine.ts`（收口判据与词表） | `design/conversation.md` 的收口段、[`adr/0012`](adr/0012-open-thread-closure-criterion.md) §判据升级、`progress.md` |
 | `packages/domain/src/mood.ts` 或提示词的 mood 段 | `design/domain-model.md`（心情状态与迁移 005）、`design/conversation.md`（注入与影响幅度）、[`adr/0013`](adr/0013-bounded-mood-state.md)、`progress.md` |
 | `packages/model-adapters/src/reply-hygiene.ts` 或引擎的清洗/通知 | `design/brain-and-models.md` §4、`design/conversation.md` 的通知表、`progress.md` |

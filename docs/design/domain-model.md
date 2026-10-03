@@ -1,6 +1,6 @@
 # 领域模型：事件、持久化与人格
 
-> 最后更新：2026-09-30
+> 最后更新：2026-10-03（第五轮收口：§5.5 补迁移 005 的 `mood_state` / `mood_history` 与「心情不在人格三层里」）
 > 权威来源：`packages/contracts/src/*.ts`、`packages/contracts/schemas/**`、`packages/domain/src/{store,migrations,personality,config,clock}.ts`、`packages/domain/src/migrations/001_initial.sql`
 > 若与代码不一致，以代码为准，并请立即修正本文件
 
@@ -155,11 +155,12 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
 
 `source_event_id` 目前**恒为 `NULL`**：只有 M3 的反馈解释器才会把变更指回触发它的事件。
 
-### 5.5 `002` / `003` / `004` 新增的表
+### 5.5 `002` / `003` / `004` / `005` 新增的表
 
 字段级细节以迁移文件为准（[`002_world_state.sql`](../../packages/domain/src/migrations/002_world_state.sql)、
 [`003_open_threads.sql`](../../packages/domain/src/migrations/003_open_threads.sql)、
-[`004_memory.sql`](../../packages/domain/src/migrations/004_memory.sql)）：
+[`004_memory.sql`](../../packages/domain/src/migrations/004_memory.sql)、
+[`005_mood.sql`](../../packages/domain/src/migrations/005_mood.sql)）：
 
 | 表 | 迁移 | 角色 | 关键列 |
 |---|---|---|---|
@@ -170,12 +171,17 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
 | `relationship_notes` | 004 | 我们怎么相处 | `note_id` PK、`aspect`、`note`、`source_type`、`source_event_id`、`confidence`；索引 `aspect` |
 | `self_profile_learned` | 004 | 学习到的**累计偏移**（与 `self_profile` 基线分开） | `property` PK、`delta`、`source_type`（`learned:…`）、`evidence`、`confidence`、`updated_at` |
 | `session_overrides` | 004 | **只对 `valid_day` 这一本地自然日生效**的覆盖（次日自动失效） | `override_id` PK、`session_id`、`property`、`delta`、`reason`、`source_type`、`valid_day`；索引 `(valid_day, property)` |
+| `mood_state` | 005 | **当前心情（一行）**——有界、会回落、由事件演化（第五轮） | `key` PK（`'mood.now'`）、`schema_version`、`valence` / `energy`（都落 `[0,1]`）、`evidence_json`（每个信号出现过几次）、`last_beat_at`、`cursor_json`（已吸收到哪条 `events.sequence`）、`source` / `summary` / `updated_at` |
+| `mood_history` | 005 | 心情的**变更记录**（每次真的变了才写一行；复位也留一行 `reset=true`） | `change_id` PK、`before_*` / `after_*`、`delta_*`、`reset`、`signals_json`、`signal_count`、`dropped_count`、`note`、`created_at` |
 
 共同点：**都是推导，不是事实**——每行带 `source_event_id` 指回 `conversation.turn`（铁律 4）；
 记忆写入**不新增事件类型**（可以按 `source_event_id` 重放重建），唯一的例外是 `open_threads`：
 它的每一次状态变化同时写一条 `open_thread.changed` 事件（表与日志同事务，表可被日志重建）。
-有效人格 = `self_profile`（基线）+ `self_profile_learned`（学习偏移）+ `session_overrides`（当天覆盖）三层相加。
-可查看/编辑/删除目前**只有领域 API**（`MemoryStore` / `SelfModel` / `OpenThreadStore`），没有 UI。
+**心情也不新增事件类型**：它从 `conversation.turn` / `proactive.decision` / `presence.changed` 按确定性规则重放重建
+（边界来自代码里的 `clampMood`，不是库约束；口径见 [`../adr/0013`](../adr/0013-bounded-mood-state.md)）。
+有效人格 = `self_profile`（基线）+ `self_profile_learned`（学习偏移）+ `session_overrides`（当天覆盖）三层相加；
+**心情不在这三层里**——它是短期的、自己回落的，权重远小于人格（语气 ±6%、主动性软偏移 ±0.03）。
+可查看/编辑/删除目前**只有领域 API**（`MemoryStore` / `SelfModel` / `OpenThreadStore` / `XixiStore.mood()` 系列），没有 UI。
 
 ## 6. 人格属性与两种写入方式
 
