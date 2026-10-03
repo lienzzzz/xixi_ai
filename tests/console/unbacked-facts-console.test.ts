@@ -99,7 +99,10 @@ function composerAnswering(text: string, toolName: string | null) {
   };
   const screening = realScreeningEngine();
   const engine = {
+    // V0.3 P1：主动开口走 `buildProactivePrompt`（`ContextBuilder.buildProactive` 那一条路），
+    // 这个替身只关心投递接缝的闸门，所以两个方法给同一份最小提示词。
     buildPrompt: () => ({ system: 'S', history: [], user: 'U' }),
+    buildProactivePrompt: () => ({ system: 'S', history: [], user: 'U' }),
     screenUnbackedFacts: (candidate: string, tool: string | null) => screening.screenUnbackedFacts(candidate, tool),
     adapter: {
       handleUserTurn: async () => {

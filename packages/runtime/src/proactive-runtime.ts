@@ -1228,7 +1228,9 @@ export function createModelComposer(options: {
     const vision = options.vision?.() ?? null;
     const directive = proactiveComposeDirective(input.plan, options.recentLines?.() ?? []);
     const at = new Date();
-    const prompt = options.engine.buildPrompt({ sessionId, text: directive, addressed: true, at });
+    // V0.3 P1：主动开口走**同一条**上下文装配（`ContextBuilder.buildProactive`）——
+    // 依据行代替用户原话做检索，且不做工作记忆展开（把上一轮当「用户刚说」塞进去正是重复的来源）。
+    const prompt = options.engine.buildProactivePrompt({ directive, fact: input.plan.fact, at, sessionId });
     const stream = await options.engine.adapter.handleUserTurn({
       sessionId,
       text: directive,

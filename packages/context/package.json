@@ -1,0 +1,13 @@
+{
+  "name": "@xixi/context",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "上下文装配层：ContextBuilder 与 MemoryRetriever（带 provenance/confidence 的长期记忆召回、关系与未完话题摘要）。只读领域层，不碰提示词与状态机。",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@xixi/domain": "*"
+  }
+}

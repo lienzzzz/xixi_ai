@@ -6,6 +6,7 @@ import { moodProse } from '@xixi/domain';
 import {
   CORE_IDENTITY,
   HARD_POLICY,
+  MEMORY_SECTION_HEADING,
   PromptAssembler,
   personalityDirectives,
   SILENCE_TOKEN,
@@ -100,6 +101,26 @@ test('the safety block stays compact and every boundary is still checkable (P1 m
   assert.ok(HARD_POLICY.includes(SILENCE_TOKEN), 'the safety block must name the silence token');
 });
 
+/**
+ * V0.3 P1 改写了硬边界的第一条（pack `docs/02_MEMORY_CONTEXT.md` §4）。
+ *
+ * 旧写法「可核查事实只能来自工具或刚刚说的信息」与长期记忆召回**直接冲突**（审计 §3.2）：
+ * 系统一旦真的把带 provenance 的记忆放进提示词，那句话就等于让模型读到的记忆「不能当事实用」。
+ * 这条用例同时钉住两件必须一起成立的事：
+ *   * 新写法把第三个来源（系统提供的可信记忆 / 世界状态）明确纳入；
+ *   * **来源约束没有被放宽** —— 模型自己「好像记得」的内容仍然不许当事实，而且引用系统给的记忆
+ *     时必须按 confidence / freshness 表达不确定。
+ */
+test('硬边界按 pack §4 改写：可信记忆是第三个允许的来源，但来源约束与不确定性表达都还在', () => {
+  assert.match(HARD_POLICY, /只能来自三处/, '三个来源必须写清');
+  assert.match(HARD_POLICY, /系统在上面给你的可信记忆或世界状态/, '第三个来源就是它');
+  assert.match(HARD_POLICY, /你自己「好像记得」的内容不算事实/, '模型自己的记忆不是事实来源（铁律 4）');
+  assert.match(HARD_POLICY, /标了较确定才当事实/, '按 confidence 表达不确定');
+  assert.match(HARD_POLICY, /标了有点旧就当作可能已经变了/, '按 freshness 表达不确定');
+  // 旧措辞不许回潮：它会让「记忆进了提示词」与「不许当事实用」同时成立，那是自相矛盾的。
+  assert.doesNotMatch(HARD_POLICY, /只能来自工具结果或对方刚刚明确说的信息/);
+});
+
 test('personality changes the directives, which is what makes feedback verifiable in behaviour', () => {
   const terse = personalityDirectives({ verbosity: 0.1, curiosity: 0.1, silence_tolerance: 0.9 });
   const chatty = personalityDirectives({ verbosity: 0.95, curiosity: 0.9, silence_tolerance: 0.2 });
@@ -181,8 +202,54 @@ test('the context block tells the model when it is, including time of day', () =
 test('sections are addressable so the Debug UI can show exactly what the model saw', () => {
   const prompt = assembler.assemble(input());
   const names = prompt.sections.map((section) => section.name);
+  // 没接线时只有这五段：V0.3 P1 新增的 self / memories / relationship / open-threads / audience
+  // 都是**可选**层，`@xixi/context` 没有接线的调用方拿到的提示词与从前逐字相同（见下一条用例）。
   assert.deepEqual(names, ['core-identity', 'safety-policy', 'effective-style', 'world-state', 'current-turn']);
   assert.ok(prompt.sections.every((section) => section.part === 'system' || section.part === 'user'));
+});
+
+/**
+ * 上下文四段是**增量**的（V0.3 P1）。
+ *
+ * 这一条守的是「没接线 = 逐字不变」：`@xixi/context` 没有接线的调用方（老测试、老脚本）
+ * 不该因为这次改动而看到多出来的段落。接上之后每一段才出现，而且记忆那一段的条数只进
+ * `sections[].debug`（模型看到的是那几行字，不是「注入了 6 条」）。
+ */
+test('没有上下文时提示词逐字不变；接上之后每一段才出现，且条数只进 Debug 段', () => {
+  const bare = assembler.assemble(input());
+  assert.equal(
+    bare.sections.some((section) => ['memories', 'relationship', 'open-threads', 'audience'].includes(section.name)),
+    false,
+    '没接线就不该多出这几段',
+  );
+  assert.ok(!bare.user.includes(MEMORY_SECTION_HEADING), '更不该多出一段空标题');
+
+  const connected = assembler.assemble(
+    input({
+      memories: { lines: ['- [较确定] 父亲不喜欢绿茶。'], injected: 6, droppedAtRender: 1 },
+      relationship: { lines: ['你不必等他开口才说话。'] },
+      openThreads: { lines: ['- 他说要去镇上办证'] },
+      self: { lines: ['（你现在的说话方式与脾气都已经按下面的设定调过了，不用复述。）'], profile: { verbosity: 0.7 } },
+      audience: { lines: ['可能有外人或者电视媒体在场：别提到家里人的私事与没办完的事。'] },
+    }),
+  );
+  const names = connected.sections.map((section) => section.name);
+  for (const name of ['memories', 'relationship', 'open-threads', 'audience']) {
+    assert.ok(names.includes(name), `${name} 必须可寻址（面板要能逐段核对）`);
+  }
+  assert.ok(connected.user.includes(MEMORY_SECTION_HEADING), '记忆那一段用的是 pack §3 的标题');
+  assert.ok(connected.user.includes('父亲不喜欢绿茶。'), '记忆的正文进了提示词');
+  assert.ok(connected.user.includes('你不必等他开口才说话。'), '关系摘要也进了');
+  assert.ok(connected.user.includes('他说要去镇上办证'), '未完话题也进了');
+  assert.ok(connected.system.includes('别提到家里人的私事'), '听众那一段在稳定前缀里');
+
+  // 条数（注入几家）只进 Debug：模型看到的是句子，不是统计。
+  const memorySection = connected.sections.find((section) => section.name === 'memories');
+  assert.ok(memorySection !== undefined);
+  assert.equal(memorySection.text.includes('injected'), false, '`injected=` 不许出现在模型看的那一段');
+  assert.match(memorySection.debug ?? '', /injected=6/, 'Debug 段里保留条数供核对');
+  assert.match(memorySection.debug ?? '', /dropped_at_render=1/, '被出口闸门挡掉几条也要能看到');
+  assert.doesNotMatch(connected.user, /injected|dropped_at_render/, 'user 里不许出现程序字段名');
 });
 
 /**

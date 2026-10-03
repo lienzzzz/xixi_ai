@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@xixi/brain-adapter": "*",
+    "@xixi/context": "*",
     "@xixi/contracts": "*",
     "@xixi/domain": "*"
   }

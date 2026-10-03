@@ -119,6 +119,26 @@ xixi:
     relationship_notes: true # 「我们怎么相处」的笔记（由明确反馈写下来）
     async_extraction: true   # 提取在回复之后异步做（《方案》§11.1：不阻塞语音）
 
+  # 上下文装配（V0.3 P1 / pack `docs/02_MEMORY_CONTEXT.md` §1–§3）。
+  # 本段**已被代码读取**：`ConversationEngine` 构造时用 `parseContextMemorySettings(context.memory, memory)`
+  # 建 `@xixi/context` 的 `ContextBuilder`——记忆/关系/未完话题/世界状态/有效自我画像的装配都在它那里，
+  # 引擎不再自己决定上下文来源（FSM、事件与回复安全仍在引擎）。
+  # 记忆检索是**确定性混合排序**（词面相关 + 近因 + 重要度 + 置信 + 主语匹配 + 与未完话题的关系
+  # − 陈旧 − 已提及惩罚），第一版没有向量库。每个旋钮的含义：
+  #   enabled              false 时这一层完全不检索（提示词与 P0 逐字相同；对照实验用）
+  #   max_items            一轮最多注入几条，硬边界 [3, 8]（pack §2：不要每轮 dump 全部记忆）
+  #   min_confidence       低于它的候选不进提示词（0.55 = 模型推断 0.4 进不来、程序提炼 0.8 进得来）
+  #   include_relationship 关系摘要那一段（不关也不会把全统计给模型：只给几句中文）
+  #   include_open_threads 未完话题那一段（它是「将来还要接的话」，不是记忆）
+  # 老段的同名键（max_items 等）仍然生效，但**本段优先**；越界的值会报错而不是被静默忽略。
+  context:
+    memory:
+      enabled: true
+      max_items: 6
+      min_confidence: 0.55
+      include_relationship: true
+      include_open_threads: true
+
   # 三层自我画像与反馈学习（pack Phase 4 / 《方案》§7.4 §13）。
   # BaseProfile（personality.base）+ LearnedProfile + SessionOverride = 有效人格。
   # 本段**已被代码读取**：`packages/domain/src/self-model.ts` 的 `parseSelfModelSettings` 读它，

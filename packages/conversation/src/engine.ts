@@ -1,5 +1,14 @@
 import { buildEvent, toOffsetIso } from '@xixi/contracts';
 import {
+  ContextBuilder,
+  MemoryRetriever,
+  parseContextMemorySettings,
+  type AudienceContext,
+  type ConversationContext,
+  type ProactiveContext,
+  type ProactiveTurnContextInput,
+} from '@xixi/context';
+import {
   createSpokenTextFilter,
   isSilenceReply,
   sanitizeSpokenReply,
@@ -8,7 +17,7 @@ import {
   type ReplyHygieneResult,
 } from '@xixi/brain-adapter';
 import type { Clock, MoodBeatResult, MoodEngine, MoodState, TurnAction, XixiConfig, XixiStore } from '@xixi/domain';
-import { MoodEngine as MoodEngineImpl, moodBiasOf, moodProactivityNudge, systemClock } from '@xixi/domain';
+import { MemoryStore, MoodEngine as MoodEngineImpl, moodBiasOf, moodProactivityNudge, systemClock } from '@xixi/domain';
 
 import {
   ConversationStateMachine,
@@ -28,6 +37,17 @@ export interface ConversationEngineOptions {
   readonly config: XixiConfig;
   readonly clock?: Clock;
   readonly assembler?: PromptAssembler;
+  /**
+   * 上下文装配（V0.3 P1 / pack `docs/02_MEMORY_CONTEXT.md` §1）。
+   *
+   * 省略时引擎自己按 `store` / `config` / 时钟建一个 `@xixi/context` 的 `ContextBuilder`，
+   * 于是「上下文只有一个装配入口」是**结构事实**而不是约定：想换一套上下文就换这一个对象。
+   * 显式传 `false` 表示这个入口不要这一层（提示词与 P0 逐字相同）—— 它是给「验证记忆层本身
+   * 有没有改变回复行为」的对照实验留的开关，不是给生产用的。
+   */
+  readonly contextBuilder?: ContextBuilder | false | undefined;
+  /** 显式的「谁在听」（P1 只有「有没有外人」这一层）：省略 = 保守的 `family`。 */
+  readonly audience?: AudienceContext | undefined;
   /**
    * FSM tuning. `lingerMs` / `engageTimeoutMs` are decisions this layer owns;
    * `silenceTolerance` is an explicit override for tests and replay, because the
@@ -84,6 +104,14 @@ export interface RespondInput {
    * pictures (DSH) refuses such a turn instead of silently dropping the image.
    */
   readonly images?: readonly BrainImageInput[];
+  /**
+   * 记忆检索用的**查询文本**（V0.3 P1）。省略 = 用 `text`（普通轮次就是这么用的）。
+   *
+   * 为什么有这条缝：一入口会把程序写的指令（「触发源：… 依据：…」）当 `text` 传进来
+   * （主动开口那条路），拿它做词面相关会把候选全判成不相关。它只影响检索，不进提示词 ——
+   * 模型读到的仍然是 `text`。同名字段在 `AssembleInput` 上有一份更长的说明。
+   */
+  readonly gate?: string | undefined;
 }
 
 /** One segment as it is handed to the playback seam (ADR-0010). */
@@ -201,6 +229,14 @@ export class ConversationEngine {
   #decisionCount = 0;
   /** 有界的心情（第五轮 t4）。`null` = 这个入口不要心情这一层。 */
   readonly #mood: MoodEngine | null;
+  /**
+   * 上下文装配的那一个入口（V0.3 P1）。`null` = 这个入口显式关掉了它（对照实验用）。
+   *
+   * 引擎**不再自己决定上下文来源**（pack §1「不再自己决定所有 context 来源」）：工作记忆与
+   * 心情由引擎传进去（它们是引擎已经算出的一拍），记忆/关系/未完话题/世界状态/自我画像由
+   * `ContextBuilder` 决定，渲染也由它做。引擎剩下的是它该有的那部分：FSM、事件与回复安全。
+   */
+  readonly #context: ContextBuilder | null;
 
   constructor(options: ConversationEngineOptions) {
     this.#adapter = options.adapter;
@@ -229,6 +265,26 @@ export class ConversationEngine {
             config: this.#config.mood,
             clock: this.#clock,
             offsetMinutes: this.#offsetMinutes,
+          });
+    // 上下文装配：默认按 `config.context.memory`（新段）与 `config.memory`（老段）建一个。
+    // 与 `reply` 一样，「配置里写了」不等于生效 —— 这里读它才是。
+    const memorySettings = parseContextMemorySettings(
+      (this.#config as { readonly context?: { readonly memory?: Record<string, unknown> } }).context?.memory,
+      this.#config.memory,
+    );
+    this.#context =
+      options.contextBuilder === false
+        ? null
+        : options.contextBuilder ??
+          new ContextBuilder({
+            store: this.#store,
+            clock: this.#clock,
+            offsetMinutes: this.#offsetMinutes,
+            identity: { timezone: this.#config.identity.timezone, place: this.#config.identity.place },
+            memory: memorySettings,
+            audience: options.audience,
+            retriever: new MemoryRetriever(this.#store),
+            memoryStore: new MemoryStore(this.#store),
           });
     // The personality is the source of truth, so it is read at construction and
     // re-read on every turn. Forgetting this wiring is no longer invisible: an
@@ -422,10 +478,21 @@ export class ConversationEngine {
    * `moodBeat` 是**已经评估好**的那一拍（`respond()` 会在把这一轮落库之后先评估，再调这里）。
    * 省略时它自己评估一拍（Debug UI 与测试走这条默认路径）。两条路径都只评估**一次**，
    * 而且都用同一份 `#moodContext` 渲染，所以「提示词里写的心情」与「库里那行心情」永远是同一个。
+   *
+   * V0.3 P1：上下文（记忆/关系/未完话题/世界/自我/听众）全部来自 `ContextBuilder` —— 见
+   * `buildUserTurnContext()`。引擎只负责把「这一拍」的三样东西传进去：会话、心情、以及
+   * 它自己的 FSM 状态。
    */
   buildPrompt(input: RespondInput, moodBeat: MoodBeatResult | null = this.beatMood(input.at ?? this.#clock())): AssembledPrompt {
     const at = input.at ?? this.#clock();
     const session = this.#store.getSession(input.sessionId);
+    const mood = this.#moodContext(at, moodBeat);
+    const context = this.#context?.buildUserTurn({
+      userText: input.gate ?? input.text,
+      at,
+      recentTurns: this.workingMemory(input.sessionId),
+      ...(mood === undefined ? {} : { mood }),
+    });
     return this.#assembler.assemble({
       identityName: this.#config.identity.name,
       personality: this.#store.selfProfile(),
@@ -437,8 +504,106 @@ export class ConversationEngine {
       history: this.workingMemory(input.sessionId),
       userText: input.text,
       language: languageName(this.#config.identity.language),
-      mood: this.#moodContext(at, moodBeat),
+      mood,
+      ...this.#contextSections(context, at),
     });
+  }
+
+  /**
+   * 主动开口那一条路的提示词（V0.3 P1 / pack §1 的 `buildProactive`）。
+   *
+   * 它与 `buildPrompt` **走同一个装配器与同一个 ContextBuilder**，只有两处不同，都是刻意的：
+   *   * 依据行（`fact`）代替用户原话做词面相关的查询，因为主动开口时没有「对方刚说的一句话」；
+   *   * 不带最近几轮当工作记忆 —— 把上一轮当成「用户刚说」塞进去，正是「刚说完就重复」的来源
+   *     （主动循环自己用 `recentLines` 防重复，那是候选层的事）。
+   *
+   * 没有 `sessionId` 时不会去读会话（这时它也不该假装自己知道会话状态）。
+   */
+  buildProactivePrompt(input: {
+    /** 给模型看的那段指令（就是 `user` 里的内容）。 */
+    readonly directive: string;
+    /** 程序给这一轮检索用的依据行（不会出现在提示词里，见 `AssembleInput.gate`）。 */
+    readonly fact: string;
+    readonly at?: Date;
+    readonly sessionId?: string | null;
+    readonly conversationState?: ConversationState;
+  }): AssembledPrompt {
+    const at = input.at ?? this.#clock();
+    const mood = this.#moodContext(at, this.beatMood(at));
+    const context = this.#context?.buildProactive({
+      fact: input.fact,
+      at,
+      ...(mood === undefined ? {} : { mood }),
+    });
+    // 会话状态与轮次按调用方给的那一刻推进（与 `buildPrompt` 同一条纪律：重放跟着 `at` 走）。
+    const conversationState = input.conversationState ?? this.#advance(at);
+    const sessionId = input.sessionId ?? null;
+    const turnIndex = sessionId === null ? 0 : this.#store.getSession(sessionId).turnCount;
+    return this.#assembler.assemble({
+      identityName: this.#config.identity.name,
+      personality: this.#store.selfProfile(),
+      world: worldStateLite(at, this.#config.identity.timezone, this.#offsetMinutes),
+      conversationState,
+      turnIndex,
+      // 主动开口不是「接住对方的话」：不做工作记忆展开（见方法注释）。
+      history: [],
+      userText: input.directive,
+      // 记忆检索的查询用**依据行**，而不是那段指令（见 `AssembleInput.gate`）。
+      gate: input.fact,
+      language: languageName(this.#config.identity.language),
+      mood,
+      ...this.#contextSections(context, at),
+    });
+  }
+
+  /** 上下文对象（引擎这一侧的可核对视图）：面板与测试读它，不必重新跑一遍装配。 */
+  buildUserTurnContext(input: RespondInput, moodBeat: MoodBeatResult | null = this.beatMood(input.at ?? this.#clock())): ConversationContext | null {
+    if (this.#context === null) return null;
+    const at = input.at ?? this.#clock();
+    const mood = this.#moodContext(at, moodBeat);
+    return this.#context.buildUserTurn({
+      userText: input.text,
+      at,
+      recentTurns: this.workingMemory(input.sessionId),
+      ...(mood === undefined ? {} : { mood }),
+    });
+  }
+
+  /** 主动开口那一条路的上下文对象（见 `buildProactivePrompt`）。 */
+  buildProactiveContext(input: ProactiveTurnContextInput): ProactiveContext | null {
+    return this.#context?.buildProactive(input) ?? null;
+  }
+
+  /**
+   * 把上下文里的每一块交给提示词装配器。
+   *
+   * 这是「上下文只有一处装配入口」这句话的**唯一**落地点：引擎不在这里增删任何一块，
+   * 它只做搬运（渲染由 `ContextBuilder.render` 做，于是出口闸门在那一侧只有一处）。
+   */
+  #contextSections(
+    context: ConversationContext | ProactiveContext | undefined,
+    at: Date,
+  ): {
+    memories?: { readonly lines: readonly string[]; readonly injected: number; readonly droppedAtRender: number };
+    relationship?: { readonly lines: readonly string[] };
+    openThreads?: { readonly lines: readonly string[] };
+    self?: { readonly lines: readonly string[]; readonly profile: Readonly<Record<string, number>> };
+    audience?: { readonly lines: readonly string[] };
+  } {
+    if (context === undefined) return {};
+    const rendered = this.#context?.render(context, at);
+    if (rendered === undefined) return {};
+    return {
+      memories: {
+        lines: rendered.memoryLines,
+        injected: context.memories.length,
+        droppedAtRender: context.memoriesDiagnostics.droppedAtRender,
+      },
+      relationship: { lines: rendered.relationshipLines },
+      openThreads: { lines: rendered.openThreadLines },
+      self: { lines: rendered.selfLines, profile: context.self.profile },
+      audience: { lines: audienceLines(context.audience) },
+    };
   }
 
   /**
@@ -1192,6 +1357,20 @@ function sentenceAround(text: string, index: number): string {
   const start = Math.max(...before, -1);
   const end = after.length === 0 ? text.length : Math.min(...after);
   return text.slice(start + 1, end);
+}
+
+/**
+ * 「谁在听」那一段的正文。
+ *
+ * 只有**偏离默认**时才说话：家里人在场是常态，不值得每轮说一遍；有外人（电视、来访、媒体）
+ * 才需要提醒她换个说法。这是 V0.3 P6「读空气」的第一个可执行版本，口径保守 ——
+ * 拿不准就不说（`DEFAULT_AUDIENCE` 按 family 处理）。
+ */
+function audienceLines(audience: AudienceContext | undefined): string[] {
+  if (audience === undefined) return [];
+  if (audience.mode === 'public') return ['可能有外人或者电视媒体在场：别提到家里人的私事与没办完的事。'];
+  if (audience.mode === 'private') return ['现在只有他自己，不用顾忌别人。'];
+  return [];
 }
 
 function languageName(code: string): string {
