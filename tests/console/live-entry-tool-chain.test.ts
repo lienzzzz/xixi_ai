@@ -16,6 +16,11 @@
  *   * the offline branches are then *run*, because "the chain is wired in" is only true if the tools
  *     actually execute — a printed report alone would not prove it.
  *
+ * V0.3 P0-A note: the six callers now import `buildToolChain` / `CONVERSATION_SCOPE` from
+ * `@xixi/runtime` instead. The expected side of this test deliberately keeps importing them from
+ * `scripts/field-test.ts`, which makes this file the regression test for the compatibility
+ * re-export — if that re-export ever loses the symbols, this test fails to even load.
+ *
  * Run: `npm run test:console` (also part of `npm test`).
  */
 import assert from 'node:assert/strict';
@@ -26,6 +31,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { CONVERSATION_SCOPE, buildToolChain } from '../../scripts/field-test.ts';
+import { CONVERSATION_SCOPE as RUNTIME_SCOPE, buildToolChain as runtimeBuildToolChain } from '@xixi/runtime';
 import { REPO_ROOT, loadConfig } from '../../scripts/lib/harness.ts';
 
 /** The four entries T5-F1 named, each with the name it prints in its own wiring report. */
@@ -87,6 +93,24 @@ test('四个 live 入口报告的工具链与 console 是同一条', { timeout: 
   // four comparisons below would all trivially agree on an empty set.
   assert.equal(expected.tools.length, 4, 'console 的内置工具集应当是四个（pack Phase 2）');
   assert.equal(expected.maxToolRounds, 4, '轮数上限由注册表钳制（pack Phase 2）');
+  // V0.3 P0-A: name them. Until this line the four comparisons could still all agree on the
+  // *wrong* four tools; the extraction moved the assembly point, so the built-in set itself is
+  // part of what "the same chain" means.
+  assert.deepEqual(
+    expected.tools,
+    ['xixi_get_current_time', 'xixi_get_weather', 'xixi_news_stub', 'xixi_set_reminder_stub'],
+    '内置工具集就是这四个（pack Phase 2）',
+  );
+  assert.deepEqual(
+    expected.permissions,
+    {
+      xixi_get_current_time: 'allow',
+      xixi_get_weather: 'allow',
+      xixi_news_stub: 'allow',
+      xixi_set_reminder_stub: 'allow',
+    },
+    '四个内置工具的权限判定（会话作用域）',
+  );
 
   for (const entry of ENTRIES) {
     const result = await run(entry.script, ['--print-wiring']);
@@ -100,6 +124,17 @@ test('四个 live 入口报告的工具链与 console 是同一条', { timeout: 
     // hard-coded one, and every entry has to say which language it configured.
     assert.equal(wiring.language, config.identity.language, `${entry.script} 的回复过滤语言必须来自部署配置`);
   }
+});
+
+// V0.3 P0-A: the compatibility re-export in `scripts/field-test.ts` must keep handing out the
+// *same* runtime declaration, not a second copy. The two modules below resolve to the same file
+// (the workspace junction `node_modules/@xixi/runtime` → `packages/runtime`), so identity is a
+// meaningful assertion, and it is what makes the imported expectation above a guard on the old
+// import path: if the re-export is ever dropped, this test cannot even load.
+test('P0-A：field-test 的兼容 re-export 与 @xixi/runtime 是同一份声明', () => {
+  assert.equal(buildToolChain, runtimeBuildToolChain, 'buildToolChain 的 re-export 必须与包导出是同一个函数');
+  assert.equal(CONVERSATION_SCOPE, RUNTIME_SCOPE, 'Conversation scope 的 re-export 必须与包导出是同一个值');
+  assert.equal(CONVERSATION_SCOPE, 'conversation');
 });
 
 test('文字 CLI 的离线分支真的执行工具，而不是只把链打印出来', { timeout: SPAWN_TIMEOUT_MS }, async () => {

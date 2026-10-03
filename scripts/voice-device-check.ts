@@ -18,9 +18,11 @@ import { join } from 'node:path';
 import { MimoBrainAdapter, type ToolCallRecord, type ToolRegistry } from '@xixi/brain-adapter';
 import { ConversationEngine } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
+// V0.3 P0-A: the shared tool chain lives in `@xixi/runtime` now (pack `04_RUNTIME_CONSOLIDATION.md`
+// §1 Step A); `scripts/field-test.ts` keeps a compatibility re-export for un-migrated callers.
+import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
 import { openXixiStore, type XixiConfig } from '@xixi/domain';
 
-import { CONVERSATION_SCOPE, buildToolChain } from './field-test.ts';
 import { REPO_ROOT, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
 import { characterSimilarity } from './lib/similarity.ts';
 import { readWav, sliceWav } from './lib/wav.ts';

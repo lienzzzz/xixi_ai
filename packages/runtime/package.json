@@ -1,0 +1,15 @@
+{
+  "name": "@xixi/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "西西生产运行时：各 live 入口共用的装配点（Step A：工具链与对话作用域）。",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@xixi/brain-adapter": "*",
+    "@xixi/domain": "*",
+    "@xixi/model-adapters": "*"
+  }
+}

@@ -28,9 +28,11 @@ import { assertSchema, type JsonSchema } from '@xixi/contracts';
 import { ConversationEngine } from '@xixi/conversation';
 import { MimoClient, WeatherClient } from '@xixi/model-adapters';
 import { openXixiStore, type XixiConfig } from '@xixi/domain';
+// V0.3 P0-A: the shared tool chain lives in `@xixi/runtime` now (pack `04_RUNTIME_CONSOLIDATION.md`
+// §1 Step A); `scripts/field-test.ts` keeps a compatibility re-export for un-migrated callers.
+import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
 import { CORPUS, FORBIDDEN_PATTERNS, type Scenario } from '../tests/scenarios/corpus.ts';
 
-import { CONVERSATION_SCOPE, buildToolChain } from './field-test.ts';
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
 
 for (const [key, value] of Object.entries(readDotEnv())) {

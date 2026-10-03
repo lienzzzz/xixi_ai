@@ -38,10 +38,12 @@ import { FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter, type ToolCallRec
 import { ConversationEngine, evaluateProactiveGates, parseProactiveSettings, resolveReplyLimits, splitReplyIntoSegments, type ProactiveGateContext } from '@xixi/conversation';
 import { openXixiStore, type XixiConfig } from '@xixi/domain';
 import { WeatherClient } from '@xixi/model-adapters';
+// V0.3 P0-A: the shared tool chain lives in `@xixi/runtime` now (pack `04_RUNTIME_CONSOLIDATION.md`
+// §1 Step A); `scripts/field-test.ts` keeps a compatibility re-export for un-migrated callers.
+import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
 
 import { CORPUS, FORBIDDEN_PATTERNS, type Scenario } from '../tests/scenarios/corpus.ts';
 import { GOLDEN_CONVERSATIONS, type GoldenConversation } from '../tests/scenarios/golden-conversations.ts';
-import { CONVERSATION_SCOPE, buildToolChain } from './field-test.ts';
 import { REPO_ROOT, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
 import {
   bannedTemplatesIn,

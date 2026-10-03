@@ -55,13 +55,8 @@ import {
   FakeBrainAdapter,
   MimoBrainAdapter,
   ToolRegistry,
-  createToolRegistry,
   scriptedToolPlan,
-  type AgentScope,
   type BrainAdapter,
-  type NewsProvider,
-  type ReminderSink,
-  type ToolCallRecord,
 } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
 import {
@@ -106,6 +101,11 @@ import {
   type ConversationState,
 } from '@xixi/conversation';
 import { MimoClient, WeatherClient } from '@xixi/model-adapters';
+// V0.3 P0-A: the shared tool chain lives in `@xixi/runtime` now (pack `04_RUNTIME_CONSOLIDATION.md`
+// §1 Step A). Both symbols are imported **and** re-exported below on purpose: a bare
+// `export { … } from '@xixi/runtime'` would forward them to importers without creating a local
+// binding, and this file still uses them for its own console wiring (and `ToolChainOptions` as a type).
+import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
 import {
   DEFAULT_PRESENCE_TTL_SECONDS,
   MemoryStore,
@@ -143,43 +143,22 @@ export const PROBE_PYTHON = process.env.XIXI_PROBE_PYTHON ?? join(REPO_ROOT, '.v
 export const AUDIO_PYTHON = process.env.XIXI_AUDIO_PYTHON ?? join(REPO_ROOT, '.venvs', 'voice-livekit', 'Scripts', 'python.exe');
 
 // --------------------------------------------------------------------------------------
-// One tool chain for every entry point (pack Phase 2)
+// One tool chain for every entry point (pack Phase 2) — V0.3 P0-A moved it to the runtime
 // --------------------------------------------------------------------------------------
 
-/** The console and the trial page serve a conversation; `proactive` is the loop's own scope. */
-export const CONVERSATION_SCOPE: AgentScope = 'conversation';
-
-/** Overrides on the built-in tool set. The data sources are injectable so an offline run needs no network. */
-export interface ToolChainOptions {
-  readonly defaultPlace?: string;
-  readonly now?: () => Date;
-  readonly weatherClient?: WeatherClient;
-  readonly newsProvider?: NewsProvider | null;
-  readonly reminderSink?: ReminderSink;
-  readonly onToolCall?: (record: ToolCallRecord) => void;
-  readonly maxToolRounds?: number;
-}
-
 /**
- * The shared tool chain the text path and the voice path both use.
+ * `buildToolChain` / `CONVERSATION_SCOPE` now live in `@xixi/runtime` (`tool-runtime.ts`,
+ * pack `04_RUNTIME_CONSOLIDATION.md` §1 Step A).
  *
- * This is the single assembly point: `scripts/field-test.ts` (console voice + text),
- * `scripts/serve-chat.ts` (trial page voice + text) and `scripts/voice-turn.ts`
- * (file-driven voice) all build their adapter from the registry this returns, so
- * "语音和文字走同一条工具链" is a property of the code rather than of a call site,
- * and the four built-ins are registered exactly once.
+ * This file keeps the compatibility re-export on purpose (pack `01_ARCHITECTURE.md` §3): the
+ * console is no longer the owner of the assembly point, but every old
+ * `import … from './field-test.ts'` keeps working until its last caller has moved. The symbols
+ * are imported **and** re-exported (a bare `export … from` would forward them without creating
+ * the local bindings this file needs), so what an old caller gets here is the same declaration
+ * the migrated callers get from the package — not a copy that could drift. That identity is
+ * asserted in `tests/console/live-entry-tool-chain.test.ts`.
  */
-export function buildToolChain(config: XixiConfig, options: ToolChainOptions = {}): ToolRegistry {
-  return createToolRegistry({
-    defaultPlace: options.defaultPlace ?? config.identity.place ?? '',
-    ...(options.now === undefined ? {} : { now: options.now }),
-    ...(options.weatherClient === undefined ? {} : { weatherClient: options.weatherClient }),
-    ...(options.newsProvider === undefined ? {} : { newsProvider: options.newsProvider }),
-    ...(options.reminderSink === undefined ? {} : { reminderSink: options.reminderSink }),
-    ...(options.maxToolRounds === undefined ? {} : { maxToolRounds: options.maxToolRounds }),
-    ...(options.onToolCall === undefined ? {} : { onToolCall: options.onToolCall }),
-  });
-}
+export { buildToolChain, CONVERSATION_SCOPE, type ToolChainOptions } from '@xixi/runtime';
 
 /** Everything the console says is Chinese and aimed at a non-engineer. */
 export function explainAction(action: string): string {

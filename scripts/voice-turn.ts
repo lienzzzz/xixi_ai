@@ -46,6 +46,10 @@ import { FakeBrainAdapter, type BrainAdapter } from '@xixi/brain-adapter';
 import { ConversationEngine } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
 import { openXixiStore } from '@xixi/domain';
+// V0.3 P0-A: the tool chain moved to `@xixi/runtime` (pack `04_RUNTIME_CONSOLIDATION.md` §1
+// Step A). This voice entry and the console still must not drift into two chains — they simply
+// share the runtime package's one now instead of the console script's.
+import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
 
 import { REPO_ROOT, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
 import { concatWav, readWavInfo, readWav } from './lib/wav.ts';
@@ -60,9 +64,7 @@ import { CLAUSE_CHUNKER_LIMITS } from '../packages/conversation/src/segments.ts'
 import { compareBatch, formatComparison, parseBatchEvidence } from './lib/voice-latency.ts';
 // Shared with the field-test console: the multi-segment planner and the
 // speech-only slicer, so "use every segment" lives in exactly one place.
-// `buildToolChain`/`CONVERSATION_SCOPE` come from the same file for the same reason:
-// this voice entry and the console must not drift into two tool chains (pack Phase 2).
-import { buildSpeechAudio, buildToolChain, CONVERSATION_SCOPE, planSpeechSegments, type DroppedSegment } from './field-test.ts';
+import { buildSpeechAudio, planSpeechSegments, type DroppedSegment } from './field-test.ts';
 
 for (const [key, value] of Object.entries(readDotEnv())) {
   if (process.env[key] === undefined) process.env[key] = value;

@@ -36,7 +36,10 @@ import { openXixiStore, PERSONALITY_PROPERTIES, personalityProperty, type XixiCo
 import { WeatherClient, type MimoClient } from '@xixi/model-adapters';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
-import { CONVERSATION_SCOPE, buildToolChain } from './field-test.ts';
+// V0.3 P0-A: the shared tool chain moved to `@xixi/runtime`; `scripts/field-test.ts` still
+// re-exports it for anyone that has not migrated yet (this entry has — it no longer imports
+// the console script at all). See pack `04_RUNTIME_CONSOLIDATION.md` §1 Step A.
+import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
 
 export interface PersonalityArgsResult {
   /**

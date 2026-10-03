@@ -21,7 +21,6 @@ import { MemoryStore, openXixiStore, parseSelfModelSettings, SelfModel } from '@
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
 import {
   ConsoleError,
-  CONVERSATION_SCOPE,
   DEFAULT_LOOP_INTERVAL_MS,
   MIN_LOOP_INTERVAL_MS,
   PROACTIVE_PANEL_CSS,
@@ -29,7 +28,6 @@ import {
   segmentTtsNote,
   XIXI_DB_ENTRIES,
   applyAndPersistProactivePatch,
-  buildToolChain,
   createModelComposer,
   databaseNoteHtml,
   effectiveProactivity,
@@ -49,6 +47,10 @@ import {
   type VoiceDeps,
   type VoiceTurnBody,
 } from './field-test.ts';
+// V0.3 P0-A: the tool chain moved to `@xixi/runtime` (pack `04_RUNTIME_CONSOLIDATION.md` §1
+// Step A). The trial page still imports the rest of its shared voice/console seams from
+// `field-test.ts`; only the two runtime symbols left that file.
+import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
 import { toOffsetIso } from '@xixi/contracts';
 // Pack Phase 8: the streaming speech pieces. Chunking itself lives in `handleVoiceTurn` (one
 // `ClauseChunker` for every entry), so this file no longer imports the chunker at all — the
