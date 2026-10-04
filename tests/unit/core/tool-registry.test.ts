@@ -8,6 +8,7 @@ import {
   createToolRegistry,
   executeTool,
   parseToolArguments,
+  toolArgumentsDigest,
   type AgentTool,
 } from '@xixi/brain-adapter';
 
@@ -98,17 +99,52 @@ test('a write tool runs for the resident in a conversation and is refused elsewh
   assert.equal(write.calls.count, 1);
 });
 
-test('an ask policy suspends instead of running: the model is told to ask first', async () => {
+test('an ask tool is offered, and a call to it stops instead of running (pack §5)', async () => {
   const registry = new ToolRegistry({ permission: new ToolPermission({ role: 'resident', askTools: ['xixi_write_probe'] }) });
   const tool = probeTool({ name: 'xixi_write_probe', risk: 'write' });
   registry.register(tool);
-  // `ask` is not `allow`, so the tool is not offered in the first place…
-  assert.equal(registry.listForAgent('conversation').length, 0);
-  // …and a model that names it anyway gets a refusal with the next step.
+  // V0.3 P2-B：`ask` 的工具**必须被广告出来**。pack §5 的审批流程从「模型真的发起这次 tool_call」
+  // 开始（model tool_call → permission ASK → 持久化 → 问一句 → 确认 → 执行冻结调用）；看不见的
+  // 工具永远不会被调用，审批就成了够不到的死代码。`deny` 仍然不可见（上面两条用例钉着）。
+  assert.deepEqual(registry.listForAgent('conversation').map((entry) => entry.name), ['xixi_write_probe']);
+  // 没有审批宿主时：调用得到「先问一句」的拒绝，工具体一次都不跑。
   const execution = await registry.execute({ name: tool.name, arguments: '{}' }, CONTEXT);
   assert.equal(execution.permission.verdict, 'ask');
   assert.equal(execution.record.error, 'ASK');
   assert.match(String(execution.payload.error), /同意/);
+  assert.equal(tool.calls.count, 0);
+  // 装了审批宿主：这次调用被**记下来**（冻结参数 + 摘要），工具体仍然不跑。
+  const asked: { readonly toolName: string; readonly digest: string }[] = [];
+  const gated = new ToolRegistry({
+    permission: new ToolPermission({ role: 'resident', askTools: ['xixi_write_probe'] }),
+    approval: {
+      request: (input) => {
+        asked.push({ toolName: input.toolName, digest: input.argsDigest });
+        return { approvalId: 'apr_test', expiresAt: '2099-01-01T00:00:00+08:00' };
+      },
+    },
+  });
+  gated.register(tool);
+  const recorded = await gated.execute({ name: tool.name, arguments: '{"value":"x"}' }, CONTEXT);
+  assert.equal(recorded.record.error, 'APPROVAL_REQUIRED');
+  assert.equal(recorded.payload['approvalId'], 'apr_test');
+  assert.equal(recorded.payload['requiresApproval'], true);
+  assert.equal(tool.calls.count, 0, '记下来不等于执行');
+  assert.deepEqual(asked.map((entry) => entry.toolName), ['xixi_write_probe']);
+  assert.equal(asked[0]?.digest.length, 64, '宿主拿到的是冻结参数本身的摘要');
+});
+
+test('an ask entry cannot widen a call the other rules refuse', async () => {
+  // 「先问一句」不是一条绕过规则的路：deny 先判，同意凭据也救不回被拒的调用。
+  const registry = new ToolRegistry({ role: 'guest', permission: new ToolPermission({ role: 'guest', askTools: ['xixi_write_probe'] }) });
+  const tool = probeTool({ name: 'xixi_write_probe', risk: 'write' });
+  registry.register(tool);
+  assert.equal(registry.check('xixi_write_probe', 'conversation', 'guest').verdict, 'deny');
+  assert.equal(registry.listForAgent('conversation').length, 0);
+  const execution = await registry.execute({ name: tool.name, arguments: '{}' }, { ...CONTEXT, role: 'guest' }, {
+    approval: { approvalId: 'apr_x', argsDigest: toolArgumentsDigest({}), approvedBy: 'father' },
+  });
+  assert.equal(execution.record.error, 'PERMISSION_DENIED');
   assert.equal(tool.calls.count, 0);
 });
 
