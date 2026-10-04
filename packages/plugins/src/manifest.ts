@@ -37,6 +37,13 @@ export type PluginCapability = (typeof PLUGIN_CAPABILITIES)[number];
  * reason naming the boundary. The second place is the context: even a granted permission never
  * hands out a device — `sensor_source` subscriptions receive *events the perception edge already
  * filtered* (铁律 6).
+ *
+ * **Tool-level approval is deliberately NOT here (yet)** — V0.3 P2-B 的 ASK 声明面是部署配置
+ * `config.tools.approval.ask`（`@xixi/runtime` 的 `resolveToolApprovalSettings`），**manifest 侧未实现**：
+ * 权限表里没有「这个工具要先问一句」的 token，`ActionHandler.approval` 只作用于 `action` 能力，
+ * 而 action 今天还没有被挂成模型可见的工具。给 manifest 加一个 approval token（并让
+ * `registerContribution` / 工具视图把它接到 `ToolPermission.askTools`）是**下一轮的小任务**——
+ * 在那之前，插件工具与内置工具一样，只能靠部署声明变成 `ask`，插件不能自己给自己加一道确认。
  */
 export const PLUGIN_PERMISSIONS = ['network', 'storage', 'notify', 'context.read', 'topic.read', 'tool.register', 'sensor.events'] as const;
 

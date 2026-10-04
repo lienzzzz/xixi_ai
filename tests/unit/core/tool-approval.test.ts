@@ -367,6 +367,36 @@ test('an expired request never runs and is audited as expired', async () => {
   r.store.close();
 });
 
+test('approve() is its own expiry gate: no sweep, still expired, still zero calls', async () => {
+  // t10 的反事实发现：上面那条先 sweep 再点头的用例**够不到** approve() 自带的到期闸门
+  // （把 `if (Date.parse(current.expiresAt) <= at.getTime())` 改成 `if (false)` 时它仍然全绿，
+  // 因为 status 已经被 sweep 改成 expired、approve 早退在状态检查那一步）。这条用例**不 sweep**：
+  // 越过 TTL 直接点头，唯一的到期判定就是 approve() 里那一道闸门。
+  const dir = tempDir();
+  let now = REQUESTED_AT;
+  const clock = () => now;
+  const r = rig(dir, clock);
+
+  const asked = await askOnce(r, { amount: 12, to: '儿子' });
+  const approvalId = String(asked.payload['approvalId']);
+
+  now = new Date(REQUESTED_AT.getTime() + 5 * 60_000 + 1_000); // 过了 TTL
+  assert.equal(r.manager.get(approvalId)?.status, 'pending', '这一步之前没有任何人 sweep 过');
+
+  const decision = await r.manager.approve({ approvalId, actorId: 'father' });
+  assert.equal(decision.status, 'expired');
+  assert.equal(decision.reasonCode, 'approval_expired');
+  assert.equal(decision.execution, null);
+  assert.equal(decision.approval.status, 'expired');
+  assert.equal(r.tool.calls.count, 0, '过期 = 不执行（闸门拿掉时这里会变成 1）');
+
+  const reasons = auditPayloads(r.store).map((payload) => payload['reason_code']);
+  assert.deepEqual(reasons, ['approval_requested', 'approval_expired']);
+  assert.ok(!reasons.includes('user_approved'), '不能留下「人同意了」的记录');
+  assert.ok(!reasons.includes('approval_executed'), '更不能留下「执行过」的记录');
+  r.store.close();
+});
+
 test('nothing asks for approval unless a deployment declares it', async () => {
   // 「没声明就不该 ASK」：出厂默认是空表；只有 config.tools.approval.ask 里写了名字才会 ask。
   assert.deepEqual(parseToolApprovalSettings(undefined), { ask: [], ttlSeconds: 300 });

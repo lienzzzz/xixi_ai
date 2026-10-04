@@ -22,6 +22,12 @@
  *      并且 `pending → denied|expired` 之后没有可能再走到 `executed`（domain 的状态机拒绝）。
  *   3. **没声明就不 ASK**：`ask` 表来自 `config.tools.approval.ask`（缺省为空）。没有任何工具
  *      会因为「看起来危险」被自动加进来 —— 审批和权限一样，要先声明。
+ *
+ * **声明面的现状（口径统一，别写成已实现）**：ASK 目前**只**由部署配置
+ * `config.tools.approval.ask` 声明；**manifest 侧未实现** —— `XixiPluginManifest` 今天没有 tool 级的
+ * approval 声明（`packages/plugins/src/manifest.ts` 的权限表里也没有对应 token，`ActionHandler.approval`
+ * 只作用于尚未暴露成模型工具的 `action` 能力）。也就是说「某个插件在它自己的 manifest 里声明『我的这个
+ * 工具要先问一句』」这条路今天走不通，插件的工具与内置工具走的是**同一份**部署声明。
  */
 import {
   DEFAULT_TOOL_APPROVAL_SETTINGS,
