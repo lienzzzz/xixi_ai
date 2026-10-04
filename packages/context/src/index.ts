@@ -69,6 +69,31 @@ export {
   renderWorldLines,
   type MemoryRenderResult,
 } from './render.ts';
+export {
+  CORRECTION_MATCH_FLOOR,
+  correctedStatement,
+  detectMemoryCorrection,
+  MemoryCorrectionResolver,
+  objectTermOf,
+  type CorrectionDetection,
+  type CorrectionKind,
+  type CorrectionResolution,
+  type CorrectionResolutionInput,
+  type MemoryCorrectionResolverOptions,
+} from './memory-correction.ts';
+export {
+  tier2StoredConfidence,
+  TIER2_MAX_CANDIDATES,
+  TIER2_MIN_CONFIDENCE,
+  TIER2_PROPERTIES,
+  validateTier2Candidates,
+  worthRemembering,
+  type RejectedTier2Candidate,
+  type StructuredMemoryExtractor,
+  type Tier2Candidate,
+  type Tier2Property,
+  type Tier2Validation,
+} from './tier2-extraction.ts';
 export { parseContextMemorySettings, type ContextMemorySettings } from './settings.ts';
 export type { PromptTurnLike, TurnRoleLike } from './prompt-turn.ts';
 export {

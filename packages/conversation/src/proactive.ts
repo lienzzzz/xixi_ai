@@ -973,6 +973,26 @@ function tightenBudget(cap: number, multiplier: number): number {
 
 // ------------------------------------------------------------- model decision
 
+/**
+ * 读空气时额外给模型看的**上下文**（V0.3 P1-b / pack §6 §7）。
+ *
+ * 为什么放在这里而不是塞进 `basis`：`basis` 是**这一次判定的确定性依据**（冷却、额度、
+ * 未回应……），每条都能被复算成「为什么现在说」；这几行是**关系与未完话题的摘要**，
+ * 它们回答的是「现在该怎么说话」而不是「现在该不该说」。两者混在一个数组里，
+ * 面板与评审就再也分不清一条依据到底是门禁还是语气。
+ *
+ * 三行都是**程序渲染好的中文**（`ContextBuilder` 的渲染出口闸门已经过了：没有 id、没有数字），
+ * 模型看到的是句子。
+ */
+export interface ProactiveContextLines {
+  /** 关系摘要（pack §6：只给与当前行为有关的几句话，不给全统计）。 */
+  readonly relationship: readonly string[];
+  /** 还没收口的话题（pack §7：这是「将来还要接的话」，不是记忆）。 */
+  readonly openThreads: readonly string[];
+  /** 检索到的长期记忆（pack §2）。 */
+  readonly memories: readonly string[];
+}
+
 /** What the model sees when it is asked "说还是不说". Numbers and labels only — no prompt prose. */
 export interface ProactiveModelInput {
   readonly candidate: ProactiveCandidate;
@@ -983,6 +1003,10 @@ export interface ProactiveModelInput {
   readonly recommendation: 'speak' | 'hold';
   readonly primarySignal: ProactivePrimarySignal;
   readonly basis: readonly string[];
+  /**
+   * 上下文摘要（可选）：省略时与从前逐字相同（老调用方、老测试不必知道这一层存在）。
+   */
+  readonly context?: ProactiveContextLines | undefined;
   /** How heavily the recent proactive messages went unanswered (0..1; the escalated grade divided back by the base penalty, clamped). */
   readonly unansweredRatio: number;
   readonly now: Date;

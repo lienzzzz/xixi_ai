@@ -141,6 +141,7 @@ export {
   scoreProactiveCandidate,
   type ProactiveCandidate,
   type ProactiveConsiderInput,
+  type ProactiveContextLines,
   type ProactiveDecider,
   type ProactiveDelivery,
   type ProactiveDeliveryRecord,

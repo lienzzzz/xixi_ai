@@ -70,6 +70,9 @@ test('ContextBuilder 是唯一入口：ConversationContext 的每一块都在，
   try {
     seed(h.memory, '父亲不喜欢绿茶');
     seed(h.memory, '他喜欢喝红茶');
+    // 关系笔记（「我们怎么相处」）：它必须一路走到**对话的提示词**里 —— 这是 pack §6
+    // 「关系上下文真的进入对话」的可观察结果。
+    h.memory.recordNote({ aspect: 'chat_style', note: '他嫌话多：少说、少主动、少追问', sourceType: 'explicit_correction' });
     const threads = new OpenThreadStore(h.store);
     threads.create({ threadId: 'thread_ctx000001', summary: '明天下午我要去镇上办证', subject: '去镇上办证' });
 
@@ -79,6 +82,10 @@ test('ContextBuilder 是唯一入口：ConversationContext 的每一块都在，
     assert.ok(context.memories.length >= 1, `记忆必须进上下文：${JSON.stringify(context.memories)}`);
     assert.equal(typeof context.relationship.recentStats.windowDays, 'number');
     assert.equal(context.relationship.recentStats.interruptionRate, null, '没有打断事件就不编一个比率');
+    assert.ok(
+      context.relationship.prose.some((line) => line.includes('嫌话多')),
+      `关系摘要里要带上那条笔记：${JSON.stringify(context.relationship.prose)}`,
+    );
     assert.equal(context.openThreads.length, 1, '未收口的话题是上下文的一部分');
     assert.equal(context.openThreads[0]?.threadId, 'thread_ctx000001');
     assert.equal(context.world.timezone, 'Asia/Shanghai');
@@ -92,6 +99,8 @@ test('ContextBuilder 是唯一入口：ConversationContext 的每一块都在，
     assert.ok(prompt.user.includes(MEMORY_SECTION_HEADING), '记忆段的标题在');
     assert.ok(prompt.user.includes('不喜欢绿茶'), '记忆的正文在');
     assert.ok(prompt.user.includes('明天下午我要去镇上办证'), '未完话题在');
+    assert.ok(prompt.user.includes('他嫌话多'), '关系摘要也在提示词里（pack §6 的「进入对话」）');
+    assert.ok(prompt.sections.some((section) => section.name === 'relationship'), '而且逐段可寻址');
     assert.equal(prompt.sections.filter((section) => section.name === 'memories').length, 1);
     assert.equal(prompt.sections.filter((section) => section.name === 'self').length, 1);
     // 两处的标题必须是同一个字符串（这一条防的是「两处各写一份标题」那种漂移）。

@@ -49,7 +49,7 @@ import { openXixiStore, resolveCanonicalDataDir } from '@xixi/domain';
 // V0.3 P0-A: the tool chain moved to `@xixi/runtime` (pack `04_RUNTIME_CONSOLIDATION.md` §1
 // Step A). This voice entry and the console still must not drift into two chains — they simply
 // share the runtime package's one now instead of the console script's.
-import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
+import { CONVERSATION_SCOPE, buildToolChain, createTurnExtraction } from '@xixi/runtime';
 
 import { REPO_ROOT, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
 import { concatWav, readWavInfo, readWav } from './lib/wav.ts';
@@ -253,6 +253,11 @@ const store = openXixiStore({ dataDir: voiceDataDir });
 store.seedSelfProfile(config.personality.base);
 const session = store.latestSession() ?? store.createSession();
 /**
+ * V0.3 P1-b：一轮之后的记忆提取（pack §4 §5）。`afterTurn` **只入队、不 await**，
+ * 所以语音的延迟与「她要不要写记忆」无关；`drain()` 在关库之前把排队与在飞的活跑完。
+ */
+const extraction = createTurnExtraction({ store, config });
+/**
  * Pack Phase 2: the file-driven voice entry uses the *same* tool chain as the text
  * entries (`buildToolChain` → one registry with the four built-ins). Before this, the
  * voice path had no tools at all: asking about the weather by voice could only be
@@ -270,7 +275,15 @@ const adapter: BrainAdapter = useFake
       timezone: config.identity.timezone,
       language: config.identity.language,
     });
-const engine = new ConversationEngine({ adapter, store, config, turnTimeoutMs: 60_000 });
+const engine = new ConversationEngine({
+  adapter,
+  store,
+  config,
+  turnTimeoutMs: 60_000,
+  // V0.3 P1-b：这个入口以前**没有**接过 `afterTurn` —— 语音里说过的事不会进记忆，
+  // 而文字入口会（同一个西西因此表现不一致）。装配与另外两个入口共用同一份工厂。
+  afterTurn: extraction.afterTurn,
+});
 mkdirSync(OUT_DIR, { recursive: true });
 
 const results: VoiceTurnResult[] = [];
@@ -581,4 +594,6 @@ mkdirSync(dirname(outPath), { recursive: true });
 writeFileSync(outPath, `=== 语音闭环（夹具音频 → VAD → ASR → 对话 → 流式 TTS）===\n${JSON.stringify(serializable, null, 2)}\n`, 'utf8');
 console.log(`\n[evidence] 本批产物已写入 ${outPath}（--compare ${outPath} 可复算对照，不调 API）`);
 store.recordHealth('voice-edge', 'ok', `voice turn batch of ${wavs.length}`);
+// 关库之前先把后台提取跑完（t9 F3 的同一纪律：数据丢失不能是无声的）。
+await extraction.drain();
 store.close();

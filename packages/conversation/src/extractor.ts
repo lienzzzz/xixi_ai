@@ -21,6 +21,15 @@
 
 import { toOffsetIso } from '@xixi/contracts';
 import {
+  MemoryCorrectionResolver,
+  tier2StoredConfidence,
+  validateTier2Candidates,
+  worthRemembering,
+  type CorrectionResolution,
+  type StructuredMemoryExtractor,
+  type Tier2Validation,
+} from '@xixi/context';
+import {
   MemoryStore,
   SelfModel,
   type EpisodicMemory,
@@ -62,6 +71,10 @@ export interface ExtractionResult {
   readonly episodic: readonly EpisodicMemory[];
   readonly semantic: readonly SemanticMemory[];
   readonly notes: readonly RelationshipNote[];
+  /** pack §5 的记忆纠正闭环结果（`null` = 这一轮没命中纠正规则）。 */
+  readonly correction: CorrectionResolution | null;
+  /** pack §8 的 Tier 2（结构化模型抽取）结果；没接线 / 这一轮不值得记时为 `null`。 */
+  readonly tier2: Tier2Extraction | null;
   /**
    * 这一轮里**单独失败**的步骤（preflight ③）：每一步互不牵连，坏的那条丢自己。
    *
@@ -69,6 +82,16 @@ export interface ExtractionResult {
    * 整轮失败（库已关、调用方注入的东西在更外层炸）仍然只由 `#runSafely` 计数。
    */
   readonly failures: readonly ExtractionFailure[];
+}
+
+/** Tier 2 一轮的结果：模型给了什么、收下了什么、为什么丢。 */
+export interface Tier2Extraction {
+  /** 这一轮过没过「可能值得记」那道门槛（没过就连模型都没叫）。 */
+  readonly attempted: boolean;
+  readonly validation: Tier2Validation;
+  readonly written: readonly SemanticMemory[];
+  /** 调用模型本身失败时的原因（模型挂了不该影响 Tier 1 已经写下的东西）。 */
+  readonly failure: string | null;
 }
 
 /** 一条被隔离掉的失败：`step` 是产生它的那一步（例如 `self_model.learn:verbosity`）。 */
@@ -87,6 +110,18 @@ export interface TurnMemoryExtractorOptions {
   readonly scheduler?: ExtractionScheduler | undefined;
   /** 提取里出的错（写库失败、规则异常）从这里出来，绝不影响已经说完的那句话。 */
   readonly onError?: ((error: unknown) => void) | undefined;
+  /**
+   * pack §5 的记忆纠正闭环。省略 = 自己按 store 建一个（于是「他否定了一条记忆」这件事
+   * 默认会被处理，不需要每个入口记得接一次线）。
+   */
+  readonly correctionResolver?: MemoryCorrectionResolver | undefined;
+  /**
+   * pack §8 的 Tier 2：**结构化的模型抽取**。省略 = 不叫模型（只有 Tier 1）。
+   *
+   * 它是注入的，不是为了灵活，而是为了两件事：离线能测「模型给非法输出会怎样」，
+   * 以及入口自己决定用哪个模型与哪套 schema（这一层只做校验与写入政策）。
+   */
+  readonly structuredExtractor?: StructuredMemoryExtractor | undefined;
 }
 
 /**
@@ -143,7 +178,11 @@ export class TurnMemoryExtractor {
   readonly #memory: MemoryStore;
   readonly #scheduler: ExtractionScheduler;
   readonly #onError: ((error: unknown) => void) | undefined;
+  readonly #correction: MemoryCorrectionResolver;
+  readonly #structured: StructuredMemoryExtractor | undefined;
   readonly #queue: PostTurnJob[] = [];
+  /** 在飞的 Tier 2 任务（它们 async，`flush()` 要等它们跑完才算「这一轮提取完了」）。 */
+  readonly #tier2InFlight = new Set<Promise<unknown>>();
   #processed = 0;
   #errors = 0;
 
@@ -153,6 +192,8 @@ export class TurnMemoryExtractor {
     this.#memory = options.memory ?? new MemoryStore(options.store);
     this.#scheduler = options.scheduler ?? DEFAULT_EXTRACTION_SCHEDULER;
     this.#onError = options.onError;
+    this.#correction = options.correctionResolver ?? new MemoryCorrectionResolver({ store: options.store, memory: this.#memory });
+    this.#structured = options.structuredExtractor;
   }
 
   /** 还没跑的活（面板/测试看得见「回复之后还有多少提取在排队」）。 */
@@ -186,7 +227,73 @@ export class TurnMemoryExtractor {
       if (job === undefined) break;
       this.#runSafely(job);
     }
+    // Tier 2 是 async 的：`flush()` 的语义是「这一轮提取真的结束了」，所以必须等它们。
+    while (this.#tier2InFlight.size > 0) {
+      await Promise.allSettled([...this.#tier2InFlight]);
+    }
     pendingAtExit.delete(this);
+  }
+
+  /**
+   * Tier 2（pack §8）：结构化的模型抽取。
+   *
+   * 三件事按顺序发生，任何一步不成立都不会走到下一步：
+   *   1. `worthRemembering()`（确定性）—— 不值得记的回合**连模型都不叫**；
+   *   2. 注入的 `structuredExtractor` 拿这一轮的对话去问模型（形状完全不被信任）；
+   *   3. `validateTier2Candidates()` 校验：类别白名单 + schema + 置信阈值，通过的才写库。
+   *
+   * **它永远不会碰 SelfModel**：这个方法的写入路径只有 `recordSemantic`，
+   * 而人格属性（verbosity 之类）在类别白名单之外，第一步就被拒。
+   * 模型/网络失败只记进 `failure`，不影响 Tier 1 已经写下的东西（与 preflight ③ 同一条纪律）。
+   */
+  async runTier2(job: PostTurnJob): Promise<Tier2Extraction> {
+    const extractor = this.#structured;
+    if (extractor === undefined || !worthRemembering(job.userText)) {
+      return {
+        attempted: false,
+        validation: { accepted: [], rejected: [] },
+        written: [],
+        failure: extractor === undefined ? '这个入口没有接线结构化抽取（只有 Tier 1）' : '这一轮不值得记（确定性门槛没过）',
+      };
+    }
+    let raw: unknown;
+    try {
+      raw = await extractor({ userText: job.userText, replyText: job.replyText });
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : String(error);
+      try {
+        this.#onError?.(new Error(`[memory.tier2] ${failure}`));
+      } catch {
+        // 上报失败不能把这一轮变成崩溃。
+      }
+      return { attempted: true, validation: { accepted: [], rejected: [] }, written: [], failure };
+    }
+    const validation = validateTier2Candidates(raw);
+    const written: SemanticMemory[] = [];
+    for (const candidate of validation.accepted) {
+      try {
+        // 判重：同一句话已经记过（Tier 1 或上一轮）就不再写一条。
+        const existing = this.#memory.semantic({ property: candidate.property, limit: 200 });
+        if (existing.some((entry) => entry.statement === candidate.statement)) continue;
+        written.push(
+          this.#memory.recordSemantic({
+            property: candidate.property,
+            statement: candidate.statement,
+            sourceType: 'model_inference',
+            sourceEventId: job.userEventId,
+            confidence: tier2StoredConfidence(candidate.confidence),
+          }),
+        );
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        try {
+          this.#onError?.(new Error(`[memory.tier2:${candidate.property}] ${detail}`));
+        } catch {
+          // 同上。
+        }
+      }
+    }
+    return { attempted: true, validation, written, failure: null };
   }
 
   /**
@@ -327,6 +434,34 @@ export class TurnMemoryExtractor {
       });
     }
 
+    // pack §5：**记忆纠正闭环**。它排在语义规则**前面** —— 纠正会写一条新的语义记忆，
+    // 后面的规则再看到同一句话时会被「statement 已存在」的判重挡住，于是不会写第二条。
+    const correction: CorrectionResolution | null =
+      attempt('memory.correction', () =>
+        this.#correction.resolve({
+          userText: job.userText,
+          at: job.at,
+          sessionId: job.sessionId,
+          sourceEventId: job.userEventId,
+        }),
+      ) ?? null;
+    if (correction !== null && correction.status !== null) {
+      // 被改状态的那条记忆也留下一条「发生过的事」：将来她可以回答「你上次说你不喝绿茶」。
+      attempt('memory.episodic:memory_correction', () => {
+        episodic.push(
+          ...this.#recordOnce({
+            kind: 'correction',
+            summary: correction.note,
+            sourceType: 'explicit_correction',
+            sourceEventId: job.userEventId,
+            sessionId: job.sessionId,
+            occurredAt: job.at,
+            importance: 0.9,
+          }),
+        );
+      });
+    }
+
     // 将来的事：复用 Phase 3 的规则提取器（同一套「时间词 + 意愿 + 动作」规则，不另写一套）。
     const userEventId = job.userEventId;
     if (userEventId !== null) {
@@ -374,7 +509,7 @@ export class TurnMemoryExtractor {
       });
     }
 
-    return { job, feedback, learned, overrides, episodic, semantic, notes, failures };
+    return { job, feedback, learned, overrides, episodic, semantic, notes, correction, tier2: null, failures };
   }
 
   /** 同一条轮次、同一个 kind 只记一次（重放/重启不会把记忆写两遍）。 */
@@ -413,8 +548,27 @@ export class TurnMemoryExtractor {
       const job = this.#queue.shift();
       if (job === undefined) break;
       this.#runSafely(job);
+      this.#scheduleTier2(job);
     }
     pendingAtExit.delete(this);
+  }
+
+  /**
+   * 排一次 Tier 2（异步）。任务被登记在 `#tier2InFlight` 里，所以 `flush()` 会等它 ——
+   * 「回复返回时 Tier 1 已经写完了，Tier 2 还在路上」是可以被测试断言的事实，
+   * 而不是靠掐秒表（与 `scheduled` 那道手动调度器同一个思路）。
+   */
+  #scheduleTier2(job: PostTurnJob): void {
+    if (this.#structured === undefined) return;
+    const task = this.runTier2(job).catch((error: unknown) => {
+      try {
+        this.#onError?.(error);
+      } catch {
+        // 同上。
+      }
+    });
+    this.#tier2InFlight.add(task);
+    void task.finally(() => this.#tier2InFlight.delete(task));
   }
 
   /** 跑一轮；出错只计数并交给 `onError`（调用方要不要抛出由它决定）。返回值 = 这一轮跑成了没有。 */

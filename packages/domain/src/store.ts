@@ -17,8 +17,10 @@ import {
 import { type Clock, systemClock } from './clock.ts';
 import { DomainError } from './errors.ts';
 import {
+  MEMORY_STATUSES,
   type EpisodicMemory,
   type MemoryQuery,
+  type MemoryStatus,
   type NewEpisodicMemory,
   type NewRelationshipNote,
   type NewSemanticMemory,
@@ -485,6 +487,10 @@ interface SemanticMemoryRow {
   source_type: string;
   source_event_id: string | null;
   confidence: number;
+  /** 006_memory_status.sql 加的三列（老库里的行由迁移的 DEFAULT 填成 active）。 */
+  status: string;
+  superseded_by: string | null;
+  status_changed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1677,8 +1683,8 @@ export class XixiStore {
       .prepare(
         `INSERT INTO semantic_memory (
            memory_id, schema_version, property, statement, source_type, source_event_id,
-           confidence, created_at, updated_at
-         ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+           confidence, status, superseded_by, status_changed_at, created_at, updated_at
+         ) VALUES (?, 1, ?, ?, ?, ?, ?, 'active', NULL, NULL, ?, ?)`,
       )
       .run(
         memoryId,
@@ -1708,6 +1714,12 @@ export class XixiStore {
       clauses.push('property = ?');
       params.push(query.property);
     }
+    // 状态过滤（迁移 006）。省略 = 不过滤（审计/面板的全量视图）。
+    const statuses = query.status === undefined ? [] : Array.isArray(query.status) ? query.status : [query.status];
+    if (statuses.length > 0) {
+      clauses.push(`status IN (${statuses.map(() => '?').join(', ')})`);
+      params.push(...statuses);
+    }
     const since = toEpochMs(query.since);
     if (since !== null) {
       clauses.push('created_at >= ?');
@@ -1719,6 +1731,39 @@ export class XixiStore {
       .prepare(`SELECT * FROM semantic_memory ${where} ORDER BY updated_at DESC, rowid DESC LIMIT ?`)
       .all(...params) as unknown as SemanticMemoryRow[];
     return rows.map(toSemanticMemory);
+  }
+
+  /**
+   * 改一条语义记忆的状态（迁移 006 的写入路径）。
+   *
+   * 只动状态三列：`statement` / `property` / `source_event_id` / `confidence` 一字不改 ——
+   * 「历史不许被改写」这条在记忆上同样成立（被取代的那条仍原样留着，只是不再算数）。
+   */
+  setSemanticMemoryStatus(input: {
+    readonly memoryId: string;
+    readonly status: MemoryStatus;
+    readonly at: Date;
+    readonly reason: string;
+    readonly supersededBy?: string | null | undefined;
+  }): SemanticMemory {
+    this.#assertOpen();
+    const current = this.semanticMemory(input.memoryId);
+    const supersededBy = input.status === 'superseded' ? (input.supersededBy ?? null) : null;
+    if (input.status === 'superseded' && supersededBy === null) {
+      throw new DomainError('INVALID_MEMORY_STATUS', 'superseded 必须给出取代它的那条记忆 id', input.memoryId);
+    }
+    if (supersededBy !== null) this.semanticMemory(supersededBy);
+    const changedAt = this.#writeOffsetMinutes === null ? toOffsetIso(input.at) : toOffsetIso(input.at, this.#writeOffsetMinutes);
+    this.#db
+      .prepare('UPDATE semantic_memory SET status = ?, superseded_by = ?, status_changed_at = ?, updated_at = ? WHERE memory_id = ?')
+      .run(input.status, supersededBy, changedAt, this.#now(), current.memoryId);
+    // 状态变化也是一条**事实**：写进事件日志。复用既有的 `system.health` 审计事件类型 ——
+    // 契约的 event_type 枚举是已发布的，不为「记忆改状态」新增一种（004 的设计取舍同款）。
+    // detail 截到 400 字：这个字段有长度上限，越界会被 schema 拒绝，而「状态改了却没留痕」
+    // 比少写几个字糟糕得多。日志里**没有**用户原话，只有原因短句（铁律 5）。
+    const detail = `${current.memoryId} → ${input.status}：${input.reason}`;
+    this.recordHealth('memory.status', 'ok', detail.length > 400 ? `${detail.slice(0, 397)}...` : detail);
+    return this.semanticMemory(input.memoryId);
   }
 
   updateSemanticMemory(
@@ -2126,6 +2171,11 @@ function toSemanticMemory(row: SemanticMemoryRow): SemanticMemory {
     sourceType: row.source_type as SemanticMemory['sourceType'],
     sourceEventId: row.source_event_id,
     confidence: row.confidence,
+    // 老库（006 之前的行）由迁移的 DEFAULT 补成 'active'；万一读到不认识的字符串，
+    // 按 **inactive** 处理（`expired`）而不是当成 active —— 「认不出来的状态」不该被当成算数。
+    status: (MEMORY_STATUSES as readonly string[]).includes(row.status) ? (row.status as MemoryStatus) : 'expired',
+    supersededBy: row.superseded_by,
+    statusChangedAt: row.status_changed_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

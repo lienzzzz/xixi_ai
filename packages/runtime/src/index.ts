@@ -94,6 +94,7 @@ export {
   PROACTIVE_TRIGGER_LABELS,
   ProactiveLoop,
   buildProactiveCandidates,
+  contextLines,
   createModelComposer,
   createModelDecider,
   formatClockMinutes,
@@ -117,3 +118,5 @@ export {
   type ProactiveLoopEntry,
   type ProactiveLoopOptions,
 } from './proactive-runtime.ts';
+// V0.3 P1-b：三个入口共用的「一轮之后的记忆提取」装配（chat / 试用页 / voice-turn 都调它）。
+export { createTurnExtraction, type TurnExtraction, type TurnExtractionOptions } from './turn-extraction.ts';

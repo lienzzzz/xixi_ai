@@ -28,6 +28,7 @@ import {
 } from './fsm.ts';
 import { PromptAssembler, SILENCE_TOKEN, worldStateLite, type AssembledPrompt, type MoodContext, type PromptTurn } from './prompt.ts';
 import { DEFAULT_SILENCE_TOLERANCE, moodToleranceScale } from './personality.ts';
+import type { ProactiveContextLines } from './proactive.ts';
 import type { PostTurnJob } from './extractor.ts';
 import { REPLY_LIMITS, resolveReplyLimits, splitReplyIntoSegments, type ReplySegmentOptions, type SegmentedReply } from './segments.ts';
 
@@ -572,6 +573,27 @@ export class ConversationEngine {
   /** 主动开口那一条路的上下文对象（见 `buildProactivePrompt`）。 */
   buildProactiveContext(input: ProactiveTurnContextInput): ProactiveContext | null {
     return this.#context?.buildProactive(input) ?? null;
+  }
+
+  /**
+   * 读空气（「说还是不说」）时给模型的**上下文摘要**（V0.3 P1-b / pack §6 §7）。
+   *
+   * 与 `buildProactivePrompt` 走同一份 `ContextBuilder`、同一个渲染出口闸门，区别只在用途：
+   * 那份是**开口之后**组句子用的，这份是**判定之前**读空气用的。两处从同一个 `ProactiveContext`
+   * 渲染，所以「决策时看到的」与「说话时看到的」不会互相漂。
+   *
+   * 没有上下文层（`contextBuilder: false`）时返回 `null`：调用方省略 `context` 即可，
+   * 决策输入于是与从前逐字相同。
+   */
+  buildProactiveDecisionContext(input: ProactiveTurnContextInput): ProactiveContextLines | null {
+    const context = this.buildProactiveContext(input);
+    if (context === null || this.#context === null) return null;
+    const rendered = this.#context.render(context, input.at);
+    return {
+      memories: rendered.memoryLines,
+      relationship: rendered.relationshipLines,
+      openThreads: rendered.openThreadLines,
+    };
   }
 
   /**

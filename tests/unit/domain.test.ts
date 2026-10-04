@@ -403,7 +403,16 @@ test('004_memory 是新增迁移：四张表落地，旧库照旧能打开', () 
   const files = listMigrationFiles();
   assert.deepEqual(
     files.map((file) => file.name),
-    ['001_initial.sql', '002_world_state.sql', '003_open_threads.sql', '004_memory.sql', '005_mood.sql'],
+    [
+      '001_initial.sql',
+      '002_world_state.sql',
+      '003_open_threads.sql',
+      '004_memory.sql',
+      '005_mood.sql',
+      // V0.3 P1-b：记忆的状态机（语义记忆加 status / superseded_by / status_changed_at 三列 +
+      // 一个按状态的索引）。只新增列，004 的文件一字未动。
+      '006_memory_status.sql',
+    ],
     '已发布的迁移只能新增，不能改写（005_mood 是第五轮 t4 新增的心情表）',
   );
   const store = tempStore();
@@ -412,11 +421,47 @@ test('004_memory 是新增迁移：四张表落地，旧库照旧能打开', () 
     // 四张表都能写（迁移真的建了表，而不是只写了个文件）。
     const memory = new MemoryStore(store);
     assert.ok(memory.recordEpisodic({ summary: '一件事', kind: 'episode', sourceType: 'program_extraction' }));
-    assert.ok(memory.recordSemantic({ property: 'place', statement: '我住在城东', sourceType: 'explicit_correction' }));
+    const first = memory.recordSemantic({ property: 'place', statement: '我住在城东', sourceType: 'explicit_correction' });
     assert.ok(memory.recordNote({ aspect: 'humor', note: '喜欢听笑话', sourceType: 'explicit_correction' }));
     const self = new SelfModel(store);
     assert.equal(self.learn({ property: 'humor', delta: 0.1, sourceType: 'explicit_correction' }).applied, 0.1);
     assert.equal(self.overrides().length, 0);
+    // 006：新写下的记忆是 active，而且状态读写路径真的通了（不只是列存在）。
+    assert.equal(first.status, 'active');
+    assert.equal(first.supersededBy, null);
+    assert.equal(first.statusChangedAt, null);
+    const second = memory.recordSemantic({ property: 'place', statement: '我不在城东住了', sourceType: 'explicit_correction' });
+    const { previous } = memory.supersedeSemantic({
+      memoryId: first.memoryId,
+      supersededBy: second.memoryId,
+      at: new Date(),
+      reason: '用户更正了住址',
+    });
+    assert.equal(previous.status, 'superseded');
+    assert.equal(previous.supersededBy, second.memoryId);
+    assert.equal(previous.statement, '我住在城东', 'statement 一字不改：历史不许被改写');
+    assert.deepEqual(
+      memory.activeSemantic().map((entry) => entry.statement),
+      ['我不在城东住了'],
+      '只有 active 会被「算数的那些」看见',
+    );
+    assert.equal(memory.semantic().length, 2, '全量视图里两条都在（历史没被删）');
+
+    // 面板与将来的人工清理用的两条通用入口（`setSemanticStatus` / `markSemanticExpired`）：
+    // 它们没有别的调用者，所以必须在这里被真的跑一遍，否则就是死 API。
+    const third = memory.recordSemantic({ property: 'routine', statement: '我每天六点起床', sourceType: 'program_extraction' });
+    const expired = memory.markSemanticExpired({ memoryId: third.memoryId, at: new Date(), reason: '举例：太久没提起' });
+    assert.equal(expired.status, 'expired');
+    assert.equal(expired.supersededBy, null, '过期不是被取代：没有替代者');
+    assert.equal(memory.activeSemantic().some((entry) => entry.memoryId === third.memoryId), false);
+    const revoked = memory.setSemanticStatus({ memoryId: third.memoryId, status: 'revoked', at: new Date(), reason: '举例：他否认了这件事' });
+    assert.equal(revoked.status, 'revoked');
+    assert.notEqual(revoked.statusChangedAt, null);
+    assert.throws(
+      () => memory.setSemanticStatus({ memoryId: third.memoryId, status: 'superseded', at: new Date(), reason: '没有给出替代者' }),
+      /superseded 必须给出取代它的那条记忆 id/,
+      'superseded 不许指向空：那会让「被谁取代」永远查不出来',
+    );
   } finally {
     store.close();
   }

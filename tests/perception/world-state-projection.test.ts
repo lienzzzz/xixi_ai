@@ -44,9 +44,19 @@ test('002_world_state is a new, additive migration', () => {
   //
   // 第五轮 t4：有界的心情新增 `005_mood.sql`（`mood_state` + `mood_history` 两张表，
   // 见 docs/adr/0013-bounded-mood-state.md）。它同样是**新增**，没有改写任何已发布的迁移。
+  //
+  // V0.3 P1-b：记忆的状态机新增 `006_memory_status.sql`（只给 `semantic_memory` 加三列
+  // status / superseded_by / status_changed_at 与一个按状态的索引，没有改写任何已发布的文件）。
   assert.deepEqual(
     files.map((file) => file.name),
-    ['001_initial.sql', '002_world_state.sql', '003_open_threads.sql', '004_memory.sql', '005_mood.sql'],
+    [
+      '001_initial.sql',
+      '002_world_state.sql',
+      '003_open_threads.sql',
+      '004_memory.sql',
+      '005_mood.sql',
+      '006_memory_status.sql',
+    ],
     '已发布的迁移只能新增，不能改写',
   );
   const store = tempStore();

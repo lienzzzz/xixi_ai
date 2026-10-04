@@ -18,6 +18,7 @@
  */
 
 import {
+  MemoryStore,
   OpenThreadStore,
   type EpisodicMemory,
   type OpenThread,
@@ -146,10 +147,13 @@ interface Scored {
 export class MemoryRetriever {
   readonly #store: XixiStore;
   readonly #threads: OpenThreadStore;
+  /** 语义记忆的「只取 active」走它（迁移 006 之后，历史与算数的那些是两个视图）。 */
+  readonly #memory: MemoryStore;
 
-  constructor(store: XixiStore) {
+  constructor(store: XixiStore, memory?: MemoryStore | undefined) {
     this.#store = store;
     this.#threads = new OpenThreadStore(store);
+    this.#memory = memory ?? new MemoryStore(store);
   }
 
   /** 读候选并按混合分数排序、截断、给出诊断。 */
@@ -225,7 +229,9 @@ export class MemoryRetriever {
   #candidates(): MemoryCandidate[] {
     const limit = DEFAULT_CANDIDATE_LIMIT;
     const episodic = this.#store.episodicMemories({ limit }).map((memory) => fromEpisodic(memory));
-    const semantic = this.#store.semanticMemories({ limit }).map((memory) => fromSemantic(memory));
+    // 语义记忆只取 **active** 的（迁移 006）：被取代 / 被否定的那条不能再被当成事实说出去 ——
+    // 这正是纠错闭环的下游效果（「旧事实被标 revoked 或 superseded 且不再被召回」）。
+    const semantic = this.#memory.activeSemantic({ limit }).map((memory) => fromSemantic(memory));
     const notes = this.#store.relationshipNotes({ limit }).map((note) => fromNote(note));
     return [...episodic, ...semantic, ...notes];
   }

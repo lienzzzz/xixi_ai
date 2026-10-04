@@ -34,6 +34,38 @@ export const MEMORY_SOURCE_CONFIDENCE: Readonly<Record<MemorySourceType, number>
   model_inference: 0.4,
 });
 
+/**
+ * 一条记忆现在的**状态**（pack `docs/02_MEMORY_CONTEXT.md` §5，迁移 006）。
+ *
+ * 为什么需要它（正是审计 §3.2 抱怨的那件事）：在 `我什么时候喜欢绿茶了，我不喝那个` 之后，
+ * 「喜欢绿茶」与「不喜欢绿茶」会**永久并存**，谁也不知道哪条算数 —— 召回可能把被否定过的那条
+ * 当成事实说出去。状态就是「哪条算数」的那个答案，而且它必须**持久**：面板与评审要能回答
+ * 「这条什么时候不信的、被哪一条取代的」。
+ *
+ *   * `active`：算数 —— **唯一会被提示词召回的状态**；
+ *   * `superseded`：被一条更新的记忆取代（`supersededBy` 指向新那条）：历史留着，不再算数；
+ *   * `revoked`：父亲明确否定了这条事实、也没有替代说法：不再算数；
+ *   * `expired`：过了有效期。**本轮不自动过期**：唯一入口是显式的 `markExpired()` ——
+ *     「悄悄忘掉一件事」是用户看不见的行为，不该由一个定时器决定（AGENTS §5）。
+ */
+export const MEMORY_STATUSES = Object.freeze(['active', 'superseded', 'revoked', 'expired'] as const);
+
+export type MemoryStatus = (typeof MEMORY_STATUSES)[number];
+
+/** 还会被当成事实 / 被召回的状态（只有 `active`）。 */
+export const ACTIVE_MEMORY_STATUSES: readonly MemoryStatus[] = Object.freeze(['active']);
+
+/** 一次状态变化的审计信息（谁改的、为什么）。 */
+export interface MemoryStatusChange {
+  readonly memoryId: string;
+  readonly status: MemoryStatus;
+  /** 取代它的那一条（只有 `superseded` 才有）。 */
+  readonly supersededBy: string | null;
+  readonly at: string;
+  /** 程序渲染的一句话原因（例如「用户回答：我不喝那个」）。 */
+  readonly reason: string;
+}
+
 export type EpisodicKind = 'plan' | 'correction' | 'episode';
 
 export interface EpisodicMemory {
@@ -71,6 +103,12 @@ export interface SemanticMemory {
   readonly sourceType: MemorySourceType;
   readonly sourceEventId: string | null;
   readonly confidence: number;
+  /** 现在算不算数（迁移 006 加的列；老库里已有行默认 `active`）。 */
+  readonly status: MemoryStatus;
+  /** 取代它的那条记忆（只有 `superseded` 才有，`revoked` 为 null）。 */
+  readonly supersededBy: string | null;
+  /** 状态最后一次变化的时刻；从未变过时为 null。 */
+  readonly statusChangedAt: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -110,6 +148,11 @@ export interface MemoryQuery {
   readonly kind?: EpisodicKind | undefined;
   readonly property?: string | undefined;
   readonly aspect?: string | undefined;
+  /**
+   * 按状态过滤（只对语义记忆有意义）。省略 = **不过滤**：`semantic()` 是审计与面板用的
+   * 全量视图（历史必须看得见）；「只取算数的那些」用 `activeSemantic()`。
+   */
+  readonly status?: MemoryStatus | readonly MemoryStatus[] | undefined;
   /** 只要这段时间之后的（ISO 字符串或 epoch ms）。 */
   readonly since?: string | number | undefined;
 }
@@ -187,12 +230,100 @@ export class MemoryStore {
     return this.#store.semanticMemories(query);
   }
 
+  /**
+   * **只算数的那些**语义记忆 —— 提示词召回与主动决策唯一的输入。
+   *
+   * 它与 `semantic()` 的分工是刻意的：`semantic()` 是审计/面板的全量视图（被取代、被否定的
+   * 历史都要看得见），而这里是「现在可以当事实用」的那一份。把两者合成一个方法，
+   * 迟早会有人从「召回」那条路走到历史里去。
+   */
+  activeSemantic(query: Omit<MemoryQuery, 'status'> = {}): SemanticMemory[] {
+    return this.#store.semanticMemories({ ...query, status: ACTIVE_MEMORY_STATUSES });
+  }
+
+  /** 一条语义记忆（含它现在的状态）；不存在时抛 `UNKNOWN_MEMORY`。 */
+  semanticMemory(memoryId: string): SemanticMemory {
+    return this.#store.semanticMemory(memoryId);
+  }
+
   updateSemantic(memoryId: string, patch: { readonly statement?: string; readonly property?: string }): SemanticMemory {
     return this.#store.updateSemanticMemory(memoryId, patch);
   }
 
   forgetSemantic(memoryId: string): boolean {
     return this.#store.deleteSemanticMemory(memoryId);
+  }
+
+  // ----------------------------------------------------- semantic status (006)
+
+  /**
+   * 改一条语义记忆的状态（**唯一**的写入路径，所有调用都要说清为什么）。
+   *
+   * `at` 与 `reason` 是必需的，不给默认值：状态变化是「她什么时候开始不认这条」的审计事实
+   * （铁律 5 的同一口径 —— 留 reason，不留推理）。
+   */
+  setSemanticStatus(input: {
+    readonly memoryId: string;
+    readonly status: MemoryStatus;
+    readonly at: Date;
+    readonly reason: string;
+    readonly supersededBy?: string | null | undefined;
+  }): SemanticMemory {
+    return this.#store.setSemanticMemoryStatus(input);
+  }
+
+  /**
+   * 用一条新的记忆取代旧的：旧行标 `superseded` 并指向新行，**两条都留在库里**。
+   *
+   * 这是 pack §5 那条硬要求（「不允许喜欢绿茶与不喜欢绿茶永久并存而不带状态」）的落地点：
+   * 并存是可以的，**不带状态**不行。
+   */
+  supersedeSemantic(input: {
+    readonly memoryId: string;
+    readonly supersededBy: string;
+    readonly at: Date;
+    readonly reason: string;
+  }): { readonly previous: SemanticMemory; readonly next: SemanticMemory } {
+    const previous = this.#store.setSemanticMemoryStatus({
+      memoryId: input.memoryId,
+      status: 'superseded',
+      at: input.at,
+      reason: input.reason,
+      supersededBy: input.supersededBy,
+    });
+    return { previous, next: this.#store.semanticMemory(input.supersededBy) };
+  }
+
+  /** 明确否定一条事实（没有替代说法）。 */
+  revokeSemantic(input: { readonly memoryId: string; readonly at: Date; readonly reason: string }): SemanticMemory {
+    return this.#store.setSemanticMemoryStatus({
+      memoryId: input.memoryId,
+      status: 'revoked',
+      at: input.at,
+      reason: input.reason,
+      supersededBy: null,
+    });
+  }
+
+  /**
+   * 让一条记忆过期。**没有任何东西会自动调用它**（见 `MEMORY_STATUSES` 的说明）：
+   * 「悄悄忘掉」不是默认行为，需要有人显式决定（面板按钮、将来某个人工清理任务）。
+   */
+  markSemanticExpired(input: { readonly memoryId: string; readonly at: Date; readonly reason: string }): SemanticMemory {
+    return this.#store.setSemanticMemoryStatus({
+      memoryId: input.memoryId,
+      status: 'expired',
+      at: input.at,
+      reason: input.reason,
+      supersededBy: null,
+    });
+  }
+
+  /** 最近的状态变化（按 `status_changed_at` 倒序）：面板与审计读它。 */
+  semanticStatusHistory(query: { readonly limit?: number | undefined } = {}): SemanticMemory[] {
+    return this.#store.semanticMemories({ limit: query.limit ?? 50 })
+      .filter((memory) => memory.statusChangedAt !== null)
+      .sort((left, right) => Date.parse(right.statusChangedAt ?? '') - Date.parse(left.statusChangedAt ?? ''));
   }
 
   // --------------------------------------------------------- relationship

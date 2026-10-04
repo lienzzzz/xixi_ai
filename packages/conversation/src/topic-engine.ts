@@ -21,12 +21,14 @@
 
 import { toOffsetIso } from '@xixi/contracts';
 import {
+  MemoryStore,
   normalizeThreadSummary,
   OpenThreadStore,
   OPEN_THREAD_SETTLED_STATUSES,
   systemClock,
   threadIdFromSourceEvent,
   type Clock,
+  type EpisodicMemory,
   type NewOpenThread,
   type OpenThread,
   type XixiStore,
@@ -603,6 +605,13 @@ export interface ReconcileResult {
    * 只列出来供核对「为什么这件事还开着」。同一轮次会在每次对齐里重新算一次（无状态、幂等）。
    */
   readonly ignored: readonly IgnoredThreadTurn[];
+  /**
+   * pack §7 的边界：**话题收口之后可以变成记忆**。收口成 `resolved` 的那一刻，写一条
+   * episodic（「发生过的事」）—— 事情办完了是经历，不是「将来还要接的话」。
+   *
+   * 空的两种含义都成立：没有话题收口，或者那条 episodic 之前已经写过（幂等）。
+   */
+  readonly memories: readonly EpisodicMemory[];
 }
 
 /** 追问之后与话题对不上的一轮话（它可能是聊天，也可能是在说别的事）。 */
@@ -634,6 +643,8 @@ export class TopicEngine {
   readonly #history: TopicHistory;
   readonly #settings: TopicEngineSettings;
   readonly #clock: Clock;
+  /** 话题收口之后写 episodic 用它（pack §7 的边界）。 */
+  readonly #memory: MemoryStore;
 
   constructor(options: TopicEngineOptions) {
     this.#store = options.store;
@@ -641,6 +652,7 @@ export class TopicEngine {
     this.#history = new TopicHistory(options.store);
     this.#settings = options.settings ?? parseTopicEngineSettings(options.config);
     this.#clock = options.clock ?? systemClock;
+    this.#memory = new MemoryStore(options.store);
   }
 
   get settings(): TopicEngineSettings {
@@ -669,7 +681,8 @@ export class TopicEngine {
     const settled: OpenThread[] = [];
     const expired: OpenThread[] = [];
     const ignored: IgnoredThreadTurn[] = [];
-    if (!this.#settings.enabled) return { created, offered, settled, expired, ignored };
+    const memories: EpisodicMemory[] = [];
+    if (!this.#settings.enabled) return { created, offered, settled, expired, ignored, memories };
 
     const turns = readUserTurns(this.#store);
 
@@ -724,7 +737,17 @@ export class TopicEngine {
         at: answer.at,
         note: `用户回答：${snippetOf(answer.text, 30)}`,
       });
-      if (change !== null) settled.push(change.thread);
+      if (change !== null) {
+        settled.push(change.thread);
+        // pack §7：**resolved 之后可以生成 episodic memory**（那件事办完了，是经历），
+        // 而「不能再成为主动候选」由状态本身保证（`followUps` 只取 candidate），
+        // 「不物理删除历史」由这里的写入方式保证 —— 话题行原样留着，只是状态变了。
+        // 幂等：同一个话题 id + 同一轮事件只写一次（重放/每次 tick 重跑都不会多记）。
+        if (kind === 'resolved') {
+          const memory = this.#rememberResolved(change.thread, answer);
+          if (memory !== null) memories.push(memory);
+        }
+      }
     }
 
     // 4) 作废与「允许再问一次」。
@@ -757,7 +780,34 @@ export class TopicEngine {
       });
     }
 
-    return { created, offered, settled, expired, ignored };
+    return { created, offered, settled, expired, ignored, memories };
+  }
+
+  /**
+   * 把「一件事办完了」写成一条记忆（pack §7）。
+   *
+   * 两件事刻意分开：
+   *   * **summary 是程序渲染的**（`那件事办完了：<话题摘要>（他说：<回答>）`），不是模型写的；
+   *   * **sourceEventId 用回答那一轮的事件 id**，于是「她凭什么记得这件事」永远可以回日志核对
+   *     （铁律 4：记忆是推导，原始事实在 events 里）。
+   *
+   * 幂等靠 `source_event_id + kind`：同一条轮次重放多少次都只有一条记忆。
+   */
+  #rememberResolved(thread: OpenThread, answer: UserTurn): EpisodicMemory | null {
+    const already = this.#memory
+      .episodic({ kind: 'episode', limit: 500 })
+      .some((entry) => entry.sourceEventId === answer.eventId);
+    if (already) return null;
+    return this.#memory.recordEpisodic({
+      summary: `那件事办完了：${thread.summary}（他说：${snippetOf(answer.text, 30)}）`,
+      kind: 'episode',
+      sourceType: 'program_extraction',
+      sourceEventId: answer.eventId,
+      occurredAt: toOffsetIso(answer.at),
+      // 收口了的事比随手记下的事重要一点，但仍然低于一次明确的纠正（0.9）。
+      importance: 0.7,
+      confidence: 0.9,
+    });
   }
 
   /**

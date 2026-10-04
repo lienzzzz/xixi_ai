@@ -131,6 +131,16 @@ xixi:
   #   include_relationship 关系摘要那一段（不关也不会把全统计给模型：只给几句中文）
   #   include_open_threads 未完话题那一段（它是「将来还要接的话」，不是记忆）
   # 老段的同名键（max_items 等）仍然生效，但**本段优先**；越界的值会报错而不是被静默忽略。
+  #
+  # V0.3 P1-b 起，这一段之外还有两件与记忆有关的事，都写在代码里（这里只记录它们**真的**怎么工作）：
+  #   * **记忆纠正闭环**（`@xixi/context` 的 `MemoryCorrectionResolver`）：由 `TurnMemoryExtractor`
+  #     默认带上，三个入口（命令行 / 试用页 / 语音）共用同一份装配，**没有开关** ——
+  #     「他否定了以前记下的一条」属于铁律 4 那一档，不该被配置关掉。它只把旧行标
+  #     superseded / revoked（迁移 006 的 status 列），不删历史。
+  #   * **Tier 2 结构化模型抽取**（pack §8）：政策（值得记的门槛、类别白名单、schema 校验、
+  #     置信阈值、永远不碰 SelfModel）已经实现在 `@xixi/context` 的 `tier2-extraction.ts`，
+  #     但**还没有入口接线**（seam 在 `@xixi/runtime` 的 `createTurnExtraction({ structuredExtractor })`，
+  #     留给后续轮次）。所以这里没有 Tier 2 的旋钮可调 —— 不写一个读了也不生效的键。
   context:
     memory:
       enabled: true

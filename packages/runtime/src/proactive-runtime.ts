@@ -36,6 +36,7 @@ import type {
   ConversationState,
   OpenThreadFollowUp,
   ProactiveCandidate,
+  ProactiveContextLines,
   ProactiveDecider,
   ProactiveDelivery,
   ProactiveInitiativeKind,
@@ -805,8 +806,7 @@ export interface ProactiveLoopOptions {
    * 该追问的未完话题（pack Phase 3）。生产实现应当**先对齐再取**：
    * `topicEngine.reconcile(now); return topicEngine.followUps(now);`（见 scripts/field-test.ts 的装配处）。
    */
-  readonly readOpenThreads?: (() => readonly OpenThreadFollowUp[]) | undefined;
-  /**
+  readonly readOpenThreads?: (() => readonly OpenThreadFollowUp[]) | undefined;  /**
    * 可选的 `TopicEngine`：给了它就在每个 tick 里**先对齐再取候选**（提取 → 认下已说出口的 → 按回答
    * 收口 → `followUps`），这正是现场测试控制台 `readOpenThreads` 做的事，只是把「怎么对齐」交给循环，
    * 免得每个调用方各写一遍。给了它就不要再给 {@link readOpenThreads}（两者互斥，前者优先）。
@@ -835,6 +835,14 @@ export interface ProactiveLoopOptions {
    * keeps the offline tests hermetic and free.
    */
   readonly decide?: ProactiveDecider | undefined;
+  /**
+   * V0.3 P1-b：读空气时给模型的**上下文摘要**（关系 + 未完话题 + 记忆）。
+   *
+   * 由拿着 `ContextBuilder` 的入口提供（`engine.buildProactiveDecisionContext`）；参数是这一条
+   * 候选的决策输入 —— 入口用它挑一个合适的检索查询（例如 `basis` 那几行确定性依据）。
+   * 省略时决策输入逐字不变；返回 `null` = 这一轮没有上下文（例如没接线）。
+   */
+  readonly readContext?: ((input: ProactiveModelInput) => ProactiveContextLines | null) | undefined;
   readonly intervalMs?: number | undefined;
   readonly now?: (() => Date) | undefined;
   /**
@@ -1005,6 +1013,24 @@ export class ProactiveLoop {
     }
   }
 
+  /**
+   * 把「读空气」包一层：判定前**现取**一次上下文摘要（关系 + 未完话题 + 记忆）。
+   *
+   * 为什么在这里而不是在 decider 里：`ProactiveModelInput` 是这一层的输入契约，
+   * 而「上下文从哪来」是装配问题 —— 由拿着 `ContextBuilder` 的入口提供（`readContext`）。
+   * 没接线时返回原来的 decider，输入一字不改。
+   */
+  #decideWithContext(): ProactiveDecider | undefined {
+    const decide = this.#options.decide;
+    if (decide === undefined) return undefined;
+    const readContext = this.#options.readContext;
+    if (readContext === undefined) return decide;
+    return (input) => {
+      const context = readContext(input);
+      return decide(context === null ? input : { ...input, context });
+    };
+  }
+
   async #consider(plan: ProactiveCandidatePlan, now: Date): Promise<ProactiveLoopEntry> {
     const settings = this.#options.readSettings();
     let delivered: string | null = null;
@@ -1028,8 +1054,11 @@ export class ProactiveLoop {
        * (`recommendation === 'speak'`), so an obviously-bad moment costs nothing; each call that
        * does happen is recorded as `model_consulted: true` and charged to the daily budget.
        * No `decide` provider (offline/无密钥) → the deterministic recommendation decides.
+       *
+       * V0.3 P1-b：读空气时**也**给它关系摘要与未完话题（`readContext`）。没有 `readContext`
+       * 时传给它的还是原来的 `decide`，输入逐字不变 —— 老调用方与老测试察觉不到这一层。
        */
-      decide: this.#options.decide,
+      decide: this.#decideWithContext(),
     });
     const outcome = await engine.consider({
       candidate: plan.candidate,
@@ -1280,12 +1309,36 @@ export function proactiveDecideDirective(input: ProactiveModelInput): string {
   return [
     '（这是「要不要主动开口」的判断，不是用户在说话；请只回一个 JSON 对象，不要解释、不要多余文字。）',
     `触发源：${input.candidate.trigger}（${PROACTIVE_INITIATIVE_LABELS[input.initiativeKind]}）；意图：${input.candidate.intent ?? '—'}。`,
+    // V0.3 P1-b：关系与未完话题的摘要进**决策**（之前它们只影响开口之后的措辞）。
+    // 顺序：记忆 → 关系 → 未完话题；空的那几段不出现（与提示词的增量口径一致）。
+    ...contextLines(input.context),
     '确定性依据：',
     ...input.basis.map((line) => `- ${line}`),
     `程序建议：${input.recommendation === 'speak' ? '可以开口，但由你最终决定' : '建议这次不说'}。`,
     '你要读空气：现在真的适合开口吗？对方像是在忙、在休息、刚说过不想聊，就选择不说。',
     `只回：{"speak":true|false,"reason_code":"<${PROACTIVE_MODEL_REASON_CODES.join('|')}>"}`,
   ].join('\n');
+}
+
+/**
+ * 上下文摘要那几行。
+ *
+ * 单独一个函数是为了让「给决策看的摘要」有一个可断言的地方：测试直接读它的输出，
+ * 不必去解析整段指令；也让「不带上下文时逐字不变」这件事一眼可查（返回空数组）。
+ */
+export function contextLines(context: ProactiveContextLines | undefined): string[] {
+  if (context === undefined) return [];
+  const lines: string[] = [];
+  if (context.memories.length > 0) {
+    lines.push('你们以前真正聊过、这轮可能有用的事：', ...context.memories);
+  }
+  if (context.relationship.length > 0) {
+    lines.push('你们现在相处的方式（只作参考，不要照念）：', ...context.relationship.map((line) => `- ${line}`));
+  }
+  if (context.openThreads.length > 0) {
+    lines.push('还惦记着的事（只是提醒你别忘了，不是这次就要问）：', ...context.openThreads);
+  }
+  return lines;
 }
 
 /**

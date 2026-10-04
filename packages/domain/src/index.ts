@@ -22,14 +22,18 @@ export {
 } from './open-threads.ts';
 export { appliedMigrations, listMigrationFiles, migrate, type AppliedMigration, type MigrationFile } from './migrations.ts';
 export {
+  ACTIVE_MEMORY_STATUSES,
   MEMORY_SOURCE_CONFIDENCE,
   MEMORY_SOURCE_TYPES,
+  MEMORY_STATUSES,
   MemoryStore,
   RELATIONSHIP_ANSWER_WINDOW_MINUTES,
   type EpisodicKind,
   type EpisodicMemory,
   type MemoryQuery,
   type MemorySourceType,
+  type MemoryStatus,
+  type MemoryStatusChange,
   type NewEpisodicMemory,
   type NewRelationshipNote,
   type NewSemanticMemory,

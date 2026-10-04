@@ -14,9 +14,9 @@ import { join } from 'node:path';
 
 import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
-import { ConversationEngine, TopicEngine, TurnMemoryExtractor } from '@xixi/conversation';
+import { ConversationEngine, TopicEngine } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
-import { MemoryStore, openXixiStore, parseSelfModelSettings, resolveCanonicalDataDir, SelfModel } from '@xixi/domain';
+import { openXixiStore, resolveCanonicalDataDir } from '@xixi/domain';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
 import {
@@ -51,7 +51,7 @@ import {
 // V0.3 P0-A: the tool chain moved to `@xixi/runtime` (pack `04_RUNTIME_CONSOLIDATION.md` §1
 // Step A). The trial page still imports the rest of its shared voice/console seams from
 // `field-test.ts`; only the two runtime symbols left that file.
-import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
+import { CONVERSATION_SCOPE, buildToolChain, createTurnExtraction } from '@xixi/runtime';
 import { toOffsetIso } from '@xixi/contracts';
 // Pack Phase 8: the streaming speech pieces. Chunking itself lives in `handleVoiceTurn` (one
 // `ClauseChunker` for every entry), so this file no longer imports the chunker at all — the
@@ -133,20 +133,20 @@ function buildAdapter(): BrainAdapter {
 
 // pack Phase 4：长期记忆与反馈学习。一轮说完之后**异步**提取（`afterTurn` 只入队，不 await），
 // 所以试用页的回复速度与「她要不要写记忆」无关；学习到的偏移通过 `store.selfProfile()` 影响提示词。
-const memory = new MemoryStore(store);
-const selfModel = new SelfModel(store, parseSelfModelSettings(config.selfModel));
-const extractor = new TurnMemoryExtractor({
+// V0.3 P1-b：装配改走三个入口共用的工厂（`@xixi/runtime` 的 `createTurnExtraction`）——
+// 纠错闭环与 Tier 2 的政策只在一处，入口之间的行为不会再各写一份。
+const extraction = createTurnExtraction({
   store,
-  selfModel,
-  memory,
-  onError: (error) => console.log(`[memory] 后台提取出错（不影响这一轮）：${error instanceof Error ? error.message : String(error)}`),
+  config,
+  onError: (error: unknown) => console.log(`[memory] 后台提取出错（不影响这一轮）：${error instanceof Error ? error.message : String(error)}`),
 });
+const extractor = extraction.extractor;
 const engine = new ConversationEngine({
   adapter: buildAdapter(),
   store,
   config,
   turnTimeoutMs: 90_000,
-  afterTurn: (job) => extractor.enqueue(job),
+  afterTurn: extraction.afterTurn,
 });
 
 let session = store.latestSession() ?? store.createSession();
@@ -211,6 +211,15 @@ const proactiveLoop = new ProactiveLoop({
   readSessionId: () => session.sessionId,
   replyLimits: config.reply,
   synthesizeProvider: loopSynthesizeProvider,
+  /**
+   * V0.3 P1-b（pack §6 §7）：读空气时也让它看到关系摘要与未完话题。
+   *
+   * 检索查询用**这一条候选自己的确定性依据**（`basis` 那几行：在场、沉默多久、话题池…）——
+   * 主动开口没有「对方刚说的一句话」，`basis` 就是这一轮最接近事实的文本。
+   * 没接线（`contextBuilder: false`）时返回 `null`，决策输入逐字不变。
+   */
+  readContext: (input) =>
+    engine.buildProactiveDecisionContext({ fact: input.basis.join('；'), at: input.now }),
   // Same composer as the console: the model writes the line (tools included), from inside the
   // delivery seam only — the gates have already decided by then (t74).
   compose: createModelComposer({

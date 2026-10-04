@@ -38,7 +38,7 @@ import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } 
 // V0.3 P0-A: the shared tool chain moved to `@xixi/runtime`; `scripts/field-test.ts` still
 // re-exports it for anyone that has not migrated yet (this entry has — it no longer imports
 // the console script at all). See pack `04_RUNTIME_CONSOLIDATION.md` §1 Step A.
-import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
+import { CONVERSATION_SCOPE, buildToolChain, createTurnExtraction } from '@xixi/runtime';
 
 export interface PersonalityArgsResult {
   /**
@@ -282,7 +282,19 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   }
 
   const adapter = buildAdapter();
-  const engine = new ConversationEngine({ adapter, store, config, turnTimeoutMs: 60_000 });
+  /**
+   * V0.3 P1-b：这个入口以前**没有**接过 `afterTurn` —— 命令行里聊过的事不进记忆，
+   * 而试用页会（同一个西西因此表现不一致）。装配与另外两个入口共用同一份工厂：
+   * `afterTurn` 只入队不 await，`drain()` 在关库之前把排队与在飞的活跑完。
+   */
+  const extraction = createTurnExtraction({ store, config });
+  const engine = new ConversationEngine({
+    adapter,
+    store,
+    config,
+    turnTimeoutMs: 60_000,
+    afterTurn: extraction.afterTurn,
+  });
 
   console.log(`西西（${adapter.describe().provider} / ${adapter.describe().model}）已就绪。`);
   console.log(`会话 ${session.sessionId}，已有 ${session.turnCount} 轮；人格 ${JSON.stringify(store.selfProfile())}`);
@@ -379,6 +391,8 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     await handle(line);
   }
   store.recordHealth('chat', 'ok', 'session ended');
+  // 关库之前先把后台提取跑完（t9 F3 的同一纪律：数据丢失不能是无声的）。
+  await extraction.drain();
   store.close();
 }
 
