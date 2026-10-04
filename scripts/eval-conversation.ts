@@ -22,7 +22,7 @@ import { join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
-import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter, type ToolCallRecord, type ToolRegistry } from '@xixi/brain-adapter';
+import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type ToolCallRecord, type ToolRegistry, type TurnModelProvider } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
 import { assertSchema } from '@xixi/contracts';
 import { ConversationEngine } from '@xixi/conversation';
@@ -143,7 +143,7 @@ if (args.has('--print-wiring')) {
 
 const toolChain = evalToolChain(config, (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`));
 
-function makeAdapter(store: ReturnType<typeof openXixiStore>): BrainAdapter {
+function makeAdapter(store: ReturnType<typeof openXixiStore>): TurnModelProvider {
   if (useFake) return new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE });
   if (useDsh) {
     const transport = new CliDshTransport({

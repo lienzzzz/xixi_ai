@@ -12,9 +12,9 @@ import {
   createSpokenTextFilter,
   isSilenceReply,
   sanitizeSpokenReply,
-  type BrainAdapter,
   type BrainImageInput,
   type ReplyHygieneResult,
+  type TurnModelProvider,
 } from '@xixi/brain-adapter';
 import type { Clock, MoodBeatResult, MoodEngine, MoodState, TurnAction, XixiConfig, XixiStore } from '@xixi/domain';
 import { MemoryStore, MoodEngine as MoodEngineImpl, moodBiasOf, moodProactivityNudge, systemClock } from '@xixi/domain';
@@ -33,7 +33,7 @@ import type { PostTurnJob } from './extractor.ts';
 import { REPLY_LIMITS, resolveReplyLimits, splitReplyIntoSegments, type ReplySegmentOptions, type SegmentedReply } from './segments.ts';
 
 export interface ConversationEngineOptions {
-  readonly adapter: BrainAdapter;
+  readonly adapter: TurnModelProvider;
   readonly store: XixiStore;
   readonly config: XixiConfig;
   readonly clock?: Clock;
@@ -207,7 +207,7 @@ export interface ConversationTurn {
  * The model only decides what to say.
  */
 export class ConversationEngine {
-  readonly #adapter: BrainAdapter;
+  readonly #adapter: TurnModelProvider;
   readonly #store: XixiStore;
   readonly #config: XixiConfig;
   readonly #clock: Clock;
@@ -326,7 +326,7 @@ export class ConversationEngine {
     return moodProactivityNudge(moodBiasOf(this.#mood.stateAt(at)));
   }
 
-  get adapter(): BrainAdapter {
+  get adapter(): TurnModelProvider {
     return this.#adapter;
   }
 

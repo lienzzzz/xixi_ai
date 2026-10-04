@@ -6,11 +6,11 @@ import { join } from 'node:path';
 
 import {
   createBrainTurnStream,
-  type BrainAdapter,
   type BrainDescription,
   type BrainTurnChunk,
   type BrainTurnResult,
   type BrainTurnStream,
+  type TurnModelProvider,
   type UserTurnInput,
 } from '@xixi/brain-adapter';
 import { CLOCK_TOLERANCE_MINUTES, ConversationEngine, findUnbackedFactClaims } from '@xixi/conversation';
@@ -47,7 +47,7 @@ function store(): XixiStore {
 }
 
 /** An adapter that emits exactly the chunks a test needs, including a `tool` chunk. */
-function scriptedAdapter(chunks: readonly BrainTurnChunk[], result: Partial<BrainTurnResult>): BrainAdapter {
+function scriptedAdapter(chunks: readonly BrainTurnChunk[], result: Partial<BrainTurnResult>): TurnModelProvider {
   return {
     provider: 'scripted',
     describe: (): BrainDescription => ({ provider: 'scripted', model: 'scripted-1', transport: 'in-memory', mode: 'scripted' }),
@@ -75,14 +75,10 @@ function scriptedAdapter(chunks: readonly BrainTurnChunk[], result: Partial<Brai
         })),
       );
     },
-    evaluateProactiveCandidate: () => Promise.reject(new Error('unused')),
-    interpretFeedback: () => Promise.reject(new Error('unused')),
-    extractMemories: () => Promise.reject(new Error('unused')),
-    reflect: () => Promise.reject(new Error('unused')),
   };
 }
 
-function engineFor(adapter: BrainAdapter, s: XixiStore): ConversationEngine {
+function engineFor(adapter: TurnModelProvider, s: XixiStore): ConversationEngine {
   return new ConversationEngine({ adapter, store: s, config: CONFIG, clock: fixedClock(T0, 1_000), offsetMinutes: 480, fsm: { lingerMs: 30_000 } });
 }
 

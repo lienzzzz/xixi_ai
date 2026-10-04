@@ -2,16 +2,33 @@ import type { JsonValue } from '@xixi/contracts';
 import type { TurnAction, TurnRole } from '@xixi/domain';
 
 /**
- * The BrainAdapter seam from 《方案》§25.
+ * The provider seam from 《方案》§25, shrunk to what every harness really has
+ * (V0.3 pack `docs/03_AGENT_PLUGIN.md` §8).
  *
  * Everything above this interface speaks Xixi's own vocabulary. Nothing above
  * it may know that DSH, a provider plugin or a model name exists: that is what
  * makes the harness replaceable (§3.2, §44).
  *
- * M0 implements `handleUserTurn` for real. The other four capabilities are
- * declared so their signatures are fixed early, and each throws
- * `BrainError('NOT_IMPLEMENTED')` naming the milestone that will build it —
- * an honest gap, not a silent stub.
+ * Until V0.3 the seam was one fat `BrainAdapter` carrying four capabilities no
+ * provider ever implemented (each threw `NOT_IMPLEMENTED`, every caller either
+ * ignored it or was a test): `evaluateProactiveCandidate`, `interpretFeedback`,
+ * `extractMemories`, `reflect`. That is the “假统一” `00_CODE_AUDIT.md` §3.8
+ * tells V0.3 not to maintain. The seam is now three interfaces:
+ *
+ *   * {@link TurnModelProvider} — **required** of every harness: one user turn in,
+ *     one stream out. This is all `ConversationEngine` ever needed.
+ *   * {@link MultimodalTurnProvider} — **optional**: the same turn, plus a still
+ *     image this turn may carry.
+ *   * {@link StructuredInferenceProvider} — **optional**: JSON under a schema.
+ *
+ * The four retired capabilities are **not declared here**, on the provider or
+ * anywhere else: they already exist, deterministically, where their inputs are
+ * (`ProactiveEngine` / `evaluateProactiveGates`, `interpretFeedback`,
+ * `TurnMemoryExtractor`, `TopicEngine` in `@xixi/conversation`). A capability
+ * interface would have to be implemented by someone, and the only reason the
+ * old one existed was so a model could fill a shape something else already
+ * computes. Their old shapes stay below as plain data contracts, with a note
+ * saying who owns each one now.
  */
 
 export interface ConversationTurnView {
@@ -120,7 +137,15 @@ export interface BrainDescription {
   readonly mode: 'live' | 'scripted' | 'offline';
 }
 
-// ---------------------------------------------------------------- M5: proactive (§15.5)
+// ------------------------------------------------ retired capability: proactive (§15.5)
+//
+// NOT a provider method, and no longer a provider interface: 「该不该开口」is decided by
+// `evaluateProactiveGates` + `scoreProactiveCandidate` + `ProactiveEngine` in
+// `@xixi/conversation` (铁律 3: the hard floor is the program's, never the model's). The model
+// only ever *advises* on a candidate the deterministic side already accepted, through
+// `ProactiveDecider` / `ProactiveModelInput` there. These two shapes stay as the data contract of
+// that advisory step, so a future provider seam has one definition to implement instead of a new
+// one to invent.
 
 export interface ProactiveContext {
   readonly candidateId: string;
@@ -144,7 +169,13 @@ export interface ProactiveDecision {
   readonly reasonCode: string;
 }
 
-// ------------------------------------------------------- M3: feedback interpretation (§7.3)
+// ------------------------------------------- retired capability: feedback interpretation (§7.3)
+//
+// NOT a provider method: `interpretFeedback` / `interpretFeedbackInput` in `@xixi/conversation`
+// interpret a sentence deterministically, with `FEEDBACK_RULES` and explicit-vs-inferred weights
+// (`EXPLICIT_FEEDBACK_WEIGHT` / `INFERRED_FEEDBACK_WEIGHT`), and 铁律 4 puts an explicit user
+// correction above anything a model infers. The shapes stay as the data contract of that
+// interpretation.
 
 export interface FeedbackInput {
   readonly text: string;
@@ -167,7 +198,11 @@ export interface FeedbackDecision {
   readonly reasonCode: string;
 }
 
-// ------------------------------------------------------------- M4: memory extraction (§10.6)
+// ----------------------------------------------- retired capability: memory extraction (§10.6)
+//
+// NOT a provider method: `TurnMemoryExtractor` in `@xixi/conversation` (with the Tier-2 pass in
+// `@xixi/context`) extracts memories from a turn and writes them through the domain layer. The
+// shape stays as the data contract of an extracted candidate.
 
 export interface MemoryExtractionInput {
   readonly sessionId: string;
@@ -185,7 +220,11 @@ export interface MemoryCandidate {
   readonly ttl: string | null;
 }
 
-// --------------------------------------------------------------- M4/M5: reflection (§18)
+// --------------------------------------------------- retired capability: reflection (§18)
+//
+// NOT a provider method: the day's statistics, open threads and relationship updates are derived by
+// `TopicEngine` / `MemoryStore` / the domain layer from the event log, not asked of a model. The
+// shapes stay as the data contract of a daily reflection.
 
 export interface ReflectionInput {
   readonly day: string;
@@ -203,15 +242,66 @@ export interface ReflectionResult {
   readonly futureHooks: readonly { readonly topic: string; readonly earliestAt: string | null; readonly expiresAt: string | null }[];
 }
 
-export interface BrainAdapter {
+// ------------------------------------------------------------------- the provider seam (§8)
+
+/**
+ * What **every** harness must be able to do: serve one user turn.
+ *
+ * This is the whole contract `ConversationEngine` depends on (plus `provider` for the durable
+ * session key and `describe()` for the console). Anything a harness may *not* have lives on a
+ * separate, optional interface below — never here.
+ */
+export interface TurnModelProvider {
   /** Stable provider name used as the key of the durable brain-session mapping. */
   readonly provider: string;
   describe(): BrainDescription;
   handleUserTurn(input: UserTurnInput): Promise<BrainTurnStream>;
-  evaluateProactiveCandidate(input: ProactiveContext): Promise<ProactiveDecision>;
-  interpretFeedback(input: FeedbackInput): Promise<FeedbackDecision>;
-  extractMemories(input: MemoryExtractionInput): Promise<MemoryCandidate[]>;
-  reflect(input: ReflectionInput): Promise<ReflectionResult>;
+}
+
+/**
+ * A {@link TurnModelProvider} that can also receive still images.
+ *
+ * `supportsImages` is the literal `true`, not `boolean`: the flag exists so a **runtime** check
+ * (`provider.supportsImages === true`) can be trusted. An adapter that cannot send an image must
+ * not declare this interface and must refuse an image turn instead of dropping the frame — a
+ * silently dropped picture makes the model answer as if it had seen the room (铁律 6).
+ */
+export interface MultimodalTurnProvider extends TurnModelProvider {
+  readonly supportsImages: true;
+}
+
+/**
+ * Structured inference under a caller-owned schema (§52/§53).
+ *
+ * Optional and independent of the turn seam: a harness may be able to serve a conversation and
+ * still have no schema-constrained path. Validation belongs to the **caller** (`validate`), because
+ * the provider's `response_format` is not enforced — see `MimoClient.chatJson` in
+ * `@xixi/model-adapters` for the measured defect and the retry it owns.
+ */
+export interface StructuredInferenceProvider {
+  inferJson(options: InferJsonOptions): Promise<InferJsonResult>;
+}
+
+export interface InferJsonOptions {
+  /** The user-role instruction. */
+  readonly prompt: string;
+  /** Schema name and body, sent as `response_format.json_schema`. */
+  readonly schema: { readonly name: string; readonly schema: Record<string, unknown> };
+  /** Contract check owned by the caller; throwing it makes the structured call fail. */
+  readonly validate?: (value: unknown) => void;
+  /** Overrides the deployment language for the repair instruction (default: the adapter's own). */
+  readonly language?: string;
+  readonly timeoutMs?: number;
+}
+
+export interface InferJsonResult {
+  readonly json: unknown;
+  readonly model: string;
+  /** How many provider round trips it took (a repair counts as a second one). */
+  readonly attempts: number;
+  /** What the client had to do to get a usable object (e.g. the json_object fallback). */
+  readonly notes: readonly string[];
+  readonly totalMs: number;
 }
 
 /** Build a stream from a chunk source plus its eventual result. */

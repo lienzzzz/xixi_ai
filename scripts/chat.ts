@@ -28,7 +28,7 @@
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter, type ToolCallRecord, type ToolRegistry } from '@xixi/brain-adapter';
+import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type ToolCallRecord, type ToolRegistry, type TurnModelProvider } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
 import { ConversationEngine } from '@xixi/conversation';
 import { openXixiStore, PERSONALITY_PROPERTIES, personalityProperty, resolveCanonicalDataDir, type XixiConfig } from '@xixi/domain';
@@ -259,7 +259,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     console.log(`生效人格（已写入 self_profile，重启后仍是它）：${JSON.stringify(store.selfProfile())}`);
   }
 
-  function buildAdapter(): BrainAdapter {
+  function buildAdapter(): TurnModelProvider {
     // One chain for the REPL's text turns, built by the console's own factory (t14/T5-F1): the
     // `--fake` branch runs the real loop over the real registry, so "offline" exercises the tool
     // path instead of skipping it, and `--dsh` is untouched because the harness owns its tools.

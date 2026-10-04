@@ -12,7 +12,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 
-import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter } from '@xixi/brain-adapter';
+import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type TurnModelProvider } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
 import { ConversationEngine, TopicEngine } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
@@ -99,7 +99,7 @@ if (pruned.removed.length > 0) {
   console.log(`[privacy] 按保留策略清理 ${pruned.removed.length} 个音频文件（${Math.round(pruned.bytesFreed / 1024)} KB）：${pruned.removed.map((item) => item.name).join('、')}`);
 }
 
-function buildAdapter(): BrainAdapter {
+function buildAdapter(): TurnModelProvider {
   // Pack Phase 2: the trial page builds the same chain as the console and the file-driven
   // voice turn — one registry, four built-ins, permissions and the round cap outside the model.
   const registry = buildToolChain(config, { onToolCall: (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`) });

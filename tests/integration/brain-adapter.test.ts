@@ -1,12 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { BrainError, DshBrainAdapter, ScriptedDshTransport, collectTurn } from '@xixi/brain-adapter';
 import { ModelError, MimoClient } from '@xixi/model-adapters';
 import { openXixiStore, type XixiStore } from '@xixi/domain';
+
+import { REPO_ROOT } from '../../scripts/lib/harness.ts';
+
+/** V0.3 P2-F: the four capabilities the provider seam no longer declares (pack `docs/03_AGENT_PLUGIN.md` §8). */
+const RETIRED = ['evaluateProactiveCandidate', 'interpretFeedback', 'extractMemories', 'reflect'] as const;
 
 /**
  * A missing credential must stay `MISSING_KEY`.
@@ -164,18 +169,34 @@ test('an answer for a different request id is refused', async () => {
   }
 });
 
-test('capabilities that belong to later milestones fail loudly, not silently', async () => {
+test('the retired capabilities are gone from the provider seam, and no declaration survives', () => {
   const store = freshStore();
   try {
     const adapter = new DshBrainAdapter({ transport: new ScriptedDshTransport({ turns: [] }), store });
-    await assert.rejects(
-      () => adapter.interpretFeedback({ text: '你话太多了' }),
-      (error: unknown) => error instanceof BrainError && error.code === 'NOT_IMPLEMENTED' && error.milestone === 'M3',
-    );
-    await assert.rejects(
-      () => adapter.evaluateProactiveCandidate({ candidateId: 'pc_1', trigger: 'father_returned_home', salience: 0.8, novelty: 0.5, topicCandidates: [] }),
-      (error: unknown) => error instanceof BrainError && error.milestone === 'M5',
-    );
+    // V0.3 pack 03 §8: `evaluateProactiveCandidate` / `interpretFeedback` / `extractMemories` /
+    // `reflect` used to be declared on every provider and threw `NOT_IMPLEMENTED` in all three of
+    // them (docs/v03/ACTUAL_RUNTIME_MAP.md confirmed no production caller). They are **not**
+    // capabilities every harness has, so the seam no longer advertises them and no adapter carries
+    // a stub that lies about having one.
+    for (const retired of RETIRED) {
+      assert.equal(retired in adapter, false, `${retired} must not be on the provider seam any more`);
+    }
+    // Byte-independent structural judge over the seam's own source: the provider declarations are
+    // read, not grepped, so the assertions and comments in this very file cannot produce a false hit.
+    for (const file of ['types.ts', 'mimo.ts', 'dsh.ts', 'fake.ts']) {
+      const source = readFileSync(join(REPO_ROOT, 'packages', 'brain-adapter', 'src', file), 'utf8');
+      for (const retired of RETIRED) {
+        assert.equal(
+          source.includes(`${retired}(`),
+          false,
+          `${file} must not declare ${retired}() — the capability now lives where its input lives`,
+        );
+      }
+    }
+    // The one allowed mention: the retirement note plus the retired **data contracts** in `types.ts`
+    // (plain shapes that no provider implements). It is named in prose, never as a method.
+    const types = readFileSync(join(REPO_ROOT, 'packages', 'brain-adapter', 'src', 'types.ts'), 'utf8');
+    assert.match(types, /NOT a provider method/, 'types.ts must say why these names are still there');
   } finally {
     store.close();
   }

@@ -34,7 +34,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter, type ToolCallRecord, type ToolRegistry } from '@xixi/brain-adapter';
+import { FakeBrainAdapter, MimoBrainAdapter, type ToolCallRecord, type ToolRegistry, type TurnModelProvider } from '@xixi/brain-adapter';
 import { ConversationEngine, evaluateProactiveGates, parseProactiveSettings, resolveReplyLimits, splitReplyIntoSegments, type ProactiveGateContext } from '@xixi/conversation';
 import { openXixiStore, type XixiConfig } from '@xixi/domain';
 import { WeatherClient } from '@xixi/model-adapters';
@@ -256,7 +256,7 @@ if (has('print-wiring')) {
 const toolChain = evalToolChain(config, (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`));
 const dataDir = mkdtempSync(join(tmpdir(), 'xixi-realism-'));
 
-function makeAdapter(): BrainAdapter {
+function makeAdapter(): TurnModelProvider {
   if (useFake) return new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE });
   return new MimoBrainAdapter({
     maxCompletionTokens: 400,

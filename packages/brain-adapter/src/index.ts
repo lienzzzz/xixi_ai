@@ -21,7 +21,7 @@ export {
   type BrainErrorCode,
 } from './errors.ts';
 export { FakeBrainAdapter, scriptedToolPlan, sayToolResult, type FakeBrainOptions, type ScriptedOutcome, type ScriptedToolPlan, type ScriptedToolRequest } from './fake.ts';
-export { isSilenceReply, MimoBrainAdapter, SILENCE_TOKEN, type MimoBrainAdapterOptions } from './mimo.ts';
+export { isSilenceReply, MimoBrainAdapter, runInferJson, SILENCE_TOKEN, type MimoBrainAdapterOptions } from './mimo.ts';
 /**
  * Pack Phase 2 agent runtime, re-exported so every entry point (text or voice) builds
  * its tool chain in one place: `createToolRegistry` → `MimoBrainAdapter`/`FakeBrainAdapter`
@@ -44,6 +44,7 @@ export {
   type ToolPermissionRequest,
   type ToolPermissionVerdict,
   type ToolRegistryOptions,
+  type ToolRegistration,
   type ToolRole,
 } from './tool-registry.ts';
 export { runAgentLoop, type AgentLoopOptions, type AgentLoopResult, type AgentStep, type AgentStepOutcome, type AgentToolCall } from './agent-loop.ts';
@@ -93,7 +94,6 @@ export {
   flattenPrompt,
   splitIntoChunks,
   type AssembledPromptLike,
-  type BrainAdapter,
   type BrainContext,
   type BrainDescription,
   type BrainImageInput,
@@ -104,11 +104,16 @@ export {
   type FeedbackAdjustment,
   type FeedbackDecision,
   type FeedbackInput,
+  type InferJsonOptions,
+  type InferJsonResult,
   type MemoryCandidate,
   type MemoryExtractionInput,
+  type MultimodalTurnProvider,
   type ProactiveContext,
   type ProactiveDecision,
   type ReflectionInput,
   type ReflectionResult,
+  type StructuredInferenceProvider,
+  type TurnModelProvider,
   type UserTurnInput,
 } from './types.ts';

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { BrainError, FakeBrainAdapter, type BrainAdapter, type BrainTurnStream, type ScriptedOutcome, type UserTurnInput } from '@xixi/brain-adapter';
+import { BrainError, FakeBrainAdapter, type BrainTurnStream, type ScriptedOutcome, type TurnModelProvider, type UserTurnInput } from '@xixi/brain-adapter';
 import { ConversationEngine } from '@xixi/conversation';
 import { fixedClock, openXixiStore, type Clock, type XixiConfig, type XixiStore } from '@xixi/domain';
 
@@ -56,7 +56,10 @@ function harness(options: { readonly rejectImages?: boolean } = {}): Harness {
       return { action: 'SPEAK', text: '画面里有一个白色的信箱。' };
     },
   });
-  const adapter: BrainAdapter = options.rejectImages === true
+  // `TurnModelProvider`, not `MultimodalTurnProvider`: DSH-refuses-images is modelled by saying the
+  // provider does **not** declare the multimodal seam (V0.3 P2-F) and refusing the turn anyway — the
+  // engine hands the frame through unchanged either way, which is what this test pins.
+  const adapter: TurnModelProvider = options.rejectImages === true
     ? {
         provider: 'dsh-like',
         describe: () => base.describe(),
@@ -69,10 +72,6 @@ function harness(options: { readonly rejectImages?: boolean } = {}): Harness {
           }
           return await base.handleUserTurn(input);
         },
-        evaluateProactiveCandidate: (input) => base.evaluateProactiveCandidate(input),
-        interpretFeedback: (input) => base.interpretFeedback(input),
-        extractMemories: (input) => base.extractMemories(input),
-        reflect: (input) => base.reflect(input),
       }
     : base;
   const engine = new ConversationEngine({

@@ -6,20 +6,12 @@ import {
   createBrainTurnStream,
   flattenPrompt,
   splitIntoChunks,
-  type BrainAdapter,
   type BrainContext,
   type BrainDescription,
   type BrainTurnChunk,
   type BrainTurnResult,
   type BrainTurnStream,
-  type FeedbackDecision,
-  type FeedbackInput,
-  type MemoryCandidate,
-  type MemoryExtractionInput,
-  type ProactiveContext,
-  type ProactiveDecision,
-  type ReflectionInput,
-  type ReflectionResult,
+  type TurnModelProvider,
   type UserTurnInput,
 } from './types.ts';
 
@@ -91,7 +83,7 @@ export interface DshBrainAdapterOptions {
   readonly requestIdFactory?: () => string;
 }
 
-export class DshBrainAdapter implements BrainAdapter {
+export class DshBrainAdapter implements TurnModelProvider {
   readonly provider: string;
   readonly #transport: DshTransport;
   readonly #store: BrainSessionStore;
@@ -199,31 +191,6 @@ export class DshBrainAdapter implements BrainAdapter {
     }
     return createBrainTurnStream(replay(), Promise.resolve(result));
   }
-
-  evaluateProactiveCandidate(_input: ProactiveContext): Promise<ProactiveDecision> {
-    return notImplemented('evaluateProactiveCandidate', 'M5');
-  }
-
-  interpretFeedback(_input: FeedbackInput): Promise<FeedbackDecision> {
-    return notImplemented('interpretFeedback', 'M3');
-  }
-
-  extractMemories(_input: MemoryExtractionInput): Promise<MemoryCandidate[]> {
-    return notImplemented('extractMemories', 'M4');
-  }
-
-  reflect(_input: ReflectionInput): Promise<ReflectionResult> {
-    return notImplemented('reflect', 'M4/M5');
-  }
-}
-
-function notImplemented(capability: string, milestone: string): Promise<never> {
-  return Promise.reject(
-    new BrainError('NOT_IMPLEMENTED', `${capability} is not implemented yet`, {
-      milestone,
-      detail: 'declared in M0 to fix the seam; implemented in the named milestone',
-    }),
-  );
 }
 
 /** Narrow helper for transports that only need to move JSON over a socket. */

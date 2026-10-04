@@ -5,11 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  FakeBrainAdapter,
   createBrainTurnStream,
   splitIntoChunks,
-  type BrainAdapter,
   type BrainTurnResult,
+  type TurnModelProvider,
   type UserTurnInput,
 } from '@xixi/brain-adapter';
 import { ConversationEngine, UNBACKED_FACT_REPLY } from '@xixi/conversation';
@@ -51,8 +50,7 @@ const WEATHER_MARKUP =
   '<tool_call><function=weather><parameter=city>成都</parameter><parameter=date>明天</parameter></function></tool_call>';
 
 /** An adapter that returns exactly the text/finish reason a test needs (and nothing else moves). */
-function scriptedAdapter(text: string | null, finishReason: string | null, action: 'SPEAK' | 'SILENCE' = 'SPEAK'): BrainAdapter {
-  const base = new FakeBrainAdapter();
+function scriptedAdapter(text: string | null, finishReason: string | null, action: 'SPEAK' | 'SILENCE' = 'SPEAK'): TurnModelProvider {
   return {
     provider: 'scripted',
     describe: () => ({ provider: 'scripted', model: 'scripted-1', transport: 'in-memory', mode: 'scripted' }),
@@ -74,10 +72,6 @@ function scriptedAdapter(text: string | null, finishReason: string | null, actio
       }
       return Promise.resolve(createBrainTurnStream(replay(), Promise.resolve(result)));
     },
-    evaluateProactiveCandidate: (input) => base.evaluateProactiveCandidate(input),
-    interpretFeedback: (input) => base.interpretFeedback(input),
-    extractMemories: (input) => base.extractMemories(input),
-    reflect: (input) => base.reflect(input),
   };
 }
 
@@ -90,7 +84,7 @@ interface Harness {
   readonly now: Date;
 }
 
-function harness(adapter: BrainAdapter, now: Date = T0): Harness {
+function harness(adapter: TurnModelProvider, now: Date = T0): Harness {
   const root = mkdtempSync(join(tmpdir(), 'xixi-reply-pipeline-'));
   const store = openXixiStore({ dbPath: join(root, 'x.sqlite'), clock: fixedClock(now, 1_000) });
   const spoken: string[] = [];

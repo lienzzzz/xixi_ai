@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@xixi/contracts": "*",
-    "@xixi/domain": "*"
+    "@xixi/domain": "*",
+    "@xixi/model-adapters": "*"
   }
 }

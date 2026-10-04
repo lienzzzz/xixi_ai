@@ -49,7 +49,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { BrainAdapter } from '@xixi/brain-adapter';
+import type { TurnModelProvider } from '@xixi/brain-adapter';
 import { ACTORS, buildEvent, toOffsetIso, type Actor } from '@xixi/contracts';
 import { ConversationEngine, parseProactiveSettings, TopicEngine } from '@xixi/conversation';
 import {
@@ -474,7 +474,7 @@ export interface ReplayRunOptions {
    * (or a transport) on its own — `tests/replay` passes `FakeBrainAdapter`, later phases can pass
    * a recorded or a real adapter.
    */
-  readonly adapter: BrainAdapter;
+  readonly adapter: TurnModelProvider;
   /** Anchor override for the relative offsets (see the module doc). */
   readonly start?: string | undefined;
   readonly name?: string | undefined;

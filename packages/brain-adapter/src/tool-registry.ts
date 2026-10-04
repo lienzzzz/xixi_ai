@@ -177,6 +177,27 @@ export async function executeTool(
   }
 }
 
+/**
+ * What `ToolRegistry.register` returns (V0.3 P2-A, pack `03_AGENT_PLUGIN.md` §3: 「所有注册返回
+ * Disposable」).
+ *
+ * It is a *callable object* rather than a new shape because the old contract — a bare `() => void`
+ * that removes the tool — is already used by the console, the entries and the unit tests. A caller
+ * that keeps calling the result works exactly as before; a caller that expects a `Disposable` finds
+ * one. Both directions are idempotent, so registering and releasing twice is harmless.
+ */
+export type ToolRegistration = (() => void) & { readonly dispose: () => void };
+
+function asRegistration(release: () => void): ToolRegistration {
+  let released = false;
+  const invoke = (): void => {
+    if (released) return;
+    released = true;
+    release();
+  };
+  return Object.assign(invoke, { dispose: invoke }) as ToolRegistration;
+}
+
 export interface ToolRegistryOptions {
   readonly tools?: readonly (XixiTool | AgentTool)[];
   readonly permission?: ToolPermissionPolicy;
@@ -205,15 +226,24 @@ export class ToolRegistry {
     for (const tool of options.tools ?? []) this.register(tool);
   }
 
-  /** Registering and unregistering are symmetric: nothing stays reachable after `dispose`. */
-  register(tool: XixiTool | AgentTool): () => void {
+  /** Registering and unregistering are symmetric: nothing stays reachable after the disposable runs. */
+  register(tool: XixiTool | AgentTool): ToolRegistration {
     const agentTool = asAgentTool(tool);
     this.#tools.set(agentTool.name, agentTool);
-    return () => this.unregister(agentTool.name);
+    return asRegistration(() => this.unregister(agentTool.name));
   }
 
   unregister(name: string): boolean {
     return this.#tools.delete(name);
+  }
+
+  /**
+   * Release every registration this registry owns. It is a `Disposable` so a plugin host can hold
+   * one handle for "the tool chain" — the per-tool registrations returned by `register` keep
+   * working unchanged.
+   */
+  dispose(): void {
+    this.#tools.clear();
   }
 
   names(): string[] {

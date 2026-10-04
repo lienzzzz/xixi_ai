@@ -54,7 +54,7 @@ import {
   DshBrainAdapter,
   FakeBrainAdapter,
   MimoBrainAdapter,
-  type BrainAdapter,
+  type TurnModelProvider,
 } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
 import {
@@ -1975,7 +1975,7 @@ export interface FieldServerOptions {
   /** Test seam for the live camera loop (t78): the real one spawns the perception edge. */
   readonly liveRunner?: LiveCameraRunner;
   /** Test seam for the brain (t88): lets a test drive 「看一眼」 without a key or a network. */
-  readonly adapterOverride?: BrainAdapter;
+  readonly adapterOverride?: TurnModelProvider;
   /**
    * Test/offline seams for the voice entry (pack Phase 2): the VAD is the only Python
    * dependency on that path, and the offline ASR double returns a fixed sentence, so
@@ -2029,7 +2029,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
     onToolCall: (record) => log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
   });
 
-  function buildAdapter(): BrainAdapter {
+  function buildAdapter(): TurnModelProvider {
     if (options.adapterOverride !== undefined) return options.adapterOverride;
     if (offline) return new FakeBrainAdapter({ registry: engineTools, scope: CONVERSATION_SCOPE });
     if (!options.useDsh) {

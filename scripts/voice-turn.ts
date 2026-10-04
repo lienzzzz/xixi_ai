@@ -42,7 +42,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-import { FakeBrainAdapter, type BrainAdapter } from '@xixi/brain-adapter';
+import { FakeBrainAdapter, type TurnModelProvider } from '@xixi/brain-adapter';
 import { ConversationEngine } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
 import { openXixiStore, resolveCanonicalDataDir } from '@xixi/domain';
@@ -266,7 +266,7 @@ const extraction = createTurnExtraction({ store, config });
 const toolChain = buildToolChain(config, {
   onToolCall: (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
 });
-const adapter: BrainAdapter = useFake
+const adapter: TurnModelProvider = useFake
   ? new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE })
   : new (await import('@xixi/brain-adapter')).MimoBrainAdapter({
       maxCompletionTokens: 400,

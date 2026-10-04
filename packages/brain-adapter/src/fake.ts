@@ -2,25 +2,16 @@ import type { MimoMessage } from '@xixi/model-adapters';
 import type { TurnAction } from '@xixi/domain';
 
 import { runAgentLoop, type AgentLoopResult, type AgentStep, type AgentStepOutcome } from './agent-loop.ts';
-import { BrainError } from './errors.ts';
 import type { ToolRegistry } from './tool-registry.ts';
 import type { AgentScope } from './tools.ts';
 import {
   createBrainTurnStream,
   splitIntoChunks,
-  type BrainAdapter,
   type BrainDescription,
   type BrainTurnChunk,
   type BrainTurnResult,
   type BrainTurnStream,
-  type FeedbackDecision,
-  type FeedbackInput,
-  type MemoryCandidate,
-  type MemoryExtractionInput,
-  type ProactiveContext,
-  type ProactiveDecision,
-  type ReflectionInput,
-  type ReflectionResult,
+  type TurnModelProvider,
   type UserTurnInput,
 } from './types.ts';
 
@@ -191,7 +182,7 @@ export function sayToolResult(name: string, payload: Record<string, unknown>): s
  * cares about the image pipeline inspects the wire body instead
  * (tests/unit/core/mimo-image-payload.test.ts).
  */
-export class FakeBrainAdapter implements BrainAdapter {
+export class FakeBrainAdapter implements TurnModelProvider {
   readonly provider: string;
   readonly #model: string;
   readonly #chunkSize: number;
@@ -341,29 +332,4 @@ export class FakeBrainAdapter implements BrainAdapter {
 
     return createBrainTurnStream(pump(), result);
   }
-
-  evaluateProactiveCandidate(_input: ProactiveContext): Promise<ProactiveDecision> {
-    return notImplemented('evaluateProactiveCandidate', 'M5');
-  }
-
-  interpretFeedback(_input: FeedbackInput): Promise<FeedbackDecision> {
-    return notImplemented('interpretFeedback', 'M3');
-  }
-
-  extractMemories(_input: MemoryExtractionInput): Promise<MemoryCandidate[]> {
-    return notImplemented('extractMemories', 'M4');
-  }
-
-  reflect(_input: ReflectionInput): Promise<ReflectionResult> {
-    return notImplemented('reflect', 'M4/M5');
-  }
-}
-
-function notImplemented(capability: string, milestone: string): Promise<never> {
-  return Promise.reject(
-    new BrainError('NOT_IMPLEMENTED', `${capability} is not implemented yet`, {
-      milestone,
-      detail: 'declared in M0 to fix the seam; implemented in the named milestone',
-    }),
-  );
 }

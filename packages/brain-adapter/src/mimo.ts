@@ -1,4 +1,4 @@
-import { MimoClient, ModelError, createSpokenTextFilter, type MimoChatResult, type MimoMessage } from '@xixi/model-adapters';
+import { MimoClient, ModelError, createSpokenTextFilter, type MimoChatOptions, type MimoChatResult, type MimoMessage } from '@xixi/model-adapters';
 
 import { runAgentLoop, type AgentLoopResult, type AgentStep, type AgentStepOutcome } from './agent-loop.ts';
 import { BrainError, brainErrorCodeFor } from './errors.ts';
@@ -7,19 +7,14 @@ import { asAgentTool, type AgentScope, type ToolCallRecord, type XixiTool } from
 import {
   createBrainTurnStream,
   flattenPrompt,
-  type BrainAdapter,
   type BrainDescription,
   type BrainTurnChunk,
   type BrainTurnResult,
   type BrainTurnStream,
-  type FeedbackDecision,
-  type FeedbackInput,
-  type MemoryCandidate,
-  type MemoryExtractionInput,
-  type ProactiveContext,
-  type ProactiveDecision,
-  type ReflectionInput,
-  type ReflectionResult,
+  type InferJsonOptions,
+  type InferJsonResult,
+  type MultimodalTurnProvider,
+  type StructuredInferenceProvider,
   type UserTurnInput,
 } from './types.ts';
 
@@ -113,8 +108,14 @@ export function isSilenceReply(text: string): boolean {
  * value is observed). `collectTurn` does both; a consumer that awaits `result`
  * without iterating must use `stream: false`.
  */
-export class MimoBrainAdapter implements BrainAdapter {
+export class MimoBrainAdapter implements MultimodalTurnProvider, StructuredInferenceProvider {
   readonly provider = 'mimo-direct';
+  /**
+   * The direct path really does carry a still image (measured: docs/recon/mimo-vision-probe-2026-09-30.md),
+   * so it declares the multimodal seam; `DshBrainAdapter` must not (it refuses image turns instead).
+   * The literal `true` is the point — the caller can branch on it at runtime.
+   */
+  readonly supportsImages = true as const;
   readonly #client: MimoClient;
   readonly #model: string;
   readonly #thinking: boolean;
@@ -124,7 +125,7 @@ export class MimoBrainAdapter implements BrainAdapter {
   readonly #registry: ToolRegistry;
   readonly #scope: AgentScope;
   readonly #timezone: string;
-  /** t21: reply language, used by the hygiene filter on the streaming seam. */
+  /** t21: reply language, used by the hygiene filter on the streaming seam and by `inferJson`. */
   readonly #language: string;
   readonly #now: () => Date;
 
@@ -343,34 +344,55 @@ export class MimoBrainAdapter implements BrainAdapter {
     return createBrainTurnStream(run(), result);
   }
 
-  evaluateProactiveCandidate(_input: ProactiveContext): Promise<ProactiveDecision> {
-    return notImplemented('evaluateProactiveCandidate', 'M5');
+  inferJson(options: InferJsonOptions): Promise<InferJsonResult> {
+    return runInferJson(this.#client, options, { language: options.language ?? this.#language, model: this.#model });
   }
+}
 
-  interpretFeedback(_input: FeedbackInput): Promise<FeedbackDecision> {
-    return notImplemented('interpretFeedback', 'M3');
+/**
+ * The structured seam, in one place so it is testable without a turn.
+ *
+ * `@xixi/model-adapters` says why the retry lives at the client: MiMo's `json_schema` path
+ * intermittently pads a completion into a truncated object. Nothing here re-implements that — this
+ * function keeps the brain seam's job, which is to hand the caller a domain-shaped answer and a
+ * `BrainError` when even the repair failed (so a caller can tell a bad schema from a broken
+ * provider without parsing text).
+ */
+export async function runInferJson(
+  client: Pick<MimoClient, 'chatJson'>,
+  options: InferJsonOptions,
+  defaults: { readonly language: string; readonly model: string },
+): Promise<InferJsonResult> {
+  try {
+    const result = await client.chatJson({
+      model: defaults.model,
+      thinking: false,
+      // The repair path in `chatJson` appends its own system message and, for the schema attempt, the
+      // provider wants the instruction to be the last user message. Both are owned by the client.
+      messages: [{ role: 'user', content: inferJsonInstruction(options.prompt, options.language ?? defaults.language) }],
+      schema: options.schema,
+      ...(options.validate === undefined ? {} : { validate: options.validate }),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    } satisfies MimoChatOptions & Parameters<MimoClient['chatJson']>[0]);
+    return {
+      json: result.json,
+      model: result.model,
+      attempts: result.attempts,
+      notes: result.notes,
+      totalMs: result.totalMs,
+    };
+  } catch (cause) {
+    throw toBrainError(cause);
   }
+}
 
-  extractMemories(_input: MemoryExtractionInput): Promise<MemoryCandidate[]> {
-    return notImplemented('extractMemories', 'M4');
-  }
-
-  reflect(_input: ReflectionInput): Promise<ReflectionResult> {
-    return notImplemented('reflect', 'M4/M5');
-  }
+/** Keeps the deployment's language on the structured path too (the turn path does the same). */
+function inferJsonInstruction(prompt: string, language: string): string {
+  return language.toLowerCase().startsWith('zh') ? prompt : `${prompt}\n\n(Reply with JSON only.)`;
 }
 
 async function* replay(chunks: readonly BrainTurnChunk[]): AsyncGenerator<BrainTurnChunk> {
   for (const chunk of chunks) yield chunk;
-}
-
-function notImplemented(capability: string, milestone: string): Promise<never> {
-  return Promise.reject(
-    new BrainError('NOT_IMPLEMENTED', `${capability} is not implemented yet`, {
-      milestone,
-      detail: 'declared in M0 to fix the seam; implemented in the named milestone',
-    }),
-  );
 }
 
 export { flattenPrompt };
