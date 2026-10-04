@@ -14,7 +14,8 @@
  * 提取出来的东西全部落库、并且都带 `sourceEventId`（指回那条 `conversation.turn`）：
  *   * **显式反馈** → 学习偏移（`SelfModel.learn`）或当天会话覆盖（`overrideToday`）+ 关系笔记；
  *   * **将来的事**（复用 Phase 3 的规则提取器）→ episodic memory（kind=plan）；
- *   * **稳定的偏好/事实**（「我喜欢…」「我住在…」「我每天…」）→ semantic memory。
+ *   * **稳定的偏好/事实**（「我喜欢…」「我住在…」「我每天…」）→ semantic memory；
+ *     宾语**前置**的句子（「铁观音我平时喜欢」）捕获到的只有动词，不写 —— 见 `lacksObject`。
  *
  * **不是每句话都进记忆**（AGENTS §5）：三个写入器各有确定的触发条件，绝大多数轮次什么也不写。
  */
@@ -281,6 +282,37 @@ export function firstPersonCandidate(clause: UserClause): string | null {
   if (/[我咱]/u.test(clause.text)) return clause.text;
   const withoutConnective = clause.text.replace(LEADING_CONNECTIVE, '').trim();
   return withoutConnective.length === 0 ? null : `我${withoutConnective}`;
+}
+
+/**
+ * **光杆动词形**（V0.3 P2-G）：动词后面什么都没有，是一个**裂开的动词短语**，不是一件事。
+ *
+ * 为什么要有这个判据（真缺陷，不是防御）：宾语前置句（「铁观音我平时喜欢」「绿茶我平时爱喝」）
+ * 里，宾语在「我」**前面**，四条正则的捕获组从「我」开始往后吃，于是只吃到那个动词 ——
+ * P2-G 用 `node` 探针读工作区实测到的语句逐字是 `routine:我平时喜欢`、`routine:我平时爱喝`、
+ * `routine:我平时喜欢喝`：**没有宾语**。这种行进库是 `active`、置信 0.9，P1 之后还会被召回进提示词，
+ * 于是模型拿到一条「父亲平时喜欢（什么？）」的残句 —— 比少记一条更糟。
+ *
+ * 判据是**字面且封闭**的：`偏好动词 [+ 一个光杆身体动词]`，两个词表都写死在这里：
+ *   * **拦**：`我平时喜欢`、`我平时爱喝`、`我平时喜欢喝`、`我平时爱`；
+ *   * **不拦**：`我平时喜欢茉莉花茶`（有自己的宾语）、`我每天六点起床`、`我平时喜欢早起`、
+ *     `我平时吃素`、`我平时喝茶`（名词/形容词短句，动词后面有内容）——**宁可少记一条，也不写半句话**。
+ *
+ * **已知边界（这一层不假装全覆盖）**：词表之外的光杆动词判不出来，例如
+ * `铁观音我平时喜欢泡着喝` → `routine:我平时喜欢泡着喝`（有内容、但宾语仍在前面，照写）。
+ * 收窄它的方向是另开一条提取路径去认前置宾语，属下一轮。
+ *
+ * 反例（**不要**照抄这条注释去删守卫）：把 `lacksObject` 改成恒假，
+ * `tests/unit/core/semantic-clause-extraction.test.ts` 的「宾语前置句」那条会红。
+ */
+const PREFERENCE_VERBS = '喜欢看|喜欢吃|喜欢喝|喜欢听|喜欢|爱看|爱吃|爱喝|爱听|爱';
+/** 光杆身体动词：只在偏好动词**后面**单独出现时算「还是没宾语」（`喜欢喝` ✗ / `喝茶` ✓）。 */
+const BARE_BODY_VERBS = '看|听|读|写|玩|种|养|买|做|穿|用|吃|喝';
+const BARE_VERB_FORM = new RegExp(`^(?:${PREFERENCE_VERBS})(?:${BARE_BODY_VERBS})?$`, 'u');
+
+/** 捕获到的片段是不是**只说了动词、没说宾语**（见 {@link BARE_VERB_FORM} 的判据与例子）。 */
+export function lacksObject(fragment: string): boolean {
+  return BARE_VERB_FORM.test(fragment.trim());
 }
 
 export class TurnMemoryExtractor {
@@ -601,14 +633,19 @@ export class TurnMemoryExtractor {
     }
 
     /**
-     * 稳定的偏好/事实（V0.3 t22：按**小节**匹配 + 第一人称继承 + 真的会拦疑问句）。
+     * 稳定的偏好/事实（V0.3 t22：按**小节**匹配 + 第一人称继承 + 真的会拦疑问句；
+     * V0.3 P2-G 再补一条「不写半句话」）。
      *
-     * 三件事各修一个已实测的缺陷：
+     * 四件事各修一个已实测的缺陷：
      *   1. 按小节而不是整句匹配 —— `我不喝绿茶，平时喜欢茉莉花茶。` 里的第二小节因此接得上；
      *   2. 第一人称**在同一句内向后继承**（`平时喜欢茉莉花茶` 补成 `我平时喜欢茉莉花茶`），
      *      跨句不继承，所以 `他喜欢喝茶。` 不会被写成「我」的事；
      *   3. 疑问句在**写之前**被拦下，而且判的是原始那句话（旧写法判的是 match 出来的片段，
-     *      而那个字符类里根本没有问号，条件恒为假 —— 见 `looksLikeQuestion` 的注释）。
+     *      而那个字符类里根本没有问号，条件恒为假 —— 见 `looksLikeQuestion` 的注释）；
+     *   4. **捕获片段里没有宾语就不写**（P2-G，宾语前置句）：`铁观音我平时喜欢` 只吃到
+     *      `我平时喜欢`，写下去就是一条没有宾语的 `routine` 行 —— 见 `lacksObject` 的注释。
+     *      判据是「这段字面本身成不成一件事」，不猜宾语；宾语在前面的句子这一轮**选择不写**，
+     *      而不是编一个宾语出来（AGENTS §1：规则只做确定的事）。
      */
     const clauses = splitUserClauses(job.userText);
     for (const clause of clauses) {
@@ -621,6 +658,10 @@ export class TurnMemoryExtractor {
           if (match === null) return;
           const statement = match[0].trim();
           if (statement.length === 0) return;
+          // 四条规则都是**恰好一个捕获组**（宾语那一段）。这里不写 `?? ''`：将来若有人给规则
+          // 加/去了捕获组，宁可让这条规则一声不响地不写（本函数的返回语义），也不要静默地
+          // 把守卫变成恒假（`lacksObject('')` 为假，等于把 P2-G 修的东西又放回去）。
+          if (match[1] !== undefined && lacksObject(match[1])) return;
           // 判重按**全部状态**看（`semantic` 不是 `activeSemantic`）：一句被纠正过的话
           // 不该因为「它已经不 active 了」而被重新写一遍。
           const existing = this.#memory.semantic({ property, limit: 200 });

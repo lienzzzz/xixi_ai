@@ -22,7 +22,7 @@ import { test } from 'node:test';
 import { TurnMemoryExtractor, type PostTurnJob } from '@xixi/conversation';
 import { MemoryStore, openXixiStore, SelfModel, type XixiStore } from '@xixi/domain';
 
-import { firstPersonCandidate, looksLikeQuestion, splitUserClauses } from '../../../packages/conversation/src/extractor.ts';
+import { firstPersonCandidate, lacksObject, looksLikeQuestion, splitUserClauses } from '../../../packages/conversation/src/extractor.ts';
 
 const AT = new Date(2026, 9, 3, 20, 0, 0);
 
@@ -196,6 +196,88 @@ test('分小节的其它形状：逗号、分号、顿号、换行都算小节�
     // 换行与分号也是边界（每一条用**不同**的内容：同一句话重复说不写第二条，那是另一条用例管的事）。
     assert.deepEqual([...h.extract('我住在城东；我很喜欢喝茉莉花茶。')].sort(), ['place:我住在城东', 'preference:我很喜欢喝茉莉花茶'].sort());
     assert.deepEqual([...h.extract('我住在城西\n我很喜欢听戏。')].sort(), ['place:我住在城西', 'preference:我很喜欢听戏'].sort());
+  } finally {
+    h.store.close();
+  }
+});
+
+/**
+ * 宾语**前置**句：不再写出没有宾语的截断记忆（V0.3 P2-G）。
+ *
+ * 缺陷口径（上一轮 t23 复审的观察项、本轮修）：`铁观音我平时喜欢` 这类句子里宾语在「我」**前面**，
+ * 四条正则的捕获组从「我」开始往后吃，只吃到那个动词，于是写出一条 `routine:我平时喜欢`
+ * —— 它是 `active`、置信 0.9 的行，P1 之后还会被召回进提示词，模型拿到的是一条
+ * 「父亲平时喜欢（什么？）」的残句。**这不是 t22 引入的**：t23 在改造前后跑同一批句子，
+ * 输出逐字相同；t22 只是让它变得有害（以前不召回，现在召回）。
+ *
+ * 修法（`lacksObject`）：捕获片段只有动词、没有宾语时**不写**。这一轮**不猜宾语**——
+ * 从「我」前面那段原文里补出宾语要另开一条提取路径，属下一轮；「要么不写、要么写对」
+ * 里选**不写**（AGENTS §1：规则只做确定的事，宁可少一条，也不写半句话）。
+ *
+ * **反事实（红证，可复跑）**：把 `lacksObject` 的返回改成恒 `false`（等价于修复前），
+ * 下面 `fronted` 那 5 句会各写出 1 条截断记忆、本用例整条红；还原后必须重新全绿。
+ * 具体做法与哈希记在 P2-G 的回报里（脚本改的是工作区文件，**不是**这条用例本身）。
+ */
+test('宾语前置句不写半句话：宾语在前面的句子不写出没有宾语的截断记忆（P2-G 回归）', () => {
+  const h = harness();
+  try {
+    // 判据本身（字面、封闭）：只有动词的捕获片段判成「没有宾语」。
+    for (const bare of ['喜欢', '爱', '爱喝', '喜欢喝', '喜欢看']) {
+      assert.equal(lacksObject(bare), true, `只有动词的片段该被判成「没有宾语」：${bare}`);
+    }
+    // 反向：动词后面有内容就照写（守卫不能把正常句子一起拦掉 —— 与疑问守卫同一条纪律）。
+    for (const full of ['喜欢茉莉花茶', '爱看戏', '喝茶', '六点起床', '早起']) {
+      assert.equal(lacksObject(full), false, `动词后面有内容的片段不该被拦：${full}`);
+    }
+
+    // 宾语在前：两句都不许写出没有宾语的截断记忆（原文带不带句号都是同一个形状）。
+    const fronted = [
+      '铁观音我平时喜欢。',
+      '绿茶我平时爱喝。',
+      '铁观音我平时喜欢',
+      '绿茶我平时爱喝',
+      '铁观音我平时喜欢喝。',
+    ];
+    for (const sentence of fronted) {
+      const written = h.extract(sentence);
+      assert.deepEqual(written, [], `宾语在前面的句子不许写出半句话：${sentence} → ${JSON.stringify(written)}`);
+    }
+    assert.deepEqual(
+      h.memory.semantic({ limit: 50 }).map((row) => `${row.property}:${row.statement}`),
+      [],
+      `上面那批句子一条都不该落库（修复前会留下 routine:我平时喜欢 / routine:我平时爱喝 这类行）`,
+    );
+
+    // 反向（同一条边界的另一侧）：宾语在动词**后面**的句子照写，一个字都不许少。
+    assert.deepEqual(h.extract('铁观音我平时喜欢泡着喝。'), ['routine:我平时喜欢泡着喝']);
+    assert.deepEqual(h.extract('我平时喜欢喝茶。'), ['routine:我平时喜欢喝茶']);
+    assert.deepEqual(h.extract('我每天看书。'), ['routine:我每天看书']);
+    assert.deepEqual(h.extract('我平时吃素。'), ['routine:我平时吃素']);
+    assert.deepEqual(h.extract('我平时喜欢早起。'), ['routine:我平时喜欢早起']);
+
+    // 旗舰句一个字不许动（P2-G 不许把 t22 修好的东西碰坏）。
+    assert.deepEqual(h.extract('我不喝绿茶，平时喜欢茉莉花茶。'), ['routine:我平时喜欢茉莉花茶']);
+  } finally {
+    h.store.close();
+  }
+});
+
+/**
+ * **已知边界**（P2-G 如实记账，本轮**不**修）——与上面那条守卫是同一件事的两面：
+ * 判据是**词表**，词表之外的光杆动词判不出来。
+ *
+ * `铁观音、龙井我平时都爱喝。`（顿号把前面的宾语与「我」之间加了一层连接：「都」）
+ * 与 `铁观音我平时喜欢泡着喝。`（动词后面有内容、宾语却仍在前面）都会照写一条
+ * `routine:我平时都爱喝` / `routine:我平时喜欢泡着喝` —— 前者没有宾语、后者宾语在前，
+ * 两条都不理想。收窄它要另开一条**能认前置宾语**的提取路径（不是加词表能解决的），
+ * 属下一轮；本用例只把现状钉住，**不改**行为。
+ */
+test('宾语前置的另一半形状仍会照写（已知边界，钉住现状；收窄它要另开提取路径）', () => {
+  const h = harness();
+  try {
+    assert.deepEqual(h.extract('铁观音、龙井我平时都爱喝。'), ['routine:我平时都爱喝']);
+    assert.deepEqual(h.extract('铁观音我平时喜欢泡着喝。'), ['routine:我平时喜欢泡着喝']);
+    // 这两条与上面那条守卫的差别写在注释里：判据是词表，不认「宾语在前」这件事本身。
   } finally {
     h.store.close();
   }

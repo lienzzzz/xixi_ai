@@ -11,6 +11,31 @@
  *   2. 不该召回的一条都没多出来 —— 这是本项目对「能不能多召回」的既有判据：
  *      **先看误召回有没有上升**（表里 false 的那些行就是它的口径与结果）。
  *
+ * **单内容字查询的召回预算（V0.3 P2-G 记为已知边界，本轮不收紧）**：上面那条路径对**短查询**
+ * 就是一次话题点名，于是**同一话题下的多条记忆会一起被带进来**。P2-G 实测（6 条种子记忆
+ * `我平时喜欢茉莉花茶` / `茶叶罐放在橱柜里` / `茶壶该洗了` / `茶话会改到周六了` / `茶几上有个遥控器` /
+ * `龙井是去年的茶`，`retrieve` 不带 `maxItems`）：
+ *
+ *   * 问 `给我推荐个茶。`（查询唯一的内容字是 `茶`）→ `injected=4`：`我平时喜欢茉莉花茶`、
+ *     `茶叶罐放在橱柜里`、`茶壶该洗了`、`茶话会改到周六了`；另外 2 条被 `not_relevant` 拦下
+ *     （都在第三条起要求的 `MEMORY_STRONG_SCORE_FLOOR` 0.9 之下，**不是**被 `over_budget` 挤掉的）；
+ *   * 问 `茶呢？`（更短）→ `injected=6`，**正好是预算上限**（出厂 `maxItems` 6，硬夹进 [3, 8]）：
+ *     同一个库、同一条召回路径，只因为查询短到只剩一个内容字，同话题候选就一起进来了；
+ *   * `茶几上有个遥控器`（`茶` 的右边是功能字 `几`、`上`，**孤字**）在最长的那条查询下进不来、
+ *     在最短的那条查询下进来了；两条查询的召回集都不含跨话题的记忆。
+ *
+ * 为什么本轮**不收紧**（captain 裁定）：收紧（给单内容字查询更严的成词门槛、或按话题聚类后分配预算）
+ * 会**先削掉旗舰场景本身** —— `茶` 这个内容字正是 `给我推荐个茶。` 唯一能召回 `我平时喜欢茉莉花茶` 的证据。
+ * 跨话题方向**没有**上升（探针里 `茶几上有个遥控器` 只在最短查询时进来一次，`咖啡`/象棋/普洱 类记忆
+ * 一条都没进来），所以现在的口径是「**同话题内**多带几条」而不是「闸门变漏斗」。下一轮若要收紧，
+ * 可能的做法是按话题聚类后按预算分配，或给单内容字查询一个更高的成词门槛
+ * （这两条也写在 ADR-0014 与 docs/progress-v03.md 的已知边界里，供下一轮判断）。
+ *
+ * **还有一个容易被误读的细节**（P2-G 实测）：`MemoryStore.recordSemantic` 的输入**没有** `updatedAt`
+ * 这一项，落库时间由 store 的时钟给（`insertSemanticMemory` 一律用 `#now()`），所以想靠「造几条
+ * 不同新旧的行」来固定顺序是无效的；行与行的分数相等时，顺序由 `candidate.id` 兜底，而出厂 id 是
+ * `sem_${randomUUID()}` —— 等分时顺序**会抖**。要钉条数与内容就得显式给 `memoryId`（用例里就是这么做的）。
+ *
  * Run: `npm test`（tests/unit 在默认门禁里）。
  */
 import assert from 'node:assert/strict';
@@ -166,6 +191,66 @@ test('置信与可见范围仍然是先决条件：话题点名越不过它们',
     const result = new MemoryRetriever(store).retrieve({ query: '给我推荐个茶。', now: NOW, audience: ALONE, recentTurns: [] });
     assert.deepEqual(result.memories, [], '话题点名不是后门：置信不够仍然不召回');
     assert.equal(result.diagnostics.dropped.some((row) => row.reason === 'low_confidence'), true);
+  } finally {
+    store.close();
+  }
+});
+
+/**
+ * **单内容字查询的召回预算**（V0.3 P2-G 记为已知边界，本轮不收紧；口径与理由见文件头注释）。
+ *
+ * 这条用例是**现状钉**，不是「应该这样」的断言：它把「同一话题的多条记忆会一起被带进来、
+ * 预算会被占掉多少」写成可复跑的实测，供下一轮收紧时对照。改行为就要改这条用例
+ * ——那正是它的用途（用例坏了说明口径变了，而不是它拦住了修复）。
+ */
+test('单内容字查询的同话题预算（已知边界）：茶字点名会带出同话题多条，条数与上限都由实测钉住', () => {
+  const store = freshStore();
+  try {
+    const memory = new MemoryStore(store);
+    // 六条同一个话题（都含成词的「茶」）的种子记忆。
+    const teaMemories = ['我平时喜欢茉莉花茶', '茶叶罐放在橱柜里', '茶壶该洗了', '茶话会改到周六了', '茶几上有个遥控器', '龙井是去年的茶'];
+    const recorded = teaMemories.map((statement, index) =>
+      memory.recordSemantic({
+        property: 'preference',
+        statement,
+        sourceType: 'explicit_correction',
+        sourceEventId: `evt_00000000-0000-4000-8000-0000000000${String(index + 4).padStart(2, '0')}`,
+        // **显式给 id**，不是为了好看：六条的记忆是同一次插入、同一次 `#now()`、同一条置信，
+        // 于是分数**相等**，而检索器的排序在等分时按 `candidate.id` 升序兜底 —— 出厂 id 是
+        // `sem_${randomUUID()}`，等分时的**顺序会随机抖动**（P2-G 实测：连着两次运行条数一样、
+        // 顺序不同）。这一层要钉的是**条数与内容**，所以把 id 写死来消掉那个抖动源。
+        memoryId: `mem_00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+      }),
+    );
+
+    const result = new MemoryRetriever(store).retrieve({ query: '给我推荐个茶。', now: NOW, audience: ALONE, recentTurns: [] });
+    assert.equal(result.diagnostics.candidates, teaMemories.length, '前提：六条都是候选');
+    assert.equal(result.diagnostics.eligible, teaMemories.length, '前提：六条都过了置信与可见范围');
+
+    // 预算：出厂上限 6（硬夹进 3~8）；这一库里实测只注入 4 条，另外 2 条被 `not_relevant` 拦下。
+    assert.equal(result.diagnostics.maxItems, 6, '出厂预算上限');
+    assert.equal(result.diagnostics.injected, 4, `同话题条数（这条是已知边界的实测值）：${JSON.stringify(result.memories.map((row) => row.text))}`);
+    assert.deepEqual(
+      result.memories.map((row) => row.text),
+      ['我平时喜欢茉莉花茶', '茶叶罐放在橱柜里', '茶壶该洗了', '茶话会改到周六了'],
+      `带进来的就是这四条（顺序靠写死的 id 稳定下来）：${JSON.stringify(result.memories.map((row) => row.text))}`,
+    );
+
+    // 被丢的**不是**被预算挤掉的（`over_budget`），而是没拿到第三条起要求的强信号
+    // （`MEMORY_STRONG_SCORE_FLOOR` 0.9）—— 所以今天这个上限是「信号」挡的，不是「名额」挡的。
+    const droppedReasons = result.diagnostics.dropped.map((row) => row.reason);
+    assert.deepEqual(
+      droppedReasons.filter((reason) => reason === 'over_budget'),
+      [],
+      `这一库里还没有哪一条是被预算挤掉的：${JSON.stringify(droppedReasons)}`,
+    );
+    assert.equal(droppedReasons.length, teaMemories.length - result.memories.length, '其余候选都记了被丢的理由');
+
+    // 同一个库、同一份预算，把查询换成一个**更短**的单内容字查询：实测被占满 6 条（上限）。
+    // （同样是已知边界：查询越短，话题点名越容易成立，同话题的候选越容易被一起带进来。）
+    const shorter = new MemoryRetriever(store).retrieve({ query: '茶呢？', now: NOW, audience: ALONE, recentTurns: [] });
+    assert.equal(shorter.diagnostics.injected, 6, `更短的查询实测注入 ${shorter.diagnostics.injected} 条（= 预算上限）`);
+    assert.equal(recorded.length, teaMemories.length, '六条种子都写进了库（前提，不是结论）');
   } finally {
     store.close();
   }
