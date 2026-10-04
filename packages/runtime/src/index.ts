@@ -59,7 +59,9 @@ export {
   CONVERSATION_SCOPE,
   buildPluginRuntime,
   buildToolChain,
+  mountPluginTools,
   type PluginChainOptions,
+  type PluginMountReport,
   type PluginRuntimeMount,
   type ToolChainOptions,
 } from './tool-runtime.ts';

@@ -3,12 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Plugin 内核：manifest 校验、CapabilityRegistry、九步生命周期（discover→…→dispose）与四条边界（不得拿主库句柄、不得改核心提示词、不得直读 raw camera/mic、不得绕过 ToolPermission）。",
+  "description": "Plugin 内核：manifest 校验、CapabilityRegistry、九步生命周期（discover→…→dispose）与四条边界（不得拿主库句柄、不得改核心提示词、不得直读 raw camera/mic、不得绕过 ToolPermission）；`./mcp` 子路径是 MCP 客户端适配器。",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./mcp": "./mcp/index.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/client": "^2.3.0",
     "@xixi/brain-adapter": "*",
     "@xixi/conversation": "*"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/server": "^2.3.0"
   }
 }
