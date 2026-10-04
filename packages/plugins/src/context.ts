@@ -20,15 +20,38 @@ import type { AgentScope, AgentTool, ToolPermissionDecision, ToolPermissionPolic
 
 import type { CapabilityRegistry } from './capability-registry.ts';
 import type { CorePromptAuthority } from './prompt-authority.ts';
-import { toRegistration, type Disposable } from './disposal.ts';
 import { PluginBoundaryError, PluginPermissionError } from './errors.ts';
 import { grantedPermissions, type PluginManifest } from './manifest.ts';
 
-/** The part of `ToolRegistry` a plugin may hold. `execute` is deliberately absent. */
+/**
+ * The part of `ToolRegistry` a plugin may hold: **enumeration and asking, never mutation from outside
+ * the lifecycle**.
+ *
+ * Three methods are refusals on purpose, and this is the whole point of the shape:
+ *
+ *  * `register(tool)` — a plugin must contribute tools by returning them from `activate()`, where the
+ *    manifest declaration, the granted permission, the namespace rules and the scope check all run in
+ *    one place. The old version of this view quietly did **nothing** for `register` and returned a
+ *    handle that released *any* name on dispose — a plugin could call
+ *    `ctx.tools.register(coreTool).dispose()` and delete a core tool. The bypass is gone: there is no
+ *    second door, and reaching for it is a named refusal that says which door to use.
+ *  * `unregister(name)` — allowed, but only for a tool **this plugin contributed**. Ownership is read
+ *    from the `CapabilityRegistry` (the same record `#add` guards on), never from the caller.
+ *  * `execute(...)` — the model loop runs tools; a plugin does not (铁律 8).
+ */
 export interface PluginToolView {
-  /** Same contract as the core: the returned value is callable *and* disposable, and idempotent. */
-  register(tool: AgentTool): Disposable;
+  /**
+   * Contribute a tool — **refused here**: it always throws `PluginBoundaryError` naming the
+   * alternative. Return the tools from `activate()` instead; the manager registers them through
+   * `CapabilityRegistry.registerContribution`, which is where the gates live.
+   */
+  register(tool: AgentTool): never;
+  /**
+   * Release one tool **this plugin owns** (capability + its mounted copy). Anything else — a core
+   * tool, another plugin's capability, a name nobody owns — is refused loudly and left untouched.
+   */
   unregister(name: string): boolean;
+  /** What the model can call right now (the core registry, read-only). */
   names(): string[];
   all(): AgentTool[];
   listForAgent(scope: AgentScope): AgentTool[];
@@ -170,19 +193,57 @@ export function assertNoPrivilegedSurface(target: object, pluginId: string, labe
   }
 }
 
+export interface PluginToolViewOptions {
+  /** The core registry: read-only for the plugin, except for releasing its *own* tool. */
+  readonly registry: ToolRegistry;
+  /** Where ownership is recorded — the same registry the lifecycle registers capabilities into. */
+  readonly capabilities: CapabilityRegistry;
+  readonly pluginId: string;
+}
+
 /**
- * Build the read-only tool view: registration and asking, never execution.
+ * Build the tool view a plugin holds.
  *
- * `execute` is refused rather than merely absent. It is not reachable through the typed view — a
- * plugin that wants it has to reach for it (`('execute' in ctx.tools)`, a cast, or a property
- * lookup on an untyped object), and this is where such a reach lands: a named boundary refusal
- * instead of a call that runs a tool with an attacker-chosen role. The guard exists because the
- * capability is exactly the kind an untyped or transpiled plugin could otherwise discover.
+ * The two refusals are the point (see `PluginToolView`): `register` says which door to use instead of
+ * silently accepting a call that does nothing, and `unregister` asks the `CapabilityRegistry` who owns
+ * the name before it touches anything. The core registry is consulted for one more thing only — the
+ * **identity** of the mounted tool: a plugin may release the very object it contributed, and nothing
+ * that merely shares its name.
  */
-export function createPluginToolView(registry: ToolRegistry, pluginId = '(unknown)'): PluginToolView {
+export function createPluginToolView(options: PluginToolViewOptions): PluginToolView {
+  const { registry, capabilities, pluginId } = options;
   return Object.freeze({
-    register: (tool: AgentTool) => toRegistration(() => void registry.unregister(tool.name)),
-    unregister: (name: string) => registry.unregister(name),
+    register: (_tool: AgentTool): never => {
+      throw new PluginBoundaryError(
+        'tool-permission',
+        pluginId,
+        '插件不要在上下文里注册工具：把工具放进 activate() 返回的 contribution.tools，' +
+          '由生命周期统一注册（manifest 声明 / tool.register 权限 / 命名空间 / scope 都在那里判）',
+      );
+    },
+    unregister: (name: string): boolean => {
+      const owner = capabilities.ownerOf('tool', name);
+      if (owner === undefined) {
+        throw new PluginBoundaryError(
+          'tool-permission',
+          pluginId,
+          `「${name}」不是任何插件注册的能力，拒绝释放：核心工具表不归插件管（只能释放自己贡献的工具）`,
+        );
+      }
+      if (owner !== pluginId) {
+        throw new PluginBoundaryError('tool-permission', pluginId, `「${name}」属于 ${owner}：插件不能释放别的插件的能力`);
+      }
+      // Identity check before any mutation: only the object this capability contributed may go.
+      const mounted = registry.all().find((tool) => tool.name === name);
+      if (mounted !== undefined) {
+        const spec = capabilities.get<{ readonly tool: AgentTool }>('tool', name);
+        if (spec === undefined || spec.tool !== mounted) {
+          throw new PluginBoundaryError('tool-permission', pluginId, `工具表里的「${name}」不是这个插件贡献的那个对象，拒绝碰它`);
+        }
+        registry.unregister(name);
+      }
+      return capabilities.release(pluginId, 'tool', name);
+    },
     names: () => registry.names(),
     all: () => registry.all(),
     listForAgent: (scope: AgentScope) => registry.listForAgent(scope),
@@ -266,7 +327,7 @@ export function buildPluginContext(options: PluginContextOptions): BuiltPluginCo
     pluginId: client,
     pluginName: manifest.name,
     manifest,
-    tools: createPluginToolView(host.tools, client),
+    tools: createPluginToolView({ registry: host.tools, capabilities: host.capabilities, pluginId: client }),
     capabilities: host.capabilities,
     permissions: host.capabilities.permission,
     get network(): NetworkGrant {

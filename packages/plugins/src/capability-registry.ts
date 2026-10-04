@@ -261,6 +261,31 @@ export class CapabilityRegistry {
     return [...this.#map<T>(kind).values()].map((entry) => entry.value);
   }
 
+  /**
+   * Who owns this name — `undefined` when nobody does.
+   *
+   * The ownership question is asked *before* anything is released: 「这个插件能不能释放这个名字」 is a
+   * question about the registry's records, not about the caller's goodwill.
+   */
+  ownerOf(kind: PluginCapability, name: string): string | undefined {
+    return this.#map<unknown>(kind).get(name)?.pluginId;
+  }
+
+  /**
+   * Release one capability **this plugin owns**, and only that one.
+   *
+   * Same ownership check as `#add`'s closure, asked of an explicit `(pluginId, name)` pair: an entry
+   * that belongs to someone else — or to nobody — is left exactly where it is and the caller is told
+   * `false`. Nothing here can touch a core tool, because core tools are not in this registry at all.
+   */
+  release(pluginId: string, kind: PluginCapability, name: string): boolean {
+    const map = this.#map<unknown>(kind);
+    const entry = map.get(name);
+    if (entry === undefined || entry.pluginId !== pluginId) return false;
+    map.delete(name);
+    return true;
+  }
+
   /** Disposables for every capability one plugin owns — the deactivate/dispose path. */
   disposablesOf(pluginId: string): Disposable[] {
     const disposables: Disposable[] = [];

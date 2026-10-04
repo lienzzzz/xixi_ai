@@ -60,11 +60,23 @@ export {
   buildPluginRuntime,
   buildToolChain,
   mountPluginTools,
+  resolveToolApprovalSettings,
   type PluginChainOptions,
   type PluginMountReport,
   type PluginRuntimeMount,
+  type PluginShutdownReport,
   type ToolChainOptions,
 } from './tool-runtime.ts';
+
+// V0.3 P2-B：工具审批（pack 03 §5）的宿主侧。`buildToolChain` 用它当 `ToolApprovalGate`，
+// 入口用它恢复「谁在等谁点头」。
+export {
+  ToolApprovalError,
+  ToolApprovalManager,
+  UNKNOWN_ACTOR,
+  type ToolApprovalDecision,
+  type ToolApprovalManagerOptions,
+} from './tool-approval.ts';
 
 export {
   concatWav,

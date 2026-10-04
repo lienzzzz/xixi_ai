@@ -177,3 +177,46 @@ export function createCorePromptAuthority(): CorePromptAuthority {
 
 /** The default authority. `@xixi/conversation` owns the text; this owns the checking. */
 export const CORE_PROMPT_AUTHORITY: CorePromptAuthority = createCorePromptAuthority();
+
+/** What `verifyOnAssemble` needs: anything that turns an input into an assembled prompt. */
+export interface PromptAssemblerLike<Input, Output extends VerifiablePrompt> {
+  assemble(input: Input): Output;
+}
+
+export interface VerifyOnAssembleOptions {
+  readonly authority?: CorePromptAuthority;
+  /** Named in a refusal — which plugin (or which wiring) built this prompt. */
+  readonly pluginId?: string;
+}
+
+/**
+ * Wrap an assembler so that **every** prompt it returns passes `verify` before the caller sees it.
+ *
+ * This is the mechanism for 「在插件贡献进入 prompt 的那个装配点调 verify」, and it is one line at the
+ * call site:
+ *
+ * ```ts
+ * const assembler = verifyOnAssemble(new PromptAssembler());
+ * ```
+ *
+ * **接线状态（诚实记录，AGENTS §9.24）：这个包装器本身有用例，但它的调用点还没接。** 真实装配点是
+ * `packages/conversation` 的 `PromptAssembler`，那一层不在本任务（t18）的 inScope 里；今天的现状是
+ * 「插件贡献只能以 context_provider 的素材行进来、其文本在加载期过滤」，权威校验尚未进入提示词装配
+ * 路径。把调用点接上，是下一阶段的显式前置项（与「在 live 入口装配插件内核」同一批），这条状态同时
+ * 写在 `packages/runtime/src/tool-runtime.ts` 的接线状态块里。
+ */
+export function verifyOnAssemble<Input, Output extends VerifiablePrompt>(
+  assembler: PromptAssemblerLike<Input, Output>,
+  options: VerifyOnAssembleOptions = {},
+): PromptAssemblerLike<Input, Output> {
+  const authority = options.authority ?? CORE_PROMPT_AUTHORITY;
+  const pluginId = options.pluginId ?? '(prompt-contributions)';
+  return {
+    assemble: (input: Input): Output => {
+      const prompt = assembler.assemble(input);
+      // A refusal here is the whole point: the prompt never reaches the model unchecked.
+      authority.verify(prompt, pluginId);
+      return prompt;
+    },
+  };
+}

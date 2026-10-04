@@ -19,6 +19,11 @@
  * chain meet. Nothing about the existing chain changes — a plugin (or MCP) tool is copied into the
  * same registry the four built-ins live in, so it is subject to the same permission policy, round
  * cap and timeout.
+ *
+ * **接线状态（一句话口径，细节见 `PluginRuntimeMount`）：内核已交付且本装配点已接线——`start()` 跑完
+ * 生命周期并挂载，插件工具对模型可见；但四个 live 入口（`scripts/chat.ts`、`scripts/serve-chat.ts`、
+ * `scripts/field-test.ts`、`scripts/voice-turn.ts`）今天仍只调 `buildToolChain`，**入口尚未接线**；
+ * 提示词侧的 `verifyOnAssemble` 也还没有调用点。这两条是下一阶段的显式接线项。**
  */
 import {
   createToolRegistry,
@@ -26,11 +31,13 @@ import {
   type AgentScope,
   type NewsProvider,
   type ReminderSink,
+  type ToolApprovalGate,
   type ToolCallRecord,
   type ToolPermissionPolicy,
   type ToolRegistry,
+  type ToolRole,
 } from '@xixi/brain-adapter';
-import type { XixiConfig } from '@xixi/domain';
+import { parseToolApprovalSettings, type ToolApprovalSettings, type XixiConfig } from '@xixi/domain';
 import type { WeatherClient } from '@xixi/model-adapters';
 import {
   createPluginRuntime,
@@ -38,6 +45,7 @@ import {
   type Disposable,
   type InlinePlugin,
   type PluginAuditRecord,
+  type PluginInstance,
   type PluginRuntime,
   type PluginSource,
   type PluginToolSpec,
@@ -63,6 +71,32 @@ export interface ToolChainOptions {
   readonly reminderSink?: ReminderSink;
   readonly onToolCall?: (record: ToolCallRecord) => void;
   readonly maxToolRounds?: number;
+  readonly role?: ToolRole;
+  /** 显式的权限策略；不给就按审批设置构造（`askTools` 来自声明）。 */
+  readonly permission?: ToolPermissionPolicy;
+  /**
+   * 工具审批的声明面（pack §5）。不给就读 `config.tools`（`tools.approval.ask` / `ttl_seconds`）。
+   * **两边都没有 = 没有任何工具需要 ASK**：审批要先声明，不是「默认先问一句」。
+   */
+  readonly approval?: ToolApprovalSettings;
+  /**
+   * 审批宿主（`ToolApprovalManager`）。给了它，`ask` 的工具调用才会被**持久化**成待批请求；
+   * 不给就退回到 P2 之前的行为：模型被要求先问一句，但不落库。
+   */
+  readonly approvalGate?: ToolApprovalGate;
+}
+
+/**
+ * 审批声明的解析：显式传入优先，其次 `config.tools`，都没有就是出厂默认（空表）。
+ *
+ * 单独导出是为了让「声明从哪来」这件事只有一个答案：`buildToolChain` 与
+ * `buildPluginRuntime` 走同一个函数，入口构造 `ToolApprovalManager` 时也用它。
+ */
+export function resolveToolApprovalSettings(
+  config: XixiConfig,
+  override?: ToolApprovalSettings | undefined,
+): ToolApprovalSettings {
+  return override ?? parseToolApprovalSettings(config.tools);
 }
 
 /**
@@ -73,16 +107,28 @@ export interface ToolChainOptions {
  * voice) and the four CLI entries all build their adapter from the registry this returns, so
  * "语音和文字走同一条工具链" is a property of the code rather than of a call site, and the
  * four built-ins are registered exactly once.
+ *
+ * V0.3 P2-B adds one input: the permission policy is built **here** from the declared ask list
+ * (`config.tools.approval.ask`), so every entry that already calls `buildToolChain` inherits the
+ * same approval policy without a per-entry wiring step. No ask list declared → no ASK anywhere.
  */
 export function buildToolChain(config: XixiConfig, options: ToolChainOptions = {}): ToolRegistry {
+  const approval = resolveToolApprovalSettings(config, options.approval);
+  const permission = options.permission ?? new ToolPermission({
+    ...(options.role === undefined ? {} : { role: options.role }),
+    askTools: approval.ask,
+  });
   return createToolRegistry({
     defaultPlace: options.defaultPlace ?? config.identity.place ?? '',
+    permission,
+    ...(options.role === undefined ? {} : { role: options.role }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.weatherClient === undefined ? {} : { weatherClient: options.weatherClient }),
     ...(options.newsProvider === undefined ? {} : { newsProvider: options.newsProvider }),
     ...(options.reminderSink === undefined ? {} : { reminderSink: options.reminderSink }),
     ...(options.maxToolRounds === undefined ? {} : { maxToolRounds: options.maxToolRounds }),
     ...(options.onToolCall === undefined ? {} : { onToolCall: options.onToolCall }),
+    ...(options.approvalGate === undefined ? {} : { approval: options.approvalGate }),
   });
 }
 
@@ -166,14 +212,61 @@ export function mountPluginTools(registry: ToolRegistry, capabilities: Capabilit
   };
 }
 
-/** Everything a live entry needs to run plugins: the shared tool chain and the plugin kernel. */
+/** What a shutdown released, so the host can log it rather than guess. */
+export interface PluginShutdownReport {
+  /** Capabilities the plugin runtime released (deactivate + dispose per plugin). */
+  readonly pluginsDisposed: number;
+  /** Names `mount()` had copied into the chain, now withdrawn from it. */
+  readonly unmounted: readonly string[];
+  /** Tools still in the chain after the unmount — the four built-ins, until the final clear. */
+  readonly remainingBeforeClear: readonly string[];
+}
+
+/**
+ * Everything a live entry needs to run plugins: the shared tool chain and the plugin kernel.
+ *
+ * **接线状态（诚实记录，AGENTS §9.24）：**
+ *
+ *  * **已接**：`start()` 跑完九步生命周期**并**调用 `mountPluginTools`，所以启动之后插件/MCP 工具真的
+ *    在模型可见的工具链里（`definitionsForRound` 能查到、能被核心执行）——这条有 `runtime-wiring`
+ *    用例钉住。
+ *  * **未接**：四个 live 入口（`scripts/chat.ts` 等）今天仍然只调 `buildToolChain`，也就是说
+ *    **内核已交付、入口尚未接线**。把 `buildPluginRuntime` 接到入口，是下一阶段的显式接线项之一。
+ *  * **未接**：提示词侧的 `verify`（`verifyOnAssemble`）也还没有调用点，真实装配点
+ *    `packages/conversation` 的 `PromptAssembler` 不在本任务的 inScope 里。同样登记为下一阶段的
+ *    显式接线项。
+ *
+ * 这两条「未接」是状态，不是待办装饰：任何文档/回报都不得把它们写成已接线。
+ */
 export interface PluginRuntimeMount {
   readonly registry: ToolRegistry;
   readonly runtime: PluginRuntime;
   /** Present when `mcpServers` was configured: the adapter's status/health outside the lifecycle. */
   readonly mcp?: McpClientAdapter | undefined;
-  /** Copies the currently registered plugin tools into the tool chain; call after `start()`. */
+  /**
+   * Run the nine-step lifecycle for every configured plugin **and** mount what they registered.
+   *
+   * One call, not two: a host that starts a runtime and then forgets to mount would have a kernel
+   * that looks healthy and tools the model cannot see. `mount()` stays public for a re-mount after a
+   * hot-plug (a plugin loaded later than the initial `start()`).
+   */
+  start(): Promise<readonly PluginInstance[]>;
+  /** Copies the currently registered plugin tools into the tool chain; call after a hot-plug. */
   mount(): PluginMountReport;
+  /**
+   * The host's shutdown handle, in three steps: stop the plugins, withdraw what `mount()` copied in,
+   * then clear what is left.
+   *
+   * **它与 per-registration Disposable 的关系**（这是 F4 要求说清的那句话）：
+   *  * 细粒度那一档是 `ToolRegistry.register()` 返回的 Disposable——一次只放掉**一个**工具，插件
+   *    `deactivate` 走的就是它（放掉这个插件贡献的那几个）；
+   *  * `shutdown()` 是宿主那一档：先让插件运行时 `disposeAll()`（释放能力登记、断开 MCP 连接），
+   *    再用 `mount()` 那次的 Disposable 撤回自己复制进工具链的副本，最后 `ToolRegistry.dispose()`
+   *    一次清空——那一步**连四个内置工具也一起清掉**，且**不碰** `CapabilityRegistry`（能力是插件层
+   *    的事，上面两步已经处理完了）。
+   * 三步都幂等，重复关停不会抛。
+   */
+  shutdown(): Promise<PluginShutdownReport>;
   /** What the last `mount()` did, for a caller that only keeps the handle. */
   readonly notes: { mounted: string[]; skipped: string[]; refused: string[] };
 }
@@ -185,12 +278,17 @@ export interface PluginRuntimeMount {
  * types, never the other way round, and this function is the single call site that knows both —
  * plus the one place an MCP server is turned into a plugin.
  *
- * Nothing is connected or loaded here. `runtime.start()` runs the nine-step lifecycle (which is
- * where MCP discovery happens), `mount()` copies the result into the chain the model is given.
+ * Nothing is connected or loaded here. `start()` runs the nine-step lifecycle (which is where MCP
+ * discovery happens) and then mounts the result; `shutdown()` is the other end of it.
  */
 export function buildPluginRuntime(config: XixiConfig, options: PluginChainOptions = {}): PluginRuntimeMount {
-  const registry = options.registry ?? buildToolChain(config, options);
-  const permission = options.permission ?? new ToolPermission();
+  const approval = resolveToolApprovalSettings(config, options.approval);
+  // The plugin kernel gets the **same** policy as the built-ins: a plugin tool declared `ask` in
+  // `config.tools.approval.ask` is confirmed before it runs, and one that is not declared never ASKs.
+  const registry = options.registry ?? buildToolChain(config, { ...options, approval });
+  const permission =
+    options.permission ??
+    new ToolPermission({ ...(options.role === undefined ? {} : { role: options.role }), askTools: approval.ask });
   const mcp =
     options.mcpServers === undefined || options.mcpServers.length === 0
       ? undefined
@@ -211,17 +309,38 @@ export function buildPluginRuntime(config: XixiConfig, options: PluginChainOptio
   });
 
   const notes = { mounted: [] as string[], skipped: [] as string[], refused: [] as string[] };
+  let lastMount: PluginMountReport | undefined;
+
+  const mount = (): PluginMountReport => {
+    const report = mountPluginTools(registry, runtime.capabilities);
+    lastMount = report;
+    notes.mounted = [...report.mounted];
+    notes.skipped = [...report.skipped];
+    notes.refused = [...report.refused];
+    return report;
+  };
+
   return {
     registry,
     runtime,
     ...(mcp === undefined ? {} : { mcp: mcp.adapter }),
     notes,
-    mount() {
-      const report = mountPluginTools(registry, runtime.capabilities);
-      notes.mounted = [...report.mounted];
-      notes.skipped = [...report.skipped];
-      notes.refused = [...report.refused];
-      return report;
+    mount,
+    async start() {
+      const instances = await runtime.start();
+      mount();
+      return instances;
+    },
+    async shutdown() {
+      // Order matters: release the plugins first (their capabilities and connections go), then
+      // withdraw the copies, then clear what is left. Each step is idempotent.
+      const pluginsDisposed = await runtime.stop();
+      const unmounted = [...(lastMount?.mounted ?? [])];
+      lastMount?.disposable.dispose();
+      lastMount = undefined;
+      const remainingBeforeClear = registry.names();
+      registry.dispose();
+      return { pluginsDisposed, unmounted, remainingBeforeClear };
     },
   };
 }

@@ -66,10 +66,13 @@ export {
   CORE_PROMPT_MARKERS,
   CORE_PROMPT_SECTION_NAMES,
   createCorePromptAuthority,
+  verifyOnAssemble,
   type CorePromptAuthority,
   type CorePromptSectionName,
+  type PromptAssemblerLike,
   type PromptSection,
   type VerifiablePrompt,
+  type VerifyOnAssembleOptions,
 } from './prompt-authority.ts';
 export {
   assertNoPrivilegedSurface,
@@ -90,6 +93,7 @@ export {
   type PluginPermissionKey,
   type PluginStorage,
   type PluginToolView,
+  type PluginToolViewOptions,
   type StorageGrant,
 } from './context.ts';
 export {
