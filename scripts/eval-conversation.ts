@@ -24,7 +24,7 @@ import { tmpdir } from 'node:os';
 
 import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type BrainAdapter, type ToolCallRecord, type ToolRegistry } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
-import { assertSchema, type JsonSchema } from '@xixi/contracts';
+import { assertSchema } from '@xixi/contracts';
 import { ConversationEngine } from '@xixi/conversation';
 import { MimoClient, WeatherClient } from '@xixi/model-adapters';
 import { openXixiStore, type XixiConfig } from '@xixi/domain';
@@ -34,6 +34,9 @@ import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
 import { CORPUS, FORBIDDEN_PATTERNS } from '../tests/scenarios/corpus.ts';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
+// 评审的线上契约（schema 与读回包的映射）收在 `scripts/lib/judge-score.ts` 一处（t19 / R2-D2）：
+// 只用 `--judge` 真跑才看得见的错名，现在由 `tests/unit/core/eval-conversation-judge.test.ts` 离线守着。
+import { JUDGE_SCHEMA, judgeScoreFromWire, type JudgeScore } from './lib/judge-score.ts';
 
 for (const [key, value] of Object.entries(readDotEnv())) {
   if (process.env[key] === undefined) process.env[key] = value;
@@ -69,26 +72,6 @@ interface Violation {
   readonly turn: number;
   readonly check: string;
   readonly detail: string;
-}
-
-interface JudgeScore {
-  readonly scenario: string;
-  readonly naturalness: number;
-  readonly coherence: number;
-  readonly inCharacter: boolean;
-  readonly problems: readonly string[];
-}
-
-/**
- * What the judge actually returns: `JUDGE_SCHEMA` above is sent to the model *and* used by
- * `assertSchema`, and it spells the field `in_character`. Casting the raw JSON to `JudgeScore`
- * (camelCase) claimed a shape the wire never had — the report row below is the camelCase view.
- */
-interface JudgeOutput {
-  readonly naturalness: number;
-  readonly coherence: number;
-  readonly in_character: boolean;
-  readonly problems: readonly string[];
 }
 
 const config = loadConfig();
@@ -159,18 +142,6 @@ if (args.has('--print-wiring')) {
 }
 
 const toolChain = evalToolChain(config, (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`));
-
-const JUDGE_SCHEMA: JsonSchema = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['naturalness', 'coherence', 'in_character', 'problems'],
-  properties: {
-    naturalness: { type: 'integer', minimum: 1, maximum: 5 },
-    coherence: { type: 'integer', minimum: 1, maximum: 5 },
-    in_character: { type: 'boolean' },
-    problems: { type: 'array', maxItems: 5, items: { type: 'string', maxLength: 200 } },
-  },
-};
 
 function makeAdapter(store: ReturnType<typeof openXixiStore>): BrainAdapter {
   if (useFake) return new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE });
@@ -377,14 +348,13 @@ if (useJudge) {
         schema: { name: 'conversation_quality', schema: JUDGE_SCHEMA },
         validate: (value) => assertSchema(JUDGE_SCHEMA, value, 'INVALID_PAYLOAD', 'judge output does not match the rubric schema'),
       });
-      const parsed = judged.json as JudgeOutput & { scenario?: string };
-      judgeScores.push({
-        scenario,
-        naturalness: parsed.naturalness,
-        coherence: parsed.coherence,
-        inCharacter: parsed.in_character,
-        problems: parsed.problems ?? [],
-      });
+      const parsed = judgeScoreFromWire(judged.json, scenario);
+      if (parsed === null) {
+        // 回包里读不到 rubric 的字段 = **这一次没测到**（不是「不像家里人」）。旧写法在这里手抄
+        // `in_character`，错名时得到 `undefined`，报告会把它渲染成「否」—— 一次静默的错误结论。
+        throw new Error(`judge payload is missing the rubric fields (${Object.keys(JUDGE_SCHEMA.properties ?? {}).join('/')})`);
+      }
+      judgeScores.push(parsed);
     } catch (error) {
       // The judge is a measurement instrument, and MiMo's structured-output path is
       // intermittently unreliable (see progress §2.11). A failed judge call means

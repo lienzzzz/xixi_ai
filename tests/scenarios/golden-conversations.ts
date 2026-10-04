@@ -112,8 +112,16 @@ export const GOLDEN_CONVERSATIONS: readonly GoldenConversation[] = Object.freeze
     title: 'OpenThread（跨天 follow-up）',
     source: SOURCE,
     kind: 'unrunnable',
+    /**
+     * 这条理由在 V0.3 P0 收尾（t19）改过一次：原文写「本仓库当前没有 open thread 存储」，
+     * 而 pack Phase 3 早已落地（`OpenThreadStore` + `TopicEngine` + 常驻循环的 readOpenThreads），
+     * 跨天行为也已经有基线 —— 旧理由与事实相反，会让人以为缺的是一整块能力。
+     * 现在缺的只是「在本 runner 里的执行形状」：语料的一条场景是「一串 turns 过一个对话引擎」，
+     * 而跨天追问要的是主动循环的 tick 与跨天时钟（两个不同形状的执行）。
+     */
     notRunnableReason:
-      '需要 OpenThreadStore + TopicEngine（pack Phase 3）与跨天的主动决策；本仓库当前没有 open thread 存储，ProactiveEngine 的 candidate 由调用方构造，无法端到端跑「Day1 记下 → Day2 回来追问」',
+      '跨天追问的链路本身已经在仓库里（OpenThreadStore + TopicEngine，pack Phase 3），跨天行为基线见 tests/replay/replay-open-thread.test.ts 与它的 open-thread-cross-day 夹具（Day1 08:00 记下 → Day2 14:01 追问 → 14:10 收口 → Day3 无候选），引擎层的收口链另见 tests/integration/open-thread-followup.test.ts；' +
+      '本语料跑不了它，是因为一条场景在这里的形状是「一串 turns 过一个对话引擎」，而这条链要的是主动循环的 tick 加跨天时钟 —— 要在本 runner 里评测它，得先给语料加「多天 + tick」的执行形状',
     goodExample: '证办下来了吗？',
   },
   {

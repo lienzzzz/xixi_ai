@@ -7,7 +7,7 @@
  * 时间一律用本地时间构造（`new Date(2026, 9, 2, 15, 0, 0)`），所以数字在任何时区下都一样。
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -470,5 +470,67 @@ test('话题去重：同一件事刚被问过，另一条话题记录不再摆�
     assert.equal(engine.topicCandidates(later)[0]?.score, 1, 'pack §9：OpenThread 的优先级分是 1.00');
   } finally {
     store.close();
+  }
+});
+
+/**
+ * 省略 `at` 的 `transitionOpenThread` 必须有回归底线（t10 复审 R2-D1）。
+ *
+ * 事实：这条调用形状**曾经会抛 `TypeError`** —— 旧写法是
+ *
+ *     const at = options.at ?? this.#now();
+ *     const updatedAt = toOffsetIso(at);
+ *
+ * 而 `#now()` 返回的已经是 offset-ISO **字符串**，`toOffsetIso` 会去调 `date.getTime()`。
+ * 生产里 5 个调用点（topic-engine 的收口/作废/再候选、主动追问）**全都传了 `at`**，
+ * 所以这个默认分支在门禁里一直没有覆盖：t7 顺手修好之后也没有 —— 修好与没修好看起来一样，
+ * 靠的只是「今天没人这么调」。这条用例把它变成事实，旧写法一回来就红。
+ *
+ * 顺带钉住「默认值来自**库时钟**」（而不是墙钟、也不是话题创建时刻）：同一个函数里
+ * `this.#now()` 的语义就是「此刻」，缓存住它会让所有省略 `at` 的迁移都盖同一个时间戳。
+ */
+test('transitionOpenThread 省略 at 时回落到库时钟（旧写法会 TypeError，t10 R2-D1 的底线）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'xixi-thread-no-at-'));
+  let now = new Date(2026, 9, 1, 20, 0, 0);
+  const store = openXixiStore({ dbPath: join(dir, 'x.sqlite'), clock: () => now });
+  try {
+    const session = store.createSession();
+    store.recordTurn({ sessionId: session.sessionId, role: 'user', action: 'SPEAK', text: '明天下午我要去镇上办证。' });
+    const [thread] = new TopicEngine({ store, clock: () => now }).reconcile(now).created;
+    assert.ok(thread !== undefined, '先得有一条话题，否则测的不是迁移');
+
+    // 时钟前进一天：省略 at 的那次迁移必须用**调用时刻**的读数。
+    now = new Date(2026, 9, 2, 15, 0, 0);
+    const offered = store.transitionOpenThread(thread.threadId, 'offered', { offered: true });
+    assert.ok(offered !== null, '省略 at 不许抛，也不许当成「没有变化」什么都不做');
+    assert.equal(offered.thread.status, 'offered');
+    assert.ok(Number.isFinite(Date.parse(offered.thread.updatedAt)), `时间戳要能被 Date.parse：${offered.thread.updatedAt}`);
+    assert.equal(offered.thread.updatedAt, toOffsetIso(now), '省略 at 时的时间戳来自库时钟的当前读数');
+    assert.equal(offered.thread.lastOfferedAt, offered.thread.updatedAt, 'offered=true 记下这一次的时间');
+    assert.equal(offered.thread.attempts, thread.attempts + 1, 'offered=true 让 attempts 加一');
+    assert.equal(store.openThread(thread.threadId)?.updatedAt, toOffsetIso(now), '落库的行与返回值一致');
+    assert.equal(
+      store.readEvents({ type: 'open_thread.changed', limit: 10 }).at(-1)?.timestamp,
+      toOffsetIso(now),
+      '事件日志的时间戳与投影一致（不是 undefined / Invalid Date）',
+    );
+
+    // 显式传 Date 的另一条分支照旧 —— 别在守住省略分支时打断它。
+    const later = new Date(2026, 9, 2, 16, 30, 0);
+    const settled = store.transitionOpenThread(thread.threadId, 'resolved', { at: later, note: '他答了' });
+    assert.equal(settled?.thread.updatedAt, toOffsetIso(later), '显式 at 用给的那个时刻');
+
+    // 经 `OpenThreadStore` 包装（options 原样透传）省略 at 时同样不许炸。
+    const threads = new OpenThreadStore(store);
+    const second = threads.create({
+      threadId: 'thread_regress1',
+      summary: '明天下午我要去买药',
+      followAfter: toOffsetIso(new Date(2026, 9, 3, 14, 0, 0)),
+    });
+    const viaWrapper = threads.transition(second.thread.threadId, 'offered', { offered: true });
+    assert.equal(viaWrapper?.thread.updatedAt, toOffsetIso(now), '包装层不传 at 时也回落到库时钟');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
   }
 });
