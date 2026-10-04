@@ -1,6 +1,6 @@
 # 西西项目文档地图
 
-> 最后更新：2026-10-04（V0.3 P0+P1 集成收口 t16：登记 [`progress-v03.md`](progress-v03.md)（按 Phase 索引的阶段进度）与 P0/P1 的两份 ADR；把「四个入口各用不同的库」改成 canonical store 的实际默认值）
+、P0/P1 的**三份** ADR（0014/0015/0016）与 t15 复验报告；把「四个入口各用不同的库」改成 canonical store 的实际默认值）
 > 面向：接手本项目的编码 Agent / 维护者
 > 本文件告诉你「先读什么、什么最权威、改代码后必须更新哪些文档」。
 
@@ -113,6 +113,7 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | [`verification/t4-realism-verification-2026-10-01.md`](verification/t4-realism-verification-2026-10-01.md) | 「真人感」改造的独立验证：三次输入、主口径提问率、铁律未削弱 |
 | [`verification/t7-round5-independent-verification-2026-10-03.md`](verification/t7-round5-independent-verification-2026-10-03.md) | **第五轮四条工作的独立复验**：多日主动性（显著降频口径达标、未回应后不硬停）、话题收口升级（0/91 与反事实 9/91）、**首音延迟未达标（目标不可达）**、有界心情（0 越界 / ±6% / ±0.03 / 门禁同码）。三类证据分开、每个数字带可复跑命令 |
 | [`progress-v03.md`](progress-v03.md) | **V0.3 阶段进度（按 Phase 索引）**：P0 与 P1 的交付清单、四条 Gate 实测、库一致硬证据、遗留清单；每条结论带可重跑命令 |
+| [`adr/0014`](adr/0014-trusted-memory-policy-and-provenance.md) | 可信记忆策略与 provenance：三条来源与 `sourceType` 权重、四道先决、四条相关性路径（含话题点名）、注入 3~8 与两道分数线、两道出口闸门 |
 | [`adr/0015`](adr/0015-context-builder-and-engine-boundary.md) | ContextBuilder 与 ConversationEngine 的边界（谁装配上下文、谁做决定；两道出口闸门；「引擎自己会再建一次 context」这条实现细节） |
 | [`adr/0016`](adr/0016-memory-status-state-machine.md) | 记忆状态机（active / superseded / revoked / expired）与纠正闭环；为什么 `expired` 不自动过期 |
 | [`verification/t15-p1-independent-verification-2026-10-04.md`](verification/t15-p1-independent-verification-2026-10-04.md)（附可重跑探针 `t15-probe.mjs`） | **Phase 1 的独立复验**：四条技术验收自己复算（文件库 + 每步新进程）、两个场景真模型实跑、**pack 旗舰场景按原句未达标的三条写在最前面**（不替实现者圆场） |
