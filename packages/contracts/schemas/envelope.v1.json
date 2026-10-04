@@ -24,7 +24,7 @@
     "event_id": { "type": "string", "pattern": "^evt_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
     "event_type": {
       "type": "string",
-      "enum": ["presence.changed", "conversation.turn", "conversation.decision", "proactive.decision", "open_thread.changed", "tool.approval.changed", "system.health"]
+      "enum": ["presence.changed", "conversation.turn", "conversation.decision", "proactive.decision", "open_thread.changed", "tool.approval.changed", "reminder.changed", "system.health"]
     },
     "timestamp": {
       "type": "string",

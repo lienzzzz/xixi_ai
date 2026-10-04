@@ -51,6 +51,11 @@ test('002_world_state is a new, additive migration', () => {
   // V0.3 P2-B：工具审批新增 `007_tool_approvals.sql`（`tool_approvals` 一张表 + 两个索引，
   // 见 pack `03_AGENT_PLUGIN.md` §5 与 `docs/v03/P2_PLUGIN_GAP_MAP.md`）。同样是**新增**：
   // 001–006 六个文件一字未动。
+  //
+  // V0.3 P2-E：durable 提醒新增 `008_reminders.sql`（`reminders` 一张表 + 两个索引，见 pack
+  // `03_AGENT_PLUGIN.md` §7）。它的八个字段（id/owner/what/due_at/timezone/status/created_at/
+  // source_event_id）与五个状态（pending/due/candidate/delivered/acknowledged）都在那一份里；
+  // 同样是**新增**：001–007 七个文件一字未动。
   assert.deepEqual(
     files.map((file) => file.name),
     [
@@ -61,6 +66,7 @@ test('002_world_state is a new, additive migration', () => {
       '005_mood.sql',
       '006_memory_status.sql',
       '007_tool_approvals.sql',
+      '008_reminders.sql',
     ],
     '已发布的迁移只能新增，不能改写',
   );

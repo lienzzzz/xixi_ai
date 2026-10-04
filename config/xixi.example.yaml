@@ -196,6 +196,45 @@ xixi:
       ask: []            # 需要人工确认的工具名，精确匹配；例如写 ["xixi_set_reminder_stub"]
       ttl_seconds: 300   # 待批请求的有效期（秒）：过期不执行，落 approval_expired
 
+  # 新闻（V0.3 P2-D，pack `docs/03_AGENT_PLUGIN.md` §6）。
+  # **这一段今天是注释，不是可调键** —— `parseXixiConfig` 不读它（`packages/domain/src/config.ts`
+  # 的配置解析不在本次改动范围）。读新闻参数的是插件自己的入参
+  # `createNewsPlugin({ sources, interests, ledger, quietHours, presence, defaultTopic })`
+  # （`@xixi/plugins/news`）与装配点 `buildPluginRuntime(config, { news: … })`。
+  # 把「配置文件 → 插件」接起来是下一阶段的显式接线项；在那之前这里**不写假的键**，
+  # 免得有人改了一个没人读的数字还以为生效了（这条纪律是本文件既有做法）。
+  #
+  # 今天的新闻面（改代码前先读这三条）：
+  #   * 三个工具 `news.search` / `news.latest` / `news.for_interests` 由插件 `xixi.news` 提供，
+  #     manifest 里显式声明 `capabilities: [tool, topic_source]` 与
+  #     `permissions: [network, tool.register, topic.read]`——多出来的 `network` 是因为 RSS 与公开 API
+  #     都要走 HTTP（`tool.register` 与 `topic.read` 分别是 tool 与 topic_source 两种能力的必需权限）。
+  #     内置工具里**没有**新闻：`xixi_news_stub` 这个命名在 P2-D 被删除。
+  #   * 来源四种：离线桩（`createStubNewsSource`）、RSS（`createRssNewsSource`）、公开 JSON API
+  #     （`createJsonApiNewsSource`）、web search 适配器（`createWebSearchNewsSource`，引擎由部署注入，
+  #     本仓库没有自己的搜索客户端）。来源取不到只会变成返回里的 `problems`，不会让一轮对话崩掉。
+  #   * 主动新闻要过 pack §6 四条（fresh / personally relevant / not already mentioned /
+  #     not quiet context）；静默时段沿用上面的 `proactive.quiet_hours`。
+  # 手动验证（都不花钱）：`node scripts/probe-tools.ts --news` 是离线零网络的端到端探针，
+  # `node scripts/probe-tools.ts --news-live` 取一个真实 RSS（可用 `--news-live <url>` 换源）。
+
+  # 提醒（V0.3 P2-E，pack `docs/03_AGENT_PLUGIN.md` §7 durable Reminder）。
+  # 本段**已被代码读取**：`packages/domain/src/reminders.ts` 的 `parseReminderSettings` 读它，
+  # `@xixi/runtime` 的 `DurableReminderSink` / `ReminderScheduler` 用它解析与调度
+  # （`ReminderStore` 之外，提醒行落在 `008_reminders.sql` 的 `reminders` 表里）。
+  #
+  # 语义（pack §7）：说「明天八点提醒我打电话」→ 自然语言时刻被**解析成绝对时刻 + 时区**再落库
+  # （表里根本没有存自然语言 when 的列）→ 到点写一条 `reminder.changed` 事件（不是打印一行日志）
+  # → 五态状态机 pending → due → candidate → delivered → acknowledged，每一步都是同一事务里的表 + 事件。
+  #
+  # **这里没有「提醒的静默时段」**：几点该不该开口由主动路径的硬底线决定（铁律 3），
+  # 提醒不再多一个开关 —— 两个地方判同一件事，迟早会打架。
+  reminders:
+    # 解析自然语言时刻用的 IANA 时区。不写就跟随 identity.timezone（家里只有一个时区时不要写这一项）。
+    # timezone: Asia/Shanghai
+    default_time: "09:00"   # 只说了哪天、没说几点（「明天」「周三」）时的默认时刻（当地时刻）
+    asap_minutes: 0         # 「尽快」以及认不出来的时刻：相对请求时刻推迟多少分钟到期（0 = 立即到期）
+
   features:
     wake_word: false        # M1 先用按钮，M2 再启用
     speaker_verification: false

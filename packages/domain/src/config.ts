@@ -64,6 +64,13 @@ export interface XixiConfig {
    * `approval.ttl_seconds` 两个键——「没声明就不该 ASK」是从这里落到 `ToolPermission` 的。
    */
   readonly tools?: Record<string, unknown>;
+  /**
+   * 提醒的声明面（V0.3 P2-E，pack `03_AGENT_PLUGIN.md` §7）。可选：缺段 = 出厂默认
+   * （`parseReminderSettings` 的 `DEFAULT_REMINDER_SETTINGS`）。今天这一段只有三个键：
+   * `timezone`（缺省跟随 `identity.timezone`）、`default_time`（只说哪天没说几点时的默认时刻）、
+   * `asap_minutes`（「尽快」的宽限）。**没有「提醒静默时段」**：那属于主动路径的硬底线（铁律 3）。
+   */
+  readonly reminders?: Record<string, unknown>;
 }
 
 function fail(problem: string, file: string): never {
@@ -164,6 +171,7 @@ export function parseXixiConfig(source: string, file = '<inline>'): XixiConfig {
     privacy: section(xixi, 'privacy', file),
     features: section(xixi, 'features', file),
     tools: optionalSection(xixi, 'tools'),
+    reminders: optionalSection(xixi, 'reminders'),
   };
 }
 

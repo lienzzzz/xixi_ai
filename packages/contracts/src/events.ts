@@ -73,6 +73,12 @@ export const EVENT_TYPES: readonly EventTypeDefinition[] = Object.freeze([
     '一条待批工具调用的状态变化（pending/approved/denied/expired/executed）；pack Phase 2 §5。',
     'events/tool.approval.changed.v1.json',
   ),
+  define(
+    'reminder.changed',
+    1,
+    '一条 durable 提醒的状态变化（pending/due/candidate/delivered/acknowledged）——「到点」是日志里的事件；pack Phase 2 §7。',
+    'events/reminder.changed.v1.json',
+  ),
   define('system.health', 1, '服务健康状态；用于故障降级与可观测性。', 'events/system.health.v1.json'),
 ]);
 

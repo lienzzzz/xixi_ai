@@ -57,6 +57,7 @@ import { DEFAULT_PRESENCE_TTL_SECONDS, openXixiStore, type XixiStore } from '@xi
 // names were file-local, and the extraction left three references dangling (`join`, `REPO_ROOT`,
 // `LookOnce*`) that only a type check could see.
 import type { LookOnceTrigger, LookOnceUploadInfo } from './errors.ts';
+import { reminderDueComponents, type ReminderCandidateInput } from './reminder-runtime.ts';
 import { REPO_ROOT } from './repo.ts';
 
 
@@ -434,6 +435,14 @@ export interface ProactiveCandidateContext {
    * 「昨天你说要去镇上办证」。事实由引擎从用户自己的轮次里提取，调用方只负责问一遍。
    */
   readonly openThreads?: readonly OpenThreadFollowUp[] | undefined;
+  /**
+   * 到点的提醒（pack 03 §7，来自 `ReminderScheduler.candidateInputs()`）。
+   *
+   * 排在所有来源之前：这是**用户自己要求、还指定了时刻**的事，到点不说就是失信；而且它与
+   * 「刚发生的生活事件」不同，是**时间到了**才成立的候选。事实来自 reminders 表与它的
+   * `reminder.changed` 事件，调用方只负责把到点的那几条递进来。
+   */
+  readonly remindersDue?: readonly ReminderCandidateInput[] | undefined;
   readonly limit?: number;
 }
 
@@ -447,6 +456,24 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
   const day = localDayOf(context.now);
   const minutes = context.now.getHours() * 60 + context.now.getMinutes();
   const limit = context.limit ?? 3;
+
+  // 0a. reminder_due — 到点的提醒（pack 03 §7）。排在所有来源之前：这是**用户自己要求、并且指定了
+  //     时刻**的事，到点不说就是失信；候选 id 钉在这一条提醒上（`loop-future_hook_due-reminder-<id>`），
+  //     所以同一条提醒不会被说第二遍（说过之后它自己的状态已经走到 delivered/acknowledged，
+  //     下一次 tick 就不会再出现在 `remindersDue` 里）。`topic_ref` 是提醒 id：重复判定按「同一条提醒」，
+  //     不与别的来源共享话题窗口。
+  for (const reminder of context.remindersDue ?? []) {
+    plans.push(
+      planFor(
+        'future_hook_due',
+        `reminder-${reminder.reminderId}`,
+        reminder.line,
+        reminder.fact,
+        reminderDueComponents(),
+        { intent: 'reminder_due', topicRef: reminder.reminderId, initiativeKind: 'open_loop_followup' },
+      ),
+    );
+  }
 
   // 0. open_thread — 「没办完的那件事」（pack Phase 3 / §9 §10）。排在所有来源之前：
   // pack §9 的来源优先级里 OpenThread 是 1.00（第一），比「刚发生的生活事件」还高，因为这句话是
@@ -812,6 +839,20 @@ export interface ProactiveLoopOptions {
    * 免得每个调用方各写一遍。给了它就不要再给 {@link readOpenThreads}（两者互斥，前者优先）。
    */
   readonly topicEngine?: TopicEngine | undefined;
+  /**
+   * 到点的提醒（pack 03 §7）。生产实现是 `() => reminderScheduler.tick(now).becameCandidate` 的
+   * 结果映射（`ReminderScheduler.candidateInputs(now)`）——**先跑到点、再取候选**，与 `topicEngine`
+   * 那条路同一个取向（对齐交给循环，调用方只提供引擎）。
+   */
+  readonly readDueReminders?: (() => readonly ReminderCandidateInput[]) | undefined;
+  /**
+   * 一条提醒**真的被说出口**之后回调（`candidate → delivered` 的那一步）。
+   *
+   * 由循环在「已经决定了要说、内容也已经生成」之后调用：参数是提醒 id 与这一轮的时刻。生产实现
+   * 是 `(id, at) => reminderScheduler.deliver(id, at)`；不接线时提醒会停在 `candidate`，那是**如实**
+   * 的状态（说了没说，循环最清楚），不会假装已经提醒过。
+   */
+  readonly onReminderDelivered?: ((reminderId: string, at: Date) => void) | undefined;
   /** Injected for tests; 「随机闲聊」 only fires below `PROACTIVE_RANDOM_SMALLTALK_CHANCE`. */
   readonly random?: (() => number) | undefined;
   readonly readSessionId: () => string | null;
@@ -983,6 +1024,7 @@ export class ProactiveLoop {
         inConversation: this.#options.readState() !== 'IDLE' || (this.#options.readInFlightTurn?.() ?? false),
         recentUserTopics: this.#options.readRecentUserTopics?.(),
         openThreads,
+        remindersDue: this.#options.readDueReminders?.(),
         random: this.#options.random,
         spokenCount: this.#spoken.length,
         recentLines: this.#spoken.slice(-4),
@@ -1150,6 +1192,22 @@ export class ProactiveLoop {
             .filter((row): row is string => row !== null && row.length > 0)
             .join('；');
         }
+      }
+    }
+    /**
+     * 到点的提醒被**真的说出口**了 —— 这是 pack §7 状态机的 `candidate → delivered`。
+     *
+     * 判定条件是「循环决定了要说」且「内容确实生成了」（与写进对话历史同一个条件），而不是
+     * 「曾经考虑过」：被静默时段/额度拦下的提醒必须留在 `candidate`，否则日志会说谎。
+     * 回调失败不影响这一轮：状态是记账，不是说话的前提。
+     */
+    if (outcome.speak && delivered !== null && plan.candidate.intent === 'reminder_due' && typeof plan.candidate.topicRef === 'string') {
+      try {
+        this.#options.onReminderDelivered?.(plan.candidate.topicRef, now);
+      } catch (error) {
+        contentNote = [contentNote, `提醒状态没能落库：${error instanceof Error ? error.message : String(error)}`]
+          .filter((row): row is string => row !== null && row.length > 0)
+          .join('；');
       }
     }
     // Remember what was said, so the next message cannot repeat it (t74).

@@ -39,6 +39,20 @@ import {
   type TransitionToolApprovalOptions,
 } from './approvals.ts';
 import {
+  assertNewReminder,
+  buildReminderEvent,
+  newReminderId,
+  reminderReasonForStatus,
+  reminderTransitionAllowed,
+  UNKNOWN_REMINDER_OWNER,
+  type NewReminder,
+  type Reminder,
+  type ReminderChange,
+  type ReminderQuery,
+  type ReminderStatus,
+  type TransitionReminderOptions,
+} from './reminders.ts';
+import {
   OPEN_THREAD_SETTLED_STATUSES,
   type NewOpenThread,
   type OpenThread,
@@ -496,6 +510,25 @@ interface ToolApprovalRow {
   executed_at: string | null;
   outcome_ok: number | null;
   outcome_error: string | null;
+}
+
+interface ReminderRow {
+  id: string;
+  schema_version: number;
+  owner: string;
+  what: string;
+  due_at: string;
+  /** `due_at`'s absolute milliseconds: the column the scheduler compares and sorts by. */
+  due_at_ms: number;
+  timezone: string;
+  status: string;
+  created_at: string;
+  source_event_id: string | null;
+  status_changed_at: string | null;
+  resolve_kind: string;
+  session_id: string | null;
+  delivered_at: string | null;
+  acknowledged_at: string | null;
 }
 
 interface EpisodicMemoryRow {
@@ -1787,6 +1820,160 @@ export class XixiStore {
     });
   }
 
+  // ------------------------------------------------ durable reminders (pack Phase 2 §7)
+  //
+  // 一条提醒 = 表里一行 + 日志里的 `reminder.changed`，同一事务：到点要**真的是日志里的事件**
+  // （可被主动行为或对话读到），不是一行打印；重启后待办仍在（AGENTS.md §3）。
+  // 自然语言的 when 从不进这张表：只有 resolve 过的 `due_at`（绝对时刻，带显式偏移）+ `timezone`
+  // + `resolve_kind`（程序枚举）。比较与排序走 `due_at_ms`（跨偏移的字符串比较是错的）。
+
+  /** 记一条提醒（`pending`）：表 + `reminder.changed`（`reminder_created`），同一事务。 */
+  insertReminder(input: NewReminder): ReminderChange {
+    this.#assertOpen();
+    assertNewReminder(input);
+    // 入口常常把它手上的 `Date` 用 `toISOString()` 交过来（`Z` 形式），而事件信封要求显式偏移
+    // （`toOffsetIso` 的约定）。这里统一按本机偏移渲染**同一个瞬间**，而不是把 `Z` 原样写进库。
+    const createdAt = input.createdAt === undefined ? this.#now() : toOffsetIso(readInstant(input.createdAt, 'createdAt'));
+    const owner = input.owner === undefined || input.owner.trim().length === 0 ? UNKNOWN_REMINDER_OWNER : input.owner.trim();
+    const reminder: Reminder = {
+      id: input.id ?? newReminderId(),
+      owner,
+      what: input.what.trim(),
+      dueAt: input.dueAt,
+      timezone: input.timezone,
+      status: 'pending',
+      createdAt,
+      sourceEventId: input.sourceEventId ?? null,
+      statusChangedAt: null,
+      resolveKind: input.resolveKind ?? 'absolute',
+      sessionId: input.sessionId ?? null,
+      deliveredAt: null,
+      acknowledgedAt: null,
+    };
+    return this.#transaction(() => {
+      this.#db
+        .prepare(
+          `INSERT INTO reminders (
+             id, schema_version, owner, what, due_at, due_at_ms, timezone, status,
+             created_at, source_event_id, status_changed_at, resolve_kind, session_id,
+             delivered_at, acknowledged_at
+           ) VALUES (?, 1, ?, ?, ?, ?, ?, 'pending', ?, ?, NULL, ?, ?, NULL, NULL)`,
+        )
+        .run(
+          reminder.id,
+          reminder.owner,
+          reminder.what,
+          reminder.dueAt,
+          Date.parse(reminder.dueAt),
+          reminder.timezone,
+          reminder.createdAt,
+          reminder.sourceEventId,
+          reminder.resolveKind,
+          reminder.sessionId,
+        );
+      const event = this.appendEvent(buildReminderEvent(reminder, 'pending', 'reminder_created', createdAt, 'reminder', null));
+      return { reminder, event };
+    });
+  }
+
+  reminder(reminderId: string): Reminder | null {
+    this.#assertOpen();
+    const row = this.#db.prepare('SELECT * FROM reminders WHERE id = ?').get(reminderId) as unknown;
+    return row === undefined ? null : toReminder(row as ReminderRow);
+  }
+
+  /**
+   * 状态 / 主人 / 到点时刻过滤；默认按**该提醒的时刻**从早到晚（同刻按 id 稳定排序）。
+   * `dueBefore` 用绝对毫秒比较，所以一条带 `+08:00` 的与一条带 `+00:00` 的不会因文本顺序而错判。
+   */
+  reminders(query: ReminderQuery = {}): Reminder[] {
+    this.#assertOpen();
+    const wanted: ReminderStatus[] =
+      query.status === undefined ? [] : typeof query.status === 'string' ? [query.status] : [...query.status];
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (wanted.length > 0) {
+      clauses.push(`status IN (${wanted.map(() => '?').join(', ')})`);
+      params.push(...wanted);
+    }
+    if (query.owner !== undefined) {
+      clauses.push('owner = ?');
+      params.push(query.owner);
+    }
+    if (query.dueBefore !== undefined) {
+      const ms = query.dueBefore instanceof Date ? query.dueBefore.getTime() : Date.parse(query.dueBefore);
+      if (!Number.isFinite(ms)) throw new DomainError('INVALID_REMINDER', `dueBefore is not a readable instant: ${String(query.dueBefore)}`);
+      clauses.push('due_at_ms <= ?');
+      params.push(ms);
+    }
+    params.push(Math.max(1, Math.floor(query.limit ?? Number.MAX_SAFE_INTEGER)));
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM reminders ${clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`}
+         ORDER BY due_at_ms ASC, id ASC
+         LIMIT ?`,
+      )
+      .all(...params) as unknown as ReminderRow[];
+    return rows.map(toReminder);
+  }
+
+  /**
+   * 迁移一条提醒的状态。已经是目标状态时返回 `{ reminder, event: null }`（幂等，不写事件）。
+   *
+   * 只允许 pack §7 的那条链：`pending → due → candidate → delivered → acknowledged`
+   * （`REMINDER_NEXT_STATUSES`）。链条只能往前走一步 —— 「不得重复执行已发出的外部动作」的提醒版是
+   * 「不因为状态回退而重复提醒同一个人」。
+   *
+   * **这里不判时钟**：`pending → due` 是不是「到点」由调度器（`ReminderScheduler.markDue`）比
+   * `due_at` 决定；store 只保证状态机的形状。这样时钟只有一个来源。
+   */
+  transitionReminder(
+    reminderId: string,
+    status: ReminderStatus,
+    options: TransitionReminderOptions = {},
+  ): ReminderChange {
+    this.#assertOpen();
+    const current = this.reminder(reminderId);
+    if (current === null) {
+      throw new DomainError('UNKNOWN_REMINDER', `no reminder ${reminderId}`);
+    }
+    if (current.status === status) return { reminder: current, event: null };
+    if (!reminderTransitionAllowed(current.status, status)) {
+      throw new DomainError(
+        'INVALID_REMINDER',
+        `reminder ${reminderId} is ${current.status}; cannot move it to ${status}`,
+      );
+    }
+    const at = options.at === undefined ? this.#now() : toOffsetIso(options.at);
+    const next: Reminder = {
+      ...current,
+      status,
+      statusChangedAt: at,
+      deliveredAt: status === 'delivered' ? at : current.deliveredAt,
+      acknowledgedAt: status === 'acknowledged' ? at : current.acknowledgedAt,
+    };
+    return this.#transaction(() => {
+      this.#db
+        .prepare(
+          `UPDATE reminders
+              SET status = ?, status_changed_at = ?, delivered_at = ?, acknowledged_at = ?
+            WHERE id = ?`,
+        )
+        .run(next.status, next.statusChangedAt, next.deliveredAt, next.acknowledgedAt, next.id);
+      const event = this.appendEvent(
+        buildReminderEvent(
+          next,
+          status,
+          options.reasonCode ?? reminderReasonForStatus(status),
+          at,
+          options.source ?? 'reminder',
+          current.status,
+        ),
+      );
+      return { reminder: next, event };
+    });
+  }
+
   // ----------------------------------------------- long-term memory (pack Phase 4)
   //
   // 记忆是**推导**（铁律 4）：这些表只存程序提炼出来的东西，每行带 source_event_id 指回原始轮次。
@@ -2341,6 +2528,45 @@ function toToolApproval(row: ToolApprovalRow): ToolApproval {
     executedAt: row.executed_at,
     outcomeOk: row.outcome_ok === null ? null : row.outcome_ok === 1,
     outcomeError: row.outcome_error,
+  };
+}
+
+/**
+ * A timestamp a caller handed over, as a `Date`: readable or a loud `INVALID_REMINDER`.
+ *
+ * The reminder tables store offset-ISO text (the repo's convention); `Z`-form input is re-rendered
+ * rather than stored as-is, so 「同一个瞬间」 is preserved and the event envelope's pattern still holds.
+ */
+function readInstant(value: string, field: string): Date {
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) {
+    throw new DomainError('INVALID_REMINDER', `${field} is not a readable instant: ${value}`);
+  }
+  return new Date(ms);
+}
+
+/**
+ * 一行 `reminders` → 领域对象。`due_at_ms` 只在 SQL 里用来比较与排序，领域对象只认 `due_at`
+ * （绝对时刻文本）——两者描述的必须是同一个瞬间，这里顺手核一遍，对不上说明这一行被外部改坏了。
+ */
+function toReminder(row: ReminderRow): Reminder {
+  if (Date.parse(row.due_at) !== row.due_at_ms) {
+    throw new DomainError('INVALID_REMINDER', `reminder ${row.id} has due_at and due_at_ms that disagree`);
+  }
+  return {
+    id: row.id,
+    owner: row.owner,
+    what: row.what,
+    dueAt: row.due_at,
+    timezone: row.timezone,
+    status: row.status as ReminderStatus,
+    createdAt: row.created_at,
+    sourceEventId: row.source_event_id,
+    statusChangedAt: row.status_changed_at,
+    resolveKind: row.resolve_kind as Reminder['resolveKind'],
+    sessionId: row.session_id,
+    deliveredAt: row.delivered_at,
+    acknowledgedAt: row.acknowledged_at,
   };
 }
 
