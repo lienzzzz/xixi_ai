@@ -131,8 +131,10 @@ node scripts/eval-realism.ts --corpus=all --repeat=3 --label v02                
    控制台里每次录音都能**回放并显示峰值 dBFS**，用来判断「未识别到」是没录上、太轻还是识别错。
 4. **「看一眼」会上传一张静帧**：按需单张（不是连续视频），**默认只允许手动触发**，每次上传留一条审计
    （时间/尺寸/字节/结果，**不含图像**），图像不落盘。要它自主看需另开一个默认关的开关。
-5. **四个入口各用不同数据库**：`chat` → `data/chat`、试用页 → `data/web-chat`、`voice-turn` → `data/voice`、
-   现场测试控制台 → `data/field-test`（在场状态另用 `data`）。**在 chat 里设的人格与历史不会带到控制台。**
+5. **household 入口默认连同一个库**（V0.3 P0-B 改了默认值）：`XIXI_DATA_DIR`，未设就是 `data/xixi`——
+   `chat`、试用页、`voice-turn`、现场测试控制台与感知入库都走它（优先级：显式参数 > `XIXI_DATA_DIR` > 单入口旧变量 > 默认）。
+   `voice-turn` 是测量工具，**默认连 household 库**，只有 `--isolated-store` 才用自己的库；控制台仍可用 `--data-dir` 单独隔离。
+   **在 chat 里设的人格与历史，现在会带到其它入口。**
 6. **试用页没有实时画面与「看一眼」**（只有控制台有）。
 7. **已知取舍**：四位数温度只匹配后三位（拦截方向安全）；无数值的天气结论（「天气预报说今天适合出门」）不拦
    ——收紧误伤边界时必须放弃这类，否则会连带拦掉「朋友说要来吃饭」这种家常话。
@@ -194,17 +196,19 @@ docs/                     README（地图）、architecture、event-contracts、
 - **流式语音的首音目标（pack ≤1.5 秒）未达标**：8 批 n=32 的 ④ / 1500 ms = **[3.14, 7.33] 倍**（池化 3.73 倍），**没有一批接近**；
   下界由 ② 模型首 token 与 ③ 合成往返挡住 —— **目标不可达，不是实现缺陷**。同批对照（流式 vs 整段）方向**不一致**（3 快 5 慢、−16.1% 到 +27.3%），
   **不许写「方向多数为正」也不许拿单批百分比当结论**；`data/voice/bench/` 下较早产物的 `note` 是生成时的旧文本，**结论以 `--compare` 现算为准**。
-- **流式逐块播放没有端到端验收**：接线成立、B1 已修（每块只发一次），**B2 是已知未覆盖缺陷**（失败块之后的后继块被憋到 `flush()` 才发）；
-  只能写「接线成立 + B1 已修 + B2 是已知未覆盖缺陷」。
-- **有界心情的两条已知问题**（第五轮 t7 交回，本轮只记录）：`store.resetMood` 收到 `Z` 写法会让 `moodHistory()` 的字符串序错位
-  （生产路径走 `toOffsetIso`、今天不受影响）；`moodBias` 是相加后夹而不是平均，而 `mood.ts` 的注释写着「平均」。
+- **流式逐块播放**：接线成立、B1 已修（每块只发一次）、**B2 已在 V0.3 P0-E1 修掉**（失败块改成 tombstone，后继块不再被憋到 `flush()`）——
+  修法是**先写回归测试再改实现**（`tests/unit/voice/voice-stream.test.ts` 的「a failed clause never blocks the clauses behind it」，旧实现下先红）。
+  逐条证据见 [docs/progress-v03.md](docs/progress-v03.md) 的 P0 段。
+- **有界心情**：两条已知问题**已在 V0.3 P0-E2 清掉**——`resetMood` 的时间戳归一（`Z` 写法转本地偏移，已是数字偏移的按字节保留）
+  与 `moodBias` 的注释/公式一致（相加后夹，`±6%` 的两处表述也钉住相加语义）。
   另有两条「尚未实现」：**控制台没有心情面板**、**心情没有接进主动引擎的软评分**（`moodProactivityNudge()` 在产线里没有消费点）。
-- **`onNotice` 已被两个产线入口消费**：`serve-chat.ts`（试用页）与 `field-test.ts`（现场测试控制台）订阅并显示
-  `REPLY_HYGIENE` / `UNBACKED_FACT_CLAIM` 与「沉默原因」（`ARTIFACT_ONLY_REPLY` vs `MODEL_SILENCE`）；
-  **文字 CLI（`chat.ts`）与语音轮次（`voice-turn.ts`）仍未订阅**。
+- **`onNotice` 已被产线入口全部消费**（V0.3 P0-E2 补齐）：`chat.ts`（终端打印提示码）、`serve-chat.ts`（试用页）、
+  `field-test.ts`（控制台）、`voice-turn.ts`（提示码写进产物）都订阅并显示
+  `REPLY_HYGIENE` / `UNBACKED_FACT_CLAIM` 与「沉默原因」（`ARTIFACT_ONLY_REPLY` vs `MODEL_SILENCE`）。
   （代码里从来没有 `SILENCE_ARTIFACT_ONLY` 这个名字——那是评审提出的候选名，见 `packages/conversation/src/engine.ts` 的 `SilenceReason`。）
-- **长期记忆与未完话题已落地，但入口覆盖不齐**：写记忆/学习的只有控制台（`field-test.ts`）与试用页（`serve-chat.ts`）；
-  `chat.ts` 与 `voice-turn.ts` 未接 `afterTurn`（那两个入口本轮只接了工具链与语言）——覆盖必须逐入口写，别写成「所有入口都写了记忆」。
+- **长期记忆与未完话题**：写侧已落地（pack Phase 4），**V0.3 P1-b 补齐了入口覆盖**——`chat.ts` / `serve-chat.ts` / `voice-turn.ts`
+  都走 `@xixi/runtime` 的 `createTurnExtraction`（共用装配 + 关库前 `await drain()`），三入口各有真子进程或真 HTTP 证据。
+  读侧（检索进提示词、纠正让旧事实失效）见 [docs/progress-v03.md](docs/progress-v03.md) 的 P1 段。
 - **金额级费用上限未实现**：主动开口的额度是**次数**（6 小时 / 当日），它是当前的费用代理。
 
 ## 许可

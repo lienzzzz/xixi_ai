@@ -164,13 +164,113 @@ function installExitHook(): void {
   });
 }
 
-/** 稳定的偏好/事实（semantic memory）的识别规则：短句、第一人称、非疑问。 */
+/**
+ * 稳定的偏好/事实（semantic memory）的识别规则：短句、第一人称、非疑问。
+ *
+ * V0.3 t22 **没有**动这四条正则本身：旗舰句的修法是「先按小节切、再让第一人称继承」，
+ * 而不是放宽词表 —— 放宽 `不喝`/`不吃` 这类动词会与纠错闭环抢写同一件事
+ * （闭环先按纠正写一条 `我不喝茉莉花茶`，规则再补一条 `我不喝那个`，同一件事两行、
+ * 而且 t13 的闭环用例会红）。规则词表保持原样，行为只在「怎么切句」这一层变。
+ */
 const SEMANTIC_RULES: readonly { readonly property: string; readonly pattern: RegExp }[] = Object.freeze([
   { property: 'preference', pattern: /我(?:很|挺|特别)?(?:喜欢|爱)([^。！？!?，,；;]{2,20})/ },
   { property: 'preference', pattern: /我(?:不喜欢|不爱|讨厌)([^。！？!?，,；;]{2,20})/ },
   { property: 'place', pattern: /我(?:住|住在|老家在)([^。！？!?，,；;]{2,20})/ },
   { property: 'routine', pattern: /我(?:每天|平常|平时|一般)([^。！？!?，,；;]{2,24})/ },
 ]);
+
+/** 一句里的**小节**（V0.3 t22）。 */
+export interface UserClause {
+  /** 这一小节的正文（已 trim）。 */
+  readonly text: string;
+  /**
+   * 这一小节是不是在说「我」：自己带 `我`/`咱`，**或者同一句的前面某一小节带过**
+   * （`我不喝绿茶，平时喜欢茉莉花茶` 的第二小节）。跨句不继承：`他喜欢喝茶。` 不该写成「我」的事。
+   */
+  readonly firstPerson: boolean;
+  /** 这一小节是不是疑问（整句以 `？`/`?` 结尾，或这一小节自己长得像问句）。 */
+  readonly question: boolean;
+}
+
+/**
+ * 疑问句的**字面**判据（V0.3 t22，修掉那个恒假守卫）。
+ *
+ * 背景：原来那行守卫写的是 `statement.includes('？')`，而 `statement` 来自
+ * `[^。！？!?，,；;]{2,20}` 这个字符类 —— 问号在类里被显式排除，于是**条件恒为假**：
+ * 写着「规则只给非疑问用」，实际上疑问句照写不误（`你还记得我喜欢喝什么茶吗？`
+ * 会落库成 `preference: 我喜欢喝什么茶吗`，置信 0.9、active）。守卫必须判**原始那句话**，
+ * 而不是被判过之后的那一段。
+ *
+ * 三种字面形态：句末/句中问号、小节以 `吗`/`呢`/`吧` 收尾、明问记忆的句式
+ * （`你还记得…`/`我说过…` 之类）。**认不出的疑问句不在这里**（例如没有任何疑问标记的
+ * 残句 `我喜欢喝什么茶`）——那种情况把它当陈述读是这一层的既有口径，注释里写明。
+ */
+const QUESTION_MARK = /[？?]/u;
+const QUESTION_TAIL = /(?:吗|呢|吧)$/u;
+const QUESTION_WORD = /(?:什么|怎么|为什么|哪儿|哪里|几点|多少|什么时候)/u;
+const QUESTION_ABOUT_MEMORY = /(?:你还?记得|记得我|我说过|我什么时候|我有没有)/u;
+
+export function looksLikeQuestion(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return false;
+  return (
+    QUESTION_MARK.test(trimmed) ||
+    QUESTION_TAIL.test(trimmed) ||
+    QUESTION_WORD.test(trimmed) ||
+    QUESTION_ABOUT_MEMORY.test(trimmed)
+  );
+}
+
+/**
+ * 把用户一句话切成小节，并给每一节标注「谁在说话」与「是不是疑问」（V0.3 t22）。
+ *
+ * 为什么必须分小节：`我不喝绿茶，平时喜欢茉莉花茶。` 是非常自然的一句话，而按整句匹配时
+ * 「我」后面接的是「不喝绿茶」，于是 `我…喜欢` 接不上、`我平时喜欢` 也因为前面没有「我」接不上 ——
+ * 一句话一条记忆都不写（t15 实测，真模型与离线两次）。
+ *
+ * 分句 / 分小节：`。！？!?` 断句（并记住这一句是不是疑问），`，,；;、` 与换行断小节；
+ * 第一人称**在同一句内**向后继承，跨句不继承。
+ */
+export function splitUserClauses(text: string): readonly UserClause[] {
+  const sentences = text
+    .split(/(?<=[。！？!?])/u)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length > 0);
+  const clauses: UserClause[] = [];
+  for (const sentence of sentences) {
+    // 整句以问号收尾时，这一句的**每个**小节都按疑问处理（问的是整句）。
+    // 但不能拿「整句里出现过疑问词」当整句疑问：`我喜欢喝什么茶，我平时喜欢茉莉花茶。`
+    // 的第一小节是问句、第二小节是陈述 —— 按整句判会把第二小节一起吞掉（实测踩到过）。
+    const sentenceIsQuestion = QUESTION_MARK.test(sentence.trim().slice(-1));
+    let subjectSeen = false;
+    for (const raw of sentence.split(/[，,；;、\n]+/u)) {
+      const clause = raw.replace(/[。！？!?]+$/u, '').trim();
+      if (clause.length === 0) continue;
+      const ownSubject = /[我咱]/u.test(clause);
+      const firstPerson = ownSubject || subjectSeen;
+      if (ownSubject) subjectSeen = true;
+      clauses.push({ text: clause, firstPerson, question: sentenceIsQuestion || looksLikeQuestion(clause) });
+    }
+  }
+  return clauses;
+}
+
+/** 接续小节常见的开头（连词/副词）：补主语时要先摘掉，否则「我也喜欢下棋」接不上规则。 */
+const LEADING_CONNECTIVE = /^(?:也|还|又|再|然后|而且|并且|另外|接着|后来|不过|但是|但|就|都|只)+/u;
+
+/**
+ * 一条候选陈述：把小节补成「以我开头」的第一人称句子（第一人称继承来的小节要补主语）。
+ *
+ * `平时喜欢茉莉花茶`（前面已有「我」）→ `我平时喜欢茉莉花茶`；
+ * `也喜欢下棋` → 先摘掉开头的接续词 → `我喜欢下棋`；
+ * 自己带「我」的小节原样返回；不是第一人称的小节返回 `null`（`他很喜欢喝茶` 不该被写成「我」的事）。
+ */
+export function firstPersonCandidate(clause: UserClause): string | null {
+  if (!clause.firstPerson) return null;
+  if (/[我咱]/u.test(clause.text)) return clause.text;
+  const withoutConnective = clause.text.replace(LEADING_CONNECTIVE, '').trim();
+  return withoutConnective.length === 0 ? null : `我${withoutConnective}`;
+}
 
 export class TurnMemoryExtractor {
   readonly #store: XixiStore;
@@ -489,24 +589,42 @@ export class TurnMemoryExtractor {
       }
     }
 
-    for (const { property, pattern } of SEMANTIC_RULES) {
-      attempt(`memory.semantic:${property}`, () => {
-        const match = pattern.exec(job.userText);
-        if (match === null) return;
-        const statement = match[0].trim();
-        if (statement.length === 0 || statement.includes('？') || statement.includes('?')) return;
-        const existing = this.#memory.semantic({ property, limit: 200 });
-        if (existing.some((entry) => entry.statement === statement)) return;
-        semantic.push(
-          this.#memory.recordSemantic({
-            property,
-            statement,
-            sourceType: 'explicit_correction',
-            sourceEventId: job.userEventId,
-            confidence: 0.9,
-          }),
-        );
-      });
+    /**
+     * 稳定的偏好/事实（V0.3 t22：按**小节**匹配 + 第一人称继承 + 真的会拦疑问句）。
+     *
+     * 三件事各修一个已实测的缺陷：
+     *   1. 按小节而不是整句匹配 —— `我不喝绿茶，平时喜欢茉莉花茶。` 里的第二小节因此接得上；
+     *   2. 第一人称**在同一句内向后继承**（`平时喜欢茉莉花茶` 补成 `我平时喜欢茉莉花茶`），
+     *      跨句不继承，所以 `他喜欢喝茶。` 不会被写成「我」的事；
+     *   3. 疑问句在**写之前**被拦下，而且判的是原始那句话（旧写法判的是 match 出来的片段，
+     *      而那个字符类里根本没有问号，条件恒为假 —— 见 `looksLikeQuestion` 的注释）。
+     */
+    const clauses = splitUserClauses(job.userText);
+    for (const clause of clauses) {
+      if (clause.question) continue;
+      const candidate = firstPersonCandidate(clause);
+      if (candidate === null) continue;
+      for (const { property, pattern } of SEMANTIC_RULES) {
+        attempt(`memory.semantic:${property}`, () => {
+          const match = pattern.exec(candidate);
+          if (match === null) return;
+          const statement = match[0].trim();
+          if (statement.length === 0) return;
+          // 判重按**全部状态**看（`semantic` 不是 `activeSemantic`）：一句被纠正过的话
+          // 不该因为「它已经不 active 了」而被重新写一遍。
+          const existing = this.#memory.semantic({ property, limit: 200 });
+          if (existing.some((entry) => entry.statement === statement)) return;
+          semantic.push(
+            this.#memory.recordSemantic({
+              property,
+              statement,
+              sourceType: 'explicit_correction',
+              sourceEventId: job.userEventId,
+              confidence: 0.9,
+            }),
+          );
+        });
+      }
     }
 
     return { job, feedback, learned, overrides, episodic, semantic, notes, correction, tier2: null, failures };

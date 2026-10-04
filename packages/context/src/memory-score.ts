@@ -128,6 +128,100 @@ function unigramCoverage(query: string, text: string): number {
   return coverage(unigrams(query), new Set(unigrams(text)));
 }
 
+/**
+ * 「这句话在说哪个话题」用的**功能字表**（V0.3 t22）。
+ *
+ * 为什么要它：`给我推荐个茶。` 与 `我很喜欢喝茉莉花茶` 在**词面**上几乎不重合（共同的只有
+ * `我` 与 `茶`，而且不构成共同双字词），于是最该被想起来的一条茶偏好进不了提示词 —— 用户看到的
+ * 是引擎的兜底句。而人读这两句时不会犹豫：它们说的是**同一个话题**（茶）。
+ *
+ * 判据只能是「去掉不承载话题的字之后，剩下的字还对不对得上」，所以这里列的是**功能字**：
+ * 代词、助词、介词、连词、判断词、常见谓词（言语/心理/动作）、程度与疑问副词、语气词，
+ * 以及请求类动词（推荐/建议/请/帮…）。它们在任何话题里都会出现，因此不携带话题信息。
+ *
+ * 两条纪律：
+ *   * 这张表只影响**话题覆盖率**这一条相关性信号，不参与词面相关与排序权重（那些公式一个字没改）；
+ *   * 表里**不放名词**（茶/伞/药/饭/家…），否则话题信号会被自己抹掉。
+ */
+export const CONTENT_STOP_CHARS: ReadonlySet<string> = new Set([
+  // 代词与称谓
+  '我', '你', '他', '她', '它', '咱', '们', '您', '谁',
+  // 助词 / 语气 / 标点残留
+  '的', '了', '着', '过', '地', '得', '吗', '呢', '吧', '啊', '呀', '哦', '嗯', '嘛', '么',
+  // 判断与存在 / 副词
+  '是', '有', '在', '没', '不', '别', '无', '为', '就', '都', '也', '还', '再', '又', '只', '才',
+  '很', '太', '挺', '蛮', '更', '最', '真', '好', '坏', '多', '少', '大', '小', '快', '慢',
+  // 介词 / 连词 / 量词 / 方位
+  '和', '跟', '与', '把', '被', '给', '对', '向', '从', '于', '或', '而', '但', '却', '以', '及',
+  '个', '些', '点', '这', '那', '哪', '几', '时', '候',
+  // 「说听想问」这类言说/心理/请求动词：它们在任何话题里都会出现，不承载话题
+  '说', '讲', '问', '答', '聊', '看', '听', '想', '要', '会', '能', '可', '该', '去', '来', '做',
+  '干', '用', '拿', '推', '荐', '请', '帮', '让', '使', '叫', '记',
+  // 疑问词根
+  '什', '怎', '样', '如', '何', '甚',
+]);
+
+/**
+ * 一句话里的**内容字**（去重、保持出现顺序）：去掉标点与非汉字，再去掉 `CONTENT_STOP_CHARS`。
+ *
+ * `给我推荐个茶。` → `['茶']`；`我平时喜欢茉莉花茶` → `['平','喜','欢','茉','莉','花','茶']`。
+ */
+export function contentChars(text: string): string[] {
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  for (const character of unigrams(text)) {
+    if (!/[\u4e00-\u9fff]/u.test(character)) continue;
+    if (CONTENT_STOP_CHARS.has(character)) continue;
+    if (seen.has(character)) continue;
+    seen.add(character);
+    kept.push(character);
+  }
+  return kept;
+}
+
+/**
+ * 这个内容字在文本里是不是**成词出现的**（而不是被功能字夹着的孤字）。
+ *
+ * 为什么要这一层（实测换来的）：只看「字出现过」的话，`给我推荐个茶。` 会把
+ * `遥控器在茶几上` 也算成「说的是同一件事」（它含 `茶`），而 `茶几` 与茶没关系 —— 那是**误召回**。
+ * 判据因此收紧为：这个字自己出现的位置上，**左右至少一侧紧邻另一个内容字**（即它是一个
+ * 至少两字的词的一部分）。
+ *
+ *   * `茉莉花茶` → `花`、`茶` 都是内容字且相邻 → `茶` 成词 ✓
+ *   * `茶叶罐`   → `茶`、`叶` 相邻 → 成词 ✓
+ *   * `茶几上`   → `几`、`上` 都是功能字 → `茶` 是孤字 ✗（不会被当成话题命中）
+ */
+export function appearsAsContentTerm(character: string, text: string): boolean {
+  const characters = unigrams(text);
+  const isContent = characters.map(
+    (current) => /[\u4e00-\u9fff]/u.test(current) && !CONTENT_STOP_CHARS.has(current),
+  );
+  for (let index = 0; index < characters.length; index += 1) {
+    if (characters[index] !== character || !isContent[index]) continue;
+    if (isContent[index - 1] === true || isContent[index + 1] === true) return true;
+  }
+  return false;
+}
+
+/**
+ * 话题覆盖率 ∈ [0, 1]：查询的**内容字**有多少在文本里**成词出现**。
+ *
+ * 与 `lexicalRelevance` 的分工：词面相关问「两条读起来像不像」，话题覆盖率问「说的是不是同一件事」
+ * —— `给我推荐个茶。` 与 `我平时喜欢茉莉花茶` 的后者是 1（查询唯一的内容字 `茶` 在记忆里成词），
+ * 前者只有 0.2。检索器把 `topicCoverage === 1`（**查询的每个内容字都成词出现在记忆里**）
+ * 当成一条独立的相关性路径：对长查询很严（要**全部**内容字都对上），对短查询就是一次话题点名。
+ */
+export function topicCoverage(query: string, text: string): number {
+  const needles = contentChars(query);
+  if (needles.length === 0) return 0;
+  let hit = 0;
+  for (const needle of needles) if (appearsAsContentTerm(needle, text)) hit += 1;
+  return hit / needles.length;
+}
+
+/** 话题点名成立的门槛：查询的每个内容字都要出现在记忆里。 */
+export const TOPIC_COVERAGE_FLOOR = 1;
+
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
 }

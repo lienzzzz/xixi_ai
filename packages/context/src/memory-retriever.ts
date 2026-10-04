@@ -39,6 +39,8 @@ import {
   recencyScore,
   stalePenalty,
   subjectScore,
+  TOPIC_COVERAGE_FLOOR,
+  topicCoverage,
 } from './memory-score.ts';
 import {
   MEMORY_KINDS,
@@ -340,6 +342,9 @@ function scoreCandidate(
   const lexical = Math.max(0, lexicalRelevance(input.query, candidate.text) - (conflicting ? POLARITY_CONFLICT_PENALTY : 0));
   // 双字词命中是「说的就是这件事」的独立强信号（见 `bestBigramCoverage`）。
   const bestBigram = bestBigramCoverage(input.query, candidate.text);
+  // 话题点名（V0.3 t22）：`给我推荐个茶。` 与 `我很喜欢喝茉莉花茶` 词面几乎不重合，
+  // 但它们说的是同一个话题 —— 查询的每个**内容字**都出现在记忆里就是这一条信号。
+  const topic = topicCoverage(input.query, candidate.text);
   const subject = subjectScore(candidate.subject, input.query);
   const thread = openThreadScore(
     openThreads.flatMap((entry) => [entry.summary, entry.subject]),
@@ -363,10 +368,12 @@ function scoreCandidate(
   return {
     candidate,
     // 相关性先决条件（见 `MIN_LEXICAL_RELEVANCE`）：一条信号都不沾，就是「跟这一轮没关系」。
-    // 硬门槛保持高（0.25，挡住「一个字碰巧重合」这种弱信号），逼着弱候选去拿另外两条证据。
+    // 硬门槛保持高（0.25，挡住「一个字碰巧重合」这种弱信号），逼着弱候选去拿另外几条证据。
+    // `topic` 是第四条：查询的每个内容字都出现在记忆里（长查询要求全部对上，短查询就是一次话题点名）。
     relevant:
       bestBigram >= MIN_BIGRAM_RELEVANCE ||
       lexical >= MIN_LEXICAL_RELEVANCE ||
+      topic >= TOPIC_COVERAGE_FLOOR ||
       subject >= 0.6 ||
       thread >= 0.2,
     total,
@@ -378,7 +385,7 @@ function scoreCandidate(
     openThread: thread,
     stale,
     alreadyMentioned: mentioned,
-    reason: describeReason({ lexical, recency, stale, mentioned, subject, thread, importance, confidence }),
+    reason: describeReason({ lexical, recency, stale, mentioned, subject, thread, importance, confidence, topic }),
   };
 }
 
@@ -397,9 +404,12 @@ function describeReason(parts: {
   readonly thread: number;
   readonly importance: number;
   readonly confidence: number;
+  readonly topic: number;
 }): string {
   const clauses: string[] = [];
   if (parts.lexical >= 0.2) clauses.push('和这一轮说的是同一件事');
+  // 话题点名进入理由时**要看得见**：否则面板只能看到一个结论，说不清它是被哪一项放进来的。
+  if (parts.topic >= TOPIC_COVERAGE_FLOOR) clauses.push('说的是同一个话题（这一轮点到的那件事）');
   if (parts.subject >= 0.6) clauses.push('主语对得上');
   if (parts.thread >= 0.2) clauses.push('和没办完的那件事有关');
   if (parts.importance >= 0.7) clauses.push('这件事本身就重要');
