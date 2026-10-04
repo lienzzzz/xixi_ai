@@ -28,7 +28,7 @@
 
 **V0.3 阶段的操作事实（下一轮接手必读）**：
 1. 门禁顺序：**`npm run check:types` → `npm test` → `npm run check:docs`**；
-多日时间线 `node scripts/eval-proactive-timeline.ts`：**预算给 ≥40 分钟、不要中途掐掉**——安静机器约 24 分钟（三次实测 1429.5 / 1423.1 / 1425.6 秒），**同期有人跑测试约 34 分钟**（t16 收口时 2047.5 秒，单核打满、不是挂死；口径与 `docs/progress-v03.md` §5 一致）
+2. 多日时间线 `node scripts/eval-proactive-timeline.ts`：**预算给 ≥40 分钟、不要中途掐掉**——安静机器约 24 分钟（三次实测 1429.5 / 1423.1 / 1425.6 秒），**同期有人跑测试约 34 分钟**（t16 收口时 2047.5 秒，单核打满、不是挂死；口径与 `docs/progress-v03.md` §5 一致）
 3. 开工先读 **`docs/v03/ACTUAL_RUNTIME_MAP.md`**（运行时地图，含对 pack 审计 4 处过期结论的更正）；
 4. 支持 `--print-wiring` 的是 **chat / voice-device-check / eval-realism / eval-conversation** 这四个（`field-test` 与 `serve-chat` **没有**该开关，别按「所有入口」去 grep）。
 

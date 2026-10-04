@@ -25,7 +25,7 @@
 | P0-C typecheck | `tsconfig.base.json` + `tsconfig.json` + `npm run check:types`（`b6e8dae`） | `check:types` exit 0；`@ts-ignore`/`@ts-expect-error`/`as any` 全库 0 命中（不是靠抑制换绿） | 无 |
 | P0-D replay | `packages/runtime/src/replay-runtime.ts` + `tests/replay/*`（`c9d1ad1`） | 三条行为基线（对话 / 在场 / 跨天未完话题）；跨年（相隔 364 天）同脚本行为摘要相同；`test:replay` 16/16 | pack 的 `sensor.observation` / 音频与图像夹具按 §4 留到 V0.3 之后 |
 | P0-E 已知缺陷 | B2（`4f3301f`）+ preflight 九项（`e0ce503`） | B2 先写回归测试再修（旧实现下先红）；九项各有一条会红的证据 | 已由 t3/t2 逐项回归；剩两条 low 见 P0 遗留第 5 条（现已补） |
-| **曾不过 → t22 修复 / t23 复审 pass**（见 P1 §3） |
+| P1-a 上下文与检索 | `packages/context/*` + engine/prompt 接线（`d168af7`） | 检索进 `prompt.user`（`- [较确定] 我很喜欢茉莉花茶`）；prompt 审计无 UUID / 内部 id / 长数字 / 调试字段 | 曾不过 → t22 修复 / t23 复审 pass（见 P1 §3） |
 | P1-b 关系/话题/纠正/afterTurn | 迁移 006 + `MemoryStore` 状态 API + `MemoryCorrectionResolver` + `createTurnExtraction`（`7331ae`→`733b1ae`） | 纠正后旧行 `superseded`（带 `supersededBy`）、新行 `active`、旧事实不进 prompt；三入口各有真子进程/真 HTTP 证据 | 疑问句被写成偏好事实（P1 遗留 N3，t22 修复 / t23 复审） |
 
 > 交付号取自 `git log`；**成员只报基线、不提交代码**，交付号由 captain 提交后回填（AGENTS §9.20）。
@@ -242,13 +242,13 @@ C:\Users\zz\AppData\Local\Temp\t11-store\xixi.sqlite
    `scripts/field-test.ts` / 各入口各自拼路径（P0-A/B 已改）；表头也还写着「`packages/runtime/*` 目前不存在」。
    复核：`git grep -n 'ProactiveLoop' scripts/field-test.ts packages/runtime/src/proactive-runtime.ts`。
 2. **`docs/architecture.md` 与 `docs/README.md` 的「四个入口各用不同的库」已过期**（P0-B 之后默认同库）：
-   复核（t26 实跑，t16 报告里那句「0 命中」**不成立、已更正**）：`& 'D:\Git\usr\bin\grep.exe' -rn "各用不同" docs README.md` → 命中 5 处，
-   以及 `docs/progress.md` 里引用它的那句话）。
+   复核（t26 实跑，t16 报告里那句「0 命中」**不成立、已更正**）：`& 'D:\Git\usr\bin\grep.exe' -rn "各用不同" docs README.md` → **命中 5 处：3 处是历史引用（handoff 的 F1、README 的新鲜度行、运行时地图的旧名注释）、1 处是本条自身、1 处是原活声明 `docs/progress.md` 的那句（已在 t26 改成 canonical store 口径）**。
 两份历史 benchmark 产物只加了一块 **2 行引用块的旁注（diff +3 行**：1 个空行 + 2 行引用块）、没改写历史。
-4. **`packages/brain-adapter/package.json` 未声明 `@xixi/model-adapters`**（`packages/brain-adapter/src/tools.ts`
+3. ~~**G03 的未跑理由已过期**~~ → **已由 t19 更正**（`59cd65a`）：理由已改成点名 OpenThreadStore 与 TopicEngine 与 tests/replay 的跨天夹具；两份历史 benchmark 产物只加了一块 2 行引用块的旁注（diff +3 行：1 个空行 + 2 行引用块）、没改写历史。
+4. **packages/brain-adapter/package.json 未声明 @xixi/model-adapters**（packages/brain-adapter/src/tools.ts 在值层面 import WeatherClient）：既有缺陷，靠 workspace 提升解析；下一轮补声明。
    在值层面 import `WeatherClient`）：既有缺陷，靠 workspace 提升解析；下一轮补声明。
 5. ~~**两条没有回归底线的修复**~~ → **已由 t19 补上**（`59cd65a`）：`transitionOpenThread` 省略 `at` 的回归底线（新用例在旧写法下先红）；判官字段映射抽成唯一字段表（`scripts/lib/judge-score.ts`）并有 5 条离线单测。
-6. **时间线命令的窗口需求**（常驻运维要求，不是缺陷）：**预算 ≥40 分钟、不中断**；安静机器 ≈24 分钟（1429.5 / 1423.1 / 1425.6 秒），同期有人跑测试 ≈34 分钟（2047.5 秒，单核打满、不是挂死）——见 ⑤ 与 §5。
+6. **时间线命令的窗口需求**（常驻运维要求，不是缺陷）：**预算 ≥40 分钟、不中断**；安静机器 ≈24 分钟（1429.5 / 1423.1 / 1425.6 秒），同期有人跑测试 ≈34 分钟（2047.5 秒，单核打满、不是挂死）——见 ⑤ 与 §5。**注**：t19 没有处理过这一条（它不是代码问题）；派单若把它列进「已由 t19 补上」与事实不符，故保留为常驻运维要求。
 
 ---
 
@@ -312,8 +312,7 @@ C:\Users\zz\AppData\Local\Temp\t11-store\xixi.sqlite
 
 - [`adr/0015`](adr/0015-context-builder-and-engine-boundary.md)：ContextBuilder 与 ConversationEngine 的边界（含「引擎自己会再建一次 context」这条会骗过探针的细节）。
 - [`adr/0016`](adr/0016-memory-status-state-machine.md)：记忆状态机（active / superseded / revoked / expired）与纠正闭环。
-- ADR-0014（可信记忆策略与 provenance）**已落地**（t22 把 	opicCoverage 这条路径实现并入库 6170e4c）；它描述的策略含 `topicCoverage` 这一条相关性信号，
-  本 ADR 描述的就是落地后的现状。
+- [`adr/0014`](adr/0014-trusted-memory-policy-and-provenance.md)：可信记忆策略与 provenance（ADR 由 t16 在 `0c7d804` 登记）。
 
 ### 5. P0+P1 收口后的全量门禁（t16 实跑，2026-10-04）
 
