@@ -15,7 +15,7 @@ import { test } from 'node:test';
 import { CONVERSATION_SCOPE, buildToolChain } from '../../scripts/field-test.ts';
 import { loadConfig } from '../../scripts/lib/harness.ts';
 
-const BUILT_INS = ['xixi_get_current_time', 'xixi_get_weather', 'xixi_news_stub', 'xixi_set_reminder_stub'];
+const BUILT_INS = ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'];
 
 test('控制台的工具链：出厂不 ASK，声明之后才 ask 且仍然可见', () => {
   const config = loadConfig();
@@ -27,7 +27,6 @@ test('控制台的工具链：出厂不 ASK，声明之后才 ask 且仍然可�
     {
       xixi_get_current_time: 'allow',
       xixi_get_weather: 'allow',
-      xixi_news_stub: 'allow',
       xixi_set_reminder_stub: 'allow',
     },
     '出厂配置（config/xixi.example.yaml 的 tools.approval.ask 为空）不该有任何工具需要审批',

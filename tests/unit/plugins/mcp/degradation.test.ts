@@ -39,7 +39,7 @@ xixi:
 `);
 
 const CONTEXT: ToolExecutionContext = { scope: 'conversation', timezone: 'Asia/Shanghai', now: new Date('2026-10-05T09:00:00+08:00') };
-const BUILT_INS = ['xixi_get_current_time', 'xixi_get_weather', 'xixi_news_stub', 'xixi_set_reminder_stub'];
+const BUILT_INS = ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'];
 const FAILING = (): never => {
   throw new Error('服务器没起来');
 };
@@ -61,9 +61,9 @@ test('a server that cannot be reached is “these tools are not here today”, n
   assert.equal(instance?.health?.status, 'down');
   assert.match(String(instance?.health?.detail), /一个工具都没有|weather=failed/);
 
-  // The chain the model gets is exactly the old one: the four built-ins, nothing missing, nothing broken.
+  // The chain the model gets is exactly the old one: the built-ins, nothing missing, nothing broken.
   assert.deepEqual(mount.registry.names().sort(), [...BUILT_INS].sort());
-  assert.equal((mount.registry.definitionsForRound('conversation', 1) ?? []).length, 4);
+  assert.equal((mount.registry.definitionsForRound('conversation', 1) ?? []).length, 3);
 
   // And a model that somehow asks for a name that is not there still gets a refusal, not a crash.
   const missing = await mount.registry.execute({ name: 'mcp.weather.forecast', arguments: '{}' }, CONTEXT);

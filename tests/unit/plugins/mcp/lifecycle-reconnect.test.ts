@@ -43,7 +43,7 @@ xixi:
 `);
 
 const CONTEXT: ToolExecutionContext = { scope: 'conversation', timezone: 'Asia/Shanghai', now: new Date('2026-10-05T09:00:00+08:00') };
-const BUILT_INS = ['xixi_get_current_time', 'xixi_get_weather', 'xixi_news_stub', 'xixi_set_reminder_stub'];
+const BUILT_INS = ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'];
 const TOOL_NAME = 'mcp.weather.forecast';
 
 function weatherStub() {
@@ -101,7 +101,7 @@ test('F1：start → deactivate → activate 之后工具重新出现，且适�
   const secondCopy = mount.registry.all().find((tool) => tool.name === TOOL_NAME);
   assert.ok(secondCopy !== undefined);
   assert.notEqual(secondCopy, firstCopy, '换成了新激活贡献的那个对象，不是上一次的残留');
-  assert.deepEqual([...mount.registry.names()].sort(), [...BUILT_INS, TOOL_NAME].sort(), '四个内置工具一个不少');
+  assert.deepEqual([...mount.registry.names()].sort(), [...BUILT_INS, TOOL_NAME].sort(), '内置工具一个不少');
 
   const execution = await mount.registry.execute({ name: TOOL_NAME, arguments: '{}' }, CONTEXT);
   assert.equal(execution.record.ok, true, `重激活之后工具必须还能用：${JSON.stringify(execution.record.error)}`);

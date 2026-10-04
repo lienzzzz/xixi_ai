@@ -53,7 +53,7 @@ export function scriptedToolPlan(input: UserTurnInput, round: number): readonly 
     return [{ name: 'xixi_set_reminder_stub', arguments: { what: what.length > 0 ? what : text } }];
   }
   if (WEATHER_WORDS.test(text)) return [{ name: 'xixi_get_weather' }];
-  if (NEWS_WORDS.test(text)) return [{ name: 'xixi_news_stub' }];
+  if (NEWS_WORDS.test(text)) return [{ name: 'news.latest' }];
   if (CLOCK_WORDS.test(text)) return [{ name: 'xixi_get_current_time' }];
   return [];
 }
@@ -158,11 +158,16 @@ export function sayToolResult(name: string, payload: Record<string, unknown>): s
       const when = [date, weekday].filter((part): part is string => part !== null).join(' ');
       return time === null ? `今天是 ${when}。` : `今天是 ${when}，现在 ${time}。`;
     }
-    case 'xixi_news_stub': {
-      if (payload.available !== true) return '新闻那边还没接上，我现在看不到真实新闻。';
+    // 新闻现在由插件提供（pack §6）：名字是 `news.*` 那一族。没有挂插件时注册表会拒绝这次
+    // 调用，于是这里走的是上面 `payload.error` 那条分支——离线替身不会替不存在的工具说话。
+    case 'news.latest':
+    case 'news.search':
+    case 'news.for_interests': {
       const items = Array.isArray(payload.items) ? (payload.items as { title?: unknown }[]) : [];
       const titles = items.map((item) => (typeof item.title === 'string' ? item.title : '')).filter((title) => title.length > 0).slice(0, 3);
-      return titles.length === 0 ? '新闻那边现在没有新消息。' : `刚看到几条：${titles.join('；')}。`;
+      if (titles.length > 0) return `刚看到几条：${titles.join('；')}。`;
+      const problems = Array.isArray(payload.problems) ? payload.problems.filter((entry) => typeof entry === 'string') : [];
+      return problems.length > 0 ? '新闻源现在取不到，晚点再看看。' : '新闻那边现在没有新消息。';
     }
     case 'xixi_set_reminder_stub': {
       const what = textField(payload, 'what');

@@ -6,11 +6,15 @@
  * allowed to touch, and what the result is. Nothing here lets a model change
  * rules, permissions or state (§2.4, §41.4).
  *
- * Phase 2 set — four built-ins:
+ * Phase 2 set — three built-ins:
  *   * `xixi_get_current_time`  (read)   — local date/time/weekday
  *   * `xixi_get_weather`       (read)   — short forecast from the weather client
- *   * `xixi_news_stub`         (read)   — news *placeholder*: refuses when no provider is wired
- *   * `xixi_set_reminder_stub` (write)  — records a reminder in an in-process sink
+ *   * `xixi_set_reminder_stub` (write)  — records a reminder
+ *
+ * V0.3 P2-D removed the fourth one, `xixi_news_stub`: news is a **plugin** now
+ * (`@xixi/plugins/news` contributes `news.search` / `news.latest` / `news.for_interests`), so this
+ * package no longer carries a news seam at all. The `xixi_` namespace is the core's own
+ * (`RESERVED_TOOL_PREFIXES`), and a news tool belongs to the plugin that owns the provider.
  *
  * `risk` and `scopes` are the program's own metadata: `ToolRegistry` (see
  * `tool-registry.ts`) filters what the model may even see, and re-checks before
@@ -141,74 +145,6 @@ export function createWeatherTool(options: WeatherToolOptions): AgentTool {
   };
 }
 
-// ---------------------------------------------------------------------------- news
-
-export interface NewsItem {
-  readonly title: string;
-  readonly source: string;
-  readonly at: string;
-  readonly url?: string;
-}
-
-export interface NewsLookup {
-  readonly fetchedAt: string;
-  readonly source: string;
-  readonly items: readonly NewsItem[];
-}
-
-/**
- * Where headlines come from. Phase 2 ships **no** provider: without one the tool
- * refuses instead of inventing headlines (the real source is Phase 7's job), so a
- * reply can never pass placeholder text off as today's news.
- */
-export interface NewsProvider {
-  readonly name: string;
-  latest(input: { readonly limit: number; readonly topic?: string }): Promise<NewsLookup>;
-}
-
-export interface NewsToolOptions {
-  readonly provider?: NewsProvider | null;
-  readonly now?: () => Date;
-}
-
-/** `xixi_news_stub`: a bounded, honest placeholder until the news source is wired. */
-export function createNewsTool(options: NewsToolOptions = {}): AgentTool {
-  const provider = options.provider ?? null;
-  const now = options.now ?? (() => new Date());
-  return {
-    name: 'xixi_news_stub',
-    description:
-      '查最近的新闻标题。返回若干条结构化条目；如果 available 为 false，就直说现在看不到新闻，不要凭记忆编造。',
-    parameters: {
-      type: 'object',
-      properties: {
-        topic: { type: 'string', description: '想知道哪方面，例如“本地”“天气”。省略就是随便看看。' },
-        limit: { type: 'integer', description: '最多要几条，默认 3，最多 5。' },
-      },
-      additionalProperties: false,
-    },
-    risk: 'read',
-    scopes: CONVERSATION_SCOPES,
-    timeoutMs: 20_000,
-    async execute(args) {
-      const topic = typeof args.topic === 'string' && args.topic.trim().length > 0 ? args.topic.trim() : undefined;
-      const rawLimit = typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.floor(args.limit) : 3;
-      const limit = Math.max(1, Math.min(5, rawLimit));
-      if (provider === null) {
-        return { available: false, items: [], requestedAt: now().toISOString(), note: '新闻源还没接上，现在看不到任何真实新闻' };
-      }
-      const lookup = await provider.latest({ limit, ...(topic === undefined ? {} : { topic }) });
-      return {
-        available: lookup.items.length > 0,
-        source: lookup.source,
-        fetchedAt: lookup.fetchedAt,
-        requestedAt: now().toISOString(),
-        items: lookup.items.slice(0, limit).map((item) => ({ title: item.title, source: item.source, at: item.at, ...(item.url === undefined ? {} : { url: item.url }) })),
-      };
-    },
-  };
-}
-
 // ------------------------------------------------------------------------ reminder
 
 export interface ScheduledReminder {
@@ -280,11 +216,10 @@ export interface DefaultToolsOptions {
   readonly defaultPlace: string;
   readonly now?: () => Date;
   readonly weatherClient?: WeatherClient;
-  readonly newsProvider?: NewsProvider | null;
   readonly reminderSink?: ReminderSink;
 }
 
-/** The four Phase 2 built-ins. New tools join here and nowhere else. */
+/** The three Phase 2 built-ins. New tools join here and nowhere else. */
 export function defaultTools(options: DefaultToolsOptions): AgentTool[] {
   return [
     createCurrentTimeTool(options.now),
@@ -293,7 +228,6 @@ export function defaultTools(options: DefaultToolsOptions): AgentTool[] {
       ...(options.weatherClient === undefined ? {} : { client: options.weatherClient }),
       ...(options.now === undefined ? {} : { now: options.now }),
     }),
-    createNewsTool({ provider: options.newsProvider ?? null, ...(options.now === undefined ? {} : { now: options.now }) }),
     createReminderTool({ ...(options.reminderSink === undefined ? {} : { sink: options.reminderSink }), ...(options.now === undefined ? {} : { now: options.now }) }),
   ];
 }

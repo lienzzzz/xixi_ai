@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import {
   createCurrentTimeTool,
   createMemoryReminderSink,
-  createNewsTool,
   createReminderTool,
   createWeatherTool,
   defaultTools,
@@ -99,11 +98,11 @@ test('the current-time tool answers with local date and weekday', async () => {
   assert.ok(String(result.localDate).includes('2026'));
 });
 
-test('the built-in set is the four Phase 2 tools, and each carries its risk', () => {
+test('the built-in set is the three Phase 2 tools, and each carries its risk', () => {
   const tools: AgentTool[] = defaultTools({ defaultPlace: '成都' });
   assert.deepEqual(
     tools.map((tool) => tool.name).sort(),
-    ['xixi_get_current_time', 'xixi_get_weather', 'xixi_news_stub', 'xixi_set_reminder_stub'],
+    ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'],
   );
   for (const tool of tools) {
     assert.equal(tool.parameters.type, 'object');
@@ -113,26 +112,25 @@ test('the built-in set is the four Phase 2 tools, and each carries its risk', ()
   // The one write tool is a *stub* and declares itself as such: the registry narrows it
   // (resident, conversation only). Nothing dangerous exists in the PoC (§19.2, 铁律 7).
   assert.equal(tools.find((tool) => tool.name === 'xixi_set_reminder_stub')?.risk, 'write');
-  assert.ok(tools.filter((tool) => tool.risk === 'read').length >= 3, 'the rest are read-only');
+  assert.ok(tools.filter((tool) => tool.risk === 'read').length >= 2, 'the rest are read-only');
   assert.ok(!tools.some((tool) => tool.risk === 'dangerous'));
   assert.ok(!tools.some((tool) => /delete|control|unlock|pay/i.test(tool.name)));
 });
 
-test('the news tool refuses rather than inventing headlines when no source is wired', async () => {
-  const tool = createNewsTool();
-  assert.equal(tool.risk, 'read');
-  const result = await tool.execute({ limit: 3 }, CONTEXT);
-  assert.equal(result.available, false);
-  assert.deepEqual(result.items, [], 'an unwired source must not produce made-up items');
-
-  // With a source injected, the items flow through with their provenance — and the
-  // limit is clamped by the tool, not by the caller's goodwill.
-  const items = Array.from({ length: 9 }, (_, index) => ({ title: `第 ${index + 1} 条`, source: '测试源', at: '2026-09-30T08:00:00+08:00' }));
-  const wired = createNewsTool({ provider: { name: 'stub', latest: async () => ({ fetchedAt: '2026-09-30T08:00:00+08:00', source: '测试源', items }) } });
-  const limited = await wired.execute({ limit: 99 }, CONTEXT);
-  assert.equal(limited.available, true);
-  assert.equal(limited.source, '测试源');
-  assert.equal((limited.items as unknown[]).length, 5, 'the declared maximum is enforced');
+/**
+ * V0.3 P2-D: news left this package entirely.
+ *
+ * The old placeholder was a core tool named `xixi_news_stub`; the real thing is a plugin
+ * (`@xixi/plugins/news`) whose three tools live in the plugin namespace, so the `xixi_` prefix is
+ * the core's own again. Two halves of that are checked here — the built-in set has no news tool, and
+ * the module has no news factory to reach for (a type-level import of a deleted export would not
+ * even compile). The behaviour of the three tools is pinned in `tests/unit/core/tool-loop.test.ts`,
+ * where they are brought up through the real plugin lifecycle.
+ */
+test('no core tool carries a news seam any more (P2-D moved it into a plugin)', () => {
+  const names = defaultTools({ defaultPlace: '成都' }).map((tool) => tool.name);
+  assert.ok(!names.some((name) => name.includes('news')), `内置工具里不该再有新闻：${names.join('、')}`);
+  assert.ok(!names.includes('xixi_news_stub'), 'P2-D 删掉了这个命名');
 });
 
 test('the reminder stub records what it was told and still declares a write risk', async () => {

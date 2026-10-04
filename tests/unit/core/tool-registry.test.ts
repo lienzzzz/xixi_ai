@@ -21,7 +21,9 @@ import {
  */
 
 const CONTEXT = { scope: 'conversation' as const, timezone: 'Asia/Shanghai', now: new Date('2026-10-01T09:00:00+08:00') };
-const BUILT_INS = ['xixi_get_current_time', 'xixi_get_weather', 'xixi_news_stub', 'xixi_set_reminder_stub'];
+// V0.3 P2-D: three built-ins. The news tool left this package — it is a plugin tool now
+// (`news.search` / `news.latest` / `news.for_interests`), pinned in tests/unit/core/tool-loop.test.ts.
+const BUILT_INS = ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'];
 
 function probeTool(overrides: Partial<AgentTool> & { readonly name: string }): AgentTool & { readonly calls: { count: number } } {
   const calls = { count: 0 };
@@ -40,7 +42,7 @@ function probeTool(overrides: Partial<AgentTool> & { readonly name: string }): A
   return tool;
 }
 
-test('the built-in set is offered to the model as exactly the four Phase 2 tools', () => {
+test('the built-in set is offered to the model as exactly the three Phase 2 tools', () => {
   const registry = createToolRegistry({ defaultPlace: '成都' });
   assert.deepEqual(registry.names().sort(), [...BUILT_INS].sort());
   assert.deepEqual(
@@ -59,7 +61,7 @@ test('the round cap is a program constant: round 5 is offered nothing, whatever 
   const registry = createToolRegistry({ defaultPlace: '成都' });
   assert.equal(registry.maxToolRounds, MAX_TOOL_ROUNDS);
   for (let round = 1; round <= MAX_TOOL_ROUNDS; round += 1) {
-    assert.equal(registry.definitionsForRound('conversation', round)?.length, 4, `round ${round} must offer every tool`);
+    assert.equal(registry.definitionsForRound('conversation', round)?.length, 3, `round ${round} must offer every tool`);
   }
   assert.equal(registry.definitionsForRound('conversation', MAX_TOOL_ROUNDS + 1), undefined, 'past the cap there are no tools to ask for');
   // …and it cannot be raised by configuration either: an absurd request is clamped.

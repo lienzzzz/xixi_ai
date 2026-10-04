@@ -92,25 +92,24 @@ test('四个 live 入口报告的工具链与 console 是同一条', { timeout: 
   };
   // A sanity check on the expectation itself: if the console ever stops exposing the built-ins, the
   // four comparisons below would all trivially agree on an empty set.
-  assert.equal(expected.tools.length, 4, 'console 的内置工具集应当是四个（pack Phase 2）');
+  assert.equal(expected.tools.length, 3, 'console 的内置工具集应当是三个（pack Phase 2，P2-D 起新闻改由插件提供）');
   assert.equal(expected.maxToolRounds, 4, '轮数上限由注册表钳制（pack Phase 2）');
   // V0.3 P0-A: name them. Until this line the four comparisons could still all agree on the
-  // *wrong* four tools; the extraction moved the assembly point, so the built-in set itself is
+  // *wrong* tools; the extraction moved the assembly point, so the built-in set itself is
   // part of what "the same chain" means.
   assert.deepEqual(
     expected.tools,
-    ['xixi_get_current_time', 'xixi_get_weather', 'xixi_news_stub', 'xixi_set_reminder_stub'],
-    '内置工具集就是这四个（pack Phase 2）',
+    ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'],
+    '内置工具集就是这三个（pack Phase 2；新闻不是内置工具了）',
   );
   assert.deepEqual(
     expected.permissions,
     {
       xixi_get_current_time: 'allow',
       xixi_get_weather: 'allow',
-      xixi_news_stub: 'allow',
       xixi_set_reminder_stub: 'allow',
     },
-    '四个内置工具的权限判定（会话作用域）',
+    '三个内置工具的权限判定（会话作用域）',
   );
 
   for (const entry of ENTRIES) {

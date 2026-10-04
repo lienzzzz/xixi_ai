@@ -11,14 +11,14 @@
  *     it, like the trial page and the four CLI entries. That is the whole point of the
  *     extraction: 「语音和文字走同一条工具链」 stops being a property of `field-test.ts`.
  *
- * The four built-ins, the permission policy and the round cap are unchanged: this file only
- * flattens `ToolChainOptions` into `createToolRegistry`'s inputs, exactly as before.
+ * The built-ins (three since V0.3 P2-D), the permission policy and the round cap are unchanged: this
+ * file only flattens `ToolChainOptions` into `createToolRegistry`'s inputs, exactly as before.
  *
- * V0.3 P2-A/P2-C add one thing above that: `mountPluginTools` / `buildPluginRuntime`, the **one**
- * place where the plugin kernel (`@xixi/plugins`), the MCP adapter (`@xixi/plugins/mcp`) and the tool
- * chain meet. Nothing about the existing chain changes — a plugin (or MCP) tool is copied into the
- * same registry the four built-ins live in, so it is subject to the same permission policy, round
- * cap and timeout.
+ * V0.3 P2-A/P2-C/P2-D add one thing above that: `mountPluginTools` / `buildPluginRuntime`, the **one**
+ * place where the plugin kernel (`@xixi/plugins`), the MCP adapter (`@xixi/plugins/mcp`), the news
+ * plugin (`@xixi/plugins/news`) and the tool chain meet. Nothing about the existing chain changes — a
+ * plugin tool is copied into the same registry the built-ins live in, so it is subject to the same
+ * permission policy, round cap and timeout.
  *
  * **接线状态（一句话口径，细节见 `PluginRuntimeMount`）：内核已交付且本装配点已接线——`start()` 跑完
  * 生命周期并挂载，插件工具对模型可见；但四个 live 入口（`scripts/chat.ts`、`scripts/serve-chat.ts`、
@@ -29,7 +29,6 @@ import {
   createToolRegistry,
   ToolPermission,
   type AgentScope,
-  type NewsProvider,
   type ReminderSink,
   type ToolApprovalGate,
   type ToolCallRecord,
@@ -51,6 +50,7 @@ import {
   type PluginToolSpec,
 } from '@xixi/plugins';
 import { createMcpPlugin, type McpClientAdapter, type McpServerSpec } from '@xixi/plugins/mcp';
+import { createNewsPlugin, type NewsPluginHandle, type NewsPluginOptions } from '@xixi/plugins/news';
 
 /**
  * The agent scope a conversation runs in.
@@ -67,7 +67,6 @@ export interface ToolChainOptions {
   readonly defaultPlace?: string;
   readonly now?: () => Date;
   readonly weatherClient?: WeatherClient;
-  readonly newsProvider?: NewsProvider | null;
   readonly reminderSink?: ReminderSink;
   readonly onToolCall?: (record: ToolCallRecord) => void;
   readonly maxToolRounds?: number;
@@ -106,7 +105,7 @@ export function resolveToolApprovalSettings(
  * `scripts/serve-chat.ts` (trial page voice + text), `scripts/voice-turn.ts` (file-driven
  * voice) and the four CLI entries all build their adapter from the registry this returns, so
  * "语音和文字走同一条工具链" is a property of the code rather than of a call site, and the
- * four built-ins are registered exactly once.
+ * built-ins are registered exactly once.
  *
  * V0.3 P2-B adds one input: the permission policy is built **here** from the declared ask list
  * (`config.tools.approval.ask`), so every entry that already calls `buildToolChain` inherits the
@@ -124,7 +123,6 @@ export function buildToolChain(config: XixiConfig, options: ToolChainOptions = {
     ...(options.role === undefined ? {} : { role: options.role }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.weatherClient === undefined ? {} : { weatherClient: options.weatherClient }),
-    ...(options.newsProvider === undefined ? {} : { newsProvider: options.newsProvider }),
     ...(options.reminderSink === undefined ? {} : { reminderSink: options.reminderSink }),
     ...(options.maxToolRounds === undefined ? {} : { maxToolRounds: options.maxToolRounds }),
     ...(options.onToolCall === undefined ? {} : { onToolCall: options.onToolCall }),
@@ -145,8 +143,25 @@ export interface PluginChainOptions extends ToolChainOptions {
    * this option cannot turn the tool chain into a high-frequency sensor path.
    */
   readonly mcpServers?: readonly McpServerSpec[];
+  /**
+   * The news plugin (pack `03_AGENT_PLUGIN.md` §6).
+   *
+   * Given, `buildPluginRuntime` brings `@xixi/plugins/news` up through the same nine-step lifecycle
+   * as anything else, and its three tools (`news.search` / `news.latest` / `news.for_interests`)
+   * become visible to the model after `start()`. Omitted, the chain simply has no news: there is no
+   * built-in news tool any more, so "no news configured" is a fact about the deployment rather than
+   * a placeholder that pretends to be one.
+   */
+  readonly news?: NewsPluginOptions;
   /** Plugins the host already holds, loaded alongside the MCP one. */
   readonly inline?: readonly InlinePlugin[];
+  /**
+   * Outbound fetch handed to plugins that declared the `network` permission.
+   *
+   * Given, an offline run can prove it stayed offline: the news tests pass a spy that throws, and a
+   * plugin that reached for the network would fail loudly instead of quietly succeeding.
+   */
+  readonly fetchImpl?: typeof fetch;
 }
 
 /** What one `mountPluginTools` call did, so a caller can say it out loud instead of guessing. */
@@ -230,7 +245,7 @@ export interface PluginShutdownReport {
   readonly pluginsDisposed: number;
   /** Names `mount()` had copied into the chain, now withdrawn from it. */
   readonly unmounted: readonly string[];
-  /** Tools still in the chain after the unmount — the four built-ins, until the final clear. */
+  /** Tools still in the chain after the unmount — the built-ins, until the final clear. */
   readonly remainingBeforeClear: readonly string[];
 }
 
@@ -255,6 +270,8 @@ export interface PluginRuntimeMount {
   readonly runtime: PluginRuntime;
   /** Present when `mcpServers` was configured: the adapter's status/health outside the lifecycle. */
   readonly mcp?: McpClientAdapter | undefined;
+  /** Present when `news` was configured: the news plugin's live sources/tools, for probes and health. */
+  readonly news?: NewsPluginHandle | undefined;
   /**
    * Run the nine-step lifecycle for every configured plugin **and** mount what they registered.
    *
@@ -274,8 +291,8 @@ export interface PluginRuntimeMount {
    *    `deactivate` 走的就是它（放掉这个插件贡献的那几个）；
    *  * `shutdown()` 是宿主那一档：先让插件运行时 `disposeAll()`（释放能力登记、断开 MCP 连接），
    *    再用 `mount()` 那次的 Disposable 撤回自己复制进工具链的副本，最后 `ToolRegistry.dispose()`
-   *    一次清空——那一步**连四个内置工具也一起清掉**，且**不碰** `CapabilityRegistry`（能力是插件层
-   *    的事，上面两步已经处理完了）。
+   *    一次清空——那一步**连内置工具也一起清掉**（P2-D 起内置是三个：时间 / 天气 / 提醒），且**不碰**
+   *    `CapabilityRegistry`（能力是插件层的事，上面两步已经处理完了）。
    * 三步都幂等，重复关停不会抛。
    */
   shutdown(): Promise<PluginShutdownReport>;
@@ -288,10 +305,10 @@ export interface PluginRuntimeMount {
  *
  * The direction of the dependency is the point: the plugin kernel depends on the tool registry's
  * types, never the other way round, and this function is the single call site that knows both —
- * plus the one place an MCP server is turned into a plugin.
+ * plus the one place an MCP server and the news plugin are turned into plugins.
  *
  * Nothing is connected or loaded here. `start()` runs the nine-step lifecycle (which is where MCP
- * discovery happens) and then mounts the result; `shutdown()` is the other end of it.
+ * discovery and the news sources happen) and then mounts the result; `shutdown()` is the other end.
  */
 export function buildPluginRuntime(config: XixiConfig, options: PluginChainOptions = {}): PluginRuntimeMount {
   const approval = resolveToolApprovalSettings(config, options.approval);
@@ -308,7 +325,15 @@ export function buildPluginRuntime(config: XixiConfig, options: PluginChainOptio
           servers: options.mcpServers,
           ...(options.now === undefined ? {} : { now: options.now }),
         });
-  const inline: InlinePlugin[] = [...(options.inline ?? []), ...(mcp === undefined ? [] : [mcp.plugin])];
+  // The news plugin (pack §6) is brought up exactly like anything else: it declares its capabilities
+  // and permissions in its manifest, and `start()` runs the nine-step lifecycle for it. No special
+  // path, no core tool named after it.
+  const news = options.news === undefined ? undefined : createNewsPlugin(options.news);
+  const inline: InlinePlugin[] = [
+    ...(options.inline ?? []),
+    ...(mcp === undefined ? [] : [mcp.plugin]),
+    ...(news === undefined ? [] : [news.plugin]),
+  ];
 
   const runtime = createPluginRuntime({
     tools: registry,
@@ -316,6 +341,7 @@ export function buildPluginRuntime(config: XixiConfig, options: PluginChainOptio
     ...(options.sources === undefined ? {} : { sources: options.sources }),
     ...(options.pluginDirectory === undefined ? {} : { pluginDirectory: options.pluginDirectory }),
     ...(options.audit === undefined ? {} : { audit: options.audit }),
+    ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(inline.length === 0 ? {} : { inline }),
   });
@@ -336,6 +362,7 @@ export function buildPluginRuntime(config: XixiConfig, options: PluginChainOptio
     registry,
     runtime,
     ...(mcp === undefined ? {} : { mcp: mcp.adapter }),
+    ...(news === undefined ? {} : { news }),
     notes,
     mount,
     async start() {
