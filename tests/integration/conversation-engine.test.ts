@@ -4,7 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { FakeBrainAdapter, type ScriptedOutcome, type UserTurnInput } from '@xixi/brain-adapter';
+import { FakeBrainAdapter, type ScriptedOutcome, type TurnModelProvider, type UserTurnInput } from '@xixi/brain-adapter';
 import { ConversationEngine, type ReplySegmentPlayback } from '@xixi/conversation';
 import { fixedClock, openXixiStore, type Clock, type XixiConfig, type XixiStore } from '@xixi/domain';
 
@@ -169,8 +169,9 @@ test('a silence token split across streamed deltas is still suppressed', async (
   const store = freshStore();
   try {
     // Hand-rolled adapter: real adapters stream deltas, and "[" + "静默" + "]"
-    // is exactly how the token arrived from MiMo in live use.
-    const adapter = {
+    // is exactly how the token arrived from MiMo in live use. V0.3 P2-F: typed as the provider seam
+    // and carrying no retired capability keys — they were dead weight an object literal could hide.
+    const adapter: TurnModelProvider = {
       provider: 'piecewise',
       describe: () => ({ provider: 'piecewise', model: 'piecewise-1', transport: 'test', mode: 'scripted' as const }),
       handleUserTurn: async () => {
@@ -192,18 +193,6 @@ test('a silence token split across streamed deltas is still suppressed', async (
             finishReason: null,
           }),
         };
-      },
-      evaluateProactiveCandidate: async () => {
-        throw new Error('not used');
-      },
-      interpretFeedback: async () => {
-        throw new Error('not used');
-      },
-      extractMemories: async () => {
-        throw new Error('not used');
-      },
-      reflect: async () => {
-        throw new Error('not used');
       },
     };
 

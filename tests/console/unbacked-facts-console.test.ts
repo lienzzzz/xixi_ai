@@ -4,7 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createBrainTurnStream, type BrainTurnResult } from '@xixi/brain-adapter';
+import { createBrainTurnStream, type BrainTurnResult, type TurnModelProvider } from '@xixi/brain-adapter';
 import { ConversationEngine } from '@xixi/conversation';
 import { fixedClock, openXixiStore, type XixiConfig } from '@xixi/domain';
 
@@ -55,25 +55,20 @@ function realScreeningEngine(): ConversationEngine {
     dbPath: join(mkdtempSync(join(tmpdir(), 'xixi-unbacked-console-')), 'x.sqlite'),
     clock: fixedClock(new Date('2026-09-30T10:00:00+08:00'), 1_000),
   });
+  // V0.3 P2-F: the provider seam is `TurnModelProvider` — three members, no retired capabilities.
+  // This used to carry four dead keys (`evaluateProactiveCandidate` … `reflect`) hidden behind
+  // `as unknown as ConversationEngine['adapter']`, which is why they survived the type gate: the cast
+  // switched excess-property checking off. `satisfies` keeps the assertion without reopening that hole.
+  // (The `engine as unknown as ConversationEngine` below is a different, still-open case: that stub is
+  // a deliberately partial *composer* seam, not a provider — tightening it needs a seam type in
+  // `packages/runtime`, which is outside this task.)
   const adapter = {
     provider: 'never-called',
     describe: () => ({ provider: 'never-called', model: 'never', transport: 'in-memory', mode: 'scripted' as const }),
     handleUserTurn: async () => {
       throw new Error('the screening engine never talks to a model in this test');
     },
-    evaluateProactiveCandidate: async () => {
-      throw new Error('unused');
-    },
-    interpretFeedback: async () => {
-      throw new Error('unused');
-    },
-    extractMemories: async () => {
-      throw new Error('unused');
-    },
-    reflect: async () => {
-      throw new Error('unused');
-    },
-  } as unknown as ConversationEngine['adapter'];
+  } satisfies TurnModelProvider;
   return new ConversationEngine({
     adapter,
     store,

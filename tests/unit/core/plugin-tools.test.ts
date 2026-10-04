@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools';
 import { defaultTools } from '@xixi/brain-adapter';
 
 import {
@@ -37,6 +36,210 @@ const FORECAST = {
     precipitation_probability_max: [80, 8, 0],
   },
 };
+
+/**
+ * The schema subset DSH's tool runtime enforces, checked locally.
+ *
+ * 铁律 9 forbids a Harness API outside `packages/brain-adapter` — **tests included** — and this file
+ * used to `import { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools'` (the violation V0.3
+ * P2-F found; this file is the fix). The dependency is gone; what it proved is kept, in a form that
+ * is verifiable rather than trusted.
+ *
+ * The rules below mirror `@deepseek-ai/dsh-tools@0.1.7-rc.2`'s `json-schema.ts` for the one schema
+ * this file feeds it: single scalar `type` (arrays of types rejected), `type` and `oneOf` mutually
+ * exclusive, `oneOf` as an array of at least two branches with no sibling constraint keywords,
+ * `properties`/`required`/`additionalProperties` on objects only (and `required` naming a declared
+ * property), `items` on arrays only, type-correct non-empty scalar `enum`, type-correct `const`
+ * (and inside `enum` when both are declared), annotations (`description`/`title`/`default`/
+ * `examples`) ignored for validation but required to be lossless JSON, and an annotation-only node
+ * accepted as the standard unconstrained-JSON form. It was cross-checked against the real function
+ * over a 33-schema battery (every accept/refuse verdict identical, including `-0`, `NaN`, a `type`
+ * +`oneOf` node and `required: []`) before the import was removed, and the refusals below keep it
+ * from being a tautology: no rule can be deleted without turning the suite red.
+ *
+ * Why the check cannot be *delegated* to brain-adapter: it is about the **plugin's own contract**
+ * (`plugins/xixi-tools` is a plain-JS DSH plugin package that only has a peerDependency on
+ * `dsh-tools`), not about an API this repo calls. brain-adapter's seam is the *transport*
+ * (`DshTransport`) — the seam the baseline's three `@deepseek-ai/dsh` mentions outside this package
+ * go through (apps/brain-dsh profile and transport, scripts/install-dsh-profile).
+ */
+const SCHEMA_TYPES = ['object', 'array', 'string', 'number', 'integer', 'boolean', 'null'] as const;
+type SchemaType = (typeof SCHEMA_TYPES)[number];
+
+/** Which keywords may appear on which node type — DSH's `allowedFor` table. */
+const KEYWORD_TYPES: Readonly<Record<string, readonly SchemaType[]>> = {
+  properties: ['object'],
+  required: ['object'],
+  additionalProperties: ['object'],
+  items: ['array'],
+  enum: ['string', 'number', 'integer', 'boolean', 'null'],
+  const: ['string', 'number', 'integer', 'boolean', 'null'],
+};
+
+/** `type` / `oneOf` / the six typed keywords; everything else is an annotation (DSH's two Sets). */
+const CONSTRAINT_KEYWORDS = new Set(['type', 'oneOf', ...Object.keys(KEYWORD_TYPES)]);
+const ANNOTATION_KEYWORDS = new Set(['description', 'title', 'default', 'examples']);
+/** Keywords that are invalid sitting next to `oneOf` (DSH's `ONE_OF_SIBLING_KEYWORDS`). */
+const ONE_OF_SIBLING_KEYWORDS = ['properties', 'required', 'additionalProperties', 'items', 'enum', 'const'] as const;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Lossless finite JSON number, excluding negative zero — DSH's `isJsonNumber`. */
+function isJsonNumber(value: unknown): boolean {
+  return typeof value === 'number' && Number.isFinite(value) && !Object.is(value, -0);
+}
+
+/** Whether one scalar is valid for a declared schema type (DSH's `scalarMatches`). */
+function scalarMatches(type: SchemaType, value: unknown): boolean {
+  switch (type) {
+    case 'string':
+      return typeof value === 'string';
+    case 'number':
+      return isJsonNumber(value);
+    case 'integer':
+      return isJsonNumber(value) && Number.isInteger(value);
+    case 'boolean':
+      return typeof value === 'boolean';
+    case 'null':
+      return value === null;
+    default:
+      return false;
+  }
+}
+
+/** `JSON.parse(JSON.stringify(v))` survives — what "lossless JSON annotation" means in DSH. */
+function isLosslessJson(value: unknown): boolean {
+  if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint' || typeof value === 'undefined') return false;
+  if (typeof value === 'number') return isJsonNumber(value);
+  if (Array.isArray(value)) return value.every((entry) => isLosslessJson(entry));
+  if (isPlainRecord(value)) return Object.values(value).every((entry) => isLosslessJson(entry));
+  return value === null || typeof value === 'string' || typeof value === 'boolean';
+}
+
+/**
+ * Walk one node and collect every violation (DSH collects rather than throws at the first one, so a
+ * broken schema reports all its problems; the assertion below reads the same way). `ancestors` is the
+ * current path in the tree, which is how a cycle is told from a merely shared sub-schema.
+ *
+ * 恒真守卫防的是这个：查的**关键字集合**与运行时一致——DSH 在 allow-list 之外的关键字上是**拒绝**
+ * 而不是忽略（`is not a supported keyword`），所以插件里出现 `pattern`/`$ref`/`format` 这类字样时
+ * 这里必须同样拒绝：它们到不了模型，写进契约就是骗人。
+ */
+function collectSchemaViolations(value: unknown, path: string, out: string[], ancestors: ReadonlySet<object>): void {
+  if (!isPlainRecord(value)) {
+    out.push(`${path} must be a schema object`);
+    return;
+  }
+  if (ancestors.has(value)) {
+    out.push(`${path} is circular`);
+    return;
+  }
+  for (const key of Object.keys(value)) {
+    if (CONSTRAINT_KEYWORDS.has(key)) continue;
+    if (ANNOTATION_KEYWORDS.has(key)) {
+      if (!isLosslessJson(value[key])) out.push(`${path}.${key} annotation must be lossless JSON data`);
+      continue;
+    }
+    out.push(
+      `${path}.${key} is not a supported keyword (subset: type/oneOf/properties/required/additionalProperties/items/enum/const + annotations)`,
+    );
+  }
+  if (Object.hasOwn(value, 'description') && typeof value.description !== 'string') out.push(`${path}.description must be a string`);
+  if (Object.hasOwn(value, 'title') && typeof value.title !== 'string') out.push(`${path}.title must be a string`);
+
+  const hasType = Object.hasOwn(value, 'type');
+  const hasOneOf = Object.hasOwn(value, 'oneOf');
+  if (hasType && hasOneOf) {
+    out.push(`${path} cannot declare both type and oneOf`);
+    return;
+  }
+  if (!hasType && !hasOneOf) {
+    // Annotation-only node: the standard "any JSON" form. Only its constraint keywords are refused.
+    for (const key of ONE_OF_SIBLING_KEYWORDS) {
+      if (Object.hasOwn(value, key)) out.push(`${path}.${key} requires type or oneOf`);
+    }
+    return;
+  }
+
+  const seen = new Set<object>([...ancestors, value]);
+
+  if (hasOneOf) {
+    const branches = value.oneOf;
+    if (!Array.isArray(branches) || branches.length < 2) {
+      out.push(`${path}.oneOf must be an array of at least two schemas`);
+      return;
+    }
+    for (const key of ONE_OF_SIBLING_KEYWORDS) {
+      if (Object.hasOwn(value, key)) out.push(`${path}.${key} is not supported beside oneOf`);
+    }
+    branches.forEach((node, index) => collectSchemaViolations(node, `${path}.oneOf[${index}]`, out, seen));
+    return;
+  }
+
+  const type = value.type;
+  if (typeof type !== 'string' || !(SCHEMA_TYPES as readonly string[]).includes(type)) {
+    out.push(
+      Array.isArray(type)
+        ? `${path}.type must be a single type string (type arrays are not supported)`
+        : `${path}.type must be one of ${SCHEMA_TYPES.join('/')}`,
+    );
+    return;
+  }
+  const nodeType = type as SchemaType;
+
+  for (const [keyword, allowed] of Object.entries(KEYWORD_TYPES)) {
+    if (Object.hasOwn(value, keyword) && !allowed.includes(nodeType)) {
+      out.push(`${path}.${keyword} is not supported on type "${nodeType}"`);
+    }
+  }
+
+  if (nodeType === 'object') {
+    const declared = isPlainRecord(value.properties) ? value.properties : {};
+    if (Object.hasOwn(value, 'properties')) {
+      const properties = value.properties;
+      if (!isPlainRecord(properties)) out.push(`${path}.properties must be an object of schemas`);
+      else for (const [key, node] of Object.entries(properties)) collectSchemaViolations(node, `${path}.properties.${key}`, out, seen);
+    }
+    if (Object.hasOwn(value, 'additionalProperties') && typeof value.additionalProperties !== 'boolean') {
+      out.push(`${path}.additionalProperties must be a boolean`);
+    }
+    if (Object.hasOwn(value, 'required')) {
+      const required = value.required;
+      if (!Array.isArray(required) || required.some((entry) => typeof entry !== 'string')) {
+        out.push(`${path}.required must be an array of strings`);
+      } else {
+        for (const name of required) {
+          if (!Object.hasOwn(declared, name)) out.push(`${path}.required names "${name}" which is not in properties`);
+        }
+      }
+    }
+    return;
+  }
+
+  if (nodeType === 'array') {
+    if (Object.hasOwn(value, 'items')) collectSchemaViolations(value.items, `${path}.items`, out, seen);
+    return;
+  }
+
+  const hasEnum = Object.hasOwn(value, 'enum');
+  const allowed = hasEnum ? value.enum : undefined;
+  if (hasEnum && (!Array.isArray(allowed) || allowed.length === 0 || !allowed.every((entry) => scalarMatches(nodeType, entry)))) {
+    out.push(`${path}.enum must be a non-empty array of ${nodeType} values`);
+  }
+  if (Object.hasOwn(value, 'const')) {
+    if (!scalarMatches(nodeType, value.const)) out.push(`${path}.const must be a ${nodeType} value`);
+    else if (Array.isArray(allowed) && !allowed.includes(value.const)) out.push(`${path}.const must be one of ${path}.enum when both are declared`);
+  }
+}
+
+/** The seam DSH's `assertSupportedJsonSchema` provided: throws listing every violation. */
+function assertSupportedJsonSchema(schema: unknown): void {
+  const violations: string[] = [];
+  collectSchemaViolations(schema, 'schema', violations, new Set());
+  if (violations.length > 0) throw new Error(`unsupported JSON Schema: ${violations.join('; ')}`);
+}
 
 /**
  * The shape this test walks on a registered tool: its `name`, the declared `parameters` and the
@@ -99,6 +302,21 @@ test('both paths declare the same weather arguments and neither accepts undeclar
   const dsh = registered().find((tool) => tool.name === 'xixi_get_weather');
   assert.ok(dsh !== undefined);
   assertSupportedJsonSchema(dsh.parameters);
+
+  // Counterfactual half of the same check (AGENTS §9.25 ④: a guard needs a case that proves it
+  // refuses bad input). Each fixture breaks exactly one rule of the subset, so deleting that rule
+  // from the walker makes the assertion below throw.
+  assert.doesNotThrow(() => assertSupportedJsonSchema({ type: 'object', properties: { day: { type: 'string', enum: ['today'] } } }));
+  for (const broken of [
+    { type: 'object', properties: { day: { type: 'string', enum: [] } } },          // empty enum
+    { type: 'array', properties: { day: { type: 'string' } } },                     // properties on array
+    { type: 'object', properties: { day: { type: 'tuple' } } },                     // unknown type
+    { type: 'object', properties: { day: { type: 'string', pattern: '^t' } } },     // keyword DSH ignores
+    { type: 'object', required: ['day'] },                                          // requires a property it does not declare
+    { oneOf: [{ type: 'string' }] },                                                // oneOf needs two branches
+  ]) {
+    assert.throws(() => assertSupportedJsonSchema(broken), /unsupported JSON Schema/);
+  }
 
   const directProperties = direct.parameters.properties as Record<string, Record<string, unknown>>;
   const dshProperties = (dsh.parameters.properties ?? {}) as Record<string, Record<string, unknown>>;
