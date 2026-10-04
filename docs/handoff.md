@@ -54,6 +54,7 @@
 7. **等分行的顺序会随机抖**（t7 实测）：`MemoryStore.recordSemantic` 的输入**没有 `updatedAt`**（落库时间一律由 store 的 `now` 给），并列时按 `candidate.id` 兜底、出厂 id 是 `sem_${randomUUID()}` → **顺序断言必须显式给 `memoryId`**；这与「计时断言先证明不抖」是同一类纪律，顺序断言也不许依赖未指定的并列裁决。
 8. **`plugins/xixi-tools/index.js` 仍 import `@deepseek-ai/dsh-tools`**：按铁律 9 的**字面**它在 `packages/brain-adapter` 之外，但性质是 **DSH 侧插件包本体**（manifest 的 peerDependency 就是 dsh-tools、靠 cordis patch 挂载、上游 `00_CODE_AUDIT` §6 已登记为 DSH 侧工具插件）——**收编进 brain-adapter 还是登记为显式例外，需要用户裁定**；captain 不擅自改铁律、也不擅自搬包。
 9. **`tests/console/unbacked-facts-console.test.ts:111` 的 `engine as unknown as ConversationEngine`** 是另一个（非 adapter 的）部分替身；收紧它需要在 `packages/runtime` 暴露 composer 接缝类型。
+10. **`manager.instance().health` 是「最后一次记录的报告」**（t21 复审的 O1，low 但会误导面板）：deactivate 之后它仍写「1 个 MCP 工具在线」，而同一次新鲜的 `plugin.module.health()` / `status()` 都说未连接；且 `checkHealth()` 只遍历 active 插件，**管理器的公开面没有一条路能把这份快照刷新**。要么让 `deactivate` 也记一条新鲜 health，要么在文档里写清「面板读它时必须同时读 state」。
 
 ---
 

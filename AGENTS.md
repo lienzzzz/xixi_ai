@@ -170,6 +170,12 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    **纪律**：① **先 `git grep 'migrations'` / `git grep '004_memory'` 之类找出所有钉死点**，不要凭记忆写；
    ② 派单时把这两条路径**都**写进 inScope 与验收（`tests/perception/world-state-projection.test.ts` 与
    `tests/unit/domain.test.ts`）；③ 迁移号要**串行点名**（t4 的 007、t8 的 008），别让两条并行任务同时声称一个号。
+   **同一纪律的推广（V0.3 P2 的 t6 换来）：凡是会改变「被钉死成字面量的集合」的任务，都要先找出所有钉死点。**
+   已知的集合至少有三类：**内置工具集**（改它会让 MCP/插件/runtime-wiring 里断言「内置四个」的用例变红——t6 删
+   `xixi_news_stub` 时工作区一度 3 条 MCP + 4 条 runtime-wiring 变红，t21 评审在自己的副本里把这些陈旧字面量中性化才继续）、
+   **已发布迁移清单**（上面那两处）、**事件类型枚举**（`envelope.v1.json` + `schemas/events/*.json` + `contracts/src/events.ts` 三处同改）。
+   **做法**：派单前 `git grep` 那个名字或那个计数（例如 `git grep -n 'xixi_news_stub'`、`git grep -n '=== 4'`），
+   把命中**每一个**测试文件写进 inScope；评审要按同一份清单核对「陈旧字面量是否都跟着改了」。
    **amend 只替换你显式给出的字段**：把某个路径加进 inScope 之后，**必须同时检查 outOfScope 是否还禁止着它**
    （captain 本轮就把 `packages/conversation/src/engine.ts` 加进 inScope，却留着 outOfScope 里的 `packages/`，
    自相矛盾——成员会不知道该不该改）。**加完 inScope 要重读一遍整份契约。**
