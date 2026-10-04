@@ -179,6 +179,14 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    **amend 只替换你显式给出的字段**：把某个路径加进 inScope 之后，**必须同时检查 outOfScope 是否还禁止着它**
    （captain 本轮就把 `packages/conversation/src/engine.ts` 加进 inScope，却留着 outOfScope 里的 `packages/`，
    自相矛盾——成员会不知道该不该改）。**加完 inScope 要重读一遍整份契约。**
+   **子规则（V0.3 P2 的 t6 第二次换来，captain 又犯一次）：给 inScope 打补丁要「追加」，不要「整份重写」。**
+   t6 原本的 inScope 里有 `tests/unit/core/tool-loop.test.ts`、`tests/unit/core/tool-registry.test.ts`、
+   `tests/console/field-test-console.test.ts` 三条，captain 为了修正另两条错误路径而**整份替换**了清单，
+   把这三条挤掉；成员确实改了它们（删 `xixi_news_stub` 之后的新期望），于是完成校验报
+   `tests/unit/core/tool-loop.test.ts is undeclared`、**任务卡住无法收口**（只能按 §9.2 在正文披露，由 captain 提交时补上）。
+   **纪律**：amend 之前先把**当前** inScope 读出来（`agent_teams_status` 或上一次 amend 的回显），
+   新清单 = **旧清单 ∪ 新路径 − 明确要删的**；改完**逐条回读**，并数一次条数（本次 20 条 → 期望 23 条）。
+   **「加路径」永远不需要删路径**——若你发现自己在删路径，停下来问一句：那是我要收回许可，还是我把它读漏了？
    **子规则（2026-10-01 第三轮 t6 换来）**：**事件类型枚举与「钉死已发布迁移列表」的测试也在 inScope 之外**——
    新事件类型的 `event_type` 枚举在 `packages/contracts/schemas/envelope.v1.json`（**不在** `schemas/events/` 下），
    而 `tests/perception/world-state-projection.test.ts` 把已发布迁移列表钉成字面量（加迁移 003 就必红）。
