@@ -80,7 +80,7 @@ npm run eval:conversation:judge            # 对话质量评测（含评审模�
 | **主动开口（ADR-0009 + ADR-0011）** | **两层**：硬底线（静默时段 / 6h 与当日**次数**额度 / DND / 隐私与同意 / 场景与音频路径）由程序判定，模型不能绕过；底线之上**由模型读空气决定说不说**，确定性社会预算只给候选与建议（`BELOW_RECOMMENDATION` 是建议不是否决）+ `proactive.decision` 审计 + 先记后播。**金额级费用上限尚未实现**（次数额度是当前的费用代理）。**口径已定＝显著降频**（不做「连续两次没回应后 = 0」的硬停，[`docs/adr/0011`](docs/adr/0011-proactive-decision-ownership.md) 决定 2 的补充）；多日验收 `node scripts/eval-proactive-timeline.ts`（三天、M1–M6 进退出码） |
 | **不编造可核查的事实** | 提示词 `HARD_POLICY` 的「可核查的具体事实」那条（关键词锚点，不再按编号引用）+ 引擎层闸门（无工具却出现具体数值就扣住并改说修复句）；台账核对「含具体值的轮次都伴随工具调用」 |
 | **制品清洗（`REPLY_HYGIENE`）** | 工具调用标记与外文推理在进 TTS / 日志 / 工作记忆前被程序剔除（`sanitizeSpokenReply`）；整轮只剩制品 → 沉默，并写原因码 **`ARTIFACT_ONLY_REPLY`**（与「模型自己选择沉默」`MODEL_SILENCE` 可区分）。`REPLY_HYGIENE` / `UNBACKED_FACT_CLAIM` 两类 `onNotice` 审计通知已被**试用页（`serve-chat.ts`）与现场测试控制台（`field-test.ts`）**订阅并在页面显示；文字 CLI（`chat.ts`）与语音轮次（`voice-turn.ts`）未订阅（逐入口清单见 `docs/progress.md` §4） |
-| **工具链覆盖（逐入口）** | `scripts/field-test.ts` 的 `buildToolChain()` 是唯一出口（注册表默认四个内置工具：时间 / 天气 / 新闻桩 / 提醒桩——提醒桩是只写内存 sink 的 `risk: write`；同一权限策略、同一四轮上限、可见性再由 `listForAgent(scope)` 过滤）。四个 live 入口——文字 CLI `scripts/chat.ts`、设备自检 `scripts/voice-device-check.ts`、真人感评测 `scripts/eval-realism.ts`、对话评测 `scripts/eval-conversation.ts`——已改用它（此前只有控制台走这条链）；离线自证是每个入口的 `--print-wiring`（打印 `{entry,language,maxToolRounds,tools,permissions}` 后退出，不调模型、不建库）。设备自检没有离线端到端证据（需真实 WAV + 硬件 + 真实 ASR），见 `docs/progress.md` §2.10 |
+| **工具链覆盖（逐入口）** | `scripts/field-test.ts` 的 `buildToolChain()` 是唯一出口（注册表**现在是三个内置工具**：时间 / 天气 / 提醒——V0.3 P2-D 起新闻桩已删除，新闻改由 `packages/plugins/news/` 的三个插件工具提供；插件与 MCP 的工具在装配点上经 `mountPluginTools()` 复制进同一个注册表，权限、轮次上限与超时都不变；**四个 live 入口还没走 `buildPluginRuntime`**）。四个 live 入口——文字 CLI `scripts/chat.ts`、设备自检 `scripts/voice-device-check.ts`、真人感评测 `scripts/eval-realism.ts`、对话评测 `scripts/eval-conversation.ts`——已改用它（此前只有控制台走这条链）；离线自证是每个入口的 `--print-wiring`（打印 `{entry,language,maxToolRounds,tools,permissions}` 后退出，不调模型、不建库）。设备自检没有离线端到端证据（需真实 WAV + 硬件 + 真实 ASR），见 `docs/progress.md` §2.10 |
 | **「看一眼」（视觉）** | `UserTurnInput.images` → OpenAI 风格 `image_url`（data URL）；真机实测能描述画面内容；DSH 路径发不了图时**明确报错**而不是静默丢图 |
 | 质量过程 | `npm test` 全绿（**项数以末行为准**）；[`docs/review/`](docs/review/) 有评审报告（含复审与再复审），[`docs/verification/`](docs/verification/) 有独立验证报告，[`docs/benchmarks/`](docs/benchmarks/realism-metrics.md) 有可重跑的基准与前后对比 |
 
@@ -154,10 +154,13 @@ node scripts/eval-realism.ts --corpus=all --repeat=3 --label v02                
 
 ```text
 packages/contracts/       事件信封与 payload schema（xixi.event.v1），所有服务共用
-packages/domain/          唯一写 SQLite 的包：事件日志、会话、人格基线、world_state、迁移执行器
+packages/domain/          唯一写 SQLite 的包：事件日志、会话、人格基线、world_state、工具审批（迁移 007）、durable 提醒（迁移 008）、迁移执行器
+packages/context/         上下文装配（V0.3 P1）：ContextBuilder、MemoryRetriever、记忆纠正闭环
 packages/conversation/    对话引擎：FSM、提示词组装、分段器（ADR-0010）、主动引擎（ADR-0009）
-packages/brain-adapter/   BrainAdapter 接口 + FakeBrainAdapter + DSH 适配器 + 离线脚本化 transport
+packages/brain-adapter/   TurnModelProvider 三接口（+ Multimodal / StructuredInference 两个可选面）+ Mimo/Dsh/Fake 三套实现 + 工具注册表
 packages/model-adapters/  MiMo 直连适配器（含图像 image_url 构造）
+packages/plugins/         插件内核（manifest / 五能力 / 九步生命周期 / 四条「插件不能做」）；子路径 ./mcp（SDK v2 客户端适配器）与 ./news（真实 News 插件）
+packages/runtime/         生产装配（V0.3 P0-A）：工具链与 buildPluginRuntime、工具审批宿主、durable 提醒调度、常驻考虑循环、语音缝、感知入库
 apps/brain-dsh/           DSH 侧接线：profile patch（MiMo 路由）与 CLI transport
 plugins/xixi-tools/       西西最小工具集（含 xixi_get_current_time / 天气等）
 services/voice-edge/      语音前端（Python）：去直流 + 高通 + 门限 + 校准 + 噪声夹具生成
@@ -165,8 +168,8 @@ services/perception-edge/ 在场检测（Python）：DSHOW 抓帧 → 帧差动 
 config/                   xixi.example.yaml（方案 §42）
 scripts/                  安装、验收、演示与现场测试控制台（field-test.ts 是控制台入口）
 tests/                    unit / integration / perception / console / scenarios / replay
-docs/                     README（地图）、architecture、event-contracts、testing、progress、handoff、
-                          design/、adr/、recon/、review/、verification/、benchmarks/
+docs/                     README（地图）、architecture、event-contracts、testing、progress、
+                          progress-v03（按 Phase 的交付与遗留）、handoff、design/、adr/、recon/、review/、verification/、benchmarks/
 ```
 
 ## 设计要点

@@ -1,8 +1,10 @@
 # 测试
 
-> 最后更新：2026-09-30
+> 最后更新：2026-10-04（V0.3 P2 收口：§1 集成层与 §2 新增 P2 的测试面，把「`tests/replay/` 仍为空」这条过期陈述改掉）
 > 权威来源：`tests/**`、`scripts/**`、`package.json` 的脚本；与代码不一致时以代码为准并立即修正本文
-> 当前状态：`npm test` → **全绿**（**项数与文件数以实跑为准**；2026-09-30 实测点 **223 项、29 个 `*.test.ts`**＝unit 131 + integration 30 + perception 11 + console 51；`tests/scenarios/` 是语料模块、`tests/replay/` 仍为空，都不产生用例），**不发起任何网络请求**。
+> 当前状态：`npm test` → **全绿**（**项数与文件数以实跑为准**；最近一次实测点是 V0.3 P2 收口的 **717 项、pass 717 / fail 0**，
+> 取数修订号与命令见 [`progress-v03.md`](progress-v03.md) 的 P2 段；更早的 2026-09-30 实测点是 223 项、29 个 `*.test.ts`），**不发起任何网络请求**。
+> `tests/scenarios/` 是语料模块（不产生用例）；`tests/replay/` 自 V0.3 P0-D 起有 16 项行为回放（`npm run test:replay`），**不再是空的**。
 > 壁钟：**以实跑为准**（默认门禁的目标是「可用于迭代」，**不写死秒数**，见 [`AGENTS.md` §7](../AGENTS.md)）——数字只当区间看：
 > 同日实测（`npm test` 五次）：空载 **13.6 / 13.9 / 15.9s**，同机有别的成员在跑 **18.2 / 18.6s**；另一次空载 wall **15.4s**、`ℹ duration_ms 14686`。
 > 关键路径**历史上（t47 之前）**是 `tests/unit/voice/frontend.test.ts` 的多次 Python + VAD 冷启动（单文件就要 ~21s，全量门禁因此在 27–39s 一带）；
@@ -18,7 +20,7 @@
 | 层 | 目录 | 跑什么 | 是否联网 | 现在有什么 |
 |---|---|---|---|---|
 | 单元 | `tests/unit/` | 契约校验、领域持久化、transport 解析、会话 FSM、Prompt 组装、工具、语音前端、核心接线 | 否 | **文件数与项数都以实跑为准**：文件数用 `git ls-files "tests/unit/*.test.ts" "tests/unit/**/*.test.ts"`（**两条通配都要给**：只写 `tests/unit/**/*.test.ts` 会漏掉直接放在 `tests/unit/` 下的那些文件），项数用 `npm run test:unit` 的末行 |
-| 集成 | `tests/integration/` | BrainAdapter ↔ transport ↔ store、会话引擎、离线重启恢复、主动引擎门禁与重启不重发 | 否 | **以实跑为准**：文件数 `git ls-files "tests/integration/*.test.ts"`，项数 `npm run test:integration` 末行 |
+| 集成 | `tests/integration/` | `TurnModelProvider` ↔ transport ↔ store、会话引擎、离线重启恢复、主动引擎门禁与重启不重发、**durable 提醒的两进程重启**（`tests/integration/reminder/`） | 否 | **以实跑为准**：文件数 `git ls-files "tests/integration/*.test.ts"`，项数 `npm run test:integration` 末行 |
 | 场景 | `tests/scenarios/` | 对话语料（8 场景，数据驱动），由 `scripts/eval-conversation.ts` 执行 | 执行时联网 | `corpus.ts`（**不是**空目录，也不产生 `npm test` 用例：它是数据模块） |
 | 回放 | `tests/replay/` | 导出事件区间 → 重放 → 复现决策（§22.3） | 否 | **空**（属 M5） |
 | 控制台 | `tests/console/` | 现场测试控制台的隐私保留策略、多段语音规划、在场回退、报告与错误文案、主动开口面板、三栏页面、「看一眼」（项数以 `npm run test:console` 末行为准） | 否 | `field-test-console.test.ts`、`proactive-console.test.ts`、`proactive-loop.test.ts`、`three-column-console.test.ts`、`look-once-console.test.ts`；**已在 `npm test` 的 glob 里（t16 起）**，也可用 `npm run test:console` 单跑 |
@@ -128,6 +130,22 @@ harness 映射仍在，并把持久化的 harness 会话原样交给 transport�
 
 需要真机的部分（麦克风电平、扬声器回环、摄像头取帧）由 `node scripts/field-test.ts --acceptance` 覆盖，
 离线自检 `node scripts/field-test.ts --self-test` 则真的起 HTTP 服务并跑 VAD，验证「无语音不留盘」「多段语音全部送识别」等承诺。
+
+### V0.3 P2 新增的测试面（插件内核 / MCP / 审批 / News / Reminder）
+
+这些都在默认门禁（`npm test` 的六个 glob）里，不需要联网，也不用密钥：
+
+| 面 | 文件（举例） | 覆盖什么行为 |
+|---|---|---|
+| 插件内核 | `tests/unit/plugins/{lifecycle,boundaries,context,capabilities,discovery,manifest}.test.ts` | 九步生命周期与每步的失败拒绝；四条「插件不能做」各有**坏输入必须被拦**的用例；五能力与七权限的配对；保留命名空间拒绝 |
+| 插件工具接线 | `tests/unit/plugins/runtime-wiring.test.ts` | `buildPluginRuntime().start()` 之后插件工具真的在 `definitionsForRound` 里、且能被核心执行（这条是「内核已交付」与「入口已接线」的分界，别混） |
+| MCP | `tests/unit/plugins/mcp/*.test.ts`（真 SDK v2 `McpServer` + `InMemoryTransport` 桩） | discover → 规范化 → 命名空间 `mcp.<server>.<tool>` → 注册表；连不上/空列表不崩；重连与 `status()`/`health()` 说真话；**不做高频总线**（空转零调用 + 源码探针） |
+| 工具审批 | `tests/unit/core/tool-approval.test.ts`、`tests/unit/core/tool-registry.test.ts` | 七字段落库与重启取回；**冻结参数摘要对不上就零调用**；拒绝/到期不执行且都落审计；没声明就不 ASK；ask 不能放宽被 deny 的调用 |
+| News | `tests/unit/core/tool-loop.test.ts`、`tests/unit/plugins/news/*.test.ts` | 三个工具离线端到端（桩来源）、RSS/Atom 夹具与坏文档降级、铁律 8 的不可信数据形态、四条主动判据与反例、账本记账、TopicSource |
+| Reminder | `tests/unit/reminder/{store,time-resolution,scheduler,sink}.test.ts`、`tests/integration/reminder/durable-reminder.test.ts` | 八字段与五态迁移；自然语言 → 绝对时刻 + 时区（含「本机时区恰好等于请求时区」也要能证伪的边界）；**两进程真文件库**的重启与到点事件 |
+
+判据口径与每一条的边界见 [`progress-v03.md`](progress-v03.md) 的 P2 段；**P2 的两个 pack 场景不在这张表里**
+（它们要真模型 + 真库，属手动复验，见 [`verification/t14-p2-gate-independent-verification-2026-10-04.md`](verification/t14-p2-gate-independent-verification-2026-10-04.md)）。
 
 ## 3. 怎么跑
 
@@ -299,7 +317,7 @@ manual audio hardware tests 三档；`AGENTS.md` 第 2 节也要求「联网验�
 | `npm run voice:bargein` | 0 | 打断判定延迟；写出被截断的播放音频作为证据 |
 | `npm run verify:structured-output` | 3~4 次 | 结构化输出契约 + MiMo 缺陷金丝雀 |
 | `npm run chat` / `--fake` / `--dsh` / `--print-wiring` | 每次一轮 | 交互式验证；`--fake` 完全离线（注入内存天气源）；`--print-wiring` **0 成本**：打印 `{entry,language,maxToolRounds,tools,permissions}` 后退出 |
-| 四个 live 入口的 `--print-wiring` | **0**（离线：不调模型、不建库） | **工具链覆盖的离线自证**（第四轮 t2）：`scripts/chat.ts` / `voice-device-check.ts` / `eval-realism.ts` / `eval-conversation.ts` 各打印一行，实测四行逐字相同（`language` 取自部署配置、`maxToolRounds: 4`、四个内置工具、四个 `allow`），并与 `scripts/field-test.ts` 的 `buildToolChain(loadConfig())` 逐字段相等（离线用例 `tests/console/live-entry-tool-chain.test.ts`）。**设备自检没有离线端到端证据**（要真实 WAV + 硬件 + 真实 ASR），它的证据就是这一行 + 与适配器共用一个 `deviceToolChain` 调用点 |
+| 四个 live 入口的 `--print-wiring` | **0**（离线：不调模型、不建库） | **工具链覆盖的离线自证**（第四轮 t2）：`scripts/chat.ts` / `voice-device-check.ts` / `eval-realism.ts` / `eval-conversation.ts` 各打印一行，实测四行逐字相同（`language` 取自部署配置、`maxToolRounds: 4`、**三个内置工具**、三个 `allow`——P2-D 删掉新闻桩之前是四个；**不含插件/MCP 工具**，因为入口还没走 `buildPluginRuntime`），并与 `scripts/field-test.ts` 的 `buildToolChain(loadConfig())` 逐字段相等（离线用例 `tests/console/live-entry-tool-chain.test.ts`）。**设备自检没有离线端到端证据**（要真实 WAV + 硬件 + 真实 ASR），它的证据就是这一行 + 与适配器共用一个 `deviceToolChain` 调用点 |
 | `npm run web` / `npm run web -- --dsh` | 每次一轮 | 浏览器试用页（http://127.0.0.1:8791）；`--dsh` 切到 Harness 路径 |
 | `POST /api/voice`（试用页的🎤） | ASR + 一轮 | 浏览器采集 → VAD 只取语音段 → ASR → 对话 → TTS；无语音时返回 `NO_SPEECH_DETECTED` 而不是假装听懂 |
 | `scripts/voice-device-check.ts` | ASR + 一轮 | 设备验收：对回环录音跑全链路并与原文比对字符级相似度（≥0.5 判 PASS） |

@@ -1,16 +1,17 @@
-# 大脑与模型：`BrainAdapter`、MiMo 直连、DSH Harness
+# 大脑与模型：`TurnModelProvider` 三接口、MiMo 直连、DSH Harness
 
-> 最后更新：2026-10-03（第五轮收口：新增 §5b「心情怎么演化、怎么进提示词」与 §8 的三条「没有」）
-> 权威来源：`packages/brain-adapter/src/{types,mimo,dsh,tools,errors,scripted,fake}.ts`、`packages/model-adapters/src/{mimo,weather,errors}.ts`、`apps/brain-dsh/src/transport.ts`、`apps/brain-dsh/profile/cordis.patch.yml`、`plugins/xixi-tools/index.js`、`scripts/verify-structured-output.ts`、[recon/mimo-api-probe-2026-09-29.md](../recon/mimo-api-probe-2026-09-29.md)、ADR-0002/0005/0008、[progress.md](../progress.md) §2.3/§2.6/§2.10/§2.11
+> 最后更新：2026-10-04（V0.3 P2-F/P2 收口：§2 从七成员 `BrainAdapter` 改成三个接口，四个能力退役并注明归属；
+> 新增「两条接缝在生产侧没有消费者」的口径，见 [ADR-0020](../adr/0020-provider-three-interfaces-and-mcp-deps.md)）
+> 权威来源：`packages/brain-adapter/src/{types,mimo,dsh,tools,errors,scripted,fake}.ts`、`packages/model-adapters/src/{mimo,weather,errors}.ts`、`apps/brain-dsh/src/transport.ts`、`apps/brain-dsh/profile/cordis.patch.yml`、`plugins/xixi-tools/index.js`、`scripts/verify-structured-output.ts`、[recon/mimo-api-probe-2026-09-29.md](../recon/mimo-api-probe-2026-09-29.md)、ADR-0002/0005/0008/0020、[progress.md](../progress.md) §2.3/§2.6/§2.10/§2.11
 > 若与代码不一致，以代码为准，并请立即修正本文件
 
 本文只写代码里真实存在的东西。方案（`xixi_ai_companion_project_plan.md`）里有、代码里没有的，一律写成「未实现（属 Mx）」。
 
-## 1. 结构：一个接口，三套实现
+## 1. 结构：三个接口，三套实现
 
 | 层 | 位置 | 知道什么 |
 |---|---|---|
-| 对话 / 领域层 | `packages/conversation`、`packages/domain` | 只说 `BrainAdapter`、`UserTurnInput`、`BrainTurnResult`、`TurnAction` |
+| 对话 / 领域层 | `packages/conversation`、`packages/domain` | 只说 `TurnModelProvider`、`UserTurnInput`、`BrainTurnResult`、`TurnAction` |
 | 大脑适配层 | `packages/brain-adapter` | 直连 MiMo、DSH Harness、离线 Fake，都实现同一接口 |
 | 协议 / 进程层 | `packages/model-adapters`（HTTPS）、`apps/brain-dsh`（子进程 + NDJSON）、`plugins/xixi-tools`（DSH 工具插件） | MiMo API、DSH CLI、JSON Schema |
 
@@ -18,22 +19,31 @@
 
 `ScriptedDshTransport`（`src/scripted.ts`）与 `FakeBrainAdapter`（`src/fake.ts`）是离线替身，让 `npm test` 完全不碰模型。
 
-## 2. `BrainAdapter`（§25）全部方法：哪个真做了，哪个抛 `NOT_IMPLEMENTED`
+## 2. 三个接口：谁必须实现什么（V0.3 P2-F 起）
 
-接口定义：`packages/brain-adapter/src/types.ts`。三套实现（`MimoBrainAdapter`、`DshBrainAdapter`、`FakeBrainAdapter`）状态完全一致。
+接口定义：`packages/brain-adapter/src/types.ts`。
 
-| 成员 | 状态 | 说明 |
-|---|---|---|
-| `readonly provider: string` | ✅ 实现 | `'mimo-direct'`（`src/mimo.ts`）；`DshBrainAdapter` 默认 `'dsh'`，可由构造参数覆盖（`src/dsh.ts`）；`FakeBrainAdapter` 默认 `'fake'`。它是 `conversation_sessions.brain_provider` 的键（ADR-0005）。 |
-| `describe(): BrainDescription` | ✅ 实现 | 返回 `{provider, model, transport, mode}`。Mimo 的 `mode` 是 `hasKey ? 'live' : 'offline'`；DSH 的 `model` 取上一轮响应（`#lastModel`，初始 `'unknown'`）。 |
-| `handleUserTurn(input)` | ✅ 真实现 | 见 §3、§4。 |
-| `evaluateProactiveCandidate(input)` | ⛔ `NOT_IMPLEMENTED` — **milestone `M5`** | `notImplemented('evaluateProactiveCandidate', 'M5')`，三套实现各一份。 |
-| `interpretFeedback(input)` | ⛔ `NOT_IMPLEMENTED` — **`M3`** | 同上。 |
-| `extractMemories(input)` | ⛔ `NOT_IMPLEMENTED` — **`M4`** | 同上。 |
-| `reflect(input)` | ⛔ `NOT_IMPLEMENTED` — **`M4/M5`** | 同上。 |
+| 接口 | 成员 | 谁实现 | 说明 |
+|---|---|---|---|
+| `TurnModelProvider`（**必须**） | `readonly provider: string` | 三套实现全有 | `'mimo-direct'`（`src/mimo.ts`）；`DshBrainAdapter` 默认 `'dsh'`，可由构造参数覆盖（`src/dsh.ts`）；`FakeBrainAdapter` 默认 `'fake'`。它是 `conversation_sessions.brain_provider` 的键（ADR-0005）。 |
+| | `describe(): BrainDescription` | 三套实现全有 | 返回 `{provider, model, transport, mode}`。Mimo 的 `mode` 是 `hasKey ? 'live' : 'offline'`；DSH 的 `model` 取上一轮响应（`#lastModel`，初始 `'unknown'`）。 |
+| | `handleUserTurn(input)` | 三套实现全有 | 见 §3、§4。 |
+| `MultimodalTurnProvider`（**可选**，extends 上面那个） | `supportsImages: true` | **只有** `MimoBrainAdapter` | 字面量 `true` 而不是 `boolean`：运行期检查 `provider.supportsImages === true` 因此可以信。DSH 路径与离线替身**没有**这个属性——它们不声称能收图（`tests/unit/brain/provider-seams.test.ts` 钉住）。**今天在生产侧没有读取方**（见 §8）。 |
+| `StructuredInferenceProvider`（**可选**） | `inferJson(options)` | **只有** `MimoBrainAdapter` | 真实现：经 `MimoClient.chatJson` 的解析 + 重试，`validate` 仍由调用方传（见 §5）。**今天在生产侧没有调用方**（`scripts/eval-conversation.ts` 的判官仍直连 `chatJson`）。 |
 
-四个缺口的错误是 `BrainError('NOT_IMPLEMENTED')`，`milestone` 字段带里程碑名，`detail` 固定为
-`declared in M0 to fix the seam; implemented in the named milestone`（`src/types.ts` 顶部注释称之为「诚实的缺口，不是静默 stub」）。
+**四个能力已在 P2-F 退役**：`evaluateProactiveCandidate` / `interpretFeedback` / `extractMemories` / `reflect`
+从接口与三个实现类里**一并删除**（连三处 `notImplemented` 助手一起删），`BrainAdapter` 这个名字不再从包里导出。
+四组**类型**保留为 retired capability 的数据契约，并注明真实归属：
+
+```text
+evaluateProactiveCandidate → ProactiveEngine / evaluateProactiveGates（@xixi/conversation，确定性那一半）
+interpretFeedback          → 确定性反馈解释（@xixi/conversation）
+extractMemories            → TurnMemoryExtractor（@xixi/conversation）
+reflect                    → TopicEngine（@xixi/conversation）
+```
+
+判据与后果见 [ADR-0020](../adr/0020-provider-three-interfaces-and-mcp-deps.md)；
+包 manifest 的 `dependencies` 也在同一轮补上了 `@xixi/model-adapters`（源码 6 处 import 却一直没声明）。
 
 `TurnAction` 由 `packages/domain/src/store.ts` 定义为 `'SPEAK' | 'BACKCHANNEL' | 'WAIT' | 'SILENCE' | 'TOOL'`，
 但**没有任何适配器/传输层会产出 `BACKCHANNEL` 或 `WAIT`**：直连路径只产出 `SPEAK`/`SILENCE`/`TOOL`（`src/mimo.ts` 的 `#interpret`），
@@ -128,22 +138,24 @@ resume 的两个硬约束（相同 cwd、相同 profile）在 `CliDshTransport` 
 
 - `XixiTool`：`name` / `description` / `parameters`（JSON Schema，原样交给 provider）/ `execute(args, {timezone, now})`。
 - `ToolCallRecord`：`{name, args, ok, result, error}`，通过 `onToolCall` 回调给上层写审计。
-- 注册表只有一处出口：`defaultTools({defaultPlace, now, …})` = **Phase 2 的四个内置工具**（注释：`The four Phase 2 built-ins. New tools join here and nowhere else`）：
+- 注册表只有一处出口：`defaultTools({defaultPlace, now, …})` = **Phase 2 的三个内置工具**（`packages/brain-adapter/src/tools.ts` 的注释：`The three Phase 2 built-ins. New tools join here and nowhere else.`）：
   时间 / 天气 / 新闻桩 / 提醒桩；可见性再由 `listForAgent(scope)` 按 scope 过滤（不是「注册了就人人可见」）。
 - **逐入口覆盖（2026-10-01 第四轮 t2 实测，别写成「语音与文字共用同一条工具链」这种笼统话）**：
   `scripts/field-test.ts` 的 `buildToolChain(config, options)` 是四个 live 入口共用的构造点——
   文字 CLI `scripts/chat.ts`、设备自检 `scripts/voice-device-check.ts`、真人感评测 `scripts/eval-realism.ts`、
   对话评测 `scripts/eval-conversation.ts`；控制台（`field-test.ts`）与试用页/语音（`serve-chat.ts` / `voice-turn.ts`）本来就走这条链。
   离线自证：每个入口跑 `--print-wiring` 打印 `{entry,language,maxToolRounds,tools,permissions}` 后退出（不调模型、不建库），
-  实测四入口逐字相同：`language` 取自部署配置、`maxToolRounds: 4`、四个内置工具、四个 `allow`。
+  实测四入口逐字相同：`language` 取自部署配置、`maxToolRounds: 4`、**三个内置工具**、三个 `allow`
+   （V0.3 P2-D 删掉 `xixi_news_stub` 之后的新期望；**插件与 MCP 的工具不在入口的这份清单里**——
+   入口还没走 `buildPluginRuntime`，见 §8 与 [ADR-0017](../adr/0017-plugin-boundary-and-four-prohibitions.md)）。
   **设备自检没有离线端到端证据**（要真实 WAV + 硬件 + 真实 ASR），它的证据是 `--print-wiring` 与适配器共用一个 `deviceToolChain` 调用点。
 
 | 工具 | 权限 | 参数 | 行为 |
 |---|---|---|---|
 | `xixi_get_current_time` | L0（内部只读，`risk: read`） | `{type:'object', properties:{}, additionalProperties:false}` | 返回 `iso` / `localDate` / `weekday`（`Asia/Shanghai`，代码内固定时区） |
 | `xixi_get_weather` | L1（外部只读，`risk: read`） | `place`(string)、`day`(enum `today`/`tomorrow`/`day_after_tomorrow`)、**`additionalProperties:false`** | `place` 省略时用 `defaultPlace`；`day` 默认 `tomorrow`；返回 `place`/`day`/`date`/`summary`/`temperatureMaxC`/`temperatureMinC`/`precipitationChance`/`advice`/`daysUntil`/`requestedAt`/`timezone` |
-| `xixi_news_stub` | 外部只读（`risk: read`） | 见 `tools.ts` | 新闻源的**诚实占位**：没有 provider 时直说「现在看不到新闻」，不凭记忆编造 |
-| `xixi_set_reminder_stub` | **`risk: write`**（写的是内存 sink） | 见 `tools.ts` | 提醒的占位实现：只写进内存 sink，不落库、不触发外部动作 |
+| `news.search` / `news.latest` / `news.for_interests` | 插件工具（`network` 权限，manifest 声明） | 见 `packages/plugins/news/tools.ts` | V0.3 P2-D 起新闻是**插件**，不再是内置：返回的外部文本一律带 `untrusted` 与 `flags`，拿不到来源时在 `problems` 里说原因（不编） |
+| `xixi_set_reminder_stub` | **`risk: write`** | 见 `tools.ts` | 名字与文案仍是 `_stub`（已过时，下一轮改）：接 `DurableReminderSink` 时落 `reminders` 表并到点写事件，**但四个 live 入口没接**，入口里它只写内存 sink、不落库、不触发外部动作（[ADR-0019](../adr/0019-news-and-reminder-data-model.md)） |
 
 - 天气来源是 **Open-Meteo，无需密钥**（`packages/model-adapters/src/weather.ts`）：geocoding + forecast 两个端点，
   超时 15s，WMO 天气码译成中文口语（`describeWeatherCode`），**30 分钟缓存**（`report(place, cacheMs = 30 * 60_000)`，按 trim 后的地名键控）。
@@ -249,7 +261,7 @@ resume 的两个硬约束（相同 cwd、相同 profile）在 `CliDshTransport` 
 
 | code | 含义 / 触发点 |
 |---|---|
-| `NOT_IMPLEMENTED` | 四个未实现能力；带 `milestone` |
+| `NOT_IMPLEMENTED` | **今天没有任何适配器抛它**（V0.3 P2-F 起四个能力已从接口移除）：错误分类表里保留这个码，`BrainError` 也仍然接受它 |
 | `TRANSPORT_FAILED` | transport 未回答（`src/dsh.ts`）；找不到 `dsh`、`bin.js` 不存在、cwd 不存在（`apps/brain-dsh/src/transport.ts`）；`ModelError` 的 `MISSING_KEY` / `NETWORK`；`MimoBrainAdapter` 的兜底（`src/mimo.ts`） |
 | `PROVIDER_FAILED` | harness 返回 `ok:false`（原始码保留在 `originalCode`/`detail`）；`ModelError('PROVIDER')`（HTTP ≥ 500）；`ModelError` 的默认分支 |
 | `TIMEOUT` | `CliDshTransport` 超时并 kill 子进程；`ModelError('TIMEOUT')` |
@@ -302,7 +314,13 @@ FatherModel/RelationshipModel/FutureHooks 恢复（这些领域对象尚不存�
 
 - `BACKCHANNEL` / `WAIT` 两种 action **没有任何生产者**（事实由 `tests/unit/core/dead-code-truthfulness.test.ts` 固化，见 §2）。
   t88 的「看一眼」也**不制造**这两个值：它把这一次当作普通一轮交给 `ConversationEngine.respond`，助手那一轮记的是模型真实的 action（直连路径只有 SPEAK / SILENCE / TOOL）。
-- 四个 meta-agent 能力（§2 表）。
+- **四个 meta-agent 能力已从接口退役**（V0.3 P2-F）：`evaluateProactiveCandidate` / `interpretFeedback` /
+  `extractMemories` / `reflect` 不在 `TurnModelProvider` 的任何变体上，也不在任何实现类里；
+  真实归属见 §2 的映射表与 [ADR-0020](../adr/0020-provider-three-interfaces-and-mcp-deps.md)。
+- **两条新接缝在生产侧没有消费者**（同一轮实测）：`supportsImages` 只有声明与用例断言、没有读取方；
+  `inferJson` 只有接口与 `mimo.ts` 的实现、没有生产调用方（`scripts/eval-conversation.ts` 的判官仍直连 `chatJson`）。
+  核对：`git grep -n "supportsImages" -- packages scripts apps` 与 `git grep -n "inferJson" -- packages scripts apps`。
+  **它们是下一阶段候选，不许写成「已接线」。**
 - DSH 路径的提示词拼装是 `composeTask` 占位（§26 的正式拼装由 `packages/conversation` 的 `PromptAssembler` 负责，直连路径已用上）。
   （**DSH 路径的天气工具已在本轮补齐**，见 §5。）
 - 本地 ASR / TTS 兜底、模型私有推理之外的失败话术。
@@ -326,7 +344,7 @@ FatherModel/RelationshipModel/FutureHooks 恢复（这些领域对象尚不存�
 
 ```
 控制台「看一眼」按钮 → POST /api/field/look → ConversationEngine.respond({ …, images })
-   → BrainAdapter.handleUserTurn({ …, images }) → MimoBrainAdapter 挂到最后一个 user 消息
+   → `TurnModelProvider.handleUserTurn({ …, images })` → `MimoBrainAdapter` 挂到最后一个 user 消息
    → model-adapters/mimo 转成 OpenAI 风格 content:[…, {type:'image_url',…}]
 ```
 

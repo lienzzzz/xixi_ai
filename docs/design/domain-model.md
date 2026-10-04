@@ -1,6 +1,7 @@
 # 领域模型：事件、持久化与人格
 
-> 最后更新：2026-10-03（第五轮收口：§5.5 补迁移 005 的 `mood_state` / `mood_history` 与「心情不在人格三层里」）
+> 最后更新：2026-10-04（V0.3 P2 收口：事件类型 6 → **8** 类（`tool.approval.changed` / `reminder.changed`）、
+> §5.5 补迁移 007 的 `tool_approvals` 与 008 的 `reminders`、006 只加列不建表）
 > 权威来源：`packages/contracts/src/*.ts`、`packages/contracts/schemas/**`、`packages/domain/src/{store,migrations,personality,config,clock}.ts`、`packages/domain/src/migrations/001_initial.sql`
 > 若与代码不一致，以代码为准，并请立即修正本文件
 
@@ -59,7 +60,7 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
   断言「注册表类型集合 == 信封 `event_type` 枚举」「`payloadVersion` == `SCHEMA_VERSION`」「`ACTORS` == 信封 `actor` 枚举」。
 - 新增类型的步骤见 [`../event-contracts.md`](../event-contracts.md) §9。
 
-## 4. 事件类型（当前 **6** 类）
+## 4. 事件类型（当前 **8** 类）
 
 注册表：`packages/contracts/src/events.ts`；schema：`packages/contracts/schemas/events/`。
 
@@ -71,6 +72,8 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
 | `proactive.decision` | `candidate_id`, `trigger`, `speak`, `reason_code` | 其余字段**全部可选**（同一事件类型内新增字段一律可选，旧事件照旧校验）：`session_id`、`score` / `threshold`（number\|null，0–1）、`recommendation`、`primary_signal`、`signals`（9 个 0–1 信号）、`basis`（≤12 条中文依据）、`decided_by`（`program` / `model`）、`model_reason_code`（白名单码，≤40）、`model_consulted`、`topic_ref`、`intent`、`delivered`。**只存理由码与分数，不存用户原话与模型私有推理**（铁律 5） |
 | `open_thread.changed` | `thread_id`, `status`, `summary` | `thread_id` 形如 `thread_…`；`status: candidate \| offered \| engaged \| resolved \| snoozed \| exhausted`；可选 `previous_status`、`subject`、`follow_after`、`expire_at`、`follow_up_hint`、`importance`、`attempts`、`source_event_id`、`note`。写这条事件与写 `open_threads` 表在**同一事务**里，所以表可被日志重建（pack Phase 3） |
 | `system.health` | `service`, `status`, `detail` | `service` 1–120 字符；`status: ok \| degraded \| down`；`detail: string \| null`（≤500） |
+| `tool.approval.changed` | `approval_id`, `tool_name`, `status`, `reason_code`, `requested_at`, `expires_at` | V0.3 P2-B 新增。`status: pending \| approved \| denied \| expired \| executed`；`reason_code: approval_requested \| user_approved \| user_denied \| approval_expired \| approval_executed \| approval_execution_failed`；可选 `session_id`、`actor_id`、`source_event_id`、`frozen_args_digest`、`decided_at`、`decided_by`、`score`（`approved`/`denied`/`executed` 记 1，程序判定记 0）。**日志里只有摘要、没有参数正文**，正文只在 `tool_approvals` 表里 |
+| `reminder.changed` | `reminder_id`, `owner`, `status`, `reason_code`, `due_at`, `timezone` | V0.3 P2-E 新增。`status: pending \| due \| candidate \| delivered \| acknowledged`；`reason_code: reminder_created \| reminder_due \| reminder_candidate \| reminder_delivered \| reminder_acknowledged`；可选 `what`、`previous_status`、`resolve_kind`、`source_event_id`、`session_id`、`status_changed_at`、`delivered_at`、`acknowledged_at`。**「到点」就是这条事件**（`reason_code = reminder_due`），不是一行日志 |
 
 `conversation.turn` 的两个要点：
 
@@ -155,12 +158,16 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
 
 `source_event_id` 目前**恒为 `NULL`**：只有 M3 的反馈解释器才会把变更指回触发它的事件。
 
-### 5.5 `002` / `003` / `004` / `005` 新增的表
+### 5.5 `002` / `003` / `004` / `005` / `007` / `008` 新增的表
 
 字段级细节以迁移文件为准（[`002_world_state.sql`](../../packages/domain/src/migrations/002_world_state.sql)、
 [`003_open_threads.sql`](../../packages/domain/src/migrations/003_open_threads.sql)、
 [`004_memory.sql`](../../packages/domain/src/migrations/004_memory.sql)、
-[`005_mood.sql`](../../packages/domain/src/migrations/005_mood.sql)）：
+[`005_mood.sql`](../../packages/domain/src/migrations/005_mood.sql)、
+[`007_tool_approvals.sql`](../../packages/domain/src/migrations/007_tool_approvals.sql)、
+[`008_reminders.sql`](../../packages/domain/src/migrations/008_reminders.sql)）。
+`006_memory_status.sql` **不新增表**：它给 `semantic_memory` 加 `status` / `superseded_by` / `status_changed_at` 三列
+（V0.3 P1 的状态机，见 [ADR-0016](../adr/0016-memory-status-state-machine.md)）：
 
 | 表 | 迁移 | 角色 | 关键列 |
 |---|---|---|---|
@@ -173,6 +180,8 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
 | `session_overrides` | 004 | **只对 `valid_day` 这一本地自然日生效**的覆盖（次日自动失效） | `override_id` PK、`session_id`、`property`、`delta`、`reason`、`source_type`、`valid_day`；索引 `(valid_day, property)` |
 | `mood_state` | 005 | **当前心情（一行）**——有界、会回落、由事件演化（第五轮） | `key` PK（`'mood.now'`）、`schema_version`、`valence` / `energy`（都落 `[0,1]`）、`evidence_json`（每个信号出现过几次）、`last_beat_at`、`cursor_json`（已吸收到哪条 `events.sequence`）、`source` / `summary` / `updated_at` |
 | `mood_history` | 005 | 心情的**变更记录**（每次真的变了才写一行；复位也留一行 `reset=true`） | `change_id` PK、`before_*` / `after_*`、`delta_*`、`reset`、`signals_json`、`signal_count`、`dropped_count`、`note`、`created_at` |
+| `tool_approvals` | 007 | **待批的工具调用**（V0.3 P2-B）：七字段 + 摘要 + 恢复执行需要的程序事实 | `approval_id` PK、`session_id`、`actor_id`、`tool_name`、`frozen_args`（正文）、`frozen_args_digest`、`scope`、`timezone`、`status`（五态）、`reason_code`、`source_event_id`、`requested_at`、`expires_at`、`decided_at`、`decided_by`、`executed_at`、`outcome_ok`、`outcome_error`；每次变化与一条 `tool.approval.changed` **同一事务**（[ADR-0018](../adr/0018-tool-approval-frozen-args.md)） |
+| `reminders` | 008 | **durable 提醒**（V0.3 P2-E）：八字段 + 解析结果 | `id` PK、`owner`、`what`、`due_at`、`due_at_ms`（比较/排序用）、`timezone`、`status`（五态）、`created_at`、`source_event_id`、`session_id`、`resolve_kind`、`status_changed_at`、`delivered_at`、`acknowledged_at`。**没有 `when` 之类的文本列**——用户原话不落库；每次变化与一条 `reminder.changed` 同一事务（[ADR-0019](../adr/0019-news-and-reminder-data-model.md)） |
 
 共同点：**都是推导，不是事实**——每行带 `source_event_id` 指回 `conversation.turn`（铁律 4）；
 记忆写入**不新增事件类型**（可以按 `source_event_id` 重放重建），唯一的例外是 `open_threads`：
@@ -244,8 +253,9 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
 > `self_profile_history.source_type` 记 `learned:explicit_correction` / `learned:model_inference`，`confidence` 记同一个权重。
 > 方案 §7.4 的**按来源单日上限与漂移上限都已实现**（`dailyLimitExplicit` / `dailyLimitInferred` / `driftLimit`）；
 > **回滚是显式动作**（`SelfModel.rollback(property)` 清零学习偏移并写一条 `learned:rollback`），**没有自动回滚**。
-> `BrainAdapter.interpretFeedback()`（模型侧那个结构化反馈接口）**仍抛 `NOT_IMPLEMENTED(M3)`**——
-> 它与上面这条确定性管线**不是同一个东西**，别混为一谈。
+> `BrainAdapter.interpretFeedback()`（模型侧那个结构化反馈接口）**已在 V0.3 P2-F 退役**——
+> 它与上面这条确定性管线**不是同一个东西**，别混为一谈；退役的口径与真实归属见
+> [`../adr/0020`](../adr/0020-provider-three-interfaces-and-mcp-deps.md)。
 
 ## 7. 会话与 Harness 会话的映射
 

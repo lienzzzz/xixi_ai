@@ -11,7 +11,13 @@
 
 ## 0. 当前状态
 
-### 0.1 V0.3（2026-10-04 起，按 `E:\xixi_v03_actual_code_pack`）——**P0 已交付，正在收口**
+### 0.1 V0.3（2026-10-04 起，按 `E:\xixi_v03_actual_code_pack`）——**P0 / P1 / P2 已交付；P2 已收口，入口接线留到下一轮**
+
+**P2 轮（`xixi-v03-p2`）收口（2026-10-04）**：七块交付（插件内核、MCP 适配器、工具审批、Provider 三接口拆分、
+真实 News、durable Reminder、P2-G 的宾语前置句修复）+ 四份 ADR（0017–0020）见
+[`progress-v03.md`](progress-v03.md) 的 P2 段；两个 pack 场景在**装配点**上成立（真模型 + 真库 + 事件日志），
+**四个 live 入口的接线仍未做**。下面第 1–14 条里：**第 11① 已由 t26 关闭、第 13 已由 t15 改掉**，
+其余（第 1–10、12、14）都是下一轮清单。门禁取数修订号 `024cd43`：`check:types` exit 0、`npm test` 717/717、`check:docs` 三个 0。
 
 **范围**：本轮只做 pack 的 **Phase 0 + Phase 1**（pack 自己规定 P0/P1 必须先完成；P2–P7 另起轮次）。团队 `xixi-v03-p0p1`（7 名成员，契约在 `.agent-teams/xixi-v03-p0p1`）。
 
@@ -55,10 +61,16 @@
 8. **`plugins/xixi-tools/index.js` 仍 import `@deepseek-ai/dsh-tools`**：按铁律 9 的**字面**它在 `packages/brain-adapter` 之外，但性质是 **DSH 侧插件包本体**（manifest 的 peerDependency 就是 dsh-tools、靠 cordis patch 挂载、上游 `00_CODE_AUDIT` §6 已登记为 DSH 侧工具插件）——**收编进 brain-adapter 还是登记为显式例外，需要用户裁定**；captain 不擅自改铁律、也不擅自搬包。
 9. **`tests/console/unbacked-facts-console.test.ts:111` 的 `engine as unknown as ConversationEngine`** 是另一个（非 adapter 的）部分替身；收紧它需要在 `packages/runtime` 暴露 composer 接缝类型。
 10. **`manager.instance().health` 是「最后一次记录的报告」**（t21 复审的 O1，low 但会误导面板）：deactivate 之后它仍写「1 个 MCP 工具在线」，而同一次新鲜的 `plugin.module.health()` / `status()` 都说未连接；且 `checkHealth()` 只遍历 active 插件，**管理器的公开面没有一条路能把这份快照刷新**。要么让 `deactivate` 也记一条新鲜 health，要么在文档里写清「面板读它时必须同时读 state」。
-11. **两处「尚无独立评审」的登记**（t23 复审时按 §9.15/§9.25② 如实指出，别让它们随别的任务一起被当成已核）：① **P2-G 的疑问句守卫与召回预算**——t23 那轮 acceptance 的第 1 条误写成这两件事（实际属记忆线），captain 已**另开一条独立评审**（reviewedTaskId=t7）把它补上；② **P2-F2（t17：铁律 9 越界清理 + 旧接口残留）**至今没有独立评审——它的判据是「用一次性对照脚本在 33 个 schema 上比对本地谓词与真实函数、0 处不一致」这类**自证**，比常规弱一档，下一轮若要动 `packages/brain-adapter` 的接缝，先补一次独立评审。
+11. **两处「尚无独立评审」的登记**（t23 复审时按 §9.15/§9.25② 如实指出，别让它们随别的任务一起被当成已核）：① ~~**P2-G 的疑问句守卫与召回预算**~~ → **已由 t26 独立评审判 pass（2026-10-04）**，它自己的反事实证明 `lacksObject` 判据承重、两个报告哈希与仓库字节逐字一致；② **P2-F2（t17：铁律 9 越界清理 + 旧接口残留）**至今没有独立评审——它的判据是「用一次性对照脚本在 33 个 schema 上比对本地谓词与真实函数、0 处不一致」这类**自证**，比常规弱一档，下一轮若要动 `packages/brain-adapter` 的接缝，先补一次独立评审。
 12. **引用哈希要写清是哪个文件**（t23 的引用精度提醒）：t22 报的 `B0DD5C60529B5710…` 是 **`packages/runtime/src/tool-approval.ts`（实现文件）**的哈希，**测试文件** `tests/unit/core/tool-approval.test.ts` 的是 `0FDB1DE4…`——后续引用时写清文件，否则容易张冠李戴。
-13. **4 处「当前态」文档仍写着已被删除的 `xixi_news_stub`**（t11 评审实测，**t15 收口时必须改掉**）：`docs/design/security-and-privacy.md:31` 与 `:39`、`docs/design/brain-and-models.md:145`、`docs/progress.md:440`，另 `docs/v03/ACTUAL_RUNTIME_MAP.md:29` 把旧名列进了「四个内置」。**其余 15 处命中应当保留**（`AGENTS.md` 的历史教训、两张基线地图、三个「必须消失」的回归断言、生产代码里解释它为何被删的注释）——历史与证据不许改写，这正是「不要写全库 0 命中」这条新纪律的由来。
+13. ~~**4 处「当前态」文档仍写着已被删除的 `xixi_news_stub`**~~ → **已由 t15 改掉（2026-10-04）**：`docs/design/security-and-privacy.md` 的 L1 行与「三个内置」段、`docs/design/brain-and-models.md` 的工具表行、`docs/progress.md` 的 Phase 2 工具面段、`docs/v03/ACTUAL_RUNTIME_MAP.md` 的内置工具列。**其余命中按原样保留**（`AGENTS.md` 的历史教训、两张基线地图、三个「必须消失」的回归断言、生产代码里解释它为何被删的注释）——历史与证据不许改写，这正是「不要写全库 0 命中」这条新纪律的由来。
 14. **P2 gate 实测的两条「未达标」（t14，2026-10-04；任何文档都不许写成已达标）**：① **四个 live 入口未接线**——`node scripts/chat.ts --print-wiring` 只列三个内置、**没有 `news.*`**；真跑入口问新闻她只能调时间工具并回「我查不了」；入口里提醒工具真被调用过（`[tool] xixi_set_reminder_stub ok`）但直读那库是 `reminders: []`、`reminderEvents: 0`（内存 sink）。根因：`git grep buildPluginRuntime -- scripts` 只命中 `scripts/probe-tools.ts`，入口仍只调 `buildToolChain`（`DurableReminderSink|ReminderScheduler` 在 scripts 下零命中）。② **提醒的模型可靠性只有 6/22（27%）真调工具，其余 16 次里 4 次回复明说「记下了」而库里没有行**——根因在**提示词层**：`HARD_POLICY` 只要求「可核查的事实」走工具，**没有要求「提醒我」这类写操作走工具**。**下一轮单开一条**：提示词写操作段 + 一条离线默认门禁用例（判据应是「模型说要记就必须真落库」）；逐条样本在 `.scratch/t14/remind-sample-*.json`。另：t14 的探针在 `.scratch/t14/`（gitignored），是否收进 `docs/verification/` 由 t15 决定。
+15. **G03 更正注还有两处没落（t15 交回，2026-10-04）**：`docs/benchmarks/realism-2026-10-01-v01-vanilla.md` 与 `…v02-wip.md` **已有**「源理由已在 V0.3 t19 更正」的旁注（t16 写），但两份**同名 `.json`** 里没有——它们的 G03 旧句在 `skipped[0].reason`。
+    t15 没有改这两处，因为它的 inScope 不含 `docs/benchmarks/`（改了会在完成校验里被判 undeclared）。
+    **要补时的最小改法**（`--replay` 只做 `JSON.parse(...) as RunResult`、不校验额外键，所以加一个顶层键是安全的、也不改写历史数据）：
+    在两个文件顶层加 `"annotations": [{ "at": "2026-10-04", "by": "V0.3 t15（P2 收口）", "note": "skipped[0]（G03）的源理由「本仓库当前没有 open thread 存储」已在 V0.3 t19 更正：open_threads 表与 OpenThreadStore 自 pack Phase 3 起就存在；这条记录是当次运行时的判断，不改写。" }]`。
+    改完跑一次 `node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v01-vanilla.json` 确认 exit 0。
+16. **`packages/plugins/mcp/index.ts` 的注释里没有 v1/v2 对比那两句**（t15 实测，2026-10-04）：t3 的回报与提交 `c8396e0` 的提交信息都写「依赖理由已写进 `packages/plugins/mcp/index.ts` 注释」，但该注释只覆盖**依赖面**（client/server/dev、lock 的 13 条、zod 的口径）；**「v2 取代 v1 单体包 `1.32.0`」与「否掉手写协议＝与真实 MCP 服务器互操作会变成与自造方言互操作」这两句全库零命中**（`git grep -n "1.32.0\|自造方言" -- packages docs`）。t15 已把这两句落到 [ADR-0020](adr/0020-provider-three-interfaces-and-mcp-deps.md) §5，**以后引用请引那份 ADR 或提交 `c8396e0`，不要再写「注释里有一段」**。
 
 ---
 
@@ -273,7 +285,7 @@ T5-F2（low：agent-loop 的 now 是回合开始快照）与 T5-F4（low：两�
 - **语音链路可用**：浏览器麦克风 → VAD → ASR → 对话 → TTS，打断判定实测 192ms；
 - **重启不忘事**：会话、轮次、人格都在 SQLite，两个独立进程验证过；
 - **摄像头在场检测可用（M6 最小版）**：帧差动 + YuNet 人脸确认，全在本机跑，状态写成 `presence.changed` 并投影到 `world_state`（带 TTL），离线回归在默认门禁里（`npm run test:perception`，项数看末行）；
-- **Harness 可替换**：DSH 与直连 MiMo 两套实现共用 `BrainAdapter` 接口（实时走直连，见 ADR-0008）。
+- **Harness 可替换**：DSH 与直连 MiMo 两套实现共用 `TurnModelProvider` 接口（实时走直连，见 ADR-0008；P2-F 把七成员的老接口拆成三个，见 [ADR-0020](adr/0020-provider-three-interfaces-and-mcp-deps.md)）。
 
 未实现：唤醒词（M2）、事件回放（M5）；**长期记忆与人格学习（M3/M4）已由 pack Phase 4 落地**（逐入口覆盖与权重口径见 `progress.md` §2.19）；
 **有界的心情状态（短期的情绪，第五轮 `t4`）已落地**（上下界结构性、影响幅度 ±6% 与 ±0.03、硬底线拿不到它，见 [`adr/0013`](adr/0013-bounded-mood-state.md) 与 `progress.md` §2.20）；

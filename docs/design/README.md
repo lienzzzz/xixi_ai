@@ -1,6 +1,7 @@
 # 设计文档索引与维护规则
 
-> 最后更新：2026-09-30
+> 最后更新：2026-10-04（V0.3 P2 收口：表 1 的 `brain-and-models.md` 描述改成三个 Provider 接口；
+> 更正「`security-and-privacy.md` 尚不存在」这条过期陈述；维护规则 4 分清两种「没有」）
 > 权威来源：本文的规则本身由 `docs/README.md`（文档地图与权威性排序）与 `AGENTS.md`（铁律、语言与命名）约束；每份设计文档的权威源见表 2
 > 若与代码不一致，以代码为准，并请立即修正本文件
 
@@ -13,14 +14,13 @@
 | [`../architecture.md`](../architecture.md) | 整体结构、两种大脑、文本/语音数据流、进程与端口、未实现清单 | 第一次接手；改任何跨包行为之前 |
 | [`domain-model.md`](domain-model.md) | 事件信封与三类事件、schema 版本策略、SQLite 表结构、迁移机制、人格属性集合 | 改契约、迁移、人格属性或会话映射之前 |
 | [`conversation.md`](conversation.md) | FSM 状态与判定、§26 提示词组装、人格→指令映射、§55 沉默、一轮时序 | 改对话层、提示词或沉默语义之前 |
-| [`brain-and-models.md`](brain-and-models.md) | `BrainAdapter` 全部方法的状态、两种实现的对比、流式与工具循环、`chatJson` 策略、错误码 | 改适配器、工具、模型调用或降级策略之前 |
+| [`brain-and-models.md`](brain-and-models.md) | 三个 Provider 接口（`TurnModelProvider` / `MultimodalTurnProvider` / `StructuredInferenceProvider`）各由谁实现、两种真实实现的对比、流式与工具循环、`chatJson` 策略、错误码、**接缝有没有消费者** | 改适配器、工具、模型调用或降级策略之前 |
 | [`voice.md`](voice.md) | VAD 基线、抗噪前端与成功边界、两条输入路径、打断与延迟实测 | 改语音链路或 VAD 参数之前 |
 | [`perception.md`](perception.md) | 摄像头在场检测（M6）：抓帧、帧差动 + YuNet、`presence.changed`、WorldState 投影、隐私边界 | 改在场检测、摄像头或 WorldState 投影之前 |
 
-**尚不存在的设计文档**（`docs/README.md` §3 提到但仓库里没有）：`design/security-and-privacy.md`
-（`design/voice.md` 里有一处链到它，目前是断链）。工具权限、隐私分层、密钥纪律这些内容当前分散在
-[`../architecture.md`](../architecture.md) §4/§6、[`../../AGENTS.md`](../../AGENTS.md) §5 与
-[`../adr/`](../adr/) 里。接手者若要补写，请从代码出发，不要照抄方案原文。
+**`design/security-and-privacy.md` 已存在**（`design/voice.md` 曾有一处指向它的断链，现在链得上）：
+工具权限、隐私分层、密钥纪律这些内容在那一份里；[`../architecture.md`](../architecture.md) §4/§6 与
+[`../../AGENTS.md`](../../AGENTS.md) §5 仍然是其中一部分口径的出处。接手者若要补写，请从代码出发，不要照抄方案原文。
 
 ## 2. 每份文档的权威源
 
@@ -45,7 +45,9 @@
 2. **结尾必须有 `## 维护规则` 小节**：写明「改动哪些源文件 → 必须更新本文件的哪些小节」的映射表。
 3. **行内代码标注来源**：每条关键结论后面用 `` `path/to/file.ts` `` 标注出处；标不出来的就不要写。
 4. **区分「设计意图」与「当前实现」**：方案 `xixi_ai_companion_project_plan.md` 里有、代码里没有的，
-   一律写成「未实现（属 Mx）」，并在表里给出**现状证据**（哪个函数抛 `NOT_IMPLEMENTED`、哪个 feature 开关是 `false`）。
+   一律写成「未实现（属 Mx）」，并在表里给出**现状证据**（哪个 feature 开关是 `false`、
+   哪条 `git grep` 零命中）。**注意两种「没有」的区别**：`NOT_IMPLEMENTED` 那种是「签名在、实现没有」；
+   而 V0.3 P2-F 退役的四个能力是「接口里连签名都没有了」——后者要写归属，不要写成「待补的洞」。
 5. **不写未验证的东西**；必须提及时显式标注「未验证」，并说明缺什么才能验证。
 6. **数字必须带出处与条件**：例如「192ms」要写成「离线夹具、`npm run voice:bargein`、判定层面」，
    而不是「很快」。

@@ -1,6 +1,6 @@
 # 西西项目文档地图
 
-> 最后更新：2026-10-04（V0.3 P0+P1 集成收口 t16：登记 [progress-v03.md](progress-v03.md)（按 Phase 索引的阶段进度）与 P0/P1 的**三份** ADR（0014/0015/0016）与 t15 复验报告；把「四个入口各用不同的库」改成 canonical store 的实际默认值）
+> 最后更新：2026-10-04（V0.3 **P2 收口 t15**：登记 [progress-v03.md](progress-v03.md) 的 P2 段与 P2 的**四份** ADR（0017/0018/0019/0020）与新一份复验报告 `verification/t14-p2-gate-independent-verification-2026-10-04.md`）
 > 面向：接手本项目的编码 Agent / 维护者
 > 本文件告诉你「先读什么、什么最权威、改代码后必须更新哪些文档」。
 
@@ -112,10 +112,15 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | [`review/reply-hygiene-review-2026-10-01.md`](review/reply-hygiene-review-2026-10-01.md) | 工具标记 / 英文推理清洗的评审（`REPLY_HYGIENE` 已实现；两条 requiredFix 已落地——试用页与控制台订阅 `onNotice`、沉默原因码 `ARTIFACT_ONLY_REPLY` 上线，逐入口清单见 `progress.md` §4） |
 | [`verification/t4-realism-verification-2026-10-01.md`](verification/t4-realism-verification-2026-10-01.md) | 「真人感」改造的独立验证：三次输入、主口径提问率、铁律未削弱 |
 | [`verification/t7-round5-independent-verification-2026-10-03.md`](verification/t7-round5-independent-verification-2026-10-03.md) | **第五轮四条工作的独立复验**：多日主动性（显著降频口径达标、未回应后不硬停）、话题收口升级（0/91 与反事实 9/91）、**首音延迟未达标（目标不可达）**、有界心情（0 越界 / ±6% / ±0.03 / 门禁同码）。三类证据分开、每个数字带可复跑命令 |
-| [`progress-v03.md`](progress-v03.md) | **V0.3 阶段进度（按 Phase 索引）**：P0 与 P1 的交付清单、四条 Gate 实测、库一致硬证据、遗留清单；每条结论带可重跑命令 |
+| [`progress-v03.md`](progress-v03.md) | **V0.3 阶段进度（按 Phase 索引）**：P0 / P1 / P2 的交付清单、四条 Gate 实测、两个 pack 场景的独立复验、**未达标项**与遗留清单；每条结论带可重跑命令 |
 | [`adr/0014`](adr/0014-trusted-memory-policy-and-provenance.md) | 可信记忆策略与 provenance：三条来源与 `sourceType` 权重、四道先决、四条相关性路径（含话题点名）、注入 3~8 与两道分数线、两道出口闸门 |
 | [`adr/0015`](adr/0015-context-builder-and-engine-boundary.md) | ContextBuilder 与 ConversationEngine 的边界（谁装配上下文、谁做决定；两道出口闸门；「引擎自己会再建一次 context」这条实现细节） |
 | [`adr/0016`](adr/0016-memory-status-state-machine.md) | 记忆状态机（active / superseded / revoked / expired）与纠正闭环；为什么 `expired` 不自动过期 |
+| [`adr/0017`](adr/0017-plugin-boundary-and-four-prohibitions.md) | 插件边界与四条「插件不能做」：manifest 五能力七权限的配对、九步生命周期、每条禁令的强制点、保留命名空间；「内核已交付」与「入口已接线」的分界 |
+| [`adr/0018`](adr/0018-tool-approval-frozen-args.md) | 工具审批模型：七字段 + 摘要化冻结参数、五态与原因码、**恢复语义**（`approve()` 自带到期闸门）、拒绝与到期都落审计；`listForAgent` 改成「除 deny 之外都广告」的配套语义 |
+| [`adr/0019`](adr/0019-news-and-reminder-data-model.md) | 新闻与提醒的数据模型：三工具 + 四条主动判据 + 账本；八字段表 + 五态 + **时区语义**（按请求时区的当地日历，换时区必须换绝对时刻）+「到点成事件」的口径 |
+| [`adr/0020`](adr/0020-provider-three-interfaces-and-mcp-deps.md) | Provider 三接口拆分与四能力退役（含真实归属）、**两条接缝在生产侧没有消费者**、MCP 的依赖理由与 v1→v2 的选择 |
+| [`verification/t14-p2-gate-independent-verification-2026-10-04.md`](verification/t14-p2-gate-independent-verification-2026-10-04.md) | **Phase 2（P2 gate）的独立复验**：两个场景用真模型 + 真文件库跑通并留档；四个 live 入口未接线与提醒的 27% 可靠性**按未达标写**；四条 gate 的实测数字 |
 | [`verification/t15-p1-independent-verification-2026-10-04.md`](verification/t15-p1-independent-verification-2026-10-04.md)（附可重跑探针 `t15-probe.mjs`） | **Phase 1 的独立复验**：四条技术验收自己复算（文件库 + 每步新进程）、两个场景真模型实跑、**pack 旗舰场景按原句未达标的三条写在最前面**（不替实现者圆场） |
 | [`v03/ACTUAL_RUNTIME_MAP.md`](v03/ACTUAL_RUNTIME_MAP.md) | **V0.3 Phase 0 的运行时地图**：pack 点名的十个概念（`buildToolChain` / `ProactiveLoop` / `createModelComposer` / `createModelDecider` / voice helpers / Memory extractor / 各入口 DB / perception DB / prompt builder / DSH 与直连）各自的定义处、调用点、目标包与迁移步；每行附一条可复跑的 `git grep`。另含对 pack 审计报告 `00_CODE_AUDIT.md` 的逐项复核（15 条：一致 / 偏差，附证据） |
 

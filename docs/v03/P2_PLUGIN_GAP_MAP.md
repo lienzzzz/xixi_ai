@@ -7,6 +7,16 @@
 
 **这份地图是 P2 后面六条实现任务（P2-A 插件内核 / P2-C MCP / P2-B 工具审批 / P2-D News / P2-E Reminder / P2-F Provider 收缩）的共同起点**，也是 P2 的「接线」类声明将来被评审核对时的底稿。它**不描述期望架构**：没写进本文的能力，今天在代码里就不存在。
 
+> **P2 收口后的状态注（2026-10-04，t15 落笔）**：**六条实现任务都已完成并入库**，所以本文里每一句
+> 「今天没有 / 今天仍是」都请读作「**P2 开工前（`767f505`）没有 / 仍是**」——那是本文件的价值所在（基线证据），
+> **不是现状**。现状与交付号见 [`../progress-v03.md`](../progress-v03.md) 的 P2 段；
+> 逐条设计决定见 [ADR-0017](../adr/0017-plugin-boundary-and-four-prohibitions.md)（插件边界与四禁止项）、
+> [ADR-0018](../adr/0018-tool-approval-frozen-args.md)（工具审批）、[ADR-0019](../adr/0019-news-and-reminder-data-model.md)（新闻与提醒）、
+> [ADR-0020](../adr/0020-provider-three-interfaces-and-mcp-deps.md)（Provider 三接口与 MCP 依赖理由）。
+> **唯一一句不能按「已解决」读的**：四条 live 入口的接线仍未做（入口仍走 `buildToolChain`、没接审批宿主与 durable 提醒、
+> 没配 MCP 服务器）——口径见 P2 段 §4/§5。本文的 §4（MCP）与 §8（Provider 收缩）当年是「完全没有 / 七成员胖接口」，
+> 今天分别是「已交付的 `packages/plugins/mcp`」与「三接口 + 四能力退役」。
+
 ---
 
 ## 0. 怎么读这份地图
@@ -277,6 +287,14 @@ git grep -n -- 'reminder' 767f505 -- packages/domain/src
 ## 8. pack 03 §8：Provider / Harness 接口收缩（BrainAdapter → 三接口）
 
 **结论：三个新接口名今天零命中；`BrainAdapter` 仍是一个七个成员的胖接口（3 个通用成员 + 4 个能力方法），三个实现类都被迫实现那四个「没人调、只会抛」的能力方法。**
+
+> **P2-F 之后（2026-10-04，t15 落笔）**：上面这句是 **`767f505` 的事实**。现在 `BrainAdapter` **不再导出**，
+> 接口拆成三份（`TurnModelProvider` 必须；`MultimodalTurnProvider` 带字面量 `supportsImages: true`；
+> `StructuredInferenceProvider` 带 `inferJson`），下面列的四能力方法**已从接口与三个实现类里一并删除**
+> （不是留着抛 `NOT_IMPLEMENTED`），`NOT_IMPLEMENTED` 这个错误码今天**没有生产者**；
+> 四组类型保留为 retired capability 数据契约并注明真实归属（`ProactiveEngine` / `TurnMemoryExtractor` / `TopicEngine` / 确定性反馈解释，都在 `@xixi/conversation`）。
+> 复核：`git grep -n "TurnModelProvider" -- packages`、`git grep -n "NOT_IMPLEMENTED" -- packages`；
+> 决定与后果见 [ADR-0020](../adr/0020-provider-three-interfaces-and-mcp-deps.md)。**下面几条基线实测保留不动。**
 
 - `packages/brain-adapter/src/types.ts` 的 `BrainAdapter`：`provider` / `describe` / `handleUserTurn` + `evaluateProactiveCandidate` / `interpretFeedback` / `extractMemories` / `reflect`（共七个成员）；
 - 三个实现：`MimoBrainAdapter` / `DshBrainAdapter` / `FakeBrainAdapter`（`implements BrainAdapter` 三处）；

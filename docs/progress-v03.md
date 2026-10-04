@@ -15,12 +15,12 @@
 
 ---
 
-### 0. 总表（P0 + P1）
+### 0. 总表（P0 + P1 + P2）
 
-> **P2（Agent/Plugin Completion）的交付表、gate 实测、未达标项与遗留在本文件末的 P2 段**——
-> 本文件按 Phase 索引，P0/P1 在上、P2 在下，没有合并进这张总表。
+> 本文件按 Phase 索引：P0 → P1 → P2，越靠后越新。**P2 段的逐项交付表、gate 实测、未达标项与遗留在本文件末**，
+> 下面这七行只是索引（同一批交付号，细节见 P2 段与四份 ADR）。
 
-| Phase / 项 | 交付（交付号） | 关键实测（口径与命令见本节对应的 P0 / P1 段） | 遗留 |
+| Phase / 项 | 交付（交付号） | 关键实测（口径与命令见本节对应的 P0 / P1 / P2 段） | 遗留 |
 |---|---|---|---|
 | P0-0 运行时地图 | `docs/v03/ACTUAL_RUNTIME_MAP.md`（`3da7893`） | 十个概念各一条 `git grep`；复核 pack 审计 15 条并给出 4 处与代码不符；`check:docs` 98 份 exit 0 | 地图的 §1/§3 行曾落后于抽取（t16 已按实况更新） |
 | P0-A 运行时抽取 | `packages/runtime/*`（Step A `dbe7f7f`、Step B/C `f577d7b`） | 反向 import `packages`→`scripts` 0 命中；四个入口 `--print-wiring` 除 `entry` 名外只有 1 种 payload；`npm test` 全绿 | 兼容 re-export 仍在 `scripts/field-test.ts`，**不得提前删** |
@@ -30,6 +30,14 @@
 | P0-E 已知缺陷 | B2（`4f3301f`）+ preflight 九项（`e0ce503`） | B2 先写回归测试再修（旧实现下先红）；九项各有一条会红的证据 | 已由 t3/t2 逐项回归；剩两条 low 见 P0 遗留第 5 条（现已补） |
 | P1-a 上下文与检索 | `packages/context/*` + engine/prompt 接线（`d168af7`） | 检索进 `prompt.user`（`- [较确定] 我很喜欢茉莉花茶`）；prompt 审计无 UUID / 内部 id / 长数字 / 调试字段 | 曾不过 → t22 修复 / t23 复审 pass（见 P1 §3） |
 | P1-b 关系/话题/纠正/afterTurn | 迁移 006 + `MemoryStore` 状态 API + `MemoryCorrectionResolver` + `createTurnExtraction`（`7331ae`→`733b1ae`） | 纠正后旧行 `superseded`（带 `supersededBy`）、新行 `active`、旧事实不进 prompt；三入口各有真子进程/真 HTTP 证据 | 疑问句被写成偏好事实（P1 遗留 N3，t22 修复 / t23 复审） |
+| P2-A 插件内核 | `packages/plugins/src/*` + `packages/runtime` 的 `buildPluginRuntime`（`060f1fb` + 修复轮 `9f226b6`） | 九步生命周期 + 五能力 + 四条「插件不能做」各有强制点；`ToolRegistry` 升级不推翻；`node --test` 的 plugins 套件全绿（见 P2 §2 的 131 项细分） | **入口未接线**（P2 §5 四条之一）；`start()` 不幂等、health 快照过期 |
+| P2-C MCP adapter | `packages/plugins/mcp/*`（`c8396e0` + 修复轮 `d407eac`） | SDK v2 真 client+server 走 `InMemoryTransport`；命名空间 `mcp.weather.forecast`；空转零调用（不做高频总线） | 没有对外部/远程服务器的验证；入口没配任何服务器（P2 §4.3） |
+| P2-B 工具审批 | 迁移 007 + `packages/domain/src/approvals.ts` + `packages/runtime/src/tool-approval.ts`（`d64066b` + 修复轮 `f57282d`、`8dfc0bd`） | 冻结参数摘要对不上就 `APPROVAL_MISMATCH` 且零调用；拒绝/到期都不执行且都落审计 | 入口没接 `approvalGate`；manifest 的 tool 级 approval 未实现（P2 §5） |
+| P2-F 接口收缩 | `packages/brain-adapter/src/types.ts` 三接口 + manifest 补 `@xixi/model-adapters`（`19b54b9` + `f2f3af1`） | 四能力从接口与实现一并退役；`packages/brain-adapter` 里 `@deepseek-ai/dsh` 零命中 | 两条接缝（`supportsImages` / `inferJson`）在生产侧**没有消费者** |
+| P2-D 真实 News | `packages/plugins/news/**`（`3ada7cd`） | 三个工具 + `news.topics`；真实 RSS 与公开 JSON API 手动复验（事件日志 `tool_name="news.latest"`）；默认门禁用离线桩 | 入口未接线（P2 §4.1）；真实来源属手动证据 |
+| P2-E durable Reminder | 迁移 008 + `packages/domain/src/reminders.ts` + `packages/runtime/src/reminder-runtime.ts`（`3bd7d3e` + `5336b13`） | 自然语言解析成绝对时刻 + 时区（跨日/跨时区边界有用例）；新进程读得到 `pending`，到点 `pending→due→candidate` 三条事件 | 入口未接 durable sink/scheduler（P2 §4.2）；模型只有 27% 会真的调这个工具（P2 §4.2） |
+| P2-G 上一轮遗留 | `packages/conversation/src/extractor.ts` 的 `lacksObject`（`d573437`） | 「铁观音我平时喜欢」三句从 3 条截断记忆变 0 条、正常句照旧 | 词表之外的宾语前置句仍照写 |
+
 
 > 交付号取自 `git log`；**成员只报基线、不提交代码**，交付号由 captain 提交后回填（AGENTS §9.20）。
 > **表里的「项数 / 耗时」是当次实测（口径＝`npm test` 的 `ℹ tests / pass / fail` 与 `duration_ms`），会随用例增加而变**——
@@ -360,12 +368,18 @@ C:\Users\zz\AppData\Local\Temp\t11-store\xixi.sqlite
 |---|---|
 | `node --version` | `v24.21.0`（`package.json` 的 `engines.node` = `>=24.0.0`） |
 | `npm run check:types` | **exit 0** |
-| `npm test` | **717 项 pass 717 / fail 0 / cancelled 0 / skipped 0 / todo 0**，`duration_ms 45144.0323`，**exit 0**（三条命令同一批跑，外墙钟 47.1 s） |
-| `npm run check:docs` | **104 份 markdown｜失效链接 0｜不存在的文件引用 0｜缺少新鲜度标记 0**，exit 0；**P2 段落笔后再跑一次：105 份 markdown（多的是 t14 报告），三个 0 不变，exit 0** |
+| `npm test` | **717 项 pass 717 / fail 0 / cancelled 0 / skipped 0 / todo 0**，`duration_ms 45144.0323`（t14 复验）→ **P2 收口末次复跑 44643.0 ms、同样 717/717**，**exit 0**（三条命令同一批跑，外墙钟 47.1 / 47.9 s） |
+| `npm run check:docs` | **104 份 markdown｜失效链接 0｜不存在的文件引用 0｜缺少新鲜度标记 0**，exit 0；写入 t14 报告后 105 份；**P2 收口（四份 ADR + 本节 + 全库同步）后 109 份，三个 0 不变，exit 0**——**末次复跑在全部编辑落定之后（HEAD `48e9801`、工作区含本节改动）** |
+| `node scripts/eval-proactive-timeline.ts` | **exit 0、ELAPSED 1702.1 秒（≈28.4 分钟）**；单日五项目标 + F4 分离探针 + 多日 M1–M6 **全部通过**（逐条：主动 11 次在 6~12 内、generic 18.2% ≤ 20%、话题来源 81.8% ≥ 60%、被忽视日 11→5 次降频 54.5%、热聊接话 8 次且最小间隔 4 分钟 < 18；多日 multi-responsive 逐日 8/8/11、multi-unanswered 6/8/8、crossday 跨天追问 10 次） |
 
 - **与上一轮可比**：P0 复验 520 项 / 32929.9 ms；P1 复验 575 项 / 41444 ms；P1 收口 588 项；**P2 = 717 项 / 45144.0 ms**。
   多的 129 项来自 P2 五条线的新用例；`npm test` 的 script 仍是同一组六个 glob（口径没变）。
 - P2 变动面的细分：`node --test` 跑 plugins 内核 + MCP + 提醒 + 审批 + news 工具循环 + 插件工具接线 → **131 项 pass 131 fail 0（4.32 s）**。
+- **多日时间线不回退**（P0+P1 的行为基线）：`node scripts/eval-proactive-timeline.ts` **exit 0、1702.1 秒（≈28.4 分钟）**，
+  单日五项目标 + F4 分离探针 + 多日 M1–M6 全过（输出抬头写明基线修订号 `024cd43`）。
+  **窗口口径两档照旧**：安静机器约 24 分钟（P0/P1 三次实测 1429.5 / 1423.1 / 1425.6 秒），
+  同期有人跑测试约 34 分钟（t16 收口时 2047.5 秒）；本次 28.4 分钟**介于两档之间**——同一时段我在做文档编辑与 `check:docs`（轻负载，没有跑 `npm test`）。
+  纪律不变：**预算给 ≥40 分钟、不要中途掐掉**（单核打满、不是挂死）。
 
 ### 3. 两个场景（真模型 + 真工具执行 + 真文件库；探针在 `.scratch/t14/`）
 
@@ -395,15 +409,37 @@ C:\Users\zz\AppData\Local\Temp\t11-store\xixi.sqlite
 
 ### 5. 边界与遗留（下一轮清单）
 
-- **Tier 2 入口接线**（第 4.1 与 4.2 条的根因）：入口改用 `buildPluginRuntime(config, { news, mcpServers, reminderSink })` 的 `start()`；
-  提示词侧的 `verifyOnAssemble` 仍没有调用点；`ToolApprovalManager` 与 `ReminderScheduler` 也都没有入口调用点。
-  **今天可跑的证据链是「装配点 → `registry.execute` → 真表 → 重启 → tick → 事件」，不是「某个入口已经这样跑」。任何文档都不许写成后者。**
+**P2 的「下一阶段接线项」四条**（缺一条都会让下一个任务以为它已经在守；四条今天**都不成立**）：
+
+1. **四个 live 入口仍走 `buildToolChain`**：`scripts/chat.ts`、`scripts/serve-chat.ts`、`scripts/field-test.ts`、
+   `scripts/voice-turn.ts` 下一步应改成 `buildPluginRuntime(config, { news, mcpServers, reminderSink }).start()`
+   （那是 P2-A/P2-C/P2-D/P2-E 的唯一装配点）。核对：`git grep -n "buildPluginRuntime" -- scripts` 只命中 `probe-tools.ts`。
+2. **提示词装配点没有调 `verifyOnAssemble`**：`packages/conversation` 的 `PromptAssembler` 是唯一调用点，今天没有调用。
+3. **四个 live 入口没有把 `ToolApprovalManager` 接成 `approvalGate`**（t4 估约三行），
+   所以「部署里真的会拦下来」这句话在入口层还不成立。
+4. **manifest 的 tool 级 approval 声明未实现**：今天只有 `config.tools.approval.ask` 在起作用，
+   manifest 自己没有 tool 级 token（`ActionHandler.approval` 只作用于 `action` 能力，而 `action` 还没暴露成工具）。
+   这是**下一轮的一个小任务**：它与 `packages/plugins` 和 `packages/domain/src/config.ts` 都有交集，
+   本轮排它会再串一层依赖，故明确不排。
+
+其余边界与遗留：
+
+- **今天可跑的证据链是「装配点 → `registry.execute` → 真表 → 重启 → tick → 事件」，不是「某个入口已经这样跑」。任何文档都不许写成后者。**
 - **提醒工具的名字与文案已过时**：仍叫 `xixi_set_reminder_stub`，返回文案仍写「到点不会自动响，需要人看一眼」（`git grep -n '到点不会自动响' -- packages`），
   接上 durable sink 之后与事实相反；下一轮改 brain-adapter 时要连描述一起改。
 - **提醒的提示词缺口**（第 4.2 条）：写操作要「先记再答应」，并补一条**离线**的默认门禁用例（今天门禁覆盖工具本身，不覆盖模型是否会选它）。
 - **团队已登记、本次未重复测量的遗留**（只登记）：`PluginRuntimeMount.start()` 不幂等（t19 的 O1）；
-  `manager.instance().health` 是过期快照（handoff 的下一轮清单第 10 条登记）；manifest 的 tool 级 approval 声明未实现（t22 的 F3）；
-  P2-F 的 `supportsImages` / `inferJson` 两条接缝在生产侧没有消费者（t16 的 F4）；
+  `manager.instance().health` 是过期快照（handoff 的下一轮清单第 10 条登记）；
+  P2-F 的 `supportsImages` / `inferJson` 两条接缝在生产侧没有消费者（t16 的 F4，见 ADR-0020 §3）；
   `plugins/xixi-tools/index.js` 仍 import `@deepseek-ai/dsh-tools`，这条铁律 9 的口径需要用户裁定（t17 交回 captain）。
 - **没有独立复验的部分**：MCP 的命名空间/降级/重连细节与插件内核四条「不能做」的强制点，我这次只跑了细分门禁（131 项全绿），
   细节结论仍以 t19/t21 的评审为准。
+
+### 6. ADR（本阶段新落四份）
+
+| ADR | 决定 | 与本文的关系 |
+|---|---|---|
+| [ADR-0017](adr/0017-plugin-boundary-and-four-prohibitions.md) | 插件边界与四条「插件不能做」：manifest 五能力七权限的配对、九步生命周期、每条禁令的强制点、保留命名空间 | P2-A/P2-C 的口径来源；§4.1/§4.2 与 §5 第 1 条 |
+| [ADR-0018](adr/0018-tool-approval-frozen-args.md) | 工具审批模型：七字段 + 四程序事实、摘要化冻结参数、五态与原因码、**恢复语义**（`approve()` 自带到期闸门）、拒绝与到期都落审计 | P2-B；§5 第 3、4 条 |
+| [ADR-0019](adr/0019-news-and-reminder-data-model.md) | 新闻与提醒的数据模型：三个工具 + 四条主动判据 + 账本；八字段表 + 五态 + **时区语义**（按请求时区的当地日历、换时区必须换绝对时刻）+「到点成事件」的口径 | P2-D/P2-E；§3 场景②与 §4.2/§4.4 |
+| [ADR-0020](adr/0020-provider-three-interfaces-and-mcp-deps.md) | Provider 三接口拆分、四能力退役与真实归属、**两条接缝没有消费者**、MCP 的依赖理由与版本选择 | P2-F/P2-C；§5 的遗留与 `docs/design/brain-and-models.md` 的同步依据 |

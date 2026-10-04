@@ -1,15 +1,18 @@
 # 架构（当前实现）
 
-> 最后更新：2026-10-04（V0.3 P0+P1 收口：新增 `packages/runtime` 与 `packages/context`、canonical store（`XIXI_DATA_DIR` → `data/xixi`）、类型门禁与 replay 基础、记忆检索与状态机）
-> 权威来源：`packages/**`、`apps/brain-dsh/**`、`services/{voice-edge,perception-edge}/**`、`scripts/**`、`tests/**`；`docs/progress.md`（结论与数字）、`docs/recon/*`（外部系统实测）、`docs/adr/0001`~`0010`（**不写死区间**：以 `ls docs/adr` 的实际内容为准）
+> 最后更新：2026-10-04（V0.3 P2 收口：插件内核与 MCP 适配器、工具审批、真实 News、durable Reminder、Provider 三接口拆分；
+> 本节新增 §6.2 把「内核已交付」与「入口未接线」分开写）
+> 权威来源：`packages/**`、`apps/brain-dsh/**`、`services/{voice-edge,perception-edge}/**`、`scripts/**`、`tests/**`；`docs/progress.md`（结论与数字）、`docs/progress-v03.md`（各 Phase 的交付与遗留）、`docs/recon/*`（外部系统实测）、`docs/adr/*`（**不写死区间**：以 `ls docs/adr` 的实际内容为准）
 > 若与代码不一致，以代码为准，并请立即修正本文件
 
 **一句话**：西西能听（浏览器麦克风 → 抗噪前端 → VAD → ASR）、能判断该不该说话（确定性 FSM）、能说得像家里人（§26 提示词 + 人格指令）、能不说（§55 沉默）、能在重启后还是同一个西西（事件日志 + 人格基线 + Harness 会话映射），并且**能自己看到有人在不在**（M6 摄像头在场 → `presence.changed` → WorldState 投影）与**自己找话说**（M5-lite 主动循环，全部先过确定性硬门禁）。
 
 本文描述的是**现状**。方案原文 [`../xixi_ai_companion_project_plan.md`](../xixi_ai_companion_project_plan.md) 里的
 **Memory 与 FutureHook 已由 pack Phase 3/4 落地**（未完话题 = `open_threads`；长期记忆 = `episodic_memory` / `semantic_memory` /
-`relationship_notes`；计划类钩子以 `open_threads` 实现）；**唤醒词仍未实现**；WorldState 只落了 `presence.home` 一个键，
-主动候选的模型侧生成（`evaluateProactiveCandidate`）也仍是 `NOT_IMPLEMENTED(M5)`。见 §7。
+`relationship_notes`；计划类钩子以 `open_threads` 实现）；**唤醒词仍未实现**；WorldState 只落了 `presence.home` 一个键。
+主动候选的模型侧生成（`evaluateProactiveCandidate`）自 V0.3 P2-F 起**已从适配器接口与三个实现里移除**
+（不是留着抛异常）——主动候选由确定性路径产出（`ProactiveEngine` + `evaluateProactiveGates`），
+模型只负责读空气；接口现在只有三个（见 §2 与 [ADR-0020](adr/0020-provider-three-interfaces-and-mcp-deps.md)）。见 §7。
 
 ## 1. 仓库里真实存在的部分
 
@@ -18,8 +21,9 @@ packages/contracts/       事件信封 + 6 类 payload schema + fail-closed 校�
 packages/domain/          唯一写 SQLite 的包：events / 会话投影 / 人格基线与学习 / 未完话题 / 记忆与状态机（迁移 006）/ WorldState / 迁移执行器 / 配置 / 时钟
 packages/conversation/    FSM（§12/§13）+ PromptAssembler（§26）+ ConversationEngine（一轮的编排）+ 主动引擎（ADR-0009/0011）
 packages/context/        上下文装配（V0.3 P1）：ContextBuilder（buildUserTurn / buildProactive）、MemoryRetriever（确定性混合排序 + 两道出口闸门）、MemoryCorrectionResolver（纠正闭环）、关系上下文
-packages/runtime/         生产运行时（V0.3 P0-A）：工具链（tool-runtime）、常驻考虑循环与候选构造器（proactive-runtime）、语音共享缝（voice-runtime）、感知入库（perception-ingest）、replay 驱动（replay-runtime）
-packages/brain-adapter/   BrainAdapter 接口 + MimoBrainAdapter（实时）+ DshBrainAdapter + Fake/Scripted 替身 + 只读工具
+packages/plugins/          插件内核（V0.3 P2-A）：manifest 校验 + CapabilityRegistry 五能力 + PluginManager 九步生命周期 + 四条「插件不能做」；子路径 ./mcp 是 MCP 客户端适配器（唯一需要 MCP SDK 的地方），./news 是真实 News 插件
+packages/runtime/         生产运行时（V0.3 P0-A）：工具链（tool-runtime，含 buildPluginRuntime 装配点）、工具审批宿主（tool-approval）、durable 提醒（reminder-runtime）、常驻考虑循环与候选构造器（proactive-runtime）、语音共享缝（voice-runtime）、感知入库（perception-ingest）、replay 驱动（replay-runtime）
+packages/brain-adapter/   TurnModelProvider 接口（+ MultimodalTurnProvider / StructuredInferenceProvider 两个可选面）+ MimoBrainAdapter（实时）+ DshBrainAdapter + Fake/Scripted 替身 + 工具注册表与只读工具
 packages/model-adapters/  MimoClient（chat/chatStream/transcribe/synthesize/chatJson）+ WeatherClient（Open-Meteo）
 apps/brain-dsh/           CliDshTransport（每轮一个 dsh 进程）+ profile patch（MiMo 路由 + 最小插件集）
 plugins/xixi-tools/       DSH 侧工具插件（当前只有 xixi_get_current_time）
@@ -32,19 +36,24 @@ tests/                    unit（含 core/、voice/、context/）/ integration /
 
 只有 `packages/brain-adapter` 与 `apps/brain-dsh` 知道 DSH 存在（`packages/brain-adapter/src/index.ts`、`apps/brain-dsh/src/index.ts`）——铁律 9。
 
-## 2. 两个大脑实现，同一个 `BrainAdapter` 接口
+## 2. 三个大脑实现，同一个 `TurnModelProvider` 接口
 
-接口定义在 [`types.ts`](../packages/brain-adapter/src/types.ts) 的 `BrainAdapter`：`provider`、`describe()`、
-`handleUserTurn()`，以及四个**已声明但抛 `NOT_IMPLEMENTED`** 的能力。
+接口定义在 [`types.ts`](../packages/brain-adapter/src/types.ts)：**必须**实现的只有 `TurnModelProvider`
+（`provider`、`describe()`、`handleUserTurn()`）；另有两个**可选**面——`MultimodalTurnProvider`
+（在 `TurnModelProvider` 之上加字面量 `supportsImages: true`，真能收图的适配器才声明）与
+`StructuredInferenceProvider`（`inferJson()`）。V0.3 P2-F 之前那个七成员的 `BrainAdapter` 已经拆掉：
+四个能力（`evaluateProactiveCandidate` / `interpretFeedback` / `extractMemories` / `reflect`）
+从接口与三个实现里一并**删除**，类型留作 retired capability 数据契约并注明真实归属在 `@xixi/conversation`
+（[ADR-0020](adr/0020-provider-three-interfaces-and-mcp-deps.md)）。
 
 ```mermaid
 flowchart TD
-  E["ConversationEngine.respond()"] -->|"UserTurnInput{prompt}"| I{{"BrainAdapter 接口<br/>provider + describe + handleUserTurn"}}
+  E["ConversationEngine.respond()"] -->|"UserTurnInput{prompt}"| I{{"TurnModelProvider 接口<br/>provider + describe + handleUserTurn"}}
   I --> A["MimoBrainAdapter<br/>provider = 'mimo-direct'"]
   I --> B["DshBrainAdapter<br/>provider = 'dsh'"]
   I --> F["FakeBrainAdapter<br/>provider = 'fake'"]
   A --> A1["MimoClient.chatStream()<br/>https://api.xiaomimimo.com/v1"]
-  A1 --> A2["工具循环 ≤2 轮<br/>程序执行只读工具"]
+  A1 --> A2["工具循环 ≤4 轮（MAX_TOOL_ROUNDS）<br/>经 ToolRegistry.execute：权限/审批/超时都在核心"]
   B --> B1["DshTransport.turn()"]
   B1 --> B2["CliDshTransport<br/>spawn(node, dsh/lib/bin.js --profile xixi --json)"]
   B2 --> B3["profile xixi → llm-pi-ai 路由 mimo → 同一 MiMo 端点"]
@@ -60,7 +69,7 @@ flowchart TD
 | 调用方式 | 每轮 spawn 一个 `dsh` 进程，NDJSON 一次性返回 | 一次 HTTP 流式请求，逐 delta 产出 chunk |
 | 会话记忆 | 交给 DSH：`--session-id` + 落库的 `brain_session_id` | 自己组装 messages：`system` + history + `user`（`#messages()`） |
 | 流式 | 无（整段回复一次性 `splitIntoChunks` 回放） | 有（`chatStream`，首字 0.3~1.2s，`docs/adr/0008`） |
-| 工具 | DSH 插件注册表（`plugins/xixi-tools/index.js`） | 适配器内循环（`#executeTool`，≤2 轮，只读） |
+| 工具 | DSH 插件注册表（`plugins/xixi-tools/index.js`） | 适配器内循环（`#executeTool`，≤4 轮），执行落在 `ToolRegistry.execute`：**权限、审批闸门与超时都不在模型手里** |
 | 实测每轮 | **4~7 秒**（`docs/adr/0008-realtime-path-direct-mimo.md`） | 首字 0.3~1.2s；总时长 P50 2.5s / P95 5.1s（`docs/progress.md` §0） |
 | 提示词 | DSH 自带 agent 框架提示词 + profile patch 的 persona | 完全由 `PromptAssembler` 掌握 |
 | 用在 | `npm run verify:m0` / `verify:provider` / `--dsh` 开关 | `npm run chat`、`npm run web`、`voice:turn`（默认） |
@@ -177,9 +186,11 @@ flowchart LR
   可重跑核对：`node scripts/verify-camera-presence.ts --live --seconds 8`（自报磁盘图像文件 0 个）。
 - **门禁没有被放宽**：循环只提供候选与 `candidate_id`，判定全部走同一条 `ProactiveEngine.consider`
   （核对：`git grep -n "\.consider(" -- scripts packages`）；连续 5 次 tick 里只有 1 条放行（其余被 `QUOTA_DAY_EXCEEDED` 拦）。
-- **M5-lite 的边界**（诚实清单）：候选只来自**事实**（在场、会话悬置、固定时间钩子、话题池、随机闲聊）与
-  **未完话题**（`open_threads`，pack Phase 3：父亲自己说过、还没办完的那件事）；`routine_expected` 目前没有事实源；
-  `evaluateProactiveCandidate`（模型侧候选生成）仍是 `NOT_IMPLEMENTED(M5)`。
+- **M5-lite 的边界**（诚实清单）：候选只来自**事实**（在场、会话悬置、固定时间钩子、话题池、随机闲聊）、
+  **未完话题**（`open_threads`，pack Phase 3：父亲自己说过、还没办完的那件事）与**到点的提醒**
+  （V0.3 P2-E 起，`ReminderScheduler.candidateInputs()`）；`routine_expected` 目前没有事实源。
+  模型侧候选生成（`evaluateProactiveCandidate`）**不是待补的洞**：它已随 P2-F 从适配器接口移除，
+  真实归属是 `ProactiveEngine` / `evaluateProactiveGates`（[ADR-0020](adr/0020-provider-three-interfaces-and-mcp-deps.md)）。
   人格强度默认 `proactivity: 0.85`（阈值 `0.45 + 0.30 × (1 − 0.85) = 0.495`），控制台可调、也可一键关闭循环。
 
 ## 5. 持久化：SQLite 里的表
@@ -188,8 +199,12 @@ flowchart LR
 迁移文件是 [`001_initial.sql`](../packages/domain/src/migrations/001_initial.sql)、
 [`002_world_state.sql`](../packages/domain/src/migrations/002_world_state.sql)、
 [`003_open_threads.sql`](../packages/domain/src/migrations/003_open_threads.sql)、
-[`004_memory.sql`](../packages/domain/src/migrations/004_memory.sql) 与
-[`005_mood.sql`](../packages/domain/src/migrations/005_mood.sql)（有界的心情，第五轮），字段级说明见 [`design/domain-model.md`](design/domain-model.md)。
+[`004_memory.sql`](../packages/domain/src/migrations/004_memory.sql)、
+[`005_mood.sql`](../packages/domain/src/migrations/005_mood.sql)（有界的心情，第五轮）、
+[`006_memory_status.sql`](../packages/domain/src/migrations/006_memory_status.sql)（P1 记忆状态机）、
+[`007_tool_approvals.sql`](../packages/domain/src/migrations/007_tool_approvals.sql)（P2-B 待批工具调用）与
+[`008_reminders.sql`](../packages/domain/src/migrations/008_reminders.sql)（P2-E durable 提醒），
+字段级说明见 [`design/domain-model.md`](design/domain-model.md)（**迁移只新增、不改写已发布的那几份**，铁律 10）。
 
 | 表 | 角色 | 关键列 |
 |---|---|---|
@@ -286,21 +301,41 @@ scripts/*              入口与 UI（chat / serve-chat / field-test / voice-tur
    Node 侧 `ingestPerceptionLine` 校验 → `XixiStore.appendPresenceEvent`（事件 + `world_state` 投影
    **同一事务**）→ 下一次考虑循环读到 `presence.home`。单写者：Python 与 Node 不再各写一个库。
 
+### 6.2 V0.3 P2（Agent/Plugin Completion）新增的装配面与**接线状态**
+
+**「内核已交付」与「入口已接线」必须分开写**——这是本节存在的理由（`check:docs` 看不见语义漂移，
+t14 复验实测过：入口里问「今天有什么新闻？」根本没有新闻工具可选）。
+
+| 面 | 交付物（定义处） | 已交付到什么程度 | 入口接线状态 |
+|---|---|---|---|
+| 插件内核 | `packages/plugins/src/*`（manifest / CapabilityRegistry / PluginManager 九步） | 内核完整 + `buildPluginRuntime().start()` 跑生命周期的同时把插件工具挂进模型可见的工具链 | **未接线**：四个 live 入口仍只调 `buildToolChain` |
+| MCP 适配器 | `packages/plugins/mcp/*`（SDK v2，子路径导出） | discover → normalize → 命名空间 `mcp.<server>.<tool>` → `ToolRegistry`；连不上与空列表都不崩、可重连；不做高频总线 | **未接线**：`git grep -n 'mcpServers' -- scripts` 零命中，**没有任何入口配置过 MCP 服务器**；证据是 SDK v2 真 client + 真 server 走 `InMemoryTransport` |
+| 工具审批 | 迁移 007 + `packages/domain/src/approvals.ts` + `packages/runtime/src/tool-approval.ts` | 待批落库 + 冻结参数摘要 + 点头后执行冻结调用 + 拒绝/到期落审计（[ADR-0018](adr/0018-tool-approval-frozen-args.md)） | **未接线**：入口没有把 `ToolApprovalManager` 接成 `approvalGate`；manifest 的 tool 级 approval 声明也未实现 |
+| 真实 News | `packages/plugins/news/*` | 三个工具 + `news.topics`；RSS / 公开 JSON API / web search / 离线桩四种来源（[ADR-0019](adr/0019-news-and-reminder-data-model.md)） | **未接线**：入口的工具链里没有 `news.*` |
+| durable Reminder | 迁移 008 + `packages/domain/src/reminders.ts` + `packages/runtime/src/reminder-runtime.ts` | 八字段表 + 五态 + 自然语言解析成绝对时刻与时区 + 到点写 `reminder.changed`（[ADR-0019](adr/0019-news-and-reminder-data-model.md)） | **未接线**：入口没有接 `DurableReminderSink` 与 `ReminderScheduler`（工具被调用时落的是内存 sink） |
+
+**一条可跑的证据链（不是「某个入口已经这样跑」）**：
+`buildPluginRuntime(config, { news, mcpServers, reminderSink })` → `start()` → `definitionsForRound` 里看得到插件工具
+→ `registry.execute` → 真表 → **新进程**读得到 → `ReminderScheduler.tick()` → `reminder.changed` 事件 → 主动路径读 `candidateInputs()`。
+四个 live 入口的接线是**下一阶段第一件事**，完整四条清单见 [`progress-v03.md`](progress-v03.md) 的 P2 段 §5。
+
 ## 7. 明确**未实现**的部分，以及将来插在哪里
 
 | 未实现 | 现状证据 | 将来插在哪 |
 |---|---|---|
 | **WorldState 的其余部分** | `world_state` 表与 `presence.home` 一个键**已落地**（`002_world_state.sql`、`XixiStore.worldState()`）；其余领域状态（房间、活动、日程）无写入方 | M6 之后的里程碑：同一张表加点分命名空间即可，不需要改表结构 |
-| **Memory 的模型侧**（`BrainAdapter.extractMemories` / `reflect`） | **确定性侧已落地**（pack Phase 4：`TurnMemoryExtractor` + `episodic_memory` / `semantic_memory` / `relationship_notes` / `self_profile_learned` / `session_overrides` 与 `open_threads`）；**V0.3 P1 又落了读侧**——`MemoryRetriever` 每轮注入 3~8 条带 `provenance` 的记忆、`MemoryCorrectionResolver` 让旧事实可被取代（迁移 006 的状态机）；**模型侧那两个方法仍抛 `NOT_IMPLEMENTED(M4)`，全仓无调用方** | M4 的模型侧：`MemoryCandidate` / `ReflectionResult` 形状已固定；记忆的查看/编辑/删除 UI 仍未做（`MemoryStore.snapshot()` 在生产入口没有调用方） |
-| **计划类钩子（FutureHook）** | 以 `open_threads`（pack Phase 3）实现：从父亲自己说的话里提取「将来要做的一件事」，收口判据与窗口见 `progress.md` §2.19 | 模型侧反思产出的 `futureHooks` 仍属未实现的 `reflect()` |
-| **主动候选的模型侧生成**（`evaluateProactiveCandidate`） | **确定性门禁与投递已落地**（`packages/conversation/src/proactive.ts`）；模型侧 API 仍抛 `NOT_IMPLEMENTED(M5)`，全仓无调用方 | M5：候选来自事实（在场 / 会话悬置 / 时间钩子 / 话题池 / 随机闲聊）与未完话题；`routine_expected` 还没有事实源 |
+| **Memory 的模型侧**（旧接口的 `extractMemories` / `reflect`） | **确定性侧已落地**（pack Phase 4：`TurnMemoryExtractor` + `episodic_memory` / `semantic_memory` / `relationship_notes` / `self_profile_learned` / `session_overrides` 与 `open_threads`）；**V0.3 P1 又落了读侧**——`MemoryRetriever` 每轮注入 3~8 条带 `provenance` 的记忆、`MemoryCorrectionResolver` 让旧事实可被取代（迁移 006 的状态机）；**那两个方法已在 V0.3 P2-F 从接口与三个实现里移除**（不是「仍抛 `NOT_IMPLEMENTED`」），类型留作 retired capability 并注明归属 `TurnMemoryExtractor` / `TopicEngine` | 记忆的查看/编辑/删除 UI 仍未做（`MemoryStore.snapshot()` 在生产入口没有调用方）；模型侧反思若要落地，位置在新拆出的 `StructuredInferenceProvider` 之上，而不是复活旧接口 |
+| **计划类钩子（FutureHook）** | 以 `open_threads`（pack Phase 3）实现：从父亲自己说的话里提取「将来要做的一件事」，收口判据与窗口见 `progress.md` §2.19 | 模型侧反思产出的 `futureHooks` 属未实现的能力（旧 `reflect()` 已退役，见 [ADR-0020](adr/0020-provider-three-interfaces-and-mcp-deps.md)） |
+| **主动候选的模型侧生成** | **确定性门禁与投递已落地**（`packages/conversation/src/proactive.ts`）；`evaluateProactiveCandidate` **已在 P2-F 退役**（接口与三个实现里都没有它了），全仓仍无调用方 | 候选来自事实（在场 / 会话悬置 / 时间钩子 / 话题池 / 随机闲聊）、未完话题与**到点的提醒**（P2-E）；`routine_expected` 还没有事实源 |
 | **唤醒词 / 搭话判定（§13 完整版）** | 无代码；`config/xixi.example.yaml` 的 `features.wake_word: false`，试用页用「发送 / 按住🎤」按钮当作直呼 | M2：ADR-0007 已实测两个语音框架**都无法区分电视与真人**，必须自己做（唤醒词 + 说话人相似度 + 会话状态 + 语义承接融合） |
 | **人格学习里「读自由文本」那一路** | 显式纠正与白名单推断码的学习已落地（pack Phase 4，权重只乘一次）；**不读模型自由文本**（铁律 5） | 不计划做：白名单码就是设计上的边界 |
 | **事件回放（§22.3）** | **已落地**（V0.3 P0-D）：`tests/replay/` 有 JSON 脚本 + 注入 Clock 的行为回放（对话 / 在场 / 跨天未完话题三条基线），驱动在 `packages/runtime/src/replay-runtime.ts` | 传感器类事件（`sensor.observation`、音频与图像夹具）按 pack §4 留到 V0.3 之后 |
 | **常驻语音服务** | **runner** 已有常驻 Python worker（`scripts/verify-voice-noise.ts`，回退 `XIXI_VAD_ONESHOT=1`）；**生产入口**仍是每次一进程 | 下一步：把生产入口也换成常驻进程，去掉冷启动 |
 | **`tsc --noEmit` 类型检查** | **已落地**（V0.3 P0-C）：`tsconfig.base.json` + `tsconfig.json`（覆盖 packages / apps / scripts / services / tests），`npm run check:types` 是门禁；CI 顺序＝先 `check:types` 再 `npm test` | —（已做，见 [`testing.md`](testing.md)） |
 
-未实现能力的**签名已经固定**，调用时抛带 `milestone` 的类型化错误——诚实的缺口，不是静默的桩函数。
+上表里还**没有实现**的项，签名都在代码里，不会静默失败：DSH 路径的能力缺失会抛带 `milestone` 的类型化错误
+（`BrainError('NOT_IMPLEMENTED')`）。**注意反过来的情况**：P2-F 退役的四个能力不是「未实现的签名」，
+它们已经从接口里消失（见 §2 与 [ADR-0020](adr/0020-provider-three-interfaces-and-mcp-deps.md)）。
 
 ## 维护规则
 
