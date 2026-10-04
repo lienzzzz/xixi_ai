@@ -162,6 +162,14 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    但三条断言旧值的测试不在 inScope（`tests/unit/domain.test.ts`、`tests/unit/core/proactive-gates.test.ts`、
    `tests/console/proactive-console.test.ts`），于是**任务必然 failed**。
    **派单前先 `git grep` 那个值**，把命中的测试文件一并列入 inScope。
+   **子规则（V0.3 P2 的 t4 与 t8 两次同类换来）：加迁移的任务，两处钉死「已发布迁移清单」的测试文件必须都进 inScope。**
+   仓库里有**两处**把已发布迁移列表钉成字面量的断言：`tests/perception/world-state-projection.test.ts` **与**
+   `tests/unit/domain.test.ts`。captain 在 P2 里**两次**写 inScope 时都只点名了前者（t4 加 `007_tool_approvals.sql`、
+   t8 加 `008_reminders.sql`）：t4 那次只能靠 §9.2 披露收场，t8 这次则**直接把别人（t20）的收口挡住**——
+   全队 `npm test` 唯一一条红就是它，而 t20 无法在自己的窗口里变绿。
+   **纪律**：① **先 `git grep 'migrations'` / `git grep '004_memory'` 之类找出所有钉死点**，不要凭记忆写；
+   ② 派单时把这两条路径**都**写进 inScope 与验收（`tests/perception/world-state-projection.test.ts` 与
+   `tests/unit/domain.test.ts`）；③ 迁移号要**串行点名**（t4 的 007、t8 的 008），别让两条并行任务同时声称一个号。
    **amend 只替换你显式给出的字段**：把某个路径加进 inScope 之后，**必须同时检查 outOfScope 是否还禁止着它**
    （captain 本轮就把 `packages/conversation/src/engine.ts` 加进 inScope，却留着 outOfScope 里的 `packages/`，
    自相矛盾——成员会不知道该不该改）。**加完 inScope 要重读一遍整份契约。**
