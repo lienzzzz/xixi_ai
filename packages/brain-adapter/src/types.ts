@@ -68,6 +68,14 @@ export interface BrainImageInput {
 export interface UserTurnInput {
   readonly sessionId: string;
   readonly text: string;
+  /**
+   * Who is speaking, from the program's point of view (V0.3 P2-B). Optional: an entry that has no
+   * identity resolution yet leaves it out, and a pending approval records `unknown` instead of
+   * guessing. The model never supplies these — it cannot claim to be someone (铁律 1/8).
+   */
+  readonly actorId?: string;
+  /** The event that started this turn, so a durable record can point back at it (`source_event_id`). */
+  readonly sourceEventId?: string;
   readonly context?: BrainContext;
   /**
    * Prompt assembled by the conversation layer (§26), if the caller owns it.

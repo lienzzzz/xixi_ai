@@ -180,6 +180,22 @@ xixi:
     continuous_video_cloud_upload: false
     store_raw_audio: false
 
+  # 工具面（V0.3 P2-B，pack `docs/03_AGENT_PLUGIN.md` §5 工具审批）。
+  # 本段**已被代码读取**：`packages/domain/src/approvals.ts` 的 `parseToolApprovalSettings` 读它，
+  # `@xixi/runtime` 的 `buildToolChain` / `buildPluginRuntime` 用它构造 `ToolPermission.askTools`
+  # （改这里的名字会真的改变「哪些工具要先问一句」；插件工具与四个内置工具走同一份策略）。
+  #
+  # 语义（pack §5 的流程）：模型发起 tool_call → 权限判定为 ask → **持久化一条待批请求**
+  # （007_tool_approvals.sql 的表 + tool.approval.changed 事件）→ 西西自然问一句 →
+  # 用户点头 → 执行**当时冻结的那一组参数** → 结果写回对话日志；拒绝或过期都**不执行**、都落审计。
+  #
+  # 「没声明就不该 ASK」：`ask` 为空（默认）时没有任何工具需要审批。审批与权限一样要先声明，
+  # 不做「看起来危险就先问一句」的自动推断 —— 那会让每个部署凭空多出一步人工确认。
+  tools:
+    approval:
+      ask: []            # 需要人工确认的工具名，精确匹配；例如写 ["xixi_set_reminder_stub"]
+      ttl_seconds: 300   # 待批请求的有效期（秒）：过期不执行，落 approval_expired
+
   features:
     wake_word: false        # M1 先用按钮，M2 再启用
     speaker_verification: false

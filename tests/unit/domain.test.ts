@@ -412,6 +412,10 @@ test('004_memory 是新增迁移：四张表落地，旧库照旧能打开', () 
       // V0.3 P1-b：记忆的状态机（语义记忆加 status / superseded_by / status_changed_at 三列 +
       // 一个按状态的索引）。只新增列，004 的文件一字未动。
       '006_memory_status.sql',
+      // V0.3 P2-B：工具审批（pack 03 §5）新增 `tool_approvals` 一张表 + 两个索引。
+      // 同样是**新增**：001–006 六个文件一字未动（另一份同样的清单在
+      // tests/perception/world-state-projection.test.ts 里，两处一起更新才是完整的防线）。
+      '007_tool_approvals.sql',
     ],
     '已发布的迁移只能新增，不能改写（005_mood 是第五轮 t4 新增的心情表）',
   );

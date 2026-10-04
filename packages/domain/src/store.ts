@@ -29,6 +29,16 @@ import {
 } from './memory.ts';
 import { migrate, type AppliedMigration } from './migrations.ts';
 import {
+  buildToolApprovalEvent,
+  newApprovalId,
+  type NewToolApproval,
+  type ToolApproval,
+  type ToolApprovalChange,
+  type ToolApprovalQuery,
+  type ToolApprovalStatus,
+  type TransitionToolApprovalOptions,
+} from './approvals.ts';
+import {
   OPEN_THREAD_SETTLED_STATUSES,
   type NewOpenThread,
   type OpenThread,
@@ -464,6 +474,28 @@ interface OpenThreadRow {
   last_offered_at: string | null;
   source_event_id: string | null;
   note: string | null;
+}
+
+interface ToolApprovalRow {
+  approval_id: string;
+  schema_version: number;
+  session_id: string;
+  actor_id: string;
+  tool_name: string;
+  frozen_args: string;
+  frozen_args_digest: string;
+  scope: string;
+  timezone: string;
+  status: string;
+  reason_code: string | null;
+  source_event_id: string | null;
+  requested_at: string;
+  expires_at: string;
+  decided_at: string | null;
+  decided_by: string | null;
+  executed_at: string | null;
+  outcome_ok: number | null;
+  outcome_error: string | null;
 }
 
 interface EpisodicMemoryRow {
@@ -1595,6 +1627,166 @@ export class XixiStore {
     });
   }
 
+  // ------------------------------------------------- 工具审批（pack Phase 2 §5）
+  //
+  // 一条待批请求 = 表里一行 + 日志里的 `tool.approval.changed`。两者在同一事务里写：
+  // 「谁在等谁点头」重启后不会丢，也不会重复执行已经做过的外部动作（AGENTS.md §3）。
+  // 冻结参数只存表（`frozen_args`），日志里只留摘要 —— 日志是事实与判定，不是第二份用户数据。
+
+  /** 记一条待批请求（`pending`）：表 + `approval_requested` 事件，同一事务。 */
+  insertToolApproval(input: NewToolApproval): ToolApprovalChange {
+    this.#assertOpen();
+    const at = input.requestedAt ?? this.#now();
+    const approval: ToolApproval = {
+      approvalId: input.approvalId ?? newApprovalId(),
+      sessionId: input.sessionId,
+      actorId: input.actorId,
+      toolName: input.toolName,
+      frozenArgs: input.frozenArgs,
+      frozenArgsDigest: input.frozenArgsDigest,
+      scope: input.scope,
+      timezone: input.timezone,
+      status: 'pending',
+      reasonCode: input.reasonCode ?? 'approval_requested',
+      sourceEventId: input.sourceEventId ?? null,
+      requestedAt: at,
+      expiresAt: input.expiresAt,
+      decidedAt: null,
+      decidedBy: null,
+      executedAt: null,
+      outcomeOk: null,
+      outcomeError: null,
+    };
+    return this.#transaction(() => {
+      this.#db
+        .prepare(
+          `INSERT INTO tool_approvals (
+             approval_id, schema_version, session_id, actor_id, tool_name, frozen_args,
+             frozen_args_digest, scope, timezone, status, reason_code, source_event_id,
+             requested_at, expires_at, decided_at, decided_by, executed_at, outcome_ok, outcome_error
+           ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL)`,
+        )
+        .run(
+          approval.approvalId,
+          approval.sessionId,
+          approval.actorId,
+          approval.toolName,
+          JSON.stringify(approval.frozenArgs),
+          approval.frozenArgsDigest,
+          approval.scope,
+          approval.timezone,
+          approval.reasonCode,
+          approval.sourceEventId,
+          approval.requestedAt,
+          approval.expiresAt,
+        );
+      const event = this.appendEvent(
+        buildToolApprovalEvent(approval, 'pending', approval.reasonCode ?? 'approval_requested', at, 'tools'),
+      );
+      return { approval, event };
+    });
+  }
+
+  toolApproval(approvalId: string): ToolApproval | null {
+    this.#assertOpen();
+    const row = this.#db.prepare('SELECT * FROM tool_approvals WHERE approval_id = ?').get(approvalId) as unknown;
+    return row === undefined ? null : toToolApproval(row as ToolApprovalRow);
+  }
+
+  /** 状态过滤（默认全部），最近的在前；`sessionId` 可再收窄。 */
+  toolApprovals(query: ToolApprovalQuery = {}): ToolApproval[] {
+    this.#assertOpen();
+    const wanted: ToolApprovalStatus[] = query.status === undefined ? [] : typeof query.status === 'string' ? [query.status] : [...query.status];
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (wanted.length > 0) {
+      clauses.push(`status IN (${wanted.map(() => '?').join(', ')})`);
+      params.push(...wanted);
+    }
+    if (query.sessionId !== undefined) {
+      clauses.push('session_id = ?');
+      params.push(query.sessionId);
+    }
+    params.push(Math.max(1, Math.floor(query.limit ?? Number.MAX_SAFE_INTEGER)));
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM tool_approvals ${clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`}
+         ORDER BY requested_at DESC, approval_id ASC
+         LIMIT ?`,
+      )
+      .all(...params) as unknown as ToolApprovalRow[];
+    return rows.map(toToolApproval);
+  }
+
+  /**
+   * 迁移一条待批请求的状态。已经是目标状态时返回 `{ approval, event: null }`（幂等，不写事件）。
+   *
+   * 允许的迁移只有 `pending → approved | denied | expired` 与 `approved → executed`（外加
+   * `approved → denied`：执行时发现冻结参数对不上，这次同意作废）；终态不许回退，
+   * 被拒绝的不许改成同意，已经执行过的不许再执行一次（「不得重复执行已发出的外部动作」）。
+   */
+  transitionToolApproval(
+    approvalId: string,
+    status: ToolApprovalStatus,
+    options: TransitionToolApprovalOptions = {},
+  ): ToolApprovalChange {
+    this.#assertOpen();
+    const current = this.toolApproval(approvalId);
+    if (current === null) {
+      throw new DomainError('UNKNOWN_TOOL_APPROVAL', `no tool approval ${approvalId}`);
+    }
+    if (current.status === status) return { approval: current, event: null };
+    const allowed =
+      current.status === 'pending'
+        ? ['approved', 'denied', 'expired']
+        : current.status === 'approved'
+          ? // 已经点过头、但执行时发现冻结参数对不上（行被改过）：这次同意作废，落 denied。
+            // 除此之外 approved 只能走向 executed —— 「不得重复执行已发出的外部动作」。
+            ['executed', 'denied']
+          : [];
+    if (!allowed.includes(status)) {
+      throw new DomainError(
+        'INVALID_TOOL_APPROVAL',
+        `approval ${approvalId} is ${current.status}; cannot move it to ${status}`,
+      );
+    }
+    const at = options.at === undefined ? this.#now() : toOffsetIso(options.at);
+    const decided = status === 'approved' || status === 'denied' || status === 'expired';
+    const next: ToolApproval = {
+      ...current,
+      status,
+      reasonCode: options.reasonCode ?? current.reasonCode,
+      decidedAt: decided ? at : current.decidedAt,
+      decidedBy: decided ? (options.actorId ?? current.decidedBy) : current.decidedBy,
+      executedAt: status === 'executed' ? at : current.executedAt,
+      outcomeOk: status === 'executed' ? options.outcomeOk ?? null : current.outcomeOk,
+      outcomeError: status === 'executed' ? options.outcomeError ?? null : current.outcomeError,
+    };
+    return this.#transaction(() => {
+      this.#db
+        .prepare(
+          `UPDATE tool_approvals
+              SET status = ?, reason_code = ?, decided_at = ?, decided_by = ?,
+                  executed_at = ?, outcome_ok = ?, outcome_error = ?
+            WHERE approval_id = ?`,
+        )
+        .run(
+          next.status,
+          next.reasonCode,
+          next.decidedAt,
+          next.decidedBy,
+          next.executedAt,
+          next.outcomeOk === null ? null : next.outcomeOk ? 1 : 0,
+          next.outcomeError,
+          next.approvalId,
+        );
+      const event = this.appendEvent(
+        buildToolApprovalEvent(next, status, next.reasonCode ?? status, at, options.source ?? 'tools'),
+      );
+      return { approval: next, event };
+    });
+  }
+
   // ----------------------------------------------- long-term memory (pack Phase 4)
   //
   // 记忆是**推导**（铁律 4）：这些表只存程序提炼出来的东西，每行带 source_event_id 指回原始轮次。
@@ -2118,6 +2310,37 @@ function toOpenThread(row: OpenThreadRow): OpenThread {
     lastOfferedAt: row.last_offered_at,
     sourceEventId: row.source_event_id,
     note: row.note,
+  };
+}
+
+/**
+ * 一行 `tool_approvals` → 领域对象。冻结参数正文只在表里，所以读的时候才解析；
+ * 解析失败说明这一行被外部改坏了，宁可抛错也不要拿半个参数去执行（执行是不可逆的那一半）。
+ */
+function toToolApproval(row: ToolApprovalRow): ToolApproval {
+  const parsed: unknown = JSON.parse(row.frozen_args);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new DomainError('INVALID_TOOL_APPROVAL', `approval ${row.approval_id} has unreadable frozen_args`);
+  }
+  return {
+    approvalId: row.approval_id,
+    sessionId: row.session_id,
+    actorId: row.actor_id,
+    toolName: row.tool_name,
+    frozenArgs: parsed as Record<string, unknown>,
+    frozenArgsDigest: row.frozen_args_digest,
+    scope: row.scope,
+    timezone: row.timezone,
+    status: row.status as ToolApprovalStatus,
+    reasonCode: row.reason_code,
+    sourceEventId: row.source_event_id,
+    requestedAt: row.requested_at,
+    expiresAt: row.expires_at,
+    decidedAt: row.decided_at,
+    decidedBy: row.decided_by,
+    executedAt: row.executed_at,
+    outcomeOk: row.outcome_ok === null ? null : row.outcome_ok === 1,
+    outcomeError: row.outcome_error,
   };
 }
 

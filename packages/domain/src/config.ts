@@ -58,6 +58,12 @@ export interface XixiConfig {
   readonly memory: Record<string, unknown>;
   readonly privacy: Record<string, unknown>;
   readonly features: Record<string, unknown>;
+  /**
+   * 工具面（V0.3 P2-B，pack `03_AGENT_PLUGIN.md` §5）。可选：缺段 = **没有任何工具需要审批**
+   * （`parseToolApprovalSettings` 的出厂默认）。今天这一段只有 `approval.ask` 与
+   * `approval.ttl_seconds` 两个键——「没声明就不该 ASK」是从这里落到 `ToolPermission` 的。
+   */
+  readonly tools?: Record<string, unknown>;
 }
 
 function fail(problem: string, file: string): never {
@@ -157,6 +163,7 @@ export function parseXixiConfig(source: string, file = '<inline>'): XixiConfig {
     memory: section(xixi, 'memory', file),
     privacy: section(xixi, 'privacy', file),
     features: section(xixi, 'features', file),
+    tools: optionalSection(xixi, 'tools'),
   };
 }
 

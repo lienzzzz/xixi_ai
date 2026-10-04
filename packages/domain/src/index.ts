@@ -3,6 +3,22 @@
  * baseline. This is the only package that opens SQLite.
  */
 export { type Clock, fixedClock, systemClock } from './clock.ts';
+export {
+  DEFAULT_TOOL_APPROVAL_SETTINGS,
+  TOOL_APPROVAL_REASON_CODES,
+  TOOL_APPROVAL_STATUSES,
+  ToolApprovalStore,
+  approvalExpiry,
+  parseToolApprovalSettings,
+  type NewToolApproval,
+  type ToolApproval,
+  type ToolApprovalChange,
+  type ToolApprovalQuery,
+  type ToolApprovalReasonCode,
+  type ToolApprovalSettings,
+  type ToolApprovalStatus,
+  type TransitionToolApprovalOptions,
+} from './approvals.ts';
 export { loadXixiConfig, parseXixiConfig, type XixiConfig } from './config.ts';
 export { DomainError, type DomainErrorCode } from './errors.ts';
 export {

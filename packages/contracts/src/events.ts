@@ -67,6 +67,12 @@ export const EVENT_TYPES: readonly EventTypeDefinition[] = Object.freeze([
     '一条「没聊完的事」的状态变化（candidate/offered/engaged/resolved/snoozed/exhausted）；pack Phase 3。',
     'events/open_thread.changed.v1.json',
   ),
+  define(
+    'tool.approval.changed',
+    1,
+    '一条待批工具调用的状态变化（pending/approved/denied/expired/executed）；pack Phase 2 §5。',
+    'events/tool.approval.changed.v1.json',
+  ),
   define('system.health', 1, '服务健康状态；用于故障降级与可观测性。', 'events/system.health.v1.json'),
 ]);
 

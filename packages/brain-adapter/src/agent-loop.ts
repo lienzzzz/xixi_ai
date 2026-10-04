@@ -79,8 +79,19 @@ export interface AgentLoopOptions {
    *
    * The clock is injectable for the same reason the adapters have one: an offline test with a fixed
    * clock must stay reproducible.
+   *
+   * V0.3 P2-B adds three **identity** fields next to the clock: `sessionId`, `actorId` and
+   * `sourceEventId`. They are forwarded verbatim into every tool's `ToolExecutionContext`, where the
+   * approval gate reads them (a pending approval must name its session and its actor). Like the
+   * clock, they come from the entry, never from the model.
    */
-  readonly context: { readonly timezone: string; readonly clock: () => Date };
+  readonly context: {
+    readonly timezone: string;
+    readonly clock: () => Date;
+    readonly sessionId?: string;
+    readonly actorId?: string;
+    readonly sourceEventId?: string;
+  };
 }
 
 /**
@@ -137,6 +148,11 @@ export async function* runAgentLoop(
         // Read per call, after the model round that asked for it: 「现在几点」 must be the moment
         // the tool runs, not the moment the turn started (preflight ⑨).
         now: options.context.clock(),
+        // Identity of the turn (P2-B): the approval gate turns these into `session_id`/`actor_id`
+        // on the pending record and keeps `source_event_id` for whoever resumes the call.
+        ...(options.context.sessionId === undefined ? {} : { sessionId: options.context.sessionId }),
+        ...(options.context.actorId === undefined ? {} : { actorId: options.context.actorId }),
+        ...(options.context.sourceEventId === undefined ? {} : { sourceEventId: options.context.sourceEventId }),
       });
       usedTools.push(execution.record.name);
       yield { type: 'tool', name: execution.record.name };

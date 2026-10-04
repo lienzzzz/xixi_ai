@@ -314,7 +314,14 @@ export class MimoBrainAdapter implements MultimodalTurnProvider, StructuredInfer
         const iterator = runAgentLoop(step, messages, {
           registry: adapter.#registry,
           scope: adapter.#scope,
-          context: { timezone: adapter.#timezone, clock: adapter.#now },
+          context: {
+            timezone: adapter.#timezone,
+            clock: adapter.#now,
+            // P2-B: the turn's identity reaches the tool execution context (approval needs it).
+            sessionId: input.sessionId,
+            ...(input.actorId === undefined ? {} : { actorId: input.actorId }),
+            ...(input.sourceEventId === undefined ? {} : { sourceEventId: input.sourceEventId }),
+          },
         });
         let outcome: AgentLoopResult;
         for (;;) {

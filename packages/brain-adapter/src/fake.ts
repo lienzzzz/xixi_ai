@@ -133,6 +133,9 @@ const CANNOT_LOOK_IT_UP = '这件事我现在查不到，晚点再说吧。';
  * (`xixi_*`, JSON, argument names) can end up in something a person hears.
  */
 export function sayToolResult(name: string, payload: Record<string, unknown>): string {
+  // pack §5 的中间一步：这次调用**没有跑**，它在等人点头。离线替身也要「自然地问一句」，
+  // 而不是说「查不到」—— 否则「审批流程真的走通了」在离线门禁里就看不出来。
+  if (payload.requiresApproval === true) return '这件事我得先问一句：要我帮你做吗？';
   if (typeof payload.error === 'string') return CANNOT_LOOK_IT_UP;
   switch (name) {
     case 'xixi_get_weather': {
@@ -281,7 +284,14 @@ export class FakeBrainAdapter implements TurnModelProvider {
       const iterator = runAgentLoop(step, messages, {
         registry,
         scope: adapter.#scope,
-        context: { timezone: adapter.#timezone, clock: adapter.#now },
+        context: {
+          timezone: adapter.#timezone,
+          clock: adapter.#now,
+          // P2-B: the turn's identity reaches the tool execution context (approval needs it).
+          sessionId: input.sessionId,
+          ...(input.actorId === undefined ? {} : { actorId: input.actorId }),
+          ...(input.sourceEventId === undefined ? {} : { sourceEventId: input.sourceEventId }),
+        },
       });
       let outcome: AgentLoopResult;
       for (;;) {

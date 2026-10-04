@@ -47,6 +47,10 @@ test('002_world_state is a new, additive migration', () => {
   //
   // V0.3 P1-b：记忆的状态机新增 `006_memory_status.sql`（只给 `semantic_memory` 加三列
   // status / superseded_by / status_changed_at 与一个按状态的索引，没有改写任何已发布的文件）。
+  //
+  // V0.3 P2-B：工具审批新增 `007_tool_approvals.sql`（`tool_approvals` 一张表 + 两个索引，
+  // 见 pack `03_AGENT_PLUGIN.md` §5 与 `docs/v03/P2_PLUGIN_GAP_MAP.md`）。同样是**新增**：
+  // 001–006 六个文件一字未动。
   assert.deepEqual(
     files.map((file) => file.name),
     [
@@ -56,6 +60,7 @@ test('002_world_state is a new, additive migration', () => {
       '004_memory.sql',
       '005_mood.sql',
       '006_memory_status.sql',
+      '007_tool_approvals.sql',
     ],
     '已发布的迁移只能新增，不能改写',
   );
