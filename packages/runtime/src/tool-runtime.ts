@@ -13,10 +13,25 @@
  *
  * The four built-ins, the permission policy and the round cap are unchanged: this file only
  * flattens `ToolChainOptions` into `createToolRegistry`'s inputs, exactly as before.
+ *
+ * V0.3 P2-A adds one thing above that: `mountPluginTools` / `buildPluginRuntime`, the **one**
+ * place where the plugin kernel (`@xixi/plugins`) and the tool chain meet. Nothing about the
+ * existing chain changes — a plugin tool is copied into the same registry the four built-ins live
+ * in, so it is subject to the same permission policy, round cap and timeout.
  */
-import { createToolRegistry, type AgentScope, type NewsProvider, type ReminderSink, type ToolCallRecord, type ToolRegistry } from '@xixi/brain-adapter';
+import {
+  createToolRegistry,
+  ToolPermission,
+  type AgentScope,
+  type NewsProvider,
+  type ReminderSink,
+  type ToolCallRecord,
+  type ToolPermissionPolicy,
+  type ToolRegistry,
+} from '@xixi/brain-adapter';
 import type { XixiConfig } from '@xixi/domain';
 import type { WeatherClient } from '@xixi/model-adapters';
+import { createPluginRuntime, type PluginAuditRecord, type PluginRuntime, type PluginSource } from '@xixi/plugins';
 
 /**
  * The agent scope a conversation runs in.
@@ -58,4 +73,47 @@ export function buildToolChain(config: XixiConfig, options: ToolChainOptions = {
     ...(options.maxToolRounds === undefined ? {} : { maxToolRounds: options.maxToolRounds }),
     ...(options.onToolCall === undefined ? {} : { onToolCall: options.onToolCall }),
   });
+}
+
+export interface PluginChainOptions extends ToolChainOptions {
+  readonly sources?: readonly PluginSource[];
+  readonly pluginDirectory?: string;
+  readonly registry?: ToolRegistry;
+  readonly permission?: ToolPermissionPolicy;
+  readonly audit?: (record: PluginAuditRecord) => void;
+}
+
+/** Everything a live entry needs to run plugins: the shared tool chain and the plugin kernel. */
+export interface PluginRuntimeMount {
+  readonly registry: ToolRegistry;
+  readonly runtime: PluginRuntime;
+}
+
+/**
+ * Assemble the shared tool chain **and** a plugin runtime around it.
+ *
+ * The direction of the dependency is the point: the plugin kernel depends on the tool registry's
+ * types, never the other way round, and this function is the single call site that knows both.
+ * Nothing is loaded here — `runtime.start()` runs the nine-step lifecycle.
+ *
+ * There is no separate "mount" step, and that is a design decision rather than an omission: a
+ * plugin's tool enters the core `CapabilityRegistry` during the lifecycle, and the two guards that
+ * matter — the reserved `xixi_` namespace and the scope check — fire there, while the plugin is
+ * loading. Copying the tool into the core registry afterwards would be a second, weaker place to
+ * make the same decision (铁律 12 applies to adding machinery as much as to adding packages).
+ * What the model is given is still this registry: a plugin tool is mounted by registering what the
+ * capability registry holds.
+ */
+export function buildPluginRuntime(config: XixiConfig, options: PluginChainOptions = {}): PluginRuntimeMount {
+  const registry = options.registry ?? buildToolChain(config, options);
+  const permission = options.permission ?? new ToolPermission();
+  const runtime = createPluginRuntime({
+    tools: registry,
+    permission,
+    ...(options.sources === undefined ? {} : { sources: options.sources }),
+    ...(options.pluginDirectory === undefined ? {} : { pluginDirectory: options.pluginDirectory }),
+    ...(options.audit === undefined ? {} : { audit: options.audit }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
+  return { registry, runtime };
 }

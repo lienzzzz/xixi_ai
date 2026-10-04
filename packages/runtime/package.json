@@ -13,6 +13,7 @@
     "@xixi/contracts": "*",
     "@xixi/conversation": "*",
     "@xixi/domain": "*",
-    "@xixi/model-adapters": "*"
+    "@xixi/model-adapters": "*",
+    "@xixi/plugins": "*"
   }
 }
