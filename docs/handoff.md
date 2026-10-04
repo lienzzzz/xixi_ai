@@ -55,6 +55,8 @@
 8. **`plugins/xixi-tools/index.js` 仍 import `@deepseek-ai/dsh-tools`**：按铁律 9 的**字面**它在 `packages/brain-adapter` 之外，但性质是 **DSH 侧插件包本体**（manifest 的 peerDependency 就是 dsh-tools、靠 cordis patch 挂载、上游 `00_CODE_AUDIT` §6 已登记为 DSH 侧工具插件）——**收编进 brain-adapter 还是登记为显式例外，需要用户裁定**；captain 不擅自改铁律、也不擅自搬包。
 9. **`tests/console/unbacked-facts-console.test.ts:111` 的 `engine as unknown as ConversationEngine`** 是另一个（非 adapter 的）部分替身；收紧它需要在 `packages/runtime` 暴露 composer 接缝类型。
 10. **`manager.instance().health` 是「最后一次记录的报告」**（t21 复审的 O1，low 但会误导面板）：deactivate 之后它仍写「1 个 MCP 工具在线」，而同一次新鲜的 `plugin.module.health()` / `status()` 都说未连接；且 `checkHealth()` 只遍历 active 插件，**管理器的公开面没有一条路能把这份快照刷新**。要么让 `deactivate` 也记一条新鲜 health，要么在文档里写清「面板读它时必须同时读 state」。
+11. **两处「尚无独立评审」的登记**（t23 复审时按 §9.15/§9.25② 如实指出，别让它们随别的任务一起被当成已核）：① **P2-G 的疑问句守卫与召回预算**——t23 那轮 acceptance 的第 1 条误写成这两件事（实际属记忆线），captain 已**另开一条独立评审**（reviewedTaskId=t7）把它补上；② **P2-F2（t17：铁律 9 越界清理 + 旧接口残留）**至今没有独立评审——它的判据是「用一次性对照脚本在 33 个 schema 上比对本地谓词与真实函数、0 处不一致」这类**自证**，比常规弱一档，下一轮若要动 `packages/brain-adapter` 的接缝，先补一次独立评审。
+12. **引用哈希要写清是哪个文件**（t23 的引用精度提醒）：t22 报的 `B0DD5C60529B5710…` 是 **`packages/runtime/src/tool-approval.ts`（实现文件）**的哈希，**测试文件** `tests/unit/core/tool-approval.test.ts` 的是 `0FDB1DE4…`——后续引用时写清文件，否则容易张冠李戴。
 
 ---
 
