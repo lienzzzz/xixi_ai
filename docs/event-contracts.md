@@ -115,6 +115,9 @@ schema 文件在 `packages/contracts/schemas/events/`。
   总是把 `text` 与 `tool_name` 显式写入 payload（见 `packages/domain/src/store.ts`）。
 
 `system.health` 有便捷方法 `XixiStore.recordHealth(service, status, detail)`；
+**`detail` 的 500 字上限是真的会咬人的**（V0.3 P0-E2 实测）：把「整份设置 + 变更文案」直接塞进去会到 644 字，
+旧代码 `slice` 之后写出一条**读不回来**的记录（症状是「面板存过的设置重启后回滚」）。要存结构化内容时按**紧凑形状**存
+（例如主动设置审计的 `{v:1,s,c}`：`v` 仍是 1、无迁移、读侧兼容旧对象形状），并在写入前算长度；
 `scripts/verify-m0.ts` 每轮都会用它追加一条 `brain-dsh / ok / M0 <phase> turn completed in … ms`。
 
 ## 8. 校验器是 fail-closed 的

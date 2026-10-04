@@ -2,7 +2,9 @@
 
 > 更新规则：每完成一个可独立理解的步骤就立刻追加/更新本文，写清「做了什么、验证结果、下一步、已知问题」。
 > 这台机器偶发蓝屏，**本文是崩溃后恢复工作的唯一依据**。
-> 最后更新：2026-10-03（第五轮集成收口 t8）— **第五轮四条工作收口**：主动性口径已定＝**显著降频**（不做「= 0」硬停；多日验收 M1–M6 全过）、
+> 最后更新：2026-10-04（V0.3 P0 + P1 集成收口 t16：交付、Gate 实测与遗留进 §8 与 [docs/progress-v03.md](progress-v03.md)；
+> 另更正本文件里几条「只记录」的旧结论——它们已在 V0.3 P0-E2 清掉）。
+> 上一版：2026-10-03（第五轮集成收口 t8）— **第五轮四条工作收口**：主动性口径已定＝**显著降频**（不做「= 0」硬停；多日验收 M1–M6 全过）、
 > 未完话题收口判据升级到**词 / 对象**（0/91、真答案 15/15、反事实 9/91）、pack Phase 8 流式语音**接线成立 + B1 已修 + B2 是已知未覆盖缺陷**
 > （首音 ≤1.5 秒**未达标且本机不可达**：8 批 n=32，④/1500 = [3.14, 7.33] 倍、池化 3.73 倍）、**有界的心情状态**（0 越界、语气 ±6%、软偏移 ±0.03）。
 > 四条的逐条数字、口径与复跑命令见 **§2.20**；全部已知问题（只记录、本轮不修）见 **§4 第 10 条起**（新增第 26/27 条）
@@ -557,9 +559,9 @@ node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v02-wip
 - **仍然是「尚未实现」（不得写成已实现）**：① **控制台面板**没有（只有领域接口与 `ConversationEngine.moodStatus()`）；
   ② **心情没有接进主动引擎的软评分**——`moodProactivityNudge()` 在产线里**没有消费点**（唯一真实去处是对话窗口的 ±6%）；
   ③ **心情没有写进 `conversation.decision`**（那要改已发布契约的 `additionalProperties: false` payload）。
-- **两条已知问题（第五轮 t7 交回，本轮只记录）**：① `store.resetMood(reason, at)` 若收到 `Z` 写法（`toISOString()`）会让
-  `moodHistory()` 的字符串序错位（**生产路径走 `toOffsetIso`，今天不受影响**）；② `moodBias` 是**相加后夹**不是平均，
-  所以 `(1,0)` 与 `(0,1)` 都读成中性，而 `mood.ts` 的注释写着「平均」——**注释与公式二者取一改**，留给下一轮。
+- **两条已知问题（第五轮 t7 交回）——已在 V0.3 P0-E2 清掉**：① `store.resetMood(reason, at)` 的时间戳归一进 `recordMood`
+  这个唯一写入漏斗（`Z` 写法转本地偏移，已是数字偏移的字符串按字节保留）；② `moodBias` 保留**相加后夹**语义、注释改回与公式一致
+  （`±6%` 的两处表述也钉住相加语义）。回归用例：`tests/unit/core/mood-reset-timestamp.test.ts` 与 `tests/unit/core/mood-bias-semantics.test.ts`。
 - **口径与证法**：[ADR-0013](adr/0013-bounded-mood-state.md)；独立复算的命令与逐项数字见
   [`verification/t7-round5-independent-verification-2026-10-03.md`](verification/t7-round5-independent-verification-2026-10-03.md) §2.4。
 
@@ -697,13 +699,16 @@ node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v02-wip
     会被收口，实测 1/13（两个靶子：买药 / 看孙子）。**第五轮 t2 把判据升级到词 / 对象级后实测 0/91**
     （见 §2.20 ② 与 [ADR-0012](adr/0012-open-thread-closure-criterion.md)）。本条保留作历史；升级后的边界（受控词表不是分词器、
     「别人的」是小词表、动作词要说得一样完整、只有通用动词的话题退回等过期）写在 ADR-0012 的「代价与已知边界」。
-26. **`store.resetMood(reason, at)` 的时间戳写法会让 `moodHistory()` 排序错位**（第五轮 t7 交回，**本轮只记录**）：
+26. **`store.resetMood(reason, at)` 的时间戳写法会让 `moodHistory()` 排序错位**（第五轮 t7 交回；**V0.3 P0-E2 已修**）：
     `moodHistory` 按 `created_at` 的**字符串序**排；生产路径走 `toOffsetIso`（`+08:00`）所以今天是对的，但若把 `at` 传成
     `Date.prototype.toISOString()`（`Z` 写法），同一张表里两种写法并存，**真实时间最新的那一行会排到最前**（t7 用探针复现）。
     修法二选一：`at` 参数改成收 `Date`（内部 `toOffsetIso`），或在 `recordMood` 里统一规范成同一种写法。
-27. **`moodBias` 是「相加后夹」而不是平均，注释写着「平均」**（第五轮 t7 交回，**本轮只记录**）：
+    **V0.3 P0-E2 选了后者**（归一放进 `recordMood` 这个唯一写入漏斗），回归用例在
+    `tests/unit/core/mood-reset-timestamp.test.ts`。
+27. **`moodBias` 是「相加后夹」而不是平均，注释写着「平均」**（第五轮 t7 交回；**V0.3 P0-E2 已修**）：
     `bias = clamp((valence − 0.5) + (energy − 0.5), −1, 1)`，所以 `(1, 0)` 与 `(0, 1)` 都读成 **0 = 完全中性**（幅度不满幅）。
     **有界性不受影响**（仍被夹在 ±1，语气 ±6%、软偏移 ±0.03 的上限也照旧成立）；要改的是**注释或公式二者取一**。
+    **V0.3 P0-E2 的处置＝保留相加语义、改注释**，回归用例在 `tests/unit/core/mood-bias-semantics.test.ts`。
 28. **提问率口径缺单测（t17 的 O2）**：「修复句不进分母」「主口径 ≠ 辅口径时按主口径判带」这两条夹具建议补进
     `tests/scenarios/realism-metrics.test.ts`；现在删掉修复句排除也不会红。该文件不在本轮 inScope。
 29. **指标模块的跨包相对导入（t17 的 O3）**：`scripts/lib/realism-metrics.ts` 直接
@@ -769,3 +774,23 @@ node scripts/make-audio-fixtures.ts            # 需要 MIMO_API_KEY；已有夹
 Python 3.12 解释器绝对路径：`%LOCALAPPDATA%\Programs\Python\Python312\python.exe`。
 
 然后从第 4 节继续（当前下一项是 M1 选型收尾）。
+
+## 8. V0.3（P0 + P1）收口（2026-10-04）
+
+- **权威入口**：[docs/progress-v03.md](progress-v03.md)（按 Phase 索引：交付、Gate 实测、口径、遗留）。本文是「时间倒序的流水」，两者分工写在 progress-v03 开头。
+- **P0 五块 + P1 两块都已落地**：运行时抽取（`packages/runtime`，Step A/B/C）、canonical store（`XIXI_DATA_DIR` → `data/xixi`，
+  四个 household 入口默认同库、感知单写者）、typecheck（`npm run check:types`）、replay 基础（`tests/replay/`，注入 Clock）、
+  v03-preflight 九项 + SpeechPipeline B2；P1 的 `packages/context`（ContextBuilder + MemoryRetriever + 可信记忆硬策略）与
+  关系上下文 / 未完话题进上下文 / 记忆纠正闭环 / 三入口 `afterTurn`。
+- **Gate**：`npm run check:types` exit 0；`npm test` 与 `npm run check:docs` 的实测行见 progress-v03；
+  `node scripts/eval-proactive-timeline.ts` 约 24 分钟、单核打满，**给它 ≥30 分钟窗口、不要中断**。
+- **四条「只记录」的旧结论已失效**（本文件 §2.20 末尾与 §4 第 26/27 条、`docs/design/brain-and-models.md` 的同款表述）：
+  `resetMood` 的时间戳归一、`moodBias` 注释与公式一致、`onNotice` 覆盖三入口、只读 GET 不写库、`runJob` 逐步隔离、
+  `proactiveSettingsToConfig` 回写、agent-loop 的 `now` 每次调用各读一次、`serve-chat` 信号收尾、`conversation` 索引导出登记
+  ——**都在 V0.3 P0-E2 清掉了**。
+- **P1 旗舰场景**：V0.3 复验（t15）当时**按原句不成立**（Day1 原句不写记忆 / Day2 原问句召回不过去 / 疑问句被写成偏好事实），
+  证据见 [docs/verification/t15-p1-independent-verification-2026-10-04.md](verification/t15-p1-independent-verification-2026-10-04.md)；
+  **t22 已修复并入库、t23 复审 pass**（同一份探针前后对照：`injected` 0 → 1、疑问句新增 0 条、召回 5/5、误召回反例 10/10 不召回）。
+  仍有边界：Tier 2 未接线、记忆 UI 未做、两条口径边界（复合问句 / 无标记残句）与一条既有截断行为，见 [docs/progress-v03.md](progress-v03.md) P1 遗留。
+  疑问句被写成偏好事实），证据见 [docs/verification/t15-p1-independent-verification-2026-10-04.md](verification/t15-p1-independent-verification-2026-10-04.md)；
+  修复与复审记在 t22 / t23。**在 t23 判 pass 之前，不要在文档里写「Phase 1 完成」或「pack 场景已达标」。**

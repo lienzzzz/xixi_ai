@@ -184,6 +184,17 @@ tolerance 0 → 半个窗口，1 → 1.5 倍）。本机人格 `silence_toleranc
 - 用「会 sleep 的脚本往管道里写」也能造出停顿——那是**写入方**在等，不是 readline 的功劳；
   判断依据始终是**两轮之间的真实间隔是否超过窗口**，而不是用了管道还是终端。
 
+### 3.1 测试永远不写 household 库（V0.3 P0-B 起的硬约定）
+
+- **默认库在测试里不是仓库里的那个**：`resolveCanonicalDataDir()` 在 `NODE_TEST_CONTEXT`（Node 测试 runner 会设）或
+  `NODE_ENV=test` 时，把默认库落回**进程自己的临时目录**（`<tmp>/xixi-test-store-<pid>/data/xixi`）。这是防回归的关键：
+  `scripts/serve-chat.ts` 在 **import 期**就建 store，没有这条守卫时 `npm test` 会往用户的 `data/xixi` 里写东西（P0-B 实测踩到过）。
+- **要真库的用例自己显式给路径**：一律 `mkdtempSync(join(tmpdir(), …))`（或 `dbPath` 指到临时文件），不要依赖默认值；
+  用 `XIXI_*_DATA_DIR` 显式隔离的例子见 `tests/unit/voice/voice-latency.test.ts`（spawn 的 `voice-turn` 用 `XIXI_VOICE_DATA_DIR`）。
+- **判断有没有写脏**：跑完 `npm test` 后 `Test-Path data/xixi` 应当是 `False`。
+- **记忆类用例必须是文件库**：`tests/integration/memory-correction-closure.test.ts` 用临时目录文件库，并有一条用例
+  **关库再开**来守「重启后记忆仍在」；`:memory:` 的库一关就没，守不住这条验收。
+
 ## 4. 会花真实 API 调用的检查（刻意排除在 `npm test` 之外）
 
 | 命令 | 真实调用次数 | 做什么 | 断言 |

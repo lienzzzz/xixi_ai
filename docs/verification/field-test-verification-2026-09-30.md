@@ -328,3 +328,9 @@ npm run turns -- data\chat\xixi.sqlite 6
 - 本文件是**带日期的历史记录**（docs/verification 层）：新的验证写新的 `field-test-verification-YYYY-MM-DD.md`，不要改写本文的判定与数字。
 - 本文的判定绑定 §0 记录的修订：**`2a3dd52` + 在途的 `scripts/field-test.ts` / `scripts/verify-voice-noise.ts`**。若之后再改这两处或 `package.json` 的 glob，本文相关结论（尤其 F3/F4/F5 与 `--fake` 行为）需重新验证。
 - 缺陷由 captain 决定修复归属；修完应在**下一个**验证任务里复核，而不是把本文的「失败」直接改成「通过」。
+
+---
+
+> **V0.3 旁注（2026-10-04，t16）**：本报告里与 v03-preflight 九项相关的问题**已在 V0.3 P0-E2 批次清掉**（`resetMood` 时间戳归一、
+> `moodBias` 注释与公式一致、`onNotice` 覆盖三入口、`proactiveSettingsToConfig` 回写、只读 GET 不写库、`runJob` 逐步隔离、
+> agent-loop 的 `now` 每次调用各读一次、`serve-chat` 信号收尾、`conversation` 索引导出登记）。**上文按当时的事实保留，不改写结论。**

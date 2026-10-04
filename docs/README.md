@@ -1,6 +1,6 @@
 # 西西项目文档地图
 
-> 最后更新：2026-10-03（第五轮集成收口 t8：四条工作的实测数字、口径与已知问题同步进各文档、全量门禁实跑；追加：登记 V0.3 Phase 0 的 [`v03/ACTUAL_RUNTIME_MAP.md`](v03/ACTUAL_RUNTIME_MAP.md)）
+> 最后更新：2026-10-04（V0.3 P0+P1 集成收口 t16：登记 [`progress-v03.md`](progress-v03.md)（按 Phase 索引的阶段进度）与 P0/P1 的两份 ADR；把「四个入口各用不同的库」改成 canonical store 的实际默认值）
 > 面向：接手本项目的编码 Agent / 维护者
 > 本文件告诉你「先读什么、什么最权威、改代码后必须更新哪些文档」。
 
@@ -40,10 +40,12 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
   **不会假装在场**。
 - **模型限流导致延迟波动**：LLM 首字实测 1.7–2.3 s、TTS 1.0–2.0 s，端到端首条回复音频 3.6–5.5 s；
   供应商限流或 `: PROCESSING` 保活会让首字更慢（见 [`recon/mimo-api-probe-2026-09-29.md`](recon/mimo-api-probe-2026-09-29.md)）。
-- **四个入口各用不同数据库**：`chat` → `data/chat/`、试用页 → `data/web-chat/`、`voice-turn` → `data/voice/`、
-  现场测试控制台 → `data/field-test/`（chat 与试用页可用 `XIXI_CHAT_DATA_DIR` / `XIXI_WEB_DATA_DIR` 覆盖；
-  控制台用 `--data-dir` / `--presence-data-dir`）。**在 chat 里设的人格与历史不会带到控制台**——
-  别以为功能没生效，要在哪个入口用就在哪个入口再设一次（或改 `config/xixi.example.yaml` 的基线再 seed）。
+- **household 入口默认连同一个库**（V0.3 P0-B 改了默认值）：`XIXI_DATA_DIR`，未设就是 `data/xixi`——
+  终端 `chat`、试用页、常驻语音、现场测试控制台、感知入库都走它；优先级＝显式参数 > `XIXI_DATA_DIR` >
+  单入口旧变量（`XIXI_CHAT_DATA_DIR` / `XIXI_WEB_DATA_DIR` / `XIXI_VOICE_DATA_DIR` / `XIXI_DEMO_*`）> 默认。
+  **测试与评测一律临时目录**（`mkdtempSync`；`NODE_TEST_CONTEXT` 下默认库也落进程临时目录，见
+  [`testing.md`](testing.md)）；`voice-turn` 是测量工具，**默认连 household 库**（测的是真的那个西西），
+  只有 `--isolated-store` 才用自己那个库。控制台的 `--data-dir` 仍可单独隔离。
 - **对话相关特性的怎么用**：① **多段回复**（`config/xixi.example.yaml` 的 `reply`：`max_segments: 8`、
   `segment_max_chars: 60`、`gap_ms: 450`；**「块长」与「容量」是两件事**：块长 60 字 = 一次播报的粒度，
   容量 = 8 × 60 = **480 字**。贪心按句边界打包，`≤8` 组时每段 `≤60`；`>8` 组时自第 7 组起合并进最后一段、
@@ -91,6 +93,7 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | 10 | [`review/`](review/) | **评审**报告：verdict + findings（F 编号 / 严重度）+ 复审结论 | 按需 |
 | 11 | [`../xixi_ai_companion_project_plan.md`](../xixi_ai_companion_project_plan.md) | 方案原文（57 节）。**注意：它是设计意图，不是现状** | 按需 |
 | 12 | [`v03/ACTUAL_RUNTIME_MAP.md`](v03/ACTUAL_RUNTIME_MAP.md) | **V0.3 开工第一份**：Phase 0 的运行时地图（十个概念的定义处/调用点/目标包/迁移步），以及对 pack 审计结论的逐项复核（哪些和今天的代码不符） | 10 min |
+| 13 | [`progress-v03.md`](progress-v03.md) | **V0.3 的按 Phase 索引**的阶段进度：每个 Phase 的交付、Gate 实测（带命令与数字）、明确没做的与遗留；与按时间倒序的 [`progress.md`](progress.md) 分工不同 | 10 min |
 
 本轮新增的报告（都已登记在上表目录里）：
 
@@ -109,6 +112,10 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | [`review/reply-hygiene-review-2026-10-01.md`](review/reply-hygiene-review-2026-10-01.md) | 工具标记 / 英文推理清洗的评审（`REPLY_HYGIENE` 已实现；两条 requiredFix 已落地——试用页与控制台订阅 `onNotice`、沉默原因码 `ARTIFACT_ONLY_REPLY` 上线，逐入口清单见 `progress.md` §4） |
 | [`verification/t4-realism-verification-2026-10-01.md`](verification/t4-realism-verification-2026-10-01.md) | 「真人感」改造的独立验证：三次输入、主口径提问率、铁律未削弱 |
 | [`verification/t7-round5-independent-verification-2026-10-03.md`](verification/t7-round5-independent-verification-2026-10-03.md) | **第五轮四条工作的独立复验**：多日主动性（显著降频口径达标、未回应后不硬停）、话题收口升级（0/91 与反事实 9/91）、**首音延迟未达标（目标不可达）**、有界心情（0 越界 / ±6% / ±0.03 / 门禁同码）。三类证据分开、每个数字带可复跑命令 |
+| [`progress-v03.md`](progress-v03.md) | **V0.3 阶段进度（按 Phase 索引）**：P0 与 P1 的交付清单、四条 Gate 实测、库一致硬证据、遗留清单；每条结论带可重跑命令 |
+| [`adr/0015`](adr/0015-context-builder-and-engine-boundary.md) | ContextBuilder 与 ConversationEngine 的边界（谁装配上下文、谁做决定；两道出口闸门；「引擎自己会再建一次 context」这条实现细节） |
+| [`adr/0016`](adr/0016-memory-status-state-machine.md) | 记忆状态机（active / superseded / revoked / expired）与纠正闭环；为什么 `expired` 不自动过期 |
+| [`verification/t15-p1-independent-verification-2026-10-04.md`](verification/t15-p1-independent-verification-2026-10-04.md)（附可重跑探针 `t15-probe.mjs`） | **Phase 1 的独立复验**：四条技术验收自己复算（文件库 + 每步新进程）、两个场景真模型实跑、**pack 旗舰场景按原句未达标的三条写在最前面**（不替实现者圆场） |
 | [`v03/ACTUAL_RUNTIME_MAP.md`](v03/ACTUAL_RUNTIME_MAP.md) | **V0.3 Phase 0 的运行时地图**：pack 点名的十个概念（`buildToolChain` / `ProactiveLoop` / `createModelComposer` / `createModelDecider` / voice helpers / Memory extractor / 各入口 DB / perception DB / prompt builder / DSH 与直连）各自的定义处、调用点、目标包与迁移步；每行附一条可复跑的 `git grep`。另含对 pack 审计报告 `00_CODE_AUDIT.md` 的逐项复核（15 条：一致 / 偏差，附证据） |
 
 ## 2. 权威性排序（冲突时按这个判）

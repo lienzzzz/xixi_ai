@@ -211,9 +211,9 @@ resume 的两个硬约束（相同 cwd、相同 profile）在 `CliDshTransport` 
 - **尚未实现（不得写成已实现）**：① **控制台没有心情面板**；② **心情没有接进主动引擎的软评分**
   （`moodProactivityNudge()` 在产线里**没有消费点**，唯一真实去处是对话窗口的 ±6%）；
   ③ **心情没有写进 `conversation.decision`**（那要动已发布契约的 `additionalProperties: false` payload）。
-- **两条已知问题（第五轮 t7 交回，只记录）**：`store.resetMood(reason, at)` 若收到 `Z` 写法会让 `moodHistory()`
-  的字符串序错位（生产路径走 `toOffsetIso`、今天不受影响）；`moodBias` 是**相加后夹**而不是平均，
-  所以 `(1,0)` 与 `(0,1)` 都读成中性，而代码注释写着「平均」——注释与公式二者取一改。
+- **两条已知问题（第五轮 t7 交回）——已在 V0.3 P0-E2 清掉**：`store.resetMood(reason, at)` 的时间戳归一进 `recordMood`
+  这个唯一写入漏斗；`moodBias` 保留**相加后夹**语义、注释改回与公式一致。回归用例：
+  `tests/unit/core/mood-reset-timestamp.test.ts`、`tests/unit/core/mood-bias-semantics.test.ts`。
 
 **口径、证法与逐项数字**：[`../adr/0013`](../adr/0013-bounded-mood-state.md)、
 [`../verification/t7-round5-independent-verification-2026-10-03.md`](../verification/t7-round5-independent-verification-2026-10-03.md) §2.4、
@@ -314,9 +314,11 @@ FatherModel/RelationshipModel/FutureHooks 恢复（这些领域对象尚不存�
   实际落地的名字是 **`ARTIFACT_ONLY_REPLY`**（`ConversationTurn.silenceReason`，与 `MODEL_SILENCE` 并列），
   候选名从来没有进过代码。
 - **心情（§5b）的三条「没有」**：没有控制台面板；没有接进主动引擎的软评分（`moodProactivityNudge()` 在产线里没有消费点）；
-  没有写进 `conversation.decision`（那要动已发布契约）。两条已知问题（`resetMood` 的 `Z` 写法、`moodBias` 注释与公式不符）见 §5b 末尾。
+  没有写进 `conversation.decision`（那要动已发布契约）。两条已知问题（`resetMood` 的 `Z` 写法、`moodBias` 注释与公式不符）
+  **已在 V0.3 P0-E2 清掉**，见 §5b 末尾。
 - `MimoClient.#post` 会把「缺密钥」误标成 `NETWORK`（§7 的 KNOWN GAP）。
-- `brain-adapter` 无 type check（无 `tsc --noEmit`），类型错误只在运行时暴露（progress §6）。
+- ~~`brain-adapter` 无 type check~~ → **V0.3 P0-C 起全库有类型门禁**：`npm run check:types`（`tsconfig.json` 覆盖
+  packages / apps / scripts / services / tests），`packages/brain-adapter` 也在 program 内。
 
 ### 8.1 单帧图像（t88「看一眼」）：接缝已通到引擎
 

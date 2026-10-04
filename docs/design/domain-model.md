@@ -292,3 +292,16 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
 | `store.ts` 的 `attachBrainSession` / `brainSessionId` / `recordTurn` / `resume` | §5.1、§5.2、§7 |
 | `migrations.ts` 的文件名规则、checksum 或事务策略 | §8 |
 | M3 的反馈解释器落地 | §6 的「尚未实现」提示改为事实陈述，并写清新来源类型与 `source_event_id` 语义 |
+
+## 7. V0.3 P0-B：canonical store 与感知单写者
+
+- **一个 household 一个库**：`packages/domain/src/store.ts` 的 `CANONICAL_DATA_DIR = 'data/xixi'`、
+  `CANONICAL_DATA_DIR_ENV = 'XIXI_DATA_DIR'`、`resolveCanonicalDataDir()`、`CANONICAL_STORE_ENTRIES`；
+  优先级＝**显式参数 > `XIXI_DATA_DIR` > 单入口旧变量（`XIXI_CHAT_DATA_DIR` / `XIXI_WEB_DATA_DIR` / `XIXI_VOICE_DATA_DIR` / `XIXI_DEMO_*`）> 默认**。
+- **测试与评测不碰它**：`NODE_TEST_CONTEXT` / `NODE_ENV=test` 下默认库落进程临时目录；评测脚本本来就 `mkdtempSync`。
+- **感知单写者**：`services/perception-edge` 只检测并把事件**打印到 stdout**（不再拿 `--db` / `--append`）；
+  `packages/runtime/src/perception-ingest.ts` 的 `ingestPerceptionLine` 校验后交给 `XixiStore.appendPresenceEvent`，
+  **事件与 `world_state` 投影同一事务**，且都在主库。旧库 `data/xixi.sqlite` 未被覆盖（时间戳仍是 2026-10-03）。
+- **默认行为**：`voice-turn` 是测量工具，**默认连 household 库**，`--isolated-store` 才用 `data/voice`；
+  数据目录与 `--out` 无关，音频仍只写 `--out` / `data/voice/bench`，事件日志里没有原始音视频。
+- 逐条实测（四个入口同库的硬证据、Gate 数字）见 [docs/progress-v03.md](../progress-v03.md) 的 P0 段。

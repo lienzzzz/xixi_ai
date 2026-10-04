@@ -219,3 +219,9 @@ git grep -n "worker" -- tests/unit/voice/frontend.test.ts
 - 本文件是**带日期的历史记录**（docs/verification 层）：新的验证写新的 `*-verification-YYYY-MM-DD.md`，不要改写本文判定。
 - 判定绑定 §0 的两个修订；`packages/`、`config/xixi.example.yaml`、`scripts/verify-voice-noise.ts` 之后再变，本文的门禁/分段/worker 结论需要重新验证。
 - 发现项由 captain 决定归属与修复；修完应在**下一个**验证任务里复核，而不是把本文的「未测/发现」直接改成「通过」。
+
+---
+
+> **V0.3 旁注（2026-10-04，t16）**：本报告里与 v03-preflight 九项相关的问题**已在 V0.3 P0-E2 批次清掉**（`resetMood` 时间戳归一、
+> `moodBias` 注释与公式一致、`onNotice` 覆盖三入口、`proactiveSettingsToConfig` 回写、只读 GET 不写库、`runJob` 逐步隔离、
+> agent-loop 的 `now` 每次调用各读一次、`serve-chat` 信号收尾、`conversation` 索引导出登记）。**上文按当时的事实保留，不改写结论。**

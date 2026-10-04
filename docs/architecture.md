@@ -1,6 +1,6 @@
 # 架构（当前实现）
 
-> 最后更新：2026-10-03（第五轮收口：新增迁移 005 与 `mood_state` / `mood_history` 两张表）
+> 最后更新：2026-10-04（V0.3 P0+P1 收口：新增 `packages/runtime` 与 `packages/context`、canonical store（`XIXI_DATA_DIR` → `data/xixi`）、类型门禁与 replay 基础、记忆检索与状态机）
 > 权威来源：`packages/**`、`apps/brain-dsh/**`、`services/{voice-edge,perception-edge}/**`、`scripts/**`、`tests/**`；`docs/progress.md`（结论与数字）、`docs/recon/*`（外部系统实测）、`docs/adr/0001`~`0010`（**不写死区间**：以 `ls docs/adr` 的实际内容为准）
 > 若与代码不一致，以代码为准，并请立即修正本文件
 
@@ -15,17 +15,19 @@
 
 ```text
 packages/contracts/       事件信封 + 6 类 payload schema + fail-closed 校验器（唯一契约来源）
-packages/domain/          唯一写 SQLite 的包：events / 会话投影 / 人格基线与学习 / 未完话题 / 记忆 / 迁移执行器 / 配置 / 时钟
-packages/conversation/    FSM（§12/§13）+ PromptAssembler（§26）+ ConversationEngine（一轮的编排）
+packages/domain/          唯一写 SQLite 的包：events / 会话投影 / 人格基线与学习 / 未完话题 / 记忆与状态机（迁移 006）/ WorldState / 迁移执行器 / 配置 / 时钟
+packages/conversation/    FSM（§12/§13）+ PromptAssembler（§26）+ ConversationEngine（一轮的编排）+ 主动引擎（ADR-0009/0011）
+packages/context/        上下文装配（V0.3 P1）：ContextBuilder（buildUserTurn / buildProactive）、MemoryRetriever（确定性混合排序 + 两道出口闸门）、MemoryCorrectionResolver（纠正闭环）、关系上下文
+packages/runtime/         生产运行时（V0.3 P0-A）：工具链（tool-runtime）、常驻考虑循环与候选构造器（proactive-runtime）、语音共享缝（voice-runtime）、感知入库（perception-ingest）、replay 驱动（replay-runtime）
 packages/brain-adapter/   BrainAdapter 接口 + MimoBrainAdapter（实时）+ DshBrainAdapter + Fake/Scripted 替身 + 只读工具
 packages/model-adapters/  MimoClient（chat/chatStream/transcribe/synthesize/chatJson）+ WeatherClient（Open-Meteo）
 apps/brain-dsh/           CliDshTransport（每轮一个 dsh 进程）+ profile patch（MiMo 路由 + 最小插件集）
 plugins/xixi-tools/       DSH 侧工具插件（当前只有 xixi_get_current_time）
 services/voice-edge/      voice_edge/{segment,frontend,calibrate,make_noise_fixtures,loopback}.py（VAD 分段 + 抗噪前端 + 噪声底校准 + 噪声夹具 + 设备回环）
-services/perception-edge/ perception_edge/{run,bench}.py（抓帧 + 帧差动 + YuNet 人脸 → presence 事件；M6）
+services/perception-edge/ perception_edge/{run,bench}.py（抓帧 + 帧差动 + YuNet 人脸 → presence 事件；M6；**检测结果经 stdout 交给 Node 侧单写者入库**，子进程不再拿 `--db`）
 scripts/                  serve-chat.ts（试用页）/ chat.ts / voice-turn.ts / voice-bargein.ts / field-test.ts（现场测试控制台）
                           / verify-*.ts（provider、m0、structured-output、camera-presence、voice-noise）/ eval-* / make-audio-fixtures.ts
-tests/                    unit（含 core/、voice/）/ integration / console（控制台）/ perception（在场）/ scenarios（corpus.ts），replay 目录仍为空
+tests/                    unit（含 core/、voice/、context/）/ integration / console / perception / scenarios / **replay（V0.3 P0-D：JSON 脚本 + 注入 Clock 的行为回放）**
 ```
 
 只有 `packages/brain-adapter` 与 `apps/brain-dsh` 知道 DSH 存在（`packages/brain-adapter/src/index.ts`、`apps/brain-dsh/src/index.ts`）——铁律 9。
@@ -241,30 +243,62 @@ flowchart LR
 
 | 进程 / 入口 | 触发方式 | 说明 |
 |---|---|---|
-| 现场测试控制台 | `npm run field-test`（`scripts/field-test.ts`） | 监听 **`127.0.0.1:8792`**（`--port` / `XIXI_FIELD_PORT`）；三栏界面（传感器 / 配置 / 对话）；库默认 `data/field-test`（`--data-dir` 可改，在场状态用 `--presence-data-dir`，默认 `data`）；未知参数**中文报错 + exit 2** |
+| 现场测试控制台 | `npm run field-test`（`scripts/field-test.ts`） | 监听 **`127.0.0.1:8792`**（`--port` / `XIXI_FIELD_PORT`）；三栏界面（传感器 / 配置 / 对话）；库默认走 canonical store（`XIXI_DATA_DIR`，未设则 `data/xixi`；`--data-dir` 可单独隔离，在场状态与主库**同一个库**）；未知参数**中文报错 + exit 2** |
 | 试用页 HTTP 服务 | `npm run web`（`scripts/serve-chat.ts`） | 监听 **`127.0.0.1:8791`**（`--port` 或 `XIXI_WEB_PORT` 可改）；提供 `/`、`/api/state`、`/api/turn`、`/api/voice`、`/api/quiet`、`/api/session` |
 | 终端对话 | `npm run chat [-- --fake/--dsh]` | 同进程内直接调用 `ConversationEngine`，无 HTTP；**已接分段播放**（`onSegment`，`scripts/chat.ts`） |
-| 摄像头在场子进程 | 控制台「一键启用」或 `node scripts/verify-camera-presence.ts --live` | `python -m perception_edge.run --live`（`.venvs/cv4`），帧只在内存、事件落 `data/perception/` |
+| 摄像头在场子进程 | 控制台「一键启用」或 `node scripts/verify-camera-presence.ts --live` | `python -m perception_edge.run --live`（`.venvs/cv4`）：帧只在内存，**检测结果只打印到 stdout**，由 Node 侧 `ingestPerceptionLine` 校验后走 `XixiStore.appendPresenceEvent` 入库（事件 + 投影同一事务） |
 | DSH 子进程 | 默认**不启动**；仅 `--dsh` 或 `verify:*` 时 | `CliDshTransport` 用 `spawn(process.execPath, [dsh/lib/bin.js, --profile, xixi, --json, …])`，`cwd = REPO_ROOT`、`DSH_HOME = <repo>/.dsh`；每轮一个进程，进程间不常驻 |
 | Python VAD | 每次语音回合 | `spawn(<repo>/.venvs/voice-pipecat/Scripts/python.exe, ['-m','voice_edge.segment', wav])`，`cwd = services/voice-edge`（因此该目录必须在 cwd 才能 import `voice_edge`）；见 `scripts/serve-chat.ts`、`scripts/voice-turn.ts` |
-| SQLite | 进程内 | **四个入口各用不同的库**：试用页 `data/web-chat/`、终端 `data/chat/`、语音脚本 `data/voice/`、现场测试控制台 `data/field-test/`（`openXixiStore({dataDir})`；chat 与试用页可用 `XIXI_CHAT_DATA_DIR` / `XIXI_WEB_DATA_DIR` 覆盖）。**在 chat 里设的人格不会带到控制台** |
+| SQLite | 进程内 | **household 入口默认同一个库**（V0.3 P0-B）：`XIXI_DATA_DIR`，未设则 `data/xixi`；优先级＝显式参数 > `XIXI_DATA_DIR` > 单入口旧变量（`XIXI_CHAT_DATA_DIR` / `XIXI_WEB_DATA_DIR` / `XIXI_VOICE_DATA_DIR` / `XIXI_DEMO_*`）> 默认。`voice-turn` 是测量工具：**默认连 household 库**，只有 `--isolated-store` 才用自己那个库。测试与评测脚本一律临时目录（`mkdtempSync`；`NODE_TEST_CONTEXT` 下默认库也落进程临时目录） |
 
 即：**浏览器（页面 + 麦克风）→ Node 试用页进程 → （可选）DSH 子进程 / MiMo HTTP / Python VAD 子进程**。
 没有任何常驻 broker，也没有 `EventBus` 抽象：写入方在进程内直接调用领域层（[ADR-0004](adr/0004-in-process-event-bus-for-poc.md)）。
+
+### 6.1 V0.3 之后的包边界与数据流（P0 + P1）
+
+**依赖方向是单向的**（`packages/` 不反向 import `scripts/`，`services/` 只通过 stdout 与 Node 通信）：
+
+```text
+packages/contracts     事件信封与 payload schema（唯一契约）
+      ↑
+packages/domain        唯一打开 SQLite 的包：事件日志、投影、迁移、记忆与状态机、WorldState
+      ↑
+packages/context       读投影并装配上下文（ContextBuilder / MemoryRetriever / 纠正闭环）
+packages/conversation  行为：FSM、提示词渲染、回复安全、主动引擎（读 context，不读库表）
+packages/runtime       生产装配：工具链、常驻考虑循环、语音缝、感知入库、replay 驱动
+      ↑
+scripts/*              入口与 UI（chat / serve-chat / field-test / voice-turn / eval-*）
+```
+
+**三条数据流（都能从入口复跑）**：
+
+1. **一轮对话**：`ConversationEngine.respond()` 先过 FSM（接受/拒绝与 reason_code）→ 交给
+   `ContextBuilder.buildUserTurn()` 装配上下文（记忆检索、关系、未完话题、世界状态、自我画像）→
+   `PromptAssembler` 渲染成 `system` / `user` / `sections` → `BrainAdapter` → **回复安全**（工具标记、
+   英文推理、未调用工具却给可核查事实的拦截）→ `recordTurn` 写事件 → `afterTurn` 交给
+   `TurnMemoryExtractor`（Tier 1 规则；写记忆、话题、关系与审计）。边界见
+   [ADR-0015](adr/0015-context-builder-and-engine-boundary.md)。
+2. **一次显式纠正**：同一轮里 `MemoryCorrectionResolver` 检测 → 选目标（极性冲突优先）→ 旧行标
+   `superseded`/`revoked` → 写新行（`explicit_correction`）→ 一条 episodic + 一条
+   `system.health(service=memory.status)`；检索只取 `active`，所以旧事实从**候选集**里就消失了。
+   状态语义见 [ADR-0016](adr/0016-memory-status-state-machine.md)。
+3. **一次在场事件**：`services/perception-edge` 抓帧与判定 → **stdout 打印事件**（不拿 `--db`）→
+   Node 侧 `ingestPerceptionLine` 校验 → `XixiStore.appendPresenceEvent`（事件 + `world_state` 投影
+   **同一事务**）→ 下一次考虑循环读到 `presence.home`。单写者：Python 与 Node 不再各写一个库。
 
 ## 7. 明确**未实现**的部分，以及将来插在哪里
 
 | 未实现 | 现状证据 | 将来插在哪 |
 |---|---|---|
 | **WorldState 的其余部分** | `world_state` 表与 `presence.home` 一个键**已落地**（`002_world_state.sql`、`XixiStore.worldState()`）；其余领域状态（房间、活动、日程）无写入方 | M6 之后的里程碑：同一张表加点分命名空间即可，不需要改表结构 |
-| **Memory 的模型侧**（`BrainAdapter.extractMemories` / `reflect`） | **确定性侧已落地**（pack Phase 4：`TurnMemoryExtractor` + `episodic_memory` / `semantic_memory` / `relationship_notes` / `self_profile_learned` / `session_overrides` 与 `open_threads`）；**模型侧那两个方法仍抛 `NOT_IMPLEMENTED(M4)`，全仓无调用方** | M4 的模型侧：`MemoryCandidate` / `ReflectionResult` 形状已固定；检索（memory search）与查看/编辑/删除的 UI 仍未做 |
+| **Memory 的模型侧**（`BrainAdapter.extractMemories` / `reflect`） | **确定性侧已落地**（pack Phase 4：`TurnMemoryExtractor` + `episodic_memory` / `semantic_memory` / `relationship_notes` / `self_profile_learned` / `session_overrides` 与 `open_threads`）；**V0.3 P1 又落了读侧**——`MemoryRetriever` 每轮注入 3~8 条带 `provenance` 的记忆、`MemoryCorrectionResolver` 让旧事实可被取代（迁移 006 的状态机）；**模型侧那两个方法仍抛 `NOT_IMPLEMENTED(M4)`，全仓无调用方** | M4 的模型侧：`MemoryCandidate` / `ReflectionResult` 形状已固定；记忆的查看/编辑/删除 UI 仍未做（`MemoryStore.snapshot()` 在生产入口没有调用方） |
 | **计划类钩子（FutureHook）** | 以 `open_threads`（pack Phase 3）实现：从父亲自己说的话里提取「将来要做的一件事」，收口判据与窗口见 `progress.md` §2.19 | 模型侧反思产出的 `futureHooks` 仍属未实现的 `reflect()` |
 | **主动候选的模型侧生成**（`evaluateProactiveCandidate`） | **确定性门禁与投递已落地**（`packages/conversation/src/proactive.ts`）；模型侧 API 仍抛 `NOT_IMPLEMENTED(M5)`，全仓无调用方 | M5：候选来自事实（在场 / 会话悬置 / 时间钩子 / 话题池 / 随机闲聊）与未完话题；`routine_expected` 还没有事实源 |
 | **唤醒词 / 搭话判定（§13 完整版）** | 无代码；`config/xixi.example.yaml` 的 `features.wake_word: false`，试用页用「发送 / 按住🎤」按钮当作直呼 | M2：ADR-0007 已实测两个语音框架**都无法区分电视与真人**，必须自己做（唤醒词 + 说话人相似度 + 会话状态 + 语义承接融合） |
 | **人格学习里「读自由文本」那一路** | 显式纠正与白名单推断码的学习已落地（pack Phase 4，权重只乘一次）；**不读模型自由文本**（铁律 5） | 不计划做：白名单码就是设计上的边界 |
-| **事件回放（§22.3）** | `tests/replay/` 目录为空 | M5；因为轮次就是事件，不需要先做数据搬迁 |
+| **事件回放（§22.3）** | **已落地**（V0.3 P0-D）：`tests/replay/` 有 JSON 脚本 + 注入 Clock 的行为回放（对话 / 在场 / 跨天未完话题三条基线），驱动在 `packages/runtime/src/replay-runtime.ts` | 传感器类事件（`sensor.observation`、音频与图像夹具）按 pack §4 留到 V0.3 之后 |
 | **常驻语音服务** | **runner** 已有常驻 Python worker（`scripts/verify-voice-noise.ts`，回退 `XIXI_VAD_ONESHOT=1`）；**生产入口**仍是每次一进程 | 下一步：把生产入口也换成常驻进程，去掉冷启动 |
-| **`tsc --noEmit` 类型检查** | 无 `tsconfig.json`，类型错误只在运行时暴露 | M1 之前（[ADR-0006](adr/0006-runtime-and-dependency-choices.md)） |
+| **`tsc --noEmit` 类型检查** | **已落地**（V0.3 P0-C）：`tsconfig.base.json` + `tsconfig.json`（覆盖 packages / apps / scripts / services / tests），`npm run check:types` 是门禁；CI 顺序＝先 `check:types` 再 `npm test` | —（已做，见 [`testing.md`](testing.md)） |
 
 未实现能力的**签名已经固定**，调用时抛带 `milestone` 的类型化错误——诚实的缺口，不是静默的桩函数。
 

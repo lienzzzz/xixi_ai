@@ -179,8 +179,9 @@
 各 1/13。**第五轮 t2 已把它升级到词/对象级**（对象词受控词表 + 动作词须说得一样完整 +「别人的」框；通用动词永不单独作依据，
 三表关系由模块加载期 `assertVocabularyShape` 把关）：**13 句无关探针 × 7 个话题 = 0/91**，召回不降（9 句真答案仍 7/9、
 另补 15 句 15/15）。判据、代价与四条已知边界见 [`adr/0012`](adr/0012-open-thread-closure-criterion.md) §判据升级。
-**仍待同步的旧措辞（归第五轮 t8 集成收口）**：本文件中「未完话题判据的已知残余」那一行、`progress.md` 的 §0 结论表与 §2.19
-里「收口判据＝内容字」的说法、`design/conversation.md` 的同类描述。
+**仍待同步的旧措辞**：本文件中「未完话题判据的已知残余」那一行、`progress.md` 的 §0 结论表与 §2.19
+里「收口判据＝内容字」的说法、`design/conversation.md` 的同类描述。**V0.3 t16 收口时复核：这三处仍写着旧说法**，
+故保留本行作为待办（判据本体早在第五轮 t2 就升级完毕，缺的只是措辞）。
 
 **t9 复审交 t5 的两条**：① `packages/conversation/src/index.ts` 仍未登记 `isAnswerAboutThread` 与 `IgnoredThreadTurn`
 （`ReconcileResult` 已登记）；② `classifyThreadAnswer('没去成，改天再说吧。')` 仍返回 snoozed，但门槛会**先**判它不相关——
@@ -373,3 +374,17 @@ npm run voice:bargein                # 0 次调用：打断判定延迟（纯本
 - [ ] 不新增依赖，或新增时写清新 ADR 与理由
 - [ ] 改完按 [`README.md` §3 更新触发条件](README.md) 同步文档
 - [ ] 把「做了什么、怎么验证、下一步、已知问题」写进 [`progress.md`](progress.md)
+
+## V0.3（P0 + P1）现状（2026-10-04，t16 收口）
+
+- **一句话**：P0 五块（运行时抽取 / canonical store / typecheck / replay / preflight 与 B2）与 P1 两块（`packages/context` 的
+  ContextBuilder + MemoryRetriever、关系上下文 + 未完话题进上下文 + 记忆纠正闭环 + 三入口 `afterTurn`）都已落地；
+  逐条交付、Gate 实测、口径与遗留见 [docs/progress-v03.md](progress-v03.md)。
+- **默认库变了（P0-B）**：household 入口默认同一个库（`XIXI_DATA_DIR`，未设则 `data/xixi`）；`voice-turn` 默认连 household 库、
+  `--isolated-store` 才隔离；测试与评测一律临时目录（`NODE_TEST_CONTEXT` 下默认库也落进程临时目录）；旧库 `data/xixi.sqlite` 未被触碰。
+- **新增两个包**：`packages/runtime`（生产运行时）与 `packages/context`（上下文装配）；边界见
+  [adr/0015](adr/0015-context-builder-and-engine-boundary.md) 与 [adr/0016](adr/0016-memory-status-state-machine.md)。
+- **P1 旗舰场景**：t15 复验时按原句**不成立**（详见
+  [verification/t15-p1-independent-verification-2026-10-04.md](verification/t15-p1-independent-verification-2026-10-04.md)）；**t22 已修复、t23 复审 pass**，
+  判 pass 之前不写「已达标」。
+  [verification/t15-p1-independent-verification-2026-10-04.md](verification/t15-p1-independent-verification-2026-10-04.md)），t22 修复 / t23 复审。

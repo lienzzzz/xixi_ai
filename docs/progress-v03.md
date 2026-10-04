@@ -15,6 +15,23 @@
 
 ---
 
+### 0. 总表（P0 + P1）
+
+| Phase / 项 | 交付（交付号） | 关键实测（口径与命令见本节对应的 P0 / P1 段） | 遗留 |
+|---|---|---|---|
+| P0-0 运行时地图 | `docs/v03/ACTUAL_RUNTIME_MAP.md`（`3da7893`） | 十个概念各一条 `git grep`；复核 pack 审计 15 条并给出 4 处与代码不符；`check:docs` 98 份 exit 0 | 地图的 §1/§3 行曾落后于抽取（t16 已按实况更新） |
+| P0-A 运行时抽取 | `packages/runtime/*`（Step A `dbe7f7f`、Step B/C `f577d7b`） | 反向 import `packages`→`scripts` 0 命中；四个入口 `--print-wiring` 除 `entry` 名外只有 1 种 payload；`npm test` 全绿 | 兼容 re-export 仍在 `scripts/field-test.ts`，**不得提前删** |
+| P0-B canonical store | `packages/domain/src/store.ts` + `packages/runtime/src/perception-ingest.ts`（`4827498`；t17 修 F1–F3 `13ded0e`） | 同一个库文件里同时有 `source=chat` 与 `source=field-test` 的 `system.health`；旧库 `data/xixi.sqlite` 时间戳未变 | 无（页面 `note` 的反例已由 t17 修掉） |
+| P0-C typecheck | `tsconfig.base.json` + `tsconfig.json` + `npm run check:types`（`b6e8dae`） | `check:types` exit 0；`@ts-ignore`/`@ts-expect-error`/`as any` 全库 0 命中（不是靠抑制换绿） | 无 |
+| P0-D replay | `packages/runtime/src/replay-runtime.ts` + `tests/replay/*`（`c9d1ad1`） | 三条行为基线（对话 / 在场 / 跨天未完话题）；跨年（相隔 364 天）同脚本行为摘要相同；`test:replay` 16/16 | pack 的 `sensor.observation` / 音频与图像夹具按 §4 留到 V0.3 之后 |
+| P0-E 已知缺陷 | B2（`4f3301f`）+ preflight 九项（`e0ce503`） | B2 先写回归测试再修（旧实现下先红）；九项各有一条会红的证据 | 已由 t3/t2 逐项回归；剩两条 low 见 P0 遗留第 5 条（现已补） |
+| P1-a 上下文与检索 | `packages/context/*` + engine/prompt 接线（`d168af7`） | 检索进 `prompt.user`（`- [较确定] 我很喜欢茉莉花茶`）；prompt 审计无 UUID / 内部 id / 长数字 / 调试字段 | **pack 旗舰场景原句不过**（见 P1 遗留 N1/N2） |
+| P1-b 关系/话题/纠正/afterTurn | 迁移 006 + `MemoryStore` 状态 API + `MemoryCorrectionResolver` + `createTurnExtraction`（`7331ae`→`733b1ae`） | 纠正后旧行 `superseded`（带 `supersededBy`）、新行 `active`、旧事实不进 prompt；三入口各有真子进程/真 HTTP 证据 | 疑问句被写成偏好事实（P1 遗留 N3，t22 修复 / t23 复审） |
+
+> 交付号取自 `git log`；**成员只报基线、不提交代码**，交付号由 captain 提交后回填（AGENTS §9.20）。
+> **表里的「项数 / 耗时」是当次实测（口径＝`npm test` 的 `ℹ tests / pass / fail` 与 `duration_ms`），会随用例增加而变**——
+> 判「现在是不是绿的」请自己跑一次，别引用这张表里的数字当现状。
+
 ## P0 — Consolidation（已完成，独立复验通过）
 
 **复验基线**：`273e3b6`（复验任务认领时的 HEAD）。复验期间 captain 又提交了 `f13e772`（只改 `AGENTS.md`，6 行），
@@ -227,20 +244,91 @@ C:\Users\zz\AppData\Local\Temp\t11-store\xixi.sqlite
 2. **`docs/architecture.md` 与 `docs/README.md` 的「四个入口各用不同的库」已过期**（P0-B 之后默认同库）：
    复核：`& 'D:\Git\usr\bin\grep.exe' -rn "各用不同" docs`（命中 `docs/architecture.md` 与 `docs/README.md`，
    以及 `docs/progress.md` 里引用它的那句话）。
-3. **`tests/scenarios/golden-conversations.ts` 的 G03 未跑原因已过期**：它写着「本仓库当前没有 open thread 存储」，
+3. ~~**G03 的未跑理由已过期**~~ → **已由 t19 更正**（`59cd65a`）：理由改成点名 `OpenThreadStore` 与 `TopicEngine` 与 `tests/replay/` 的跨天夹具，并写明本 runner 缺的是「多天 + tick」的执行形状；两份历史 benchmark 产物只加了一行旁注、没改写历史。
    但未完话题（Phase 3）早已落地，`tests/replay/replay-open-thread.test.ts` 现在就是跨天行为基线。
    要么把 G03 接进语料，要么改掉这条理由。
 4. **`packages/brain-adapter/package.json` 未声明 `@xixi/model-adapters`**（`packages/brain-adapter/src/tools.ts`
    在值层面 import `WeatherClient`）：既有缺陷，靠 workspace 提升解析；下一轮补声明。
-5. **两条没有回归底线的修复**（t10 评审判 low，不影响 P0 收口）：`store.transitionOpenThread` 省略 `at`
+5. ~~**两条没有回归底线的修复**~~ → **已由 t19 补上**（`59cd65a`）：`transitionOpenThread` 省略 `at` 的回归底线（新用例在旧写法下先红）；判官字段映射抽成唯一字段表（`scripts/lib/judge-score.ts`）并有 5 条离线单测。
    的场景没有被用例守着；`scripts/eval-conversation.ts` 的 `inCharacter` 映射只有 `--judge` 真跑才看得见。
-6. **时间线命令的窗口需求**要一直写下去：≈24 分钟、单核打满、不中断、预算 ≥30 分钟（见 ⑤）。
+6. **时间线命令的窗口需求**（常驻运维要求，不是缺陷）：≈24 分钟、单核打满、不中断、预算 ≥30 分钟（见 ⑤）。**注**：t19 没有处理过这一条（它不是代码问题），派单里若把它列进「已由 t19 补上」与事实不符——我保留它并标成常驻要求。
 
 ---
 
-## P1 — Memory becomes usable（未开始）
+## P1 — Memory becomes usable（已落地；pack 旗舰场景按原句**未达标**）
 
-计划（pack `08_PHASES_AND_ACCEPTANCE.md` §Phase 1）：`ContextBuilder`、`MemoryRetriever`、
-`RelationshipContext`、未完话题进上下文、可信记忆硬策略、记忆纠正与替代、`chat`/`web`/常驻语音三入口 `afterTurn`。
-验收场景：Day1「我不喝绿茶，平时喜欢茉莉花茶」→ 重启 → Day2「给我推荐个茶」，
-西西自然用上偏好、不说「根据数据库」。**本节在 P1 收尾后由独立复验任务补齐**。
+**复验基线 `59cd65a`**，独立复验报告与可重跑探针：
+[`verification/t15-p1-independent-verification-2026-10-04.md`](verification/t15-p1-independent-verification-2026-10-04.md) 与 `verification/t15-probe.mjs`。
+
+### 1. 交付了什么
+
+| 项 | 交付物（定义处） | 交付号 | 一句话说明 |
+|---|---|---|---|
+| P1-a 上下文与检索 | `packages/context/src/context-builder.ts`、`packages/context/src/memory-retriever.ts`、`packages/context/src/memory-score.ts`、`packages/context/src/render.ts`、`packages/context/src/prompt-turn.ts`、`packages/conversation/src/engine.ts`（`contextBuilder` 选项）、`packages/conversation/src/prompt.ts` | `d168af7` | ContextBuilder 成为唯一上下文装配入口（`contextBuilder: false` 可关掉）；MemoryRetriever 确定性混合排序、每轮注入 3~8 条、只取 `active`；两道出口闸门（机器 id / 参数名） |
+| P1-b 关系·话题·纠正·afterTurn | `packages/domain/src/migrations/006_memory_status.sql`、`packages/domain/src/memory.ts`（状态 API）、`packages/context/src/memory-correction.ts`、`packages/runtime/src/turn-extraction.ts`、`scripts/{chat,serve-chat,voice-turn}.ts` | `733b1ae` | 关系笔记与未完话题进 `prompt.user` 与主动决策；旧事实可被取代/否定（四态状态机）；三个入口都走共用的 `createTurnExtraction`（关库前 `await drain()`） |
+| 覆盖缺口修复 | `packages/context/src/render.ts`（最小改动）+ `tests/unit/context/context-builder.test.ts` | `bcb043a` | 给第二道防线 `renderGate` 补一条真能拓到它的用例（一对记忆：`injected=2`、`dropped_at_render=1`） |
+| G03 理由与判官字段 | `tests/scenarios/golden-conversations.ts`、`scripts/lib/judge-score.ts` | `59cd65a` | 更正常年过期的 G03 理由；判官字段映射抽成唯一字段表 + 5 条离线单测 |
+| 「重启后仍在」的默认门禁守护 | `tests/integration/memory-correction-closure.test.ts` | 本任务 t16（工作区） | 库从 `:memory:` 改成临时目录文件库，并新增一条**关库再开**的用例（跨进程版本由 t15 探针覆盖） |
+
+### 2. 实测（我自己跑的；数字与命令见 t15 报告）
+
+- **四条技术验收全部成立**（每条都用一个**文件库**、每一步一个**新进程**）：
+  ① 对话写入记忆 → `semantic_memory` 一行 `preference: 我很喜欢喝茉莉花茶`（`active`）；
+  ② 进程重启后仍在 → 新进程读同一个文件库仍是同一行（真模型侧每一步也是新的 `scripts/chat.ts` 进程）；
+  ③ 后续正常聊天召回 → 问「茉莉花茶还有吗？」得到 `injected=1`，`prompt.user` 里出现 `- [较确定] 我很喜欢喝茉莉花茶`；
+  ④ 纠正后旧事实不再召回 → 旧行 `superseded` + `supersededBy`、新行 `active`、只取 `active` 的候选集里没有旧句。
+- **场景二（绿茶纠正）完全达标**：真模型三步（每步新进程）+ 直读库：旧行 `superseded`、新行 `我不喝绿茶` `active`、
+  事后问茶不再声称「你喜欢绿茶」。
+- **措辞检查**：「根据数据库」这类机械话在 8 轮真模型回答里 0 命中；离线整段 prompt `hasDatabaseWord=false`；
+  `HARD_POLICY` 明写不提实现、不报工具幕。样本小，是观察值不是统计结论。
+- **纠正闭环的硬证据**：`system.health(service=memory.status)` 一条，正文含 `superseded` 的原因（如 `disown_claim`）与新说法。
+
+### 3. 验收状态与遗留（N1–N3 已由 t22 修复、**t23 复审 pass**）
+
+- **N1（曾未达标；t22 已修，t23 复审 pass）**
+  **一条记忆都不写**（整句匹配、不按逗号切分；「我」后面接的是「不喝绿茶」，「平时喜欢」前面没有「我」）。
+- **N2（曾未达标；t22 已修，t23 复审 pass）**
+  `injected=0`；真模型那一轮用户看到的是引擎修复句 `UNBACKED_FACT_REPLY`，不是她的回答。
+- **N3（曾未达标；t22 已修，t23 复审 pass）**
+  `我喜欢喝什么茶吗`）；机制是守卫 `statement.includes('？')` 对当前正则恒为假（字符类已把问号排除在 `match[0]` 之外）。
+- 以上三条：**t22 已修复并入库、t23 复审中**。t22 用的是**同一份探针**（t15 的 `verification/t15-probe.mjs`，一字未动、同口径：文件库 + 每步一个新进程）做前后对照：
+  改造前 write 无记忆、ask `injected=0`、疑问句落库成 `我喜欢喝什么茶吗`；改造后 write 一条 `active`、ask `injected=1` 且 `dropped_at_render=0`、
+  疑问句新增 0 条；召回精度表 15 组里 5/5 召回、**10/10 误召回反例均未召回**（反证：去掉话题点名路径后 4 条红、10 条反例仍绿）。
+  **t23 复审结论：pass**（复审基线 `f2af0fb`、用同一份探针 8FDBE4CC 独立复现了「前：0 条 / `injected=0` / 问句落库」与「后：1 条 active / `injected=1` / 问句 0 条新增」），
+  且它自己补了一张**误召回矩阵**（6 条种子记忆 × 7 条查询）：除旗舰问句 0→3（多出来的是茶话会、茶叶罐，同话题内）外，其余六条查询的召回集改造前后完全相同。
+  所以三条可以按「已修复并通过独立复审」写；**仍然不要**写「Phase 1 全部完成」——Tier 2 未接线、记忆 UI 未做，边界见下。
+- **三条已知边界（第一条为 captain 裁定的口径、第二条是既有缺陷被 P1 放大、第三条为 t23 指出的既有行为；都不是本轮新引入）**：
+  （话题点名要求**查询的每个内容字都成词出现**，复合问句里多出来的内容字就把这条路径关掉了）；② **疑问识别是字面三种形态**——
+  没有疑问标记的残句仍按陈述读（「你还记得我喜欢喝什么茶吗？」这类会被正确识别；而「我喜欢的茶」这种残句会落库成 `preference:我喜欢的茶`）——
+  **这条边界此前只在代码注释里**，t23 指出后补进文档。③ **宾语前置句会写出没有宾语的截断记忆**：「铁观音我平时喜欢」→ `routine:我平时喜欢`，
+  「绿茶我平时爱喝」→ `routine:我平时爱喝`；t23 在 t22 前后跑同一批句子输出逐字相同，**确认是旧正则的捕获行为、不是 t22 引入**；
+  P1 之后这种行会被召回，所以记在这里（修它属提取侧，下一轮）。
+  另一条**观察**（t23 的 T23-D3，方向在内、本轮不收紧）：**单内容字查询会把库里所有「茶×」词一起带进来**——
+  6 条种子记忆实测：问「给我推荐个茶」注入 3 条（茉莉花茶 / 茶话会 / 茶叶罐），跨话题没有上升（咖啡 1→1，象棋/普洱/茶几都没进来），
+  但**茶类记忆一多时会挤满 3~8 条预算**。captain 裁定本轮不收紧（收紧会削掉旗舰场景本身），记在这里供下一轮判断
+  （可能做法：按话题聚类后按预算分配，或给单字查询一个更严的成词门槛）。
+- **Tier 2 结构化抽取尚未接线**
+- **默认门禁的守护**：`npm test` 现在覆盖「写入 / 跨进程重启 / 召回 / 纠正」四条（closure 用例已是文件库），
+  但**不覆盖 pack 场景的原句**——那正是 N1/N2 的入口。
+
+### 4. ADR
+
+- [`adr/0015`](adr/0015-context-builder-and-engine-boundary.md)：ContextBuilder 与 ConversationEngine 的边界（含「引擎自己会再建一次 context」这条会骗过探针的细节）。
+- [`adr/0016`](adr/0016-memory-status-state-machine.md)：记忆状态机（active / superseded / revoked / expired）与纠正闭环。
+- ADR-0014（可信记忆策略与 provenance）在 t22 落地后补——它描述的策略含 `topicCoverage` 这一条相关性信号，
+  **不能**在修复落地前先写成现状。
+
+### 5. P0+P1 收口后的全量门禁（t16 实跑，2026-10-04）
+
+| 命令 | 实测 | 取数时的树 |
+|---|---|---|
+| `npm run check:types` | exit 0 | HEAD `6170e4c`（t22）+ **t16 的文档改动在途**（本文件的这些改动；`packages/` 无未提交改动） |
+| `npm test` | **587 项 pass 587 fail 0 exit 0**（框架 `duration_ms` 39170.7，进程外墙钟 39.7 s） | 同上 |
+| `npm run check:docs` | **103 份 markdown**，失效链接 0 / 不存在的文件引用 0 / 缺少新鲜度标记 0，exit 0 | 同上 |
+| `node scripts/eval-proactive-timeline.ts` | **EXITCODE 0、ELAPSED_SEC 2047.5（≈34 分钟）**；单日五项目标 + F4 分离探针 + 多日 M1–M6 **全部通过** | 同上 |
+
+- `npm test` 的 587 项**包含**本轮把 `tests/integration/memory-correction-closure.test.ts` 从 `:memory:` 改成临时目录文件库
+  （并新增一条**关库再开**的「重启后仍在」用例）之后的版本——这次改动没有让门禁变红。
+- **时间线这次 34 分钟**（此前三次实测 1429.5 / 1423.1 / 1425.6 秒）：本次跑在**并发窗口**里（另一个成员在同一时段反复跑测试），
+  进程采样仍是单核打满（10 秒烧 9.5 CPU 秒）、未中断，日志内容与形状和此前逐项一致（同样 23082 字节的 UTF-16LE、12 项判定全过）。
+  所以「给它 ≥30 分钟」这条要**按并发情况放宽**：安静机器 ≈24 分钟，有人同时在跑测试时 ≈34 分钟。

@@ -13,8 +13,15 @@
  *   4. 事件日志里有一条 `system.health`（状态变化也是事实）。
  *
  * Run: `npm test`（integration 也在默认门禁里）。
+ *
+ * **库是文件库、不是 `:memory:`**（t16 收口时改）：Phase 1 的验收里有一条是「**进程重启后记忆仍在**」，
+ * 而 `:memory:` 一关就没，那条验收在默认门禁里当时没有任何守护（t21 复审记的 low，只由跨进程探针覆盖）。
+ * 现在每条用例都在系统临时目录里建一个真文件库，文件末尾那条用例还会**关库再开**，把「重启后仍在」钉进默认门禁。
  */
 import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { FakeBrainAdapter } from '@xixi/brain-adapter';
@@ -36,16 +43,22 @@ const CONFIG: XixiConfig = {
 };
 
 interface Harness {
+  readonly dir: string;
+  readonly dbPath: string;
   readonly store: XixiStore;
   readonly memory: MemoryStore;
   readonly engine: ConversationEngine;
   readonly extractor: TurnMemoryExtractor;
   readonly sessionId: string;
   readonly say: (text: string, at: Date) => Promise<void>;
+  /** 关库并删掉临时目录（每条用例都调它，别把库留在系统临时目录里）。 */
+  readonly close: () => void;
 }
 
 function harness(): Harness {
-  const store = openXixiStore({ dbPath: ':memory:', clock: fixedClock(T0, 60_000) });
+  const dir = mkdtempSync(join(tmpdir(), 'xixi-closure-'));
+  const dbPath = join(dir, 'xixi.sqlite');
+  const store = openXixiStore({ dbPath, clock: fixedClock(T0, 60_000) });
   store.seedSelfProfile({ talkativeness: 0.75, verbosity: 0.7 });
   const session = store.createSession();
   const memory = new MemoryStore(store);
@@ -65,6 +78,8 @@ function harness(): Harness {
     afterTurn: (job) => extractor.enqueue(job),
   });
   return {
+    dir,
+    dbPath,
     store,
     memory,
     engine,
@@ -74,6 +89,10 @@ function harness(): Harness {
       const turn = await engine.respond({ sessionId: session.sessionId, text, at });
       assert.equal(turn.accepted, true, `这一轮要被接受：${JSON.stringify(turn.reason)}`);
       await extractor.flush();
+    },
+    close: () => {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
     },
   };
 }
@@ -127,7 +146,7 @@ test('端到端：先记下、再被纠正，旧事实不再算数（prompt 里�
     assert.equal(audit.length, 1);
     assert.match(String((audit[0]?.payload as { detail?: string }).detail ?? ''), /superseded/);
   } finally {
-    h.store.close();
+    h.close();
   }
 });
 
@@ -145,6 +164,63 @@ test('普通聊天不会误触发纠正：没有纠正规则命中时一条记�
     );
     assert.equal(h.memory.episodic({ kind: 'correction', limit: 10 }).length, 0);
   } finally {
+    h.close();
+  }
+});
+
+/**
+ * Phase 1 验收里的**「进程重启后记忆仍在」**（t16 收口补的默认门禁守护）。
+ *
+ * 这条用例刻意不碰 `:memory:`：它写完之后**关库**，再从同一个文件路径**重新打开**，
+ * 用一个全新的 `MemoryStore` / `ContextBuilder` / `ConversationEngine` 读——这正是「重启」在
+ * 单进程里能做到的最接近的形态（跨真进程由 `docs/verification/` 的复验探针覆盖，两者互为补充）。
+ *
+ * 三个断言各钉一段：
+ *   1. 库文件真的落在磁盘上（`existsSync`，`:memory:` 的写法在这里会直接失败）；
+ *   2. 关库再开之后，那条偏好**仍是 active**，且 `statement` 与 `sourceEventId` 一字不改；
+ *   3. 重启之后它**仍然能被召回**——新引擎装配出的提示词里出现这句（光「库里还在」不够，
+ *      链路必须是通的：检索 → 渲染 → `prompt.user`）。
+ */
+test('进程重启后记忆仍在：关库、重开同一个文件库、新引擎照样召回它', async () => {
+  const h = harness();
+  // 这两样要在「关库」之前取出来，重启之后才有的比。
+  let statement = '';
+  let sourceEventId: string | null = null;
+  try {
+    await h.say('我很喜欢喝茉莉花茶。', T0);
+    const before = h.memory.activeSemantic({ property: 'preference', limit: 10 });
+    assert.equal(before.length, 1, '先确认这一轮真的写进去了');
+    statement = before[0]?.statement ?? '';
+    sourceEventId = before[0]?.sourceEventId ?? null;
+    assert.ok(existsSync(h.dbPath), '这是文件库：库文件必须真的在磁盘上（:memory: 在这里就红了）');
+  } finally {
     h.store.close();
+  }
+
+  // ↓ 下面是「重启」：同一个路径、全新的进程内对象。
+  const reopened = openXixiStore({ dbPath: h.dbPath, clock: fixedClock(T2, 60_000) });
+  try {
+    const memory = new MemoryStore(reopened);
+    const session = reopened.latestSession();
+    assert.notEqual(session, null, '会话也是持久的，重启后取得到');
+    const after = memory.activeSemantic({ property: 'preference', limit: 10 });
+    assert.equal(after.length, 1, '重启后那条偏好还在，而且仍算数（active）');
+    assert.equal(after[0]?.statement, '我很喜欢喝茉莉花茶');
+    assert.equal(after[0]?.sourceEventId, sourceEventId, '来源事件 id 不许在重启后变化');
+
+    // 链路也要是通的：新引擎装配提示词时它还能进 `prompt.user`。
+    const engine = new ConversationEngine({
+      adapter: new FakeBrainAdapter(),
+      store: reopened,
+      config: CONFIG,
+      clock: fixedClock(T2, 60_000),
+      offsetMinutes: 480,
+    });
+    const prompt = engine.buildPrompt({ sessionId: session?.sessionId ?? '', text: '茉莉花茶还有吗？', at: T2 });
+    assert.ok(prompt.user.includes(statement), `重启后仍应被召回：\n${prompt.user}`);
+    assert.ok(!/[0-9a-f]{8}-[0-9a-f]{4}/i.test(prompt.user), '召回进提示词的不许是内部 id');
+  } finally {
+    reopened.close();
+    rmSync(h.dir, { recursive: true, force: true });
   }
 });
