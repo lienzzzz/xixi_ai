@@ -178,6 +178,16 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    ② 为什么必须改（对应哪条验收或哪个事实）；③ 为什么没有回滚（例如改动已被 captain 的周期提交收进去）；
    ④ 请谁单独核对这一处。**正例**：t45 用这套格式披露了 `docs/design/domain-model.md` 的两条推论，
    评审据此复核出其中一句与事实相反（四个入口各用不同数据库，覆盖不跨入口）——**格式对了，错误才抓得住**。
+   **子规则（V0.3 P2 的 t2 换来）：写 inScope 之前先确认「今天这个东西到底在哪个文件里」。**
+   P2-A 的契约声明的是 `packages/runtime/src/tool-runtime.ts`，而 **ToolRegistry 实际在 `packages/brain-adapter/src/tool-registry.ts`**
+   （现状地图 `docs/v03/P2_PLUGIN_GAP_MAP.md` 里有证据）——成员改了真位置，完成校验就把 3 条路径拒为 `is undeclared`，
+   其中 2 条还先被 captain 的周期提交按**另一条任务**（t5）的名义收进了库，归属写错。
+   **纪律**：① 先读现状地图（P0 的 `ACTUAL_RUNTIME_MAP`、P2 的 `P2_PLUGIN_GAP_MAP`）确认位置再写 inScope——
+   **地图还没出的时候，不要把「需要靠它定位」的实现任务并行派出去**（这轮 t1 与 t2 并行就是这个代价）；
+   ② 错位已经发生时，按 §9.2 披露 + 把这几条路径与「只应含预期改动」写成**下一次评审的显式核对项**，
+   并把正确路径补进同一批后续任务的契约（t3/t6 就是这么补的）；
+   ③ 两条任务若真的会写同一批文件，就用依赖串行——**别指望重叠校验替你发现**：
+   它只比较**声明的路径**，不比较代码里真实的依赖（t2 与 t5 都写 brain-adapter 而校验器没拦，因为 t2 的 inScope 里没写 brain-adapter 的路径）。
 3. **多任务不要声明同一路径**：并发写同一文件会互相覆盖（`docs/progress.md`、`tests/`、`package.json` 都踩过）。
    约定：进度文档由集成任务**单写**，其他成员把可直接粘贴的段落写进**完成回报**；测试按子目录分（`tests/unit/voice/`、`tests/unit/core/`、`tests/perception/`、`tests/console/`）。
 4. **队长所有的文件成员不得直接改**：`AGENTS.md`、`xixi_ai_companion_project_plan.md`、`.agent-teams/`（后者已 gitignore）。成员提出建议，由 captain 落笔。
