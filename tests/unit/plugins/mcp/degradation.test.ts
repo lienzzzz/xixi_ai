@@ -50,8 +50,8 @@ test('a server that cannot be reached is “these tools are not here today”, n
   });
 
   // The entry point comes up: no throw here is the whole point of the test.
-  const started = await mount.runtime.start();
-  const report = mount.mount();
+  const started = await mount.start();
+  const report = mount.notes;
   assert.deepEqual(report.mounted, []);
   assert.deepEqual(started.map((entry) => entry.state), ['active'], '插件本身是活的，只是没有工具');
 
@@ -78,8 +78,8 @@ test('a connect that fails once and then succeeds is retried — and the retry i
     mcpServers: [{ name: 'weather', connect: stub.transportFactory, retry: { attempts: 3, delayMs: 1 } }],
   });
 
-  await mount.runtime.start();
-  const report = mount.mount();
+  await mount.start();
+  const report = mount.notes;
   assert.deepEqual(report.mounted, ['mcp.weather.forecast'], '重试之后工具必须真的在');
   assert.equal(stub.factoryCalls, 2, '第一次工厂调用是失败的，第二次才成');
   assert.equal(stub.served, 1);
@@ -102,8 +102,7 @@ test('a connection that drops mid-life is noticed, reconnected, and the call sti
   const mount = buildPluginRuntime(CONFIG, {
     mcpServers: [{ name: 'weather', connect: stub.transportFactory, retry: { attempts: 2, delayMs: 1 } }],
   });
-  await mount.runtime.start();
-  mount.mount();
+  await mount.start();
 
   const first = await mount.registry.execute({ name: 'mcp.weather.forecast', arguments: '{}' }, CONTEXT);
   assert.equal(first.record.ok, true);

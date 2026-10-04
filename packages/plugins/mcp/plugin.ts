@@ -22,9 +22,18 @@
  */
 import type { PluginContext } from '../src/context.ts';
 import type { PluginModuleShape, InlinePlugin } from '../src/discovery.ts';
-import { McpClientAdapter, type McpAdapterOptions } from './adapter.ts';
+import { McpClientAdapter, type McpAdapterOptions, type McpServerStatus } from './adapter.ts';
 
 export const DEFAULT_MCP_PLUGIN_ID = 'xixi.mcp';
+
+/**
+ * The honest one-line reason a server is not usable: a real failure first, then why it was closed,
+ * then what discovery recorded. Never an empty "state" — a health report has to be quotable.
+ */
+function reasonOf(entry: McpServerStatus): string {
+  const why = entry.lastError ?? entry.closeReason ?? entry.discoverFailure;
+  return `${entry.server}=${entry.state}${why === null ? '' : `（${why}）`}`;
+}
 
 export interface McpPluginOptions extends McpAdapterOptions {
   readonly id?: string;
@@ -78,22 +87,30 @@ export function createMcpPlugin(options: McpPluginOptions): McpPluginHandle {
       return adapter.contribution();
     },
     health: () => {
-      if (adapter.disposed) return { status: 'down' as const, detail: '适配器已释放' };
+      if (adapter.disposed) return { status: 'down' as const, detail: '适配器已释放（dispose），连接是终止的' };
       const statuses = adapter.status();
       if (statuses.length === 0) return { status: 'ok' as const, detail: '没有配置 MCP 服务器' };
-      const broken = statuses.filter((entry) => entry.state === 'failed');
+
+      // 「未连接」= 不是 connected。idle / disconnected / failed 都不算连上（t20 F2：早先只把 failed
+      // 当坏，于是 deactivate 之后的 idle 会被写成「服务器连上了但没发布工具」——一句假话）。
+      const notConnected = statuses.filter((entry) => entry.state !== 'connected');
       const tools = adapter.tools().length;
-      if (tools === 0 && broken.length > 0) {
-        return { status: 'down' as const, detail: `一个工具都没有：${statuses.map((entry) => `${entry.server}=${entry.state}`).join('、')}` };
+
+      if (tools > 0 && notConnected.length === 0) return { status: 'ok' as const, detail: `${tools} 个 MCP 工具在线` };
+      if (tools > 0) {
+        return {
+          status: 'degraded' as const,
+          detail: `${notConnected.map((entry) => entry.server).join('、')} 未连接（${notConnected.map(reasonOf).join('；')}），其余 ${tools} 个工具照常`,
+        };
       }
-      if (tools === 0) {
-        // Connected, but nothing advertised: the plugin is not broken, it just has nothing to offer.
-        return { status: 'degraded' as const, detail: '服务器连上了但没发布工具' };
+      // 一个工具都没有：区分「真连上了但服务器没发布工具」与「根本没连上/已断开」。
+      if (notConnected.length === 0) {
+        return { status: 'degraded' as const, detail: '服务器连上了但没发布工具（discover 返回空列表）' };
       }
-      if (broken.length > 0) {
-        return { status: 'degraded' as const, detail: `${broken.map((entry) => entry.server).join('、')} 连不上，其余 ${tools} 个工具照常` };
-      }
-      return { status: 'ok' as const, detail: `${tools} 个 MCP 工具在线` };
+      return {
+        status: 'down' as const,
+        detail: `MCP 未连接，一个工具都没有：${statuses.map(reasonOf).join('；')}`,
+      };
     },
     deactivate: () => adapter.disconnect(),
     dispose: () => adapter.dispose(),

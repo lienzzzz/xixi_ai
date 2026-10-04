@@ -94,6 +94,12 @@ export interface McpServerStatus {
   readonly state: McpConnectionState;
   readonly tools: number;
   readonly stats: McpConnectionStats;
+  /** The last connect/call failure, if there was one. */
+  readonly lastError: string | null;
+  /** Why the connection was last closed (`deactivate`, `dispose`, a timeout …), if it was. */
+  readonly closeReason: string | null;
+  /** What the latest `discover()` recorded for this server, if it failed. */
+  readonly discoverFailure: string | null;
 }
 
 const EMPTY_SCHEMA: Record<string, unknown> = { type: 'object', properties: {}, additionalProperties: false };
@@ -277,32 +283,54 @@ export class McpClientAdapter {
     }
   }
 
-  /** Per-server observable state, including how many times a connection was (re)established. */
+  /**
+   * Per-server observable state: how often the connection was (re)established, how many tools it
+   * contributes, and **why it is not usable when it is not**.
+   *
+   * The reasons come from three sources, and all three are merged per server (t20 F2): the last
+   * connect/call failure (`stats.lastError`), the reason the connection was last closed
+   * (`closeReason`, e.g. the deactivate that released it), and the failure the latest `discover()`
+   * recorded for this server. A `health` report that only knows "state" cannot tell a server that
+   * answered with nothing from one that is not there at all — this is what it quotes instead.
+   */
   status(): McpServerStatus[] {
     const out: McpServerStatus[] = [];
     for (const [segment, connection] of this.#connections) {
+      const stats = connection.stats;
       out.push({
         server: segment,
         state: connection.state,
         tools: this.#descriptors.size === 0 ? 0 : [...this.#descriptors.values()].filter((entry) => entry.server === segment).length,
-        stats: connection.stats,
+        stats,
+        lastError: stats.lastError,
+        closeReason: connection.closeReason,
+        discoverFailure: this.#failures.find((failure) => failure.server === segment)?.error ?? null,
       });
     }
     for (const failure of this.#configFailures) {
-      out.push({ server: failure.server, state: 'failed', tools: 0, stats: { attempts: 0, connects: 0, reconnects: 0, calls: 0, listings: 0, failures: 1, lastError: failure.error } });
+      out.push({
+        server: failure.server,
+        state: 'failed',
+        tools: 0,
+        stats: { attempts: 0, connects: 0, reconnects: 0, calls: 0, listings: 0, failures: 1, lastError: failure.error },
+        lastError: failure.error,
+        closeReason: null,
+        discoverFailure: failure.error,
+      });
     }
     return out;
   }
 
   /**
-   * Drop every live connection, but stay usable.
+   * Drop every live connection, but stay usable — this is the lifecycle's `deactivate` step.
    *
-   * This is what the lifecycle's `deactivate` step needs: the capabilities are released, the
-   * connections are closed (a plugin that is not active must not hold sockets), and a later
-   * `activate()` runs discovery again through the same factories. `dispose()` is the final version.
+   * The connections go back to `idle` (a plugin that is not active must not hold sockets) and stay
+   * **reconnectable**, so `activate()` can discover again through the same factories. Terminal
+   * semantics belong to `dispose()` (t20 F1: this used to kill the connections for good, and a
+   * deactivate → activate cycle could never bring the tools back).
    */
   async disconnect(): Promise<void> {
-    for (const connection of this.#connections.values()) await connection.close();
+    for (const connection of this.#connections.values()) await connection.close('deactivate：插件停用，连接断开（可重连）');
     this.#tools = [];
     this.#descriptors = new Map();
   }
@@ -310,7 +338,9 @@ export class McpClientAdapter {
   /** Close every connection and forget the discovered tools, for good. */
   async dispose(): Promise<void> {
     this.#disposed = true;
-    await this.disconnect();
+    for (const connection of this.#connections.values()) await connection.dispose('适配器 dispose');
+    this.#tools = [];
+    this.#descriptors = new Map();
   }
 
   get disposed(): boolean {

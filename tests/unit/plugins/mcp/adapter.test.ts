@@ -79,8 +79,8 @@ test('a stub MCP server’s tools are discovered, namespaced, and offered to the
   });
 
   const mount = buildPluginRuntime(CONFIG, { mcpServers: [{ name: 'weather', connect: stub.transportFactory }] });
-  const started = await mount.runtime.start();
-  const report = mount.mount();
+  const started = await mount.start();
+  const report = mount.notes;
 
   // --- discovery, through the ordinary nine-step lifecycle
   const instance = mount.runtime.manager.instance('xixi.mcp');
@@ -138,8 +138,7 @@ test('an MCP tool is a tool like any other: the same permission policy judges it
   const mount = buildPluginRuntime(CONFIG, {
     mcpServers: [{ name: 'calendar', connect: stub.transportFactory, risk: 'write' }],
   });
-  await mount.runtime.start();
-  mount.mount();
+  await mount.start();
 
   // The operator declared this server's risk; the guest and the proactive scope are refused.
   const asGuest = await mount.registry.execute({ name: 'mcp.calendar.create_event', arguments: '{"title":"复诊"}' }, { ...CONTEXT, role: 'guest' });
@@ -173,8 +172,8 @@ test('two MCP servers keep their own namespaces, and the same tool name can exis
       { name: 'calendar', connect: calendar.transportFactory },
     ],
   });
-  await mount.runtime.start();
-  const report = mount.mount();
+  await mount.start();
+  const report = mount.notes;
 
   assert.deepEqual([...report.mounted].sort(), ['mcp.calendar.forecast', 'mcp.weather.forecast']);
   const first = await mount.registry.execute({ name: 'mcp.weather.forecast', arguments: '{}' }, CONTEXT);

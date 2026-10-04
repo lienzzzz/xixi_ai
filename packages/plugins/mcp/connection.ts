@@ -86,6 +86,7 @@ export class McpServerConnection {
   #everConnected = false;
   #disposed = false;
   #closing = false;
+  #closeReason: string | null = null;
 
   constructor(options: McpConnectionOptions) {
     this.server = options.server;
@@ -125,11 +126,33 @@ export class McpServerConnection {
     });
   }
 
-  /** Release the connection. After this the connection is finished: further calls refuse. */
-  async close(): Promise<void> {
-    this.#disposed = true;
-    await this.#drop('主动关闭');
+  /** Why the connection was last closed — the honest reason a `health` report can quote. */
+  get closeReason(): string | null {
+    return this.#closeReason;
+  }
+
+  /**
+   * Drop the live link and go back to `idle` — **not terminal**: the next operation reconnects.
+   *
+   * This is what a plugin's `deactivate` needs. The earlier version set the terminal flag here, so a
+   * `deactivate → activate` cycle left a connection that refused every call for good and the plugin
+   * could never contribute its tools again (t20 F1). Termination belongs to `dispose()` and only to
+   * `dispose()`; here the only thing that dies is the transport.
+   */
+  async close(reason = '主动断开（可重连）'): Promise<void> {
+    await this.#drop(reason);
     this.#state = 'idle';
+    this.#closeReason = reason;
+  }
+
+  /** Terminal: after this the connection refuses every operation, reconnects included. */
+  async dispose(reason = '适配器 dispose'): Promise<void> {
+    this.#disposed = true;
+    await this.close(reason);
+  }
+
+  get disposed(): boolean {
+    return this.#disposed;
   }
 
   /** One attempt at an operation, with the reconnect policy around it. */
@@ -180,11 +203,10 @@ export class McpServerConnection {
       }
     }
     this.#state = 'failed';
-    throw new McpConnectionError(
-      this.server,
-      `连不上 MCP 服务器 ${this.server}（试了 ${attempts} 次）：${messageOf(lastError)}`,
-      { cause: lastError },
-    );
+    // Record the *terminal* wording, not just the last attempt's: a health report quoting
+    // 「桩：服务器没起来」 does not say how hard we tried (t20 F2).
+    this.#stats.lastError = `连不上 MCP 服务器 ${this.server}（试了 ${attempts} 次）：${messageOf(lastError)}`;
+    throw new McpConnectionError(this.server, this.#stats.lastError, { cause: lastError });
   }
 
   /** The SDK's own lifecycle hooks: the server can die between two calls. */
@@ -193,6 +215,9 @@ export class McpServerConnection {
       if (this.#closing) return;
       this.#client = null;
       if (this.#state === 'connected') this.#state = 'disconnected';
+      // Record *why* — a health report that only knows the state cannot tell a server that said
+      // goodbye from one that was never there (t20 F2).
+      this.#closeReason = '服务器关闭了连接（onclose）';
       this.#event('disconnect', `${this.server} 的连接被对方关掉了`);
     };
     client.onerror = (error: Error): void => {

@@ -175,6 +175,11 @@ export interface PluginMountReport {
  *    core's;
  *  * a tool the policy refuses in this scope is registered, judged, and then **withdrawn** — it is
  *    not offered as something the model can ask for.
+ *
+ * One case refreshes instead of skipping: a name whose capability this plugin **re-registered** (the
+ * `deactivate → activate` cycle builds new tool objects) is replaced, so the model-facing copy is
+ * always the current activation's. A core tool is never in the capability registry, so that branch
+ * cannot reach it.
  */
 export function mountPluginTools(registry: ToolRegistry, capabilities: CapabilityRegistry): PluginMountReport {
   const owned = new Set(registry.names());
@@ -186,8 +191,15 @@ export function mountPluginTools(registry: ToolRegistry, capabilities: Capabilit
   for (const spec of capabilities.values<PluginToolSpec>('tool')) {
     const name = spec.tool.name;
     if (owned.has(name)) {
-      skipped.push(name);
-      continue;
+      const currentInCore = registry.all().find((tool) => tool.name === name);
+      const ownedByCapability = capabilities.ownerOf('tool', name) !== undefined;
+      if (currentInCore === undefined || !ownedByCapability || currentInCore === spec.tool) {
+        skipped.push(name);
+        continue;
+      }
+      // Same name, different object, and the capability registry says this plugin owns that name:
+      // the mounted copy is from a previous activation. Refresh it rather than leaving it behind.
+      registry.unregister(name);
     }
     const release = registry.register(spec.tool);
     const verdict = registry.check(name, CONVERSATION_SCOPE);
