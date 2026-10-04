@@ -60,6 +60,7 @@ export {
   type RelationshipInputs,
 } from './relationship-context.ts';
 export {
+  DEFAULT_SELF_LINES,
   MEMORY_HEADING,
   memoryTags,
   renderGate,

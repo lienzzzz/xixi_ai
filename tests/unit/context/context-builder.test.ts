@@ -18,7 +18,18 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { FakeBrainAdapter } from '@xixi/brain-adapter';
-import { ContextBuilder, MEMORY_HEADING, parseContextMemorySettings } from '@xixi/context';
+import {
+  ContextBuilder,
+  DEFAULT_SELF_LINES,
+  MEMORY_HEADING,
+  MemoryRetriever,
+  parseContextMemorySettings,
+  renderGate,
+  renderMemoryLines,
+  renderOpenThreadLines,
+  renderSelfLines,
+  type RetrievedMemory,
+} from '@xixi/context';
 import { ConversationEngine, MEMORY_SECTION_HEADING } from '@xixi/conversation';
 import { fixedClock, MemoryStore, OpenThreadStore, openXixiStore, type XixiConfig, type XixiStore } from '@xixi/domain';
 
@@ -157,6 +168,11 @@ test('记忆真的进了 prompt，而且没有把 UUID、id 或调试数字漏�
   }
 });
 
+/**
+ * 这一条压的是**第一层**（检索前的 `usefulText`）：文本本身就是机器 id 拼出来的，所以它连
+ * 候选都进不去，`droppedAtRender` 保持 0。它的断言是对的、一个字都没动 —— P1-D1 复审指出的
+ * 是**覆盖面**只到第一层，所以下面另加了一条只走第二层（渲染前的 `renderGate`）的用例。
+ */
 test('记忆文本本身带 id / 长数字时整条不进 prompt，而且诊断能说清是渲染这一层挡的', () => {
   const h = harness();
   try {
@@ -184,6 +200,139 @@ test('记忆文本本身带 id / 长数字时整条不进 prompt，而且诊断�
     h.store.close();
   }
 });
+
+/**
+ * 只走**第二层**（渲染前的 `renderGate`）的用例 —— P1-D1 复审要求补的那一条。
+ *
+ * 两层各自的职责（上面那条压第一层，这条压第二层）：
+ *   * **第一层：检索前**（`memory-retriever.ts` 的 `usefulText`）只拦**机器 id 形态**的文本：
+ *     UUID 形状、8 位以上连续数字。命中就整条不进候选（连分数都不算）。
+ *   * **第二层：渲染前**（`render.ts` 的 `renderGate`）在这一层之上**多**拦程序里的参数名
+ *     （`valence` / `confidence` / `verbosity`…）与空白文本，而且**所有出口都过它**：
+ *     记忆行、未完话题行、世界状态附加行、自我状态行。
+ *
+ * 这条用例刻意选一段**过得去第一层**的文本（只有参数名，没有 id、没有 8 位数字），
+ * 并且让它与查询**共享双字词**（否则它会在检索阶段以 `not_relevant` 被丢掉，
+ * 「记忆没进提示词」为真却与 `renderGate` 无关 —— 那是 T14 评审实测到过的陷阱）。
+ *
+ * ## 为什么不用 `engine.buildUserTurnContext(...)` 上的 `droppedAtRender` 做断言（T14 评审实测）
+ *
+ * `buildPrompt()` 内部**另建一次** context（`engine.ts` 里 `#context.buildUserTurn(...)`），
+ * 所以调用方另外拿到的那个对象**不是被渲染的同一个实例**，它的计数**恒为 0**：闸门开着与关掉
+ * 打印出来都是 0，读它等于没断言。正确的层次归因读装配好的 prompt 里 `memories` 段的
+ * debug（`prompt.ts` 写的 `injected=… dropped_at_render=…`，值来自引擎渲染时用的那个实例）：
+ *   * `injected=0` → 检索阶段就没进来（第一层拦的）；
+ *   * `injected>0 且 dropped_at_render>0` → **真的是渲染层拦的**；
+ *   * `injected>0 且 dropped_at_render=0` → 渲染层没拦（缺陷）。
+ * 「记忆段里没有那个词」这三种长得一模一样，所以光看词不够。
+ * 而「计数确实加一」这件事在 `ContextBuilder` 那一层可以直接断言（同一个实例先 build 再 render）。
+ */
+test('渲染层（第二道闸门）：参数名过得去检索，但一定进不了提示词，并且逐条计数', () => {
+  const h = harness();
+  try {
+    // 参数名后面跟空格（满足 `\b`）：`usefulText` 只看 UUID 与 8 位以上数字，
+    // 所以这段文本在第一层是**合格**的 —— 这正是本条要用的事实。
+    const tainted = '他提过 valence 这个说法';
+    h.memory.recordSemantic({
+      property: 'person',
+      statement: tainted,
+      sourceType: 'explicit_correction',
+      sourceEventId: 'evt_00000000-0000-4000-8000-00000000000a',
+    });
+    // 一条干净的、同样相关的记忆：被挡掉的只是那一条，而不是整段消失。
+    h.memory.recordSemantic({
+      property: 'person',
+      statement: '他提过那个说法',
+      sourceType: 'explicit_correction',
+      sourceEventId: 'evt_00000000-0000-4000-8000-00000000000b',
+    });
+
+    // 用户这句话里**没有**那个参数名（否则提示词里的【用户这句话】会自己带上它，
+    // 「prompt 里不出现那个词」就变成一句与闸门无关的话）；它与两条记忆共享「他提过」「个说」「说法」。
+    const query = '他提过那个说法吗';
+
+    // ① 第一层放行：直接问检索器，带参数名的那条**真的进了候选**（这条断言与实例无关）。
+    const retrieved = new MemoryRetriever(h.store).retrieve({
+      query,
+      now: NOW,
+      audience: { mode: 'family', actor: null, note: '这一条用例只看检索层放不放行' },
+      recentTurns: [],
+    });
+    assert.equal(
+      retrieved.memories.some((entry) => entry.text.includes('valence')),
+      true,
+      `它必须在候选里（否则这条用例测的是第一层）：${JSON.stringify(retrieved.memories.map((entry) => entry.text))}`,
+    );
+
+    // ② **主判据**：直接调产品自己的渲染函数 —— 它没有副作用，也不依赖「那一段在不在」。
+    const droppedOne = renderMemoryLines([taintedMemory()], NOW);
+    assert.deepEqual(droppedOne.lines, [], '带参数名的那条渲染出来是空的');
+    assert.equal(droppedOne.dropped.length, 1);
+    assert.equal(droppedOne.dropped[0]?.id, 'mem_tainted', '丢的确实是它');
+    assert.equal(droppedOne.dropped[0]?.reason, 'unusable_text');
+
+    // ③ 端到端交叉验证：读**装配好的 prompt** 里 `memories` 段的 debug 做层次归因。
+    //
+    // 为什么要一对记忆（T14 评审给的形态）：渲染层把**每一条**都拦掉时，`prompt.ts` 会让整个
+    // `memories` 段不存在，那个 debug 根本读不到 —— 而「段不存在」与「检索层就没进来」长得
+    // 一模一样。留一条干净的对照，段就一定在，于是 `injected=2 dropped_at_render=1` 可读。
+    const prompt = h.engine.buildPrompt({ sessionId: h.sessionId, text: query, at: NOW });
+    const memorySection = prompt.sections.find((section) => section.name === 'memories');
+    const debug = memorySection?.debug ?? '';
+    assert.equal(/injected=2/u.test(debug), true, `检索层两条都选上了（所以差别只可能在渲染层）：${debug}`);
+    assert.equal(/dropped_at_render=1/u.test(debug), true, `渲染层丢了一条，计数必须说得出这一点：${debug}`);
+    assert.doesNotMatch(prompt.user, /valence/u, `参数名不许出现在提示词里：\n${prompt.user}`);
+    assert.doesNotMatch(prompt.system, /valence/u, '稳定前缀里同样不许');
+    assert.ok(prompt.user.includes('他提过那个说法'), '同一批里干净的那条照旧进提示词');
+    assert.ok(prompt.user.includes(MEMORY_SECTION_HEADING), '记忆段本身没有被整段连坐');
+
+    // ④ 「计数加一」在 ContextBuilder 那一层直接可见（同一个实例：先 build 再 render）。
+    const builder = new ContextBuilder({
+      store: h.store,
+      clock: fixedClock(NOW, 1_000),
+      offsetMinutes: 480,
+      identity: { timezone: 'Asia/Shanghai', place: '成都' },
+    });
+    const context = builder.buildUserTurn({ userText: query, at: NOW, recentTurns: [] });
+    assert.equal(context.memoriesDiagnostics.droppedAtRender, 0, '渲染之前计数是 0');
+    assert.equal(context.memoriesDiagnostics.injected, 2);
+    const rendered = builder.render(context, NOW);
+    assert.equal(context.memoriesDiagnostics.droppedAtRender, 1, '这一步就是「加一」');
+    assert.deepEqual(rendered.memoryLines, ['- [较确定] 他提过那个说法'], '留下的只有干净那条');
+
+    // ⑤ 同类的出口也走同一道闸门（不是只有记忆行过它）。
+    assert.deepEqual(renderOpenThreadLines([{ summary: 'valence 这件事得问一下' }]), [], '未完话题行过闸门');
+    assert.deepEqual(renderSelfLines(['valence 已经按设定调过了']), [], '自我状态行过闸门');
+    assert.deepEqual(renderSelfLines(), [...DEFAULT_SELF_LINES], '不传参数时那一句照旧（live 路径逐字不变）');
+
+    // ⑥ 直接对闸门做单元断言（不经过引擎）——三种现实写法都要被拦住。
+    assert.equal(renderGate('- valence=0.310'), false, '面板那种 k=v 写法');
+    assert.equal(renderGate('- confidence 0.9'), false, '参数名 + 空格');
+    assert.equal(renderGate('- 他提过valence这个说法'), false, '汉字紧贴也是词边界（\\b 在 CJK 与 ASCII 之间成立）');
+    assert.equal(renderGate('- 他喜欢喝茉莉花茶'), true, '普通句子照旧放行');
+    assert.equal(renderGate('   '), false, '空白文本不成行');
+  } finally {
+    h.store.close();
+  }
+});
+
+/** 一条带参数名的 `RetrievedMemory`（渲染函数的入参形状）。 */
+function taintedMemory(): RetrievedMemory {
+  return {
+    id: 'mem_tainted',
+    kind: 'semantic',
+    text: '他提过 valence 这个说法',
+    provenance: {
+      sourceEventId: null,
+      sourceType: 'explicit_correction',
+      confidence: 1,
+      occurredAt: null,
+      updatedAt: NOW.toISOString(),
+    },
+    visibility: 'family',
+    retrievalReason: '和这一轮说的是同一件事',
+  };
+}
 
 test('没接上下文时提示词逐字回到 P0：这是「记忆层有没有改变回复行为」的对照开关', () => {
   const h = harness();

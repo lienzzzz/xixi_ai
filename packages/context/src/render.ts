@@ -5,11 +5,28 @@
  * 渲染决定「想起来的时候写成哪句话」。分开的好处是渲染可以单独被测试与反事实证明，
  * 而且**出口闸门**只在一个地方 —— 见下面的 `renderGate`。
  *
- * 出口闸门（t12 验收第 2 条「prompt 里不暴露 UUID」的最后一层）：
- * 一条候选在检索阶段就被 `usefulText` 挡掉了，这一层是**独立**的第二道 —— 任何一段
- * 要进提示词的文本，只要含 UUID 形态的 id、8 位以上连续数字、或程序里的参数名，
- * 整段丢掉并记在 `dropped` 里。这样「提示词里没有 id 与调试数字」不依赖于
- * 「上游一定干净」，而是每次渲染都重新成立。
+ * ## 两道闸门，职责不同（P1-D1 复审要求写清；两条用例分别压在它们身上）
+ *
+ * **第一层：检索前**（`memory-retriever.ts` 的 `usefulText`）。它只拦两类**机器 id 形态**的文本，
+ * 命中就整条不进候选（连分数都不算，`MemoriesDiagnostics.dropped` 里记 `unusable_text`）：
+ *   * UUID 形状的 id（`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`）；
+ *   * 8 位以上连续数字。
+ *
+ * **第二层：渲染前**（本文件的 `renderGate`，下面这个函数）。它在前两层之上**多**拦两类，
+ * 而且是**所有出口**共用的最后一道：记忆行、未完话题行、世界状态的附加行、自我状态行。
+ *   * 程序里的参数名（`valence` / `confidence` / `verbosity`…，见 `PARAMETER_NAMES`）；
+ *   * 空白文本（渲染出空行没有意义）。
+ *
+ * 为什么两层都要有：第一层挡的是「这条记忆**本身就是**机器 id 拼出来的」（那种文本连当记忆的
+ * 资格都没有）；第二层挡的是「这条记忆读起来是人话、但夹带了调试字段」—— 它才是「提示词里
+ * 不出现参数名」这条纪律真正的防线，因为检索层**没有**理由为它把一条正常文本整条丢掉。
+ * 两层都不信任上游：`ContextBuilder.render` 每次出口都重新过一遍闸门，所以「上游一定干净」
+ * 不是任何一条断言的前提。
+ *
+ * 已知边界（如实记录，不假装它不存在）：`PARAMETER_NAMES` 用词边界（`\b`）判定，所以
+ * `valence=0.3`、`confidence 0.9`、`他提过valence这个说法` 都会被拦（`=`、空格、汉字都是边界），
+ * 而 ASCII 字母数字紧贴的形式（`valence0.3`）不构成词边界、拦不住 —— 那种形状不是本项目
+ * 渲染调试字段的写法（面板与日志里都是 `k=v`），所以这一版不为此放宽整条规则。
  */
 
 import type { DroppedMemory, MemoryKind, RetrievedMemory } from './types.ts';
@@ -27,7 +44,7 @@ const LONG_DIGITS = /\d{8,}/u;
 /** 程序里的参数名/字段名：它们是给调试面板看的，不该出现在家里人的提示词里（P1 同款纪律）。 */
 const PARAMETER_NAMES = /\b(?:valence|energy|confidence|provenance|sourceEventId|occurredAt|updatedAt|verbosity|talkativeness|curiosity|formality|humor|warmth|proactivity|silence_tolerance)\b/u;
 
-/** 一段文本能不能进提示词。 */
+/** 一段文本能不能进提示词（第二道闸门，见文件头「两道闸门」那一节）。 */
 export function renderGate(text: string): boolean {
   if (text.trim().length === 0) return false;
   if (UUID_SHAPE.test(text)) return false;
@@ -67,7 +84,12 @@ export function renderMemoryLines(memories: readonly RetrievedMemory[], now: Dat
   return { lines, dropped };
 }
 
-/** 未完话题那一段（pack §7 的措辞：这是「还要接的话」，不是「已经知道的事」）。 */
+/**
+ * 未完话题那一段（pack §7 的措辞：这是「还要接的话」，不是「已经知道的事」）。
+ *
+ * 与记忆行走**同一道**出口闸门：话题摘要来自父亲自己说的话，但它是程序拼过的（可能夹带
+ * 调试字段），所以一样过 `renderGate`。
+ */
 export function renderOpenThreadLines(threads: readonly { readonly summary: string }[]): readonly string[] {
   const lines: string[] = [];
   for (const thread of threads) {
@@ -108,7 +130,24 @@ export function renderWorldLines(world: {
   return lines;
 }
 
-/** 自我画像：只给「说话方式」那一句，数值留在 `self` 里（pack §23 同款边界）。 */
-export function renderSelfLines(): readonly string[] {
-  return ['（你现在的说话方式与脾气都已经按下面的设定调过了，不用复述。）'];
+/**
+ * 自我画像那一句（pack §23 同款边界：只给「说话方式」，数值留在 `self` 里）。
+ *
+ * 与别的出口一样过 `renderGate`（P1-D1：这类「程序自己写的一行」也要走同一道闸门）。
+ * 默认就是原来那一句 —— live 路径的输出逐字不变；参数化只是为了让「它确实被闸门管着」
+ * 这件事可被单独断言（传一行带参数名的文本进去，结果必须是空的）。
+ */
+export const DEFAULT_SELF_LINES: readonly string[] = Object.freeze([
+  '（你现在的说话方式与脾气都已经按下面的设定调过了，不用复述。）',
+]);
+
+export function renderSelfLines(lines: readonly string[] = DEFAULT_SELF_LINES): readonly string[] {
+  const kept: string[] = [];
+  for (const line of lines) {
+    const text = line.trim();
+    if (text.length === 0) continue;
+    if (!renderGate(text)) continue;
+    kept.push(text);
+  }
+  return kept;
 }
