@@ -44,6 +44,17 @@
 - **渲染层把每一条都拦掉时，`memories` 段整段不存在**（`packages/conversation/src/prompt.ts:457` 是 `memoryBlock.length === 0 ? [] : [ …memories 段… ]`），于是那个 debug 字段**读不到**，而「拦住了」与「检索层就没进来（`injected=0`）」**外观完全一致**——正是前两条想避免的那种混淆。**正解**：用例放**一对**记忆（一条干净对照必须活下来；**两条都要与查询共享双字词**，否则干净那条先在检索层被丢、`injected` 只剩 1，渲染层再拦掉剩下那条 → 段又消失），期望值精确是 **`injected=2 dropped_at_render=1`**、段内只剩干净那条；更稳的**主判据是直接调产品自己的 `renderMemoryLines(...).dropped`**（无副作用、不依赖段是否存在），prompt 段的 debug 只作端到端交叉验证。
 - 另：**闸门本身目前是好的**（t14 的反事实只是临时把它改成恒真）。所以 `t20` 之后基线端到端探针**应当通过**；要验「覆盖缺口补上了」，正解是**对新用例做突变检验**（临时让 `renderGate` 恒真 → 断言**新用例**会红 → 按副本还原并报哈希），而不是期待基线探针变红。
 
+**P2 轮（`xixi-v03-p2`）留给下一轮的清单**（各任务收口时交回；编号是 P2 轮的，别与上面 P0/P1 轮的 t 编号混读）：
+1. **四条「未接线」**——**任何文档都不许把它们写成已接线**：① 四个 live 入口（`scripts/chat.ts`、`scripts/serve-chat.ts`、`scripts/field-test.ts`、`scripts/voice-turn.ts`）仍走 `buildToolChain`，下一步应改成 `buildPluginRuntime(...).start()`；② 提示词装配点（`packages/conversation` 的 `PromptAssembler`）**没有**调 `verifyOnAssemble`（t18 已在三处代码注释里写明未接线）；③ 四个入口**没有**把 `ToolApprovalManager` 接成 `approvalGate`（t4 报约三行）；④ 四个入口**没有**接 durable reminder 的 sink 与 scheduler（t8 的口径：今天可跑的证据是 `buildToolChain` → `registry.execute` → 真表 → 重启 → tick → 事件 → `ProactiveLoop` 说出口）。
+2. **manifest 的 tool 级 approval 声明**（今天只有 `config.tools.approval.ask` 在起作用，`packages/plugins/src/manifest.ts` 无 approval token）——captain 试排过本轮小任务，连撞两次依赖重叠，**明确留到下一轮**。
+3. **`PluginRuntimeMount.start()` 不幂等**（t19 的 O1）：第二次调用留下「插件 inactive 但工具仍在核心表里」的半坏状态，模型仍能调用一个已失活插件的工具；修法是 `started` 守卫或**响亮拒绝** + 用例。
+4. **热插拔后 `shutdown()` 的 `unmounted` 少报**（t19 的 O2；只是报告口径，结束态正确）。
+5. **`xixi_set_reminder_stub` 的文案与 `_stub` 命名已过时**（接上 durable sink 之后仍写着「到点不会自动响，需要人看一眼」）。
+6. **`ToolContext` 只带 `timezone` 与 `now`**：`owner` / `session_id` / `source_event_id` 由入口每轮前 `beginTurn()` 绑定（与 `ToolExecutionContext` 同一组值），彻底做法是把这三个字段转发进 `ToolContext`。
+7. **等分行的顺序会随机抖**（t7 实测）：`MemoryStore.recordSemantic` 的输入**没有 `updatedAt`**（落库时间一律由 store 的 `now` 给），并列时按 `candidate.id` 兜底、出厂 id 是 `sem_${randomUUID()}` → **顺序断言必须显式给 `memoryId`**；这与「计时断言先证明不抖」是同一类纪律，顺序断言也不许依赖未指定的并列裁决。
+8. **`plugins/xixi-tools/index.js` 仍 import `@deepseek-ai/dsh-tools`**：按铁律 9 的**字面**它在 `packages/brain-adapter` 之外，但性质是 **DSH 侧插件包本体**（manifest 的 peerDependency 就是 dsh-tools、靠 cordis patch 挂载、上游 `00_CODE_AUDIT` §6 已登记为 DSH 侧工具插件）——**收编进 brain-adapter 还是登记为显式例外，需要用户裁定**；captain 不擅自改铁律、也不擅自搬包。
+9. **`tests/console/unbacked-facts-console.test.ts:111` 的 `engine as unknown as ConversationEngine`** 是另一个（非 adapter 的）部分替身；收紧它需要在 `packages/runtime` 暴露 composer 接缝类型。
+
 ---
 
 ### 0.2 V0.2 第五轮（2026-10-03：**第五轮 `xixi-v02-round5` 集成收口中**；第四轮已收口）
