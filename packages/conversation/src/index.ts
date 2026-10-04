@@ -36,6 +36,9 @@ export {
   PromptAssembler,
   SILENCE_TOKEN,
   worldStateLite,
+  // V0.3 P2-H：写操作必须走工具那一段单独登记成常量，测试与插件边界都能逐字核它
+  // （它同时是 `HARD_POLICY` 里的一行，见 `prompt.ts`）。
+  WRITE_OPERATION_RULE,
   type AssembleInput,
   type AssembledPrompt,
   type AudienceSection,

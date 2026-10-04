@@ -10,6 +10,7 @@ import {
   PromptAssembler,
   personalityDirectives,
   SILENCE_TOKEN,
+  WRITE_OPERATION_RULE,
   worldStateLite,
 } from '@xixi/conversation';
 
@@ -99,6 +100,63 @@ test('the safety block stays compact and every boundary is still checkable (P1 m
   // Interruptibility and the silence channel stay explicit (§55, §14.2).
   assert.match(HARD_POLICY, /一开口就停下来听/);
   assert.ok(HARD_POLICY.includes(SILENCE_TOKEN), 'the safety block must name the silence token');
+});
+
+/**
+ * V0.3 P2-H：**写操作必须走工具**（pack Phase 2 第二条未达标项的提示词层根因）。
+ *
+ * 背景（t14 的 P2 gate 实测，22 次「明天八点提醒我打电话。」）：只有 6 次真的调用了工具（27%），
+ * 其余 16 次里有 4 次回复自称「记下了」而库里**一行都没有** —— 提醒、记东西这类操作在数据上就是
+ * 一次工具调用，所以那种回复是**可判定为假**的话。当时的根因定位在提示词层：原来的硬边界只管
+ * 「事实」，没有一条要求写操作走工具，于是模型可以只嘴上答应。
+ *
+ * 这一条用例守三件事：
+ *   1. 规则段真的在**装配后的核心提示词**里（不是只在一个没人读的常量里）；
+ *   2. 意图点得出来（提醒我 / 记一下 / 记住 / 记笔记），且**点明「没调用工具就是假话」**；
+ *   3. 不点**工具名** —— 工具表是动态的（插件与 MCP 都会往里加），名字变了这句话仍然成立。
+ *
+ * 反事实（可复跑）：把 `WRITE_OPERATION_RULE` 从 `HARD_POLICY` 里删掉（或把它改成空串），
+ * 本用例红 —— 见 P2-H 的完成回报（对最终字节跑的那一次）。
+ *
+ * ⚠ 这一条只证明**规则在提示词里**，**不**证明它把真调工具率提上去了：P2-H 的 A/B 实测
+ * （同一个探针、同一批句子、22 对交替跑）「去掉这一段」21/22 真调用、「带上这一段」22/22（最终字节上
+ * 单独再跑 22/22）—— 两边几乎都满，**规则的效果在这一次测量里没有体现出来**；数字、样本量与观察
+ * 写在完成回报里，别把这条用例读成「可靠性已达标」。
+ */
+test('写操作必须走工具：核心提示词里有这一段，点名意图、写明只说「记下了」不算', () => {
+  // ① 这一段是装配后的 system 的一部分（`PromptAssembler` 每一条路径都会带上它）。
+  const prompt = assembler.assemble(input());
+  assert.ok(prompt.system.includes(WRITE_OPERATION_RULE), '核心提示词里必须有这一段');
+  assert.ok(HARD_POLICY.includes(WRITE_OPERATION_RULE), '它是硬边界的一段，不是挂在别处的旁支');
+  const safety = prompt.sections.find((section) => section.name === 'safety-policy');
+  assert.ok(safety !== undefined && safety.part === 'system', '它随 safety-policy 段进稳定前缀');
+  assert.ok((safety?.text ?? '').includes(WRITE_OPERATION_RULE), '段正文里逐字包含它');
+
+  // ② 点名属于写操作的意图，并写清「只回一句记下了」的后果。
+  for (const intent of ['提醒我', '记一下', '记住', '记笔记']) {
+    assert.match(WRITE_OPERATION_RULE, new RegExp(intent, 'u'), `写操作意图要点名：${intent}`);
+  }
+  assert.match(WRITE_OPERATION_RULE, /没有调用工具/u, '要写明判据是「有没有调用工具」，不是「说得好不好听」');
+  assert.match(WRITE_OPERATION_RULE, /那句话就是假的/u, '要写明「只回一句记下了」是一句假话（用户看得见的后果）');
+  assert.match(WRITE_OPERATION_RULE, /只有工具真的写成功才算数/u, '要写明什么叫「做到了」');
+
+  // ③ 措辞不点工具名：名字随工具表变，规则不该跟着漂。
+  assert.doesNotMatch(WRITE_OPERATION_RULE, /xixi_|set_reminder|tools?\b/iu, '不许把工具名写进核心提示词');
+
+  // ④ 这一段也在**下一次装配**里（提示词是每轮重算的，规则不能只在第一次出现）。
+  const second = assembler.assemble(input({ userText: '（自言自语）', conversationState: 'ACTIVE', turnIndex: 9 }));
+  assert.ok(second.system.includes(WRITE_OPERATION_RULE), '之后的每一轮读到的还是同一段规则');
+});
+
+/**
+ * 存量守卫：加这一段**不许**把硬边界撑成一张长长的清单 —— 上面那条上限（8 行 / 800 字、
+ * 既有断言一字未改）就是 P1 定的「短到能被模型读完」，写操作那条是**塞进**这两条之内的。
+ */
+test('写操作规则加进来之后，硬边界仍然短（行数与字数的上限照旧）', () => {
+  const lines = HARD_POLICY.split('\n').filter((line) => line.trim().length > 0);
+  assert.ok(lines.length <= 8, `硬边界必须仍然紧凑，现有 ${lines.length} 行`);
+  assert.ok(HARD_POLICY.length <= 800, `…而且仍然短，现有 ${HARD_POLICY.length} 字`);
+  assert.ok(lines.some((line) => line.startsWith(WRITE_OPERATION_RULE.slice(0, 12))), '它就是其中一行');
 });
 
 /**
