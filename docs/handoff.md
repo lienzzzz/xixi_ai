@@ -57,6 +57,7 @@
 10. **`manager.instance().health` 是「最后一次记录的报告」**（t21 复审的 O1，low 但会误导面板）：deactivate 之后它仍写「1 个 MCP 工具在线」，而同一次新鲜的 `plugin.module.health()` / `status()` 都说未连接；且 `checkHealth()` 只遍历 active 插件，**管理器的公开面没有一条路能把这份快照刷新**。要么让 `deactivate` 也记一条新鲜 health，要么在文档里写清「面板读它时必须同时读 state」。
 11. **两处「尚无独立评审」的登记**（t23 复审时按 §9.15/§9.25② 如实指出，别让它们随别的任务一起被当成已核）：① **P2-G 的疑问句守卫与召回预算**——t23 那轮 acceptance 的第 1 条误写成这两件事（实际属记忆线），captain 已**另开一条独立评审**（reviewedTaskId=t7）把它补上；② **P2-F2（t17：铁律 9 越界清理 + 旧接口残留）**至今没有独立评审——它的判据是「用一次性对照脚本在 33 个 schema 上比对本地谓词与真实函数、0 处不一致」这类**自证**，比常规弱一档，下一轮若要动 `packages/brain-adapter` 的接缝，先补一次独立评审。
 12. **引用哈希要写清是哪个文件**（t23 的引用精度提醒）：t22 报的 `B0DD5C60529B5710…` 是 **`packages/runtime/src/tool-approval.ts`（实现文件）**的哈希，**测试文件** `tests/unit/core/tool-approval.test.ts` 的是 `0FDB1DE4…`——后续引用时写清文件，否则容易张冠李戴。
+13. **4 处「当前态」文档仍写着已被删除的 `xixi_news_stub`**（t11 评审实测，**t15 收口时必须改掉**）：`docs/design/security-and-privacy.md:31` 与 `:39`、`docs/design/brain-and-models.md:145`、`docs/progress.md:440`，另 `docs/v03/ACTUAL_RUNTIME_MAP.md:29` 把旧名列进了「四个内置」。**其余 15 处命中应当保留**（`AGENTS.md` 的历史教训、两张基线地图、三个「必须消失」的回归断言、生产代码里解释它为何被删的注释）——历史与证据不许改写，这正是「不要写全库 0 命中」这条新纪律的由来。
 
 ---
 
