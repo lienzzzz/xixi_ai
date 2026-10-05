@@ -351,7 +351,7 @@ export class MemoryStore {
       .filter((at) => Number.isFinite(at.getTime()) && at.getTime() >= since);
     const userTurns = this.#store
       .readEvents({ type: 'conversation.turn', limit: Number.MAX_SAFE_INTEGER })
-      .filter((event) => (event.payload as { role?: unknown }).role === 'user')
+      .filter((event) => event.actor === 'father' && (event.payload as { role?: unknown }).role === 'user')
       .map((event) => new Date(event.timestamp))
       .filter((at) => Number.isFinite(at.getTime()) && at.getTime() >= since);
     const answerWindowMs = RELATIONSHIP_ANSWER_WINDOW_MINUTES * 60_000;

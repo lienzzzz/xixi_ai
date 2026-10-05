@@ -1,4 +1,6 @@
 import { buildEvent, toOffsetIso } from '@xixi/contracts';
+import { ContextBudgetExceeded, resolveContextBudget, type ContextBudgetSettings } from './context-budget.ts';
+import { historyRecallEnabled, recallHistory } from './history-recall.ts';
 import {
   ContextBuilder,
   MemoryRetriever,
@@ -15,6 +17,8 @@ import {
   type BrainImageInput,
   type ReplyHygieneResult,
   type TurnModelProvider,
+  type BrainUsage,
+  RoundContextBudgetExceeded,
 } from '@xixi/brain-adapter';
 import type { Clock, MoodBeatResult, MoodEngine, MoodState, TurnAction, XixiConfig, XixiStore } from '@xixi/domain';
 import { MemoryStore, MoodEngine as MoodEngineImpl, moodBiasOf, moodProactivityNudge, systemClock } from '@xixi/domain';
@@ -76,6 +80,8 @@ export interface ConversationEngineOptions {
    * `TurnMemoryExtractor.enqueue`（见 `packages/conversation/src/extractor.ts`）。
    */
   readonly afterTurn?: ((job: PostTurnJob) => void) | undefined;
+  /** Host-owned tool outcome override; text is held until the final outcome is known. */
+  readonly replyGuard?: (() => { readonly text: string; readonly reasonCode: string } | null) | undefined;
   /**
    * 有界的心情（第五轮 t4）。省略 = 引擎自己用 `store` 与 `config.mood` 建一个（默认开启）；
    * 显式传 `false` 表示「入口不要这一层」（提示词与 V0.1 逐字相同，见 `prompt.ts` 的 `mood`）。
@@ -90,6 +96,8 @@ export interface ConversationEngineOptions {
 export interface RespondInput {
   readonly sessionId: string;
   readonly text: string;
+  /** Trusted host identity, never inferred by the language model. */
+  readonly actor?: 'father' | 'family_member' | 'unknown_person';
   /**
    * Wake word or very strong direct address (§13). The caller owns detection:
    * M1 has no wake word yet, so a UI button sets it; M2 supplies the detector.
@@ -165,6 +173,7 @@ export interface ReplyHygieneSummary {
 }
 
 export interface ConversationTurn {
+  readonly usage?: BrainUsage | null;
   readonly accepted: boolean;
   readonly reason: TurnAcceptanceReason;
   readonly state: ConversationState;
@@ -215,11 +224,14 @@ export class ConversationEngine {
   readonly #fsm: ConversationStateMachine;
   readonly #turnTimeoutMs: number;
   readonly #historyLimit: number;
+  readonly #historyRecallEnabled: boolean;
+  readonly #contextBudget: ContextBudgetSettings;
   readonly #offsetMinutes: number | undefined;
   /** Effective reply limits, already clamped to the hard ceilings (ADR-0010 §3). */
   readonly #replyLimits: ReplySegmentOptions;
   /** pack Phase 4：一轮之后的异步提取接缝（见 `ConversationEngineOptions.afterTurn`）。 */
   readonly #afterTurn: ((job: PostTurnJob) => void) | undefined;
+  readonly #replyGuard: ConversationEngineOptions['replyGuard'];
   /** Set only when the caller passed `fsm.silenceTolerance` explicitly. */
   readonly #silenceToleranceOverride: number | null;
   /**
@@ -249,12 +261,17 @@ export class ConversationEngine {
     this.#silenceToleranceOverride = options.fsm?.silenceTolerance ?? null;
     this.#turnTimeoutMs = options.turnTimeoutMs ?? 30_000;
     this.#historyLimit = options.historyLimit ?? 8;
+    this.#historyRecallEnabled = historyRecallEnabled(this.#config.context?.['history_recall']);
+    const budget = this.#config.context?.['budget'];
+    if (budget !== undefined && (typeof budget !== 'object' || budget === null || Array.isArray(budget))) throw new Error('INVALID_CONTEXT_BUDGET');
+    this.#contextBudget = resolveContextBudget(budget as Record<string, unknown> | undefined);
     this.#offsetMinutes = options.offsetMinutes;
     // `reply` is a declaration in `config/xixi.example.yaml` until something reads
     // it; reading it here is what makes the section true. Every value is clamped,
     // so neither the config nor a caller can raise the ADR-0010 ceilings.
     this.#replyLimits = resolveReplyLimits(this.#config.reply, options.reply);
     this.#afterTurn = options.afterTurn;
+    this.#replyGuard = options.replyGuard;
     // 心情：默认按 `config.mood` 建一个（与 topic engine / self model 同样的默认开启口径），
     // `false` 显式关掉。它只影响语气与窗口（见 `personality.ts`），**不参与硬底线**。
     this.#mood =
@@ -465,8 +482,9 @@ export class ConversationEngine {
   }
 
   /** Working memory for the next turn: the last N turns of this session (§10.2 A). */
-  workingMemory(sessionId: string): PromptTurn[] {
-    return this.#store.recentTurns(sessionId, this.#historyLimit).map((turn) => ({
+  workingMemory(sessionId: string, excludedEventId?: string): PromptTurn[] {
+    return this.#store.recentContextTurns(sessionId, this.#historyLimit + (excludedEventId === undefined ? 0 : 1))
+      .filter((turn) => turn.eventId !== excludedEventId).slice(-this.#historyLimit).map((turn) => ({
       role: turn.role,
       text: turn.text ?? '',
       action: turn.action,
@@ -484,14 +502,14 @@ export class ConversationEngine {
    * `buildUserTurnContext()`。引擎只负责把「这一拍」的三样东西传进去：会话、心情、以及
    * 它自己的 FSM 状态。
    */
-  buildPrompt(input: RespondInput, moodBeat: MoodBeatResult | null = this.beatMood(input.at ?? this.#clock())): AssembledPrompt {
+  buildPrompt(input: RespondInput, moodBeat: MoodBeatResult | null = this.beatMood(input.at ?? this.#clock()), excludedEventId?: string): AssembledPrompt {
     const at = input.at ?? this.#clock();
     const session = this.#store.getSession(input.sessionId);
     const mood = this.#moodContext(at, moodBeat);
     const context = this.#context?.buildUserTurn({
       userText: input.gate ?? input.text,
       at,
-      recentTurns: this.workingMemory(input.sessionId),
+      recentTurns: this.workingMemory(input.sessionId, excludedEventId),
       ...(mood === undefined ? {} : { mood }),
     });
     return this.#assembler.assemble({
@@ -502,8 +520,14 @@ export class ConversationEngine {
       // follow the supplied `at`, which is also what `respond()` decides with.
       conversationState: this.#advance(at),
       turnIndex: session.turnCount,
-      history: this.workingMemory(input.sessionId),
+      history: this.workingMemory(input.sessionId, excludedEventId),
+      recalledHistory: context?.audience?.mode === 'private' && this.#historyRecallEnabled
+        ? { lines: recallHistory(input.text, this.#store.recentContextUserTurns(input.sessionId), new Set([
+          ...this.#store.recentContextTurns(input.sessionId, this.#historyLimit + 1).map((t) => t.eventId),
+          ...(excludedEventId === undefined ? [] : [excludedEventId]),
+        ]), this.workingMemory(input.sessionId, excludedEventId).map((t) => t.text)) } : undefined,
       userText: input.text,
+      budget: this.#contextBudget,
       language: languageName(this.#config.identity.language),
       mood,
       ...this.#contextSections(context, at),
@@ -549,6 +573,7 @@ export class ConversationEngine {
       // 主动开口不是「接住对方的话」：不做工作记忆展开（见方法注释）。
       history: [],
       userText: input.directive,
+      budget: this.#contextBudget,
       // 记忆检索的查询用**依据行**，而不是那段指令（见 `AssembleInput.gate`）。
       gate: input.fact,
       language: languageName(this.#config.identity.language),
@@ -735,11 +760,11 @@ export class ConversationEngine {
       role: 'user',
       action: 'SPEAK',
       text: input.text,
+      ...(input.actor === undefined ? {} : { actor: input.actor }),
     }).event.event_id;
     // 心情在**落库之后**评估：真实的一轮是「判接受 → 落 turn → 组装提示词」，而心情的信号源就是
     // 刚落的这一轮（「谢谢你啊」）。评估放在落库之前会看不到它（现象：夸奖要等到下一拍才算），
     // 所以这里把评估结果**传给** `buildPrompt`，两边用的是同一拍。
-    const prompt = this.buildPrompt({ ...input, at }, this.beatMood(at));
     const startedAt = Date.now();
 
     let decisionRecorded = false;
@@ -765,6 +790,7 @@ export class ConversationEngine {
     let turnModel = this.#adapter.describe().model;
     /** t21: the provider's stop reason, carried onto the turn (t4 F5 — attribute a mid-word cut). */
     let turnFinishReason: string | null = null;
+    let turnUsage: BrainUsage | null = null;
     /** t21: why the turn ended silent, when it did (t12 F2 — artifact-only vs a chosen silence). */
     let turnSilenceReason: SilenceReason = null;
     /** t21: what the hygiene gate had to remove, or null when the reply was clean. */
@@ -776,12 +802,16 @@ export class ConversationEngine {
     const playSegments = hooks.onSegment !== undefined;
     /** How the accepted reply is spoken; computed once, from the final text. */
     let replySplit: SegmentedReply | null = null;
+    let prompt: AssembledPrompt;
     try {
+      prompt = this.buildPrompt({ ...input, at }, this.beatMood(at), userTurnEventId);
       const stream = await this.#adapter.handleUserTurn({
         sessionId: input.sessionId,
         text: input.text,
         prompt,
         timeoutMs: this.#turnTimeoutMs,
+        maxRoundBytes: this.#contextBudget.maxRoundBytes ?? 65536,
+        ...(input.actor === undefined ? {} : { actorId: input.actor, sourceEventId: userTurnEventId }),
         // t88: the caller's still frame(s) for this turn, passed straight through. Absent for every
         // ordinary turn, so the text path is byte-for-byte what it was (t87 pins that in tests).
         ...(input.images === undefined ? {} : { images: input.images }),
@@ -813,7 +843,7 @@ export class ConversationEngine {
        */
       const markupHold = createSpokenTextFilter({ language: this.#config.identity.language });
       const speak = async (text: string): Promise<void> => {
-        if (playSegments) return;
+        if (playSegments || this.#replyGuard !== undefined) return;
         const safe = markupHold.push(text);
         if (safe.length > 0) await hooks.onTextChunk?.(safe);
       };
@@ -824,7 +854,7 @@ export class ConversationEngine {
        * to the last Han character), and the repair line *is* a question.
        */
       const speakProgram = async (text: string): Promise<void> => {
-        if (playSegments) return;
+        if (playSegments || this.#replyGuard !== undefined) return;
         await hooks.onTextChunk?.(text);
       };
       for await (const chunk of stream) {
@@ -860,7 +890,7 @@ export class ConversationEngine {
       if (!suppressed && held.length > 0) await speak(held);
       if (!suppressed) {
         const heldTail = markupHold.flush();
-        if (!playSegments && heldTail.length > 0) await hooks.onTextChunk?.(heldTail);
+        if (!playSegments && this.#replyGuard === undefined && heldTail.length > 0) await hooks.onTextChunk?.(heldTail);
       }
       const result = await stream.result;
 
@@ -870,6 +900,7 @@ export class ConversationEngine {
       // see them, whatever adapter produced them. A reply that was nothing but an artifact is silence
       // (§55), and the removal is reported through `onNotice` so it stays auditable.
       const hygiene = sanitizeSpokenReply(result.text ?? '', { language: this.#config.identity.language });
+      turnUsage = result.usage ?? null;
       if (hygiene.removedChars > 0) {
         await hooks.onNotice?.({ code: 'REPLY_HYGIENE', detail: describeHygiene(hygiene) });
       }
@@ -897,6 +928,7 @@ export class ConversationEngine {
           ? []
           : findUnbackedFactClaims(hygiene.text, { now: at, offsetMinutes: this.#offsetMinutes });
       let replyText: string | null = result.text === null ? null : hygiene.text;
+      const guarded = this.#replyGuard?.() ?? null;
       if (unbackedClaims.length > 0) {
         replyText = UNBACKED_FACT_REPLY;
         heldFacts = '';
@@ -910,6 +942,11 @@ export class ConversationEngine {
         await speak(heldFacts);
         heldFacts = '';
       }
+      if (guarded !== null) {
+        replyText = guarded.text;
+        await hooks.onNotice?.({ code: guarded.reasonCode, detail: '工具的实际执行结果未完成，程序替换了回复。' });
+      }
+      if (!playSegments && this.#replyGuard !== undefined && replyText !== null && !isSilenceReply(replyText)) await hooks.onTextChunk?.(replyText);
 
       // §55 is an engine-level rule, not an adapter's promise: whatever the adapter
       // reports, a reply that is only the silence token becomes SILENCE here, so a
@@ -922,7 +959,7 @@ export class ConversationEngine {
       // hygiene gate removed. They used to look identical in every caller, so the turn now carries a
       // `silenceReason` (and the hygiene summary) that a console can print.
       const artifactOnly = result.text !== null && hygiene.text.length === 0 && result.action !== 'SILENCE';
-      const silent = result.action === 'SILENCE' || replyText === null || isSilenceReply(replyText);
+      const silent = (guarded === null && result.action === 'SILENCE') || replyText === null || isSilenceReply(replyText);
       turnAction = silent ? 'SILENCE' : result.action;
       turnText = silent ? null : replyText;
       turnProvider = result.provider;
@@ -992,6 +1029,12 @@ export class ConversationEngine {
         }
       }
       if (playbackError !== null) throw playbackError;
+    } catch (error) {
+      if (error instanceof ContextBudgetExceeded) this.#store.recordHealth('conversation.context', 'degraded',
+        JSON.stringify({ schemaVersion: 1, reason_code: error.code, session_id: input.sessionId }));
+      if (error instanceof RoundContextBudgetExceeded) this.#store.recordHealth('conversation.context', 'degraded',
+        JSON.stringify({ schemaVersion: 1, reason_code: error.reasonCode, session_id: input.sessionId }));
+      throw error;
     } finally {
       // Recorded even when the model throws: "the turn was accepted, then the
       // provider failed" is exactly the fact §21 降级 needs later.
@@ -1012,6 +1055,7 @@ export class ConversationEngine {
       provider: turnProvider,
       model: turnModel,
       finishReason: turnFinishReason,
+      usage: turnUsage,
       silenceReason: turnSilenceReason,
       toolName: turnAction === 'SILENCE' ? null : turnToolName,
       hygiene: turnHygiene,

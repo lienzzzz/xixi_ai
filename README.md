@@ -1,5 +1,19 @@
 # 西西（Xixi）
 
+`npm run probe:runtime-ledger` 可离线测量常驻tick的checkpoint/SQLite/RSS增长，全部临时数据、零API。当前基线与后续优化方向见 [测量报告](docs/recon/runtime-ledger-growth-2026-10-05.md)，它不代表硬件吞吐或资源峰值。
+
+2026-10-05：`npm run demo:input-backpressure` 离线演示队列满时明确拒绝、FIFO及空间释放；两处宿主默认最多64个待处理输入，生产者应保留被拒绝的输入。长期账本保留策略尚未实现，详见 [设计](docs/design/input-backpressure.md)。
+
+2026-10-05：`npm run demo:history-recall` 离线演示私人同会话找回滑出短历史的相关原话，最多2条/2KiB，尊重删除截止。词面匹配有局限，可用 `context.history_recall.enabled=false` 关闭；详见 [设计](docs/design/history-recall.md)。
+
+2026-10-05：`npm run demo:history-invalidation` 离线验证有来源记忆编辑/删除后旧工作历史不会因重启恢复；审计原文保留，范围见 [设计](docs/design/history-invalidation.md)。
+
+2026-10-05：`npm run demo:round-budget` 离线演示工具循环预算、超限停止和多轮用量传递。默认每轮JSON数据预算65536字节，可通过 `context.budget.max_round_bytes` 配置；真实缓存收益与金额上限尚未验收，见 [设计](docs/design/agent-round-budget.md)。
+
+2026-10-05 上下文增量：`npm run demo:context` 离线验证120轮有界上下文、数据库重开及访客隔离；当前话语按事件去重，心情/听众不再进入稳定前缀。默认总文本预算32768字节、历史8192字节。真实模型缓存与真人感尚未测；详见 [预算设计](docs/design/context-budget.md)。
+
+2026-10-05 软件进展：直连/fake终端已接统一宿主，默认公开聊天，输入 `/alone` 人工声明独处。用 `npm run chat -- --fake` 体验；用 `npm run demo:resident` 离线验证审批、提醒、长期记忆及重启恢复。设备仍是软件模拟，真实API未在本轮验证。设计和下一阶段见 [整体路线](docs/design/companion-target-architecture.md)、[终端宿主](docs/design/terminal-resident-chat.md)。
+
 > 仓库：[github.com/lienzzzz/xixi_ai](https://github.com/lienzzzz/xixi_ai)
 
 长期常驻家庭环境的陪伴智能体。**它不是带摄像头的聊天机器人**：**可替换**的是模型 / ASR / TTS / 摄像头 / Harness，

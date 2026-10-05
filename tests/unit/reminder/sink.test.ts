@@ -119,7 +119,7 @@ test('声明了审批的写入口按 P2-B 的 ASK 走：点头之前一条提醒
     assert.equal(rows.length, 1, '点头之后写了一条');
     assert.equal(rows[0]?.what, '给儿子打电话');
     assert.equal(rows[0]?.dueAt, '2026-10-01T08:00:00.000+08:00', '冻结的 when 被原样执行');
-    assert.equal(rows[0]?.sourceEventId, 'evt_turn_2');
+    assert.equal(rows[0]?.sourceEventId, 'evt_turn_1', 'the frozen request retains its originating turn identity');
     sink.endTurn();
   } finally {
     store.close();

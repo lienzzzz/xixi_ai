@@ -1,5 +1,7 @@
 # 安全与隐私：§19 权限身份、§20 数据、§53 不可信内容、§41.7 审计
 
+2026-10-05 S2终端：默认公开权限，`/alone` 或 `--private` 仅是人工声明，不能冒充传感器识别或高安全认证。私人上下文、审批/提醒列表、写工具及提醒确认检查独处/同意/静默；`/state` 不输出原文。idle tick不延长60秒在场TTL，工具执行与交付使用实时钟检查。失败写工具的模型完成宣称由程序替换；这不代表已消除所有无工具幻觉。详见 [终端宿主](terminal-resident-chat.md)。
+
 > 最后更新：2026-10-04（V0.3 P2 收口：§2 的工具面改成「三个内置 + 插件工具经同一注册表」、补插件权限表与审批闸门；
 > 删掉已被 P2-D 移除的 `xixi_news_stub` 与「只写内存 sink」的旧口径）
 > 权威来源：`packages/contracts/src/envelope.ts` + `schemas/events/{conversation.turn,conversation.decision,presence.changed}.v1.json`、`packages/domain/src/{store,migrations/001_initial.sql,config}.ts`、`packages/brain-adapter/src/{tools,mimo,dsh,errors}.ts`、`packages/plugins/src/{manifest,context,capability-registry}.ts`、`packages/runtime/src/{tool-runtime,tool-approval}.ts`、`packages/model-adapters/src/{mimo,weather,errors}.ts`、`packages/conversation/src/engine.ts`、`apps/brain-dsh/profile/cordis.patch.yml`、`plugins/xixi-tools/index.js`、`services/perception-edge/**`、`scripts/verify-camera-presence.ts`、`scripts/lib/harness.ts`、`scripts/serve-chat.ts`、`tests/unit/core/brain-error-classification.test.ts`、`.gitignore`、`AGENTS.md` §1/§5、[progress.md](../progress.md) §2.2/§2.6/§2.10、[perception.md](perception.md)、方案 §19/§20/§41.7/§53
@@ -250,3 +252,6 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
 | `.gitignore` | §3（哪些目录不进版本库） |
 | `config/xixi.example.yaml`（privacy/features/memory 段） | §3、§5（哪些只是声明） |
 | 里程碑推进（M2 身份/声纹、M4 记忆与删除、M3 回滚） | 全文，尤其 §1、§5、§6 |
+## 软件模拟宿主补充（2026-10-05）
+
+AmbientRuntime 由宿主提供身份；主人独处才能使用私人上下文和写工具，多人或未知在场使用公开会话与 guest 权限。访客/未知身份不进入主人记忆提取，播放时复核在场 TTL、同意与 quiet。quiet/撤销同意重启后保持。工具统一校验可强制执行的 schema 子集，无法执行的关键字拒绝；写操作超时结果 unknown，发 AbortSignal 不等于已停止，禁止自动重试。审批缺 registry 保持 pending。原有 live 入口没有接入本模拟宿主，不能将此规则的接线范围扩大。细节见 [软件闭环](ambient-software.md)。

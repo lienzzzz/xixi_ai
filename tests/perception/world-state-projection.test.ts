@@ -67,6 +67,8 @@ test('002_world_state is a new, additive migration', () => {
       '006_memory_status.sql',
       '007_tool_approvals.sql',
       '008_reminders.sql',
+      '009_runtime_checkpoints.sql',
+      '010_context_history_cutoffs.sql',
     ],
     '已发布的迁移只能新增，不能改写',
   );

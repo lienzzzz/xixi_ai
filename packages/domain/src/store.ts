@@ -298,6 +298,7 @@ export interface TurnRecord {
 export interface RecordTurnInput {
   readonly sessionId: string;
   readonly role: TurnRole;
+  readonly actor?: Actor;
   readonly action: TurnAction;
   readonly text?: string | null;
   readonly toolName?: string | null;
@@ -599,6 +600,14 @@ interface SessionOverrideRow {
  * identity, conversation turns and the effective personality baseline — so a
  * new process can pick up the same "西西" instead of starting over (§21.6).
  */
+export interface RuntimeCheckpoint {
+  readonly key: string;
+  readonly schemaVersion: 1;
+  readonly revision: number;
+  readonly value: Record<string, JsonValue>;
+  readonly updatedAt: string;
+}
+
 export class XixiStore {
   readonly dbPath: string;
   readonly clock: Clock;
@@ -668,6 +677,36 @@ export class XixiStore {
   }
 
   // ---------------------------------------------------------------- events
+
+  readRuntimeCheckpoint(key: string): RuntimeCheckpoint | null {
+    this.#assertOpen();
+    const row = this.#db.prepare('SELECT * FROM runtime_checkpoints WHERE checkpoint_key = ?').get(key) as
+      { checkpoint_key: string; schema_version: number; revision: number; value_json: string; updated_at: string } | undefined;
+    if (row === undefined) return null;
+    if (row.schema_version !== 1) throw new Error('CHECKPOINT_VERSION');
+    return { key: row.checkpoint_key, schemaVersion: 1, revision: row.revision, value: JSON.parse(row.value_json) as Record<string, JsonValue>, updatedAt: row.updated_at };
+  }
+
+  /** Compare-and-swap the checkpoint and its audit in one transaction. */
+  writeRuntimeCheckpoint(key: string, value: Record<string, JsonValue>, expectedRevision: number, reasonCode: string): RuntimeCheckpoint {
+    this.#assertOpen();
+    if (value['schemaVersion'] !== 1) throw new Error('CHECKPOINT_VERSION');
+    if (!key.trim() || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || !/^[a-z][a-z0-9_.]{0,119}$/.test(reasonCode)) {
+      throw new Error('INVALID_CHECKPOINT');
+    }
+    const json = JSON.stringify(value);
+    return this.#transaction(() => {
+      const current = this.readRuntimeCheckpoint(key);
+      if ((current?.revision ?? 0) !== expectedRevision) throw new Error('CHECKPOINT_CONFLICT');
+      const revision = expectedRevision + 1;
+      const updatedAt = this.#now();
+      this.#db.prepare(`INSERT INTO runtime_checkpoints (checkpoint_key, schema_version, revision, value_json, updated_at)
+        VALUES (?, 1, ?, ?, ?) ON CONFLICT(checkpoint_key) DO UPDATE SET
+        revision = excluded.revision, value_json = excluded.value_json, updated_at = excluded.updated_at`).run(key, revision, json, updatedAt);
+      this.recordHealth('ambient.checkpoint', 'ok', JSON.stringify({ schemaVersion: 1, key, revision, reason_code: reasonCode }));
+      return { key, schemaVersion: 1, revision, value: JSON.parse(json) as Record<string, JsonValue>, updatedAt };
+    });
+  }
 
   /** Append a validated event and return its log position. */
   appendEvent(event: EventEnvelope): StoredEvent {
@@ -850,7 +889,7 @@ export class XixiStore {
         buildEvent({
           event_type: 'conversation.turn',
           source: input.source ?? 'brain',
-          actor: input.role === 'user' ? 'father' : 'xixi',
+          actor: input.actor ?? (input.role === 'user' ? 'father' : 'xixi'),
           confidence: input.confidence ?? 1,
           timestamp: at,
           payload: {
@@ -883,15 +922,25 @@ export class XixiStore {
   }
 
   /** Turns in chronological order; the log is the source of truth, not a second table. */
-  recentTurns(sessionId: string, limit = 4): TurnRecord[] {
+  recentContextTurns(sessionId: string, limit = 4): TurnRecord[] {
+    return this.recentTurns(sessionId, limit, true);
+  }
+
+  recentContextUserTurns(sessionId: string): TurnRecord[] {
+    return this.recentTurns(sessionId, 200, true, true);
+  }
+
+  recentTurns(sessionId: string, limit = 4, contextOnly = false, ownerUserOnly = false): TurnRecord[] {
     this.#assertOpen();
     const rows = this.#db
       .prepare(
         `SELECT payload_json, timestamp, event_id FROM events
          WHERE event_type = 'conversation.turn' AND session_id = ?
+         ${contextOnly ? 'AND sequence > COALESCE((SELECT through_sequence FROM context_history_cutoffs WHERE session_id = ?), 0)' : ''}
+         ${ownerUserOnly ? "AND actor = 'father' AND json_extract(payload_json, '$.role') = 'user'" : ''}
          ORDER BY sequence DESC LIMIT ?`,
       )
-      .all(sessionId, limit) as unknown as Array<{ payload_json: string; timestamp: string; event_id: string }>;
+      .all(...(contextOnly ? [sessionId, sessionId, limit] : [sessionId, limit])) as unknown as Array<{ payload_json: string; timestamp: string; event_id: string }>;
     return rows
       .map((row) => {
         const payload = JSON.parse(row.payload_json) as {
@@ -1975,6 +2024,21 @@ export class XixiStore {
   }
 
   // ----------------------------------------------- long-term memory (pack Phase 4)
+
+  /** Called inside the memory mutation transaction; raw events remain available for audit. */
+  #invalidateMemoryHistory(sourceEventId: string | null, reasonCode: string): void {
+    if (sourceEventId === null) return;
+    const source = this.#db.prepare('SELECT session_id FROM events WHERE event_id = ?').get(sourceEventId) as
+      { session_id: string | null } | undefined;
+    if (source?.session_id == null) return;
+    const latest = this.#db.prepare("SELECT MAX(sequence) AS sequence FROM events WHERE session_id = ? AND event_type = 'conversation.turn'")
+      .get(source.session_id) as { sequence: number | null };
+    if (latest.sequence === null) return;
+    this.#db.prepare(`INSERT INTO context_history_cutoffs (session_id, schema_version, through_sequence, reason_code, updated_at)
+      VALUES (?, 1, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET
+      through_sequence = MAX(through_sequence, excluded.through_sequence), reason_code = excluded.reason_code, updated_at = excluded.updated_at`)
+      .run(source.session_id, latest.sequence, reasonCode, this.#now());
+  }
   //
   // 记忆是**推导**（铁律 4）：这些表只存程序提炼出来的东西，每行带 source_event_id 指回原始轮次。
   // 因此这里不写新事件类型 —— 日志是事实与判定，记忆可以按来源重建（见 004_memory.sql 的说明）。
@@ -2042,16 +2106,24 @@ export class XixiStore {
     const current = this.episodicMemory(memoryId);
     const summary = patch.summary ?? current.summary;
     const importance = patch.importance === undefined ? current.importance : clamp01(patch.importance);
+    return this.#transaction(() => {
+    if (summary !== current.summary) this.#invalidateMemoryHistory(current.sourceEventId, 'memory.episodic.edited');
     this.#db
       .prepare('UPDATE episodic_memory SET summary = ?, importance = ?, updated_at = ? WHERE memory_id = ?')
       .run(summary, importance, this.#now(), memoryId);
     return this.episodicMemory(memoryId);
+    });
   }
 
   deleteEpisodicMemory(memoryId: string): boolean {
     this.#assertOpen();
+    return this.#transaction(() => {
+    const current = this.#db.prepare('SELECT source_event_id FROM episodic_memory WHERE memory_id = ?').get(memoryId) as { source_event_id: string | null } | undefined;
+    if (current === undefined) return false;
+    this.#invalidateMemoryHistory(current.source_event_id, 'memory.episodic.deleted');
     const result = this.#db.prepare('DELETE FROM episodic_memory WHERE memory_id = ?').run(memoryId);
     return Number(result.changes) > 0;
+    });
   }
 
   insertSemanticMemory(input: NewSemanticMemory): SemanticMemory {
@@ -2133,6 +2205,8 @@ export class XixiStore {
     }
     if (supersededBy !== null) this.semanticMemory(supersededBy);
     const changedAt = this.#writeOffsetMinutes === null ? toOffsetIso(input.at) : toOffsetIso(input.at, this.#writeOffsetMinutes);
+    return this.#transaction(() => {
+    if (input.status !== current.status || supersededBy !== current.supersededBy) this.#invalidateMemoryHistory(current.sourceEventId, 'memory.semantic.status_changed');
     this.#db
       .prepare('UPDATE semantic_memory SET status = ?, superseded_by = ?, status_changed_at = ?, updated_at = ? WHERE memory_id = ?')
       .run(input.status, supersededBy, changedAt, this.#now(), current.memoryId);
@@ -2143,6 +2217,7 @@ export class XixiStore {
     const detail = `${current.memoryId} → ${input.status}：${input.reason}`;
     this.recordHealth('memory.status', 'ok', detail.length > 400 ? `${detail.slice(0, 397)}...` : detail);
     return this.semanticMemory(input.memoryId);
+    });
   }
 
   updateSemanticMemory(
@@ -2151,16 +2226,26 @@ export class XixiStore {
   ): SemanticMemory {
     this.#assertOpen();
     const current = this.semanticMemory(memoryId);
+    return this.#transaction(() => {
+    if ((patch.statement ?? current.statement) !== current.statement || (patch.property ?? current.property) !== current.property) {
+      this.#invalidateMemoryHistory(current.sourceEventId, 'memory.semantic.edited');
+    }
     this.#db
       .prepare('UPDATE semantic_memory SET statement = ?, property = ?, updated_at = ? WHERE memory_id = ?')
       .run(patch.statement ?? current.statement, patch.property ?? current.property, this.#now(), memoryId);
     return this.semanticMemory(memoryId);
+    });
   }
 
   deleteSemanticMemory(memoryId: string): boolean {
     this.#assertOpen();
+    return this.#transaction(() => {
+    const current = this.#db.prepare('SELECT source_event_id FROM semantic_memory WHERE memory_id = ?').get(memoryId) as { source_event_id: string | null } | undefined;
+    if (current === undefined) return false;
+    this.#invalidateMemoryHistory(current.source_event_id, 'memory.semantic.deleted');
     const result = this.#db.prepare('DELETE FROM semantic_memory WHERE memory_id = ?').run(memoryId);
     return Number(result.changes) > 0;
+    });
   }
 
   insertRelationshipNote(input: NewRelationshipNote): RelationshipNote {

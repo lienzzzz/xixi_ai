@@ -18,6 +18,8 @@
  * model can talk about, never an exception that takes the conversation down.
  */
 import { createHash } from 'node:crypto';
+import { canonicalSchema } from './round-budget.ts';
+import { assertEnforceable, validateSchema, type JsonSchema } from '@xixi/contracts';
 
 import type { MimoToolDefinition } from '@xixi/model-adapters';
 
@@ -235,13 +237,19 @@ export function parseToolArguments(raw: string | Record<string, unknown>): Recor
   return {};
 }
 
-async function withTimeout<T>(work: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+class ToolTimeoutError extends Error {}
+
+async function withTimeout<T>(work: () => Promise<T>, timeoutMs: number, label: string, controller: AbortController): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      work,
+      work(),
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} 超时（${timeoutMs}ms）`)), timeoutMs);
+        timer = setTimeout(() => {
+          // Reject first: a cooperative cancellation may synchronously resolve the tool promise.
+          reject(new ToolTimeoutError(`${label} 超时（${timeoutMs}ms）`));
+          controller.abort();
+        }, timeoutMs);
       }),
     ]);
   } finally {
@@ -257,15 +265,24 @@ export async function executeTool(
   tool: AgentTool,
   args: Record<string, unknown>,
   context: ToolContext,
-): Promise<{ ok: true; result: Record<string, unknown> } | { ok: false; error: string }> {
+): Promise<{ ok: true; result: Record<string, unknown> } | { ok: false; error: string; outcome?: 'unknown' }> {
   const declared = declaredArgumentNames(tool);
   const unknown = Object.keys(args).filter((key) => !declared.includes(key));
   if (unknown.length > 0) return { ok: false, error: `不认识的参数：${unknown.join('、')}` };
   const timeoutMs = Math.min(MAX_TOOL_TIMEOUT_MS, Math.max(1, Math.floor(tool.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS)));
   try {
-    const result = await withTimeout(tool.execute(args, context), timeoutMs, tool.name);
+    // Use the same fail-closed subset as event contracts; unsupported keywords never pass silently.
+    const schema = tool.parameters as JsonSchema;
+    assertEnforceable(schema);
+    const validation = validateSchema(schema, args);
+    if (!validation.ok) return { ok: false, error: `INVALID_TOOL_ARGUMENTS: ${validation.problems.join('; ')}` };
+    const controller = new AbortController();
+    const result = await withTimeout(() => tool.execute(args, { ...context, signal: controller.signal }), timeoutMs, tool.name, controller);
     return { ok: true, result };
   } catch (cause) {
+    if (cause instanceof ToolTimeoutError && tool.risk === 'write') {
+      return { ok: false, error: `${cause.message}；执行结果未知，不能自动重试`, outcome: 'unknown' };
+    }
     return { ok: false, error: cause instanceof Error ? cause.message : String(cause) };
   }
 }
@@ -384,7 +401,8 @@ export class ToolRegistry {
     if (round > this.#maxToolRounds) return undefined;
     const tools = this.listForAgent(scope);
     if (tools.length === 0) return undefined;
-    return tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
+    return tools.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+      .map((tool) => ({ name: tool.name, description: tool.description, parameters: canonicalSchema(tool.parameters) as Record<string, unknown> }));
   }
 
   /**
@@ -455,9 +473,12 @@ export class ToolRegistry {
       }
     }
 
-    const outcome = await executeTool(tool, args, { timezone: context.timezone, now: context.now });
+    const outcome = await executeTool(tool, args, { timezone: context.timezone, now: context.now,
+      ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+      ...(context.actorId === undefined ? {} : { actorId: context.actorId }),
+      ...(context.sourceEventId === undefined ? {} : { sourceEventId: context.sourceEventId }) });
     if (!outcome.ok) {
-      return reply({ error: outcome.error }, { name: tool.name, args, ok: false, result: null, error: outcome.error }, permission);
+      return reply({ error: outcome.error, ...(outcome.outcome === undefined ? {} : { outcome: outcome.outcome, retrySafe: false }) }, { name: tool.name, args, ok: false, result: null, error: outcome.error }, permission);
     }
     return reply(outcome.result, { name: tool.name, args, ok: true, result: outcome.result, error: null }, permission);
   }

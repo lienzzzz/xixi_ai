@@ -15,6 +15,7 @@ import { ContractError } from './errors.ts';
 export const SUPPORTED_KEYWORDS: readonly string[] = [
   '$schema',
   '$id',
+  '$comment',
   'title',
   'description',
   'type',

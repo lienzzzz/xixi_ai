@@ -307,11 +307,14 @@ export class MimoBrainAdapter implements MultimodalTurnProvider, StructuredInfer
               rawText: completed.text,
               spokenText,
               toolCalls: completed.toolCalls.map((call) => ({ id: call.id, name: call.name, arguments: call.arguments })),
+              usage: { ...completed.usage, reported: completed.usageReported === true, cacheReported: completed.cachedTokensReported === true,
+                reasoningReported: completed.reasoningTokensReported === true },
             };
           },
         };
 
         const iterator = runAgentLoop(step, messages, {
+          ...(input.maxRoundBytes === undefined ? {} : { maxRoundBytes: input.maxRoundBytes }),
           registry: adapter.#registry,
           scope: adapter.#scope,
           context: {
@@ -340,7 +343,7 @@ export class MimoBrainAdapter implements MultimodalTurnProvider, StructuredInfer
           Date.now() - startedAt,
           outcome.finishReason,
         );
-        settle?.resolve(final);
+        settle?.resolve({ ...final, usage: outcome.usage });
       } catch (cause) {
         const error = toBrainError(cause);
         settle?.reject(error);

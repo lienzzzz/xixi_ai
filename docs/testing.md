@@ -1,5 +1,25 @@
 # 测试
 
+2026-10-05 S4测量命令 `npm run probe:runtime-ledger` 默认1024 tick，`-- --events=4` 最小自检；脚本断言结构及零模型/读空气调用，临时库在finally删除。耗时/RSS是测量而非门槛，不进默认全量；生产门禁未减少。范围见 [基线报告](recon/runtime-ledger-growth-2026-10-05.md)。
+
+2026-10-05 S4第一步默认门禁新增bounded-queue单元5项和input-backpressure宿主集成2项：FIFO/同步重入、失败释放、拒绝零prepare、prepare中close等待/重复关闭，两处慢fake模型饱和时零额外执行/落库，终端大输入零checkpoint变更。`npm run demo:input-backpressure` 为共享队列离线演示，不接硬件/API，数字见 [progress](progress.md)。
+
+2026-10-05 S3第四步默认门禁新增history-recall单元4项及实际引擎集成1项：完整引用字节/条数、排除/错配置、同句引用去重、跨会话/公开/关闭、重启/删除截止。`npm run demo:history-recall` 演示30轮后恢复相关原话，均为fake和临时库，数字见 [progress](progress.md)。
+
+2026-10-05 S3第三步默认门禁新增 `tests/integration/history-invalidation.test.ts`：5种变更跨重启/原文审计/会话隔离/真实prompt，以及失败删除事务回滚/缺失来源。可运行 `npm run demo:history-invalidation`，fake与临时库，数字见 [progress](progress.md)。
+
+2026-10-05 S3第二步：默认门禁新增 `tests/unit/core/round-budget.test.ts`（8项）和 `tests/integration/round-budget-engine.test.ts`（2项）。验证调用前预算、同批结果超限零后续写、权限不变、SSE完整/部分/未知用量与实际引擎审计。`npm run demo:round-budget` 为实际宿主离线演示，供应商请求均为替身，数字见 [progress](progress.md)。
+
+2026-10-05 S3第一步：新增 `tests/unit/context-budget.test.ts`（6项）及 `tests/integration/context-long-session.test.ts`（1项），默认门禁运行；`npm run demo:context` 另做120长轮次实际终端宿主演示，关闭重开数据库、程序接口替代/撤销记忆与访客切换。模型全部fake，结构/权限/字节预算证据不等于真实对话质量；最新数字见 [progress](progress.md)。
+
+2026-10-05 S2验收：`node --test tests/integration/terminal-companion.test.ts tests/integration/resident-chat-cli.test.ts` 覆盖真实库、审批/提醒、公开权限、重启、TTL、输出失败及HTTP/SSE模型客户端替身；`npm run demo:resident` 启动实际fake CLI的两个独立进程，检查会话/静默/审批/长期偏好恢复。默认全量也运行这些测试；无真实供应商费用、无硬件。最新数字与评审限制见 [progress](progress.md)。
+
+## 单主人软件闭环（2026-10-05）
+
+S1配置回归：`tests/unit/endpoint-profile.test.ts` 检查版本、闭合字段、重复标识、跨房间、未知adapter/能力错配、必需端点、64端点与64KiB、BOM及无敏感内容错误。CLI子进程测试另用bedroom和自定义设备标识/单麦克风跑同一演示，验证配置传入恢复进程。`npm run demo:ambient -- --profile config/ambient.example.json` 可运行自定义档案；它不扫描设备或加载真实驱动。
+
+运行 `npm run demo:ambient`，全程临时库、离线模型和脚本化读空气，包含新进程恢复，结束清理临时数据；失败以非零退出。无物理设备与真实 API 验收。默认 `npm test` 已包含 checkpoint、工具边界、ambient-runtime 场景和实际 CLI 子进程用例。定向命令：`node --test tests/unit/ambient-checkpoint.test.ts tests/unit/core/tool-boundaries.test.ts tests/integration/ambient-runtime.test.ts tests/integration/ambient-demo.test.ts`。身份、媒体、自身声音等分类由夹具提供；用例验证接收分类后的行为，不能证明识别算法准确。实际杀进程/断电窗口尚未验收。最终数字见 [进度](progress.md)。
+
 > 最后更新：2026-10-04（V0.3 P2 收口：§1 集成层与 §2 新增 P2 的测试面，把「`tests/replay/` 仍为空」这条过期陈述改掉）
 > 权威来源：`tests/**`、`scripts/**`、`package.json` 的脚本；与代码不一致时以代码为准并立即修正本文
 > 当前状态：`npm test` → **全绿**（**项数与文件数以实跑为准**；最近一次实测点是 V0.3 P2 收口的 **717 项、pass 717 / fail 0**，
@@ -329,4 +349,3 @@ manual audio hardware tests 三档；`AGENTS.md` 第 2 节也要求「联网验�
 | `npm run turns -- data/chat/xixi.sqlite 6` | 0 | 直接查事件日志里的最近轮次（含 `tool_name` 审计） |
 | `node scripts/probe-tools.ts` | 2 次 | 诊断「模型有没有请求工具、适配器有没有真的执行」 |
 | `node scripts/eval-realism.ts --corpus=all --repeat=3 --label v02` | 84 轮 × 3 次 | **真人感指标**：跑 pack 的 12 条黄金对话 + 仓库语料，输出提问率（主口径＝末句以问号收尾；辅口径＝含问号）、回复长度四档分布、禁用模板出现率、沉默率、重复短语与交付分段；写 `docs/benchmarks/realism-<日期>-<label>.{md,json}`。`--replay <旧 JSON>` **不花钱复算**（`--re-render` 顺带用当前渲染器重写报告）、`--fake` 离线自检（**要加 `--out %TEMP%\<dir>`**，别往 `docs/benchmarks/` 写一次性产物）、`--no-gate` 只测量。口径、局限与前后对比见 [`benchmarks/realism-metrics.md`](benchmarks/realism-metrics.md) |
-

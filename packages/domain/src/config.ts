@@ -56,6 +56,7 @@ export interface XixiConfig {
    */
   readonly mood?: Record<string, unknown>;
   readonly memory: Record<string, unknown>;
+  readonly context?: Record<string, unknown>;
   readonly privacy: Record<string, unknown>;
   readonly features: Record<string, unknown>;
   /**
@@ -168,6 +169,7 @@ export function parseXixiConfig(source: string, file = '<inline>'): XixiConfig {
     selfModel: optionalSection(xixi, 'self_model'),
     mood: optionalSection(xixi, 'mood'),
     memory: section(xixi, 'memory', file),
+    context: optionalSection(xixi, 'context'),
     privacy: section(xixi, 'privacy', file),
     features: section(xixi, 'features', file),
     tools: optionalSection(xixi, 'tools'),

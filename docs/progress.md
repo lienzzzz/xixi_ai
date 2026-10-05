@@ -14,6 +14,124 @@
 
 ## 0. 结论表（objective）
 
+### 2026-10-05 用户变更计划：暂停并收口
+
+- 用户要求暂停当前进度、收尾或记录未完成项、更新文档并 push。持续目标已标记 paused；没有启动新的账本实现，也没有新的功能实现代理。当前只完成暂停交接、最终离线验证、提交与推送。
+- S0/S1/S2/S3四步/S4输入反压已完成软件验证；S4账本探针与1024事件基线已保存。待办保留：输入账本索引化、输出与审计保留策略、异步动作 fencing、金额费用上限；这些均未实现。真实缓存/真人感、硬件及断电验证未做，DSH和其他 live 入口接线仍待完成。
+- 交接入口见 [handoff](handoff.md)，测量与限制见 [基线报告](recon/runtime-ledger-growth-2026-10-05.md)。恢复开发须等待用户新指示；下方「继续/在途」按历史记录阅读。
+- 暂停收口最终门禁：`npm run check:types` exit 0，`npm test` 796项通过、0失败、68121.6801ms，`npm run check:docs` 136份、三类问题均0；来源 `$env:TEMP/xixi-pause-final-gate.log`，基于HEAD `1668969` 的待提交工作树。无真实API/硬件调用，提交仅包含明确核对的108个文件；提交信息从同一次实测记录插值生成。Git提交与远端核对结果以本次收口回复及Git记录为准。
+- pause_review只读复核无阻断：最小探针exit 0，1/2/4事件checkpoint为560/739/1097字节，modelCalls=0/decisions=0；脚本SHA256与报告一致，成功路径临时目录无残留。新增记录待办：初始化发生在try之外，以及close抛错可能阻断后续清理，故探针失败路径的清理稳健性尚未验证/补强；按暂停要求不再改实现。
+
+### 2026-10-05 S4第二步：账本增长测量（测量完成，后续实现暂停）
+
+- 上一目标轮次有实际实现/门禁/测量进展。中断处为测量已完成但报告未落地，本轮已补 [基线报告](recon/runtime-ledger-growth-2026-10-05.md) 和 [计划](plans/2026-10-05-runtime-ledger-probe.md)；用户随后要求暂停，未进入持久化实现。
+- `npm run probe:runtime-ledger` 临时库串行1024 tick、modelCalls=0/decisions=0；256/512/1024事件checkpoint字节46609/92945/185642，每批均摊7.2468/9.7595/16.1090ms，RSS采样122150912/121937920/181739520字节。stdout原值、源码SHA256与口径见报告；采样RSS不是峰值，SQLite含WAL/SHM，单批不是稳定吞吐结论。类型exit 0，4事件最小自检exit 0，无API/硬件/家庭数据。
+- 生产行为本步未变，全量沿用S4第一步最终796项通过证据；新测量命令自带结构和零调用断言，可重复运行，不引入常驻服务。下一步拟拆持久输入账本，保留所有防重/中断记录，claim与checkpoint仍原子；未实施，输出/审计保留与fencing另行。
+
+### 2026-10-05 S4第一步：宿主输入反压（软件验收通过）
+
+- S3四步软件验收后按路线顺序开展 [输入反压设计](design/input-backpressure.md) 与 [计划](plans/2026-10-05-input-backpressure.md)。S3真实供应商缓存/真人感仍待手动外部验证，不伪称整体通过；先完善无设备可验证的资源边界。
+- 两处慢模型宿主探针先红0通过2失败1024.0233ms；第一版红灯无界等待会卡住，已中断并加入40ms失败探针deadline，finally释放模型和临时库。不把这个测试等待期限当性能指标。终端4097字符先触发下游schema拒绝并已刷新presence，补入队前拒绝后checkpoint修订号不变。
+- 共享BoundedQueue默认64、范围1至1024，含执行中，满时prepare/复制/claim/动作均不发生；保持同步冻结、FIFO、失败释放和关闭等待。类型exit 0，5项专项通过886.6421ms；队列demo exit 0，容量2、接纳3、拒绝1，执行顺序first/second/after-release，拒绝未prepare。两处真实宿主回归使用慢fake模型/临时库，默认全量和queue_review在途。
+- 队列仅内存，控制命令仍FIFO；不能宣称RSS、API并发或金额上限。checkpoint长期增长和异步动作fencing留后续S4单步。未新增依赖/迁移，未调用真实API/硬件，未提交/推送。
+- 首次全量794项通过、0失败、58265.8053ms，来源 `$env:TEMP/xixi-backpressure-gate.log`；文档134份三类0。queue_review追加P2：prepare前未预留容量/顺序可同步重入，且prepare内close提前resolve；另外AmbientRuntime重复close早退会让第二清理者提前关库。2项重入先红3通过2失败87.5966ms；现先预留FIFO/容量再prepare，失败占位释放，运行时每次close均等待队列/提取。7项通过889.2136ms、类型exit 0、demo exit 0，最终门禁与复审在途。
+- 最终门禁类型exit 0，全量796项通过、0失败、59514.3721ms，来源 `$env:TEMP/xixi-backpressure-final-gate.log`，HEAD `1668969` 未提交工作树。文档134份三类0、demo exit 0。queue_review复审无阻断，7项通过854.3241ms；额外验证容量1重入拒绝/容量2FIFO/prepare中close、实宿主对象同步冻结及大输入零checkpoint后能继续输入。继续S4账本增长测量，先获取实际数据，再定持久化优化。
+
+### 2026-10-05 S3第四步：有界旧原话召回（软件验收通过）
+
+- 按第三步收口后顺序继续，设计见 [旧原话检索](design/history-recall.md)、[计划](plans/2026-10-05-history-recall.md)、[ADR-0026](adr/0026-bounded-source-quotes-for-long-context.md)。实际引擎12轮后原话滑出历史的探针先失败（847.7561ms），证明临时连续性缺口。没有新增摘要/依赖/迁移/模型请求。
+- 实现同会话最近200条主人用户原话、最多2条/2048字节、完整JSON引用、私人context才启用；公开和关闭配置排除、重启仍受来源截止控制。复用已有词面函数，不宣称语义理解。类型检查抓到AudienceContext夹具字段和demo可选结构错误，修正契约后类型exit 0，4项专项通过941.2858ms。
+- demo exit 0：34次fake模型轮次、旧话题召回时文本4442字节、公开排除/删除后重启排除通过；2048/2是代码上限，不是所有设备资源实测。全量与recall_review只读评审在途，未调用真实API/硬件、未提交/推送。
+- 全量788项通过、0失败、55789.5138ms，来源 `$env:TEMP/xixi-recall-gate.log`，类型exit 0、文档131份三类0。部分文档同步工具回报写入失败，但核对实际已写部分文件；按现状补齐剩余文件，没有盲目重复追加。独立评审在途。
+- recall_review发现P2：只按事件ID去重会额外引用文本相同的当前/短历史句。新增探针先红3通过1失败252.7123ms；仅引用候选按当前/短历史文本去重，原始角色历史不改。实际引擎两处回归证明用户重复发言仍在短历史、旧引用不额外重复；修后5项通过962.6082ms、类型exit 0、demo仍通过，最终全量/独立复审在途。其余边界独立探针已核实200条上限、访客及跨会话排除。
+- recall_review独立复审P2关闭，5项通过939.8075ms；另指出公开/关闭断言放在重复句后会被去重掩盖，已调整顺序让两处独立验证门禁，最终5项通过1011.0883ms。生产文件自上一全量启动后未改，仅测试顺序和配置注释/文档修正；最终全量等待完成。
+- 最终字节复验：类型exit 0、全量789项通过、0失败、56496.7936ms，来源 `$env:TEMP/xixi-recall-gate-final-bytes.log`；demo已通过、文档131份三类0、独立复审无阻断，HEAD `1668969` 未提交工作树。S3软件四步通过，真实缓存/真人感与DSH失效仍未验。按整体路线「阶段顺序可因证据调整」，继续单步S4输入反压；API/硬件验证不与软件实现并行，账本压缩留后续。
+
+### 2026-10-05 S3第三步：来源会话历史失效（软件验收通过）
+
+- 工具预算步独立评审通过后顺序实施。先写5项真实引擎/文件库回归；初次情景夹具误传Date，改正后5项均在旧历史仍可见处失败（984.4353ms），类型检查另发现夹具枚举和可选prompt错误，按实际契约修正。
+- 新增迁移010与两处迁移清单断言；记忆内容编辑/删除/状态变化和来源会话截止同事务，ConversationEngine工作记忆改用recentContextTurns，recentTurns/Raw Event不改。5项通过1245.5342ms；追加失败删除触发器验证事务回滚和缺失来源不误清后6项通过1318.5128ms，类型exit 0。
+- 首次全量783项通过、0失败、54634.9953ms，来源 `$env:TEMP/xixi-history-gate.log`；该次未包含随后新增的第6项回滚回归，最终需重跑。demo exit 0：原历史2条、重启后工作历史0、原始审计2、其他会话2、新话题2条，均为临时库/fake，无真实API/硬件。只读评审history_review在途。
+- 边界：有来源记录才可定位，清空该来源会话变更时全部旧工作历史会损失临时连续性；不删除审计原文或其他派生事实，不保证DSH/供应商历史擦除。下一步仍为S3长窗口连续性，不把本步写成完整遗忘。
+- 最终门禁覆盖回滚回归：类型exit 0；全量784项通过、0失败、59699.0308ms，来源 `$env:TEMP/xixi-history-final-gate.log`，HEAD `1668969` 未提交工作树；文档128份三类0。等待独立评审结论后顺序进入下一块。
+- history_review独立只读评审通过，无P0–P2发现，6项通过1404.6759ms；默认隔离runner受spawn EPERM限制，使用同进程复验。不独立复跑全量/类型/demo，其他事务失败路径为静态检查。立即顺序进入S3长窗口连续性检查，未提交/推送。
+
+### 2026-10-05 持续推进与S3第二步（软件验收通过）
+
+- 用户指出阶段验收后不应停下等待再次继续；执行约定修正为阶段通过记录证据后顺序进入下一块，遵守不并行实现多个里程碑，不把局部完成当作整体完成。旧目标系统状态仍为blocked，但本轮有明确授权和可推进软件工作，不能以该旧标记推断当前受阻；状态恢复由用户/平台控制，本Agent不伪造active。
+- 当前推进 [工具循环预算设计](design/agent-round-budget.md) 与 [计划](plans/2026-10-05-agent-round-budget.md)。每轮JSON数据预算、外部动作前检查、工具定义稳定与usage实际返回标记；无金额费用上限，不调用真实供应商，S3整体仍在途。
+- 6个基础探针先0通过6失败（277.9125ms），实现后6通过（277.129ms）。覆盖初始JSON转义/图片预算、过大工具参数零写、大结果阻止下一轮、稳定schema及HTTP/SSE用量。追加同批先大read再write探针，先红（write1本应0）；现在每个工具结果后立即检查，阻止同批剩余写动作，无自动重试。类型门禁曾exit 0，最终验收待真实引擎接线/demo/全量。
+- 真实引擎接线与部分usage补测后10项通过、0失败（798.5206ms），类型exit 0；初始超round预算仍保留完整Raw Event与decision/健康原因。统计区分complete/partial/unavailable，缺失cached/reasoning记null，不把unknown当0；fake/DSH不伪称供应商用量。新增实际宿主SSE替身demo，最终待跑。
+- 本步最终自动门禁：HEAD `1668969` 的未提交工作树，类型exit 0；全量778项通过、0失败、54605.9268ms，来源 `$env:TEMP/xixi-round-budget-gate.log`。实际宿主demo exit 0：3次离线SSE请求、2次读取、1次完成输出、3次决策审计、2次预算拒绝；完成回合usage为40 prompt/6 completion/46 total/10 cached，均为fixture值，reasoning为null。文档125份三类0，独立评审在途。
+- 边界：失败轮次目前不向宿主返回累计usage；部分报告数字只是已知轮次之和，不是总费用。预算不覆盖完整HTTP封装，不是token/金额门禁。无新依赖、迁移、真实API或硬件。下一步已只读核对：长期记忆被撤销/删除后，recentTurns仍会提供相关原文，须为工作上下文补持久失效传播。
+- 独立只读评审round_review无阻断发现，重跑10项通过、0失败（774.0149ms）及demo exit 0；其首次隔离runner遭spawn EPERM，切换无进程隔离后通过。开始顺序推进 [S3第三步设计](design/history-invalidation.md) 与 [计划](plans/2026-10-05-history-invalidation.md)，不等下一次用户继续，不推进S4。
+
+### 2026-10-05 S3第一步：上下文预算（软件验收通过，S3整体未完成）
+
+- 审计修复后最终取证：HEAD `1668969` 的未提交工作树，类型exit 0；全量768项通过、0失败、56685.5352ms，来源当次 `$env:TEMP/xixi-context-final-gate.log`；测试窗口生产文件未变。最终demo exit 0、独立复审无阻断、文档122份三类0。没有新依赖或迁移，未提交/推送；S3后续为工具/token预算、长窗口连续性/原文删除传播、同语料真人感及真实供应商缓存usage，不推进S4。
+
+- 用户授权继续；本步沿用短历史和有效长期记忆，每次只推进S3。设计见 [上下文预算](design/context-budget.md)，计划见 [实施计划](plans/2026-10-05-context-budget.md)。不引入生成式摘要、新依赖、迁移、真实API或硬件。
+- 核对发现respond先落库再buildPrompt，recentTurns会包含本轮用户输入；心情与听众也在system前缀。拟以事件ID排除本轮，并将动态场景移到user，增加UTF-8文本硬预算与无原文诊断。真实token/缓存收益和真人感后续验，不将字节稳定当缓存命中。
+- 先写6条行为探针，首跑0通过6失败（752.8906ms），重复当前话语和漂移均复现。实现统一预算后6条通过（917.9846ms）；其中超长输入探针原先触发了8000字符事件契约而非预算，已缩至5600字符确认预算路径，类型检查还抓到测试createSession参数错误，已去掉无效参数。最终门禁待长会话验收完成。
+- 实际宿主36轮/关闭重开数据库/记忆替代与撤销/访客隔离探针通过1项（2467.7376ms）；120轮demo实跑通过，模型替身126轮，文本峰值8000字节、历史峰值108字节、累计淘汰历史843条，本轮重复0，私人前缀1种；公开模式关闭context层，因此跨模式总前缀2种，这是分区差异而非私人前缀漂移。首轮demo错误地要求跨模式也只有1种，已用无原文profile诊断定位后修正验收口径，移除临时诊断。
+- 首次完整门禁768项、767通过、1失败（55779.5011ms），是context-builder旧断言把听众固定在system；改成user位置，隐私排除断言仍保留。最终全量待重跑。类型门禁exit 0；不能把首次红灯写成全绿。
+- 最终稳定工作树基于HEAD `1668969`（未提交），类型门禁exit 0，完整离线768项通过、0失败、54995.0113ms，出处为当次 `$env:TEMP/xixi-context-gate.log`；生产路径在此轮测试期间未再修改。check:docs exit 0，122份markdown，三类问题均0。实际YAML经loadXixiConfig→resolveContextBudget单次核对，读出默认32768/8192。只读独立评审在途，S3整体不能宣称完成。
+- 独立评审39项通过（3413.2795ms），demo独立复现相同126/8000/108/843/0数字；发现预算失败在respond审计finally之前，独立probe为turn1/decision0。新增审计断言先红（0!=1），已把提示构建移入既有try/finally，预算异常附code，system.health只存schemaVersion1/reason_code/session_id；conversation.decision仍为accepted/SILENCE且带接纳分数，不改已有schema。首次移动引发return的prompt作用域错误，已显式声明并经类型exit 0、7项专项通过（2603.8419ms）修复。最终门禁和复审需重新取证，之前全绿仅属于修复前字节。
+- 修复经独立只读复审通过：同一超限probe现为模型0次、完整原文、decision1/accepted/SILENCE/score1，健康事件仅版本/码/会话ID；专项7项通过（2737.4703ms），阻断已关闭。集成方最终demo exit 0，120长轮次/126假模型轮次、文本峰值8000字节、历史峰值108字节、累计淘汰843条、本轮重复0、私人前缀1种/跨模式2种、数据库重开与访客隔离均通过。check:docs 122份三类问题0、git diff --check exit 0；最新全量仍在跑。
+
+### 2026-10-05 S2终端实际入口装配（软件验收通过）
+
+- 最终工作树基于HEAD `1668969`，未提交；类型门禁exit 0。完整离线门禁实测761项通过、0失败、51612.975ms，输出来源本机临时文件 `xixi-resident-final-test.log`。首次全量759通过、2失败，定位到旧终端notice与分段标签未转发；补回通知接缝及真实停顿后，定向14项通过、0失败、7446.6169ms，再取上述全量结果。
+- 文档同步完成：check:docs exit 0，119份markdown，失效链接/不存在引用/缺少新鲜度均0；ADR-0022记录终端身份和交付决策。未自动提交或推送。
+- 最终 `npm run demo:resident` exit 0：两个实际fake CLI进程，审批执行1条、durable提醒1条、sessionRestored和quietRestored均true；硬件/供应商标记false。宿主与CLI定向13项此前通过、0失败、6992.6251ms。无新依赖、无新迁移、未读取密钥或调用真实API。
+- 独立只读评审未发现S2阻断问题；独立无隔离宿主测试10项通过、0失败、2373.4319ms，覆盖身份、权限、工具失败、交付、TTL与重启。评审环境的常规隔离与CLI内部子进程受spawn EPERM限制，不能写成独立CLI通过；CLI与demo通过证据来自集成方。下一步S3上下文预算/缓存友好与长对话；硬件、长期账本、金额费用上限、实际断电和其他入口仍未验收。
+
+- 上一目标轮有具体进展：整体设计/S1解析器/配置化demo落地，全量748项通过；本轮实时核对仍是同一未提交分支HEAD1668969。当前只推进S2，设计与计划见 [终端宿主](design/terminal-resident-chat.md)、[实施计划](plans/2026-10-05-terminal-resident-chat.md)。
+- 新增TerminalCompanion与AmbientRuntime软件交付回调，终端直连/fake默认接入宿主，DSH保留旧实现。人工独处声明与公开聊天分离，idle tick不更新人工在场；打印成功才标完成，输出失败中断，quiet持久；新输出标明private/public，公开回复可以打印且不读取私人上下文。调试/state去掉输出文本，privacy后/prompt/reminders拒绝私人内容。主人提醒确认也检查隐私。
+- 宿主回归先缺导出红，5项初次通过；追加公开调试/撤销同意回归先红再修复，6项pass6 fail0、2024.4805ms。真实chat CLI先两项红（无durable行和checkpoint），接入后2项通过3062.287ms；API HTTP替身验证真实registry→真实表→工具receipt，断网零输出/零提醒。模型在写工具参数失败后仍宣称已设置的探针先红，现增加程序replyGuard，在事件记录和输出前替换失败写工具的回复，不靠模型承诺；最终门禁见本节顶部。
+- 新增模型/天气/输出回调接缝无新依赖。原四入口print-wiring契约改为chat的显式--private权限与旧入口比，另验证默认public隐藏/拒绝写工具；不是伪造默认owner报告。API模式未真实供应商验证，当前仅HTTP替身；主动内容仍是事实短句，DSH与其他三入口未接宿主；长期账本/成本与硬件仍后续。
+
+### 2026-10-05 持续目标设计与S1端点档案
+
+- **S1收口**：HEAD1668969上未提交工作区，代码编辑停止后完整门禁tests748 / pass748 / fail0 / skipped0 / duration_ms66921.2484 / exit0，日志在临时目录xixi-endpoint-final-test.log。随后只调整单麦/双麦演示文案并复验受影响的配置与真实CLI5项pass5 fail0、4268.5652ms，类型检查再跑exit0；没有再次宣称整库门禁针对这条文案修改重跑。`git diff --check` exit0。
+- 配置化demo实际运行exit0：roomId=living、deviceCount=4、duplicateInputs=1、guestMemoryWrites=0、reminderStatus=acknowledged、childRecovery=true、outputs=6、hardwareVerified=false。最终SHA256 endpoint-profile.ts＝`AFA7832B879F4841004249C1C7FFEC4EE8CFCE4EAC20B20CBAAB746FBEB72D34`，demo-ambient.ts＝`3A7437C8D683D8A773844076F6E63F27313829A0933D1A35EA5523160F346635`。文档检查116份三类问题0、exit0，收口补记后再跑。
+- S1计划已完成并更新文档，完整持续目标仍未完成：S2实际入口、S3缓存预算和长对话质量、S4低资源/长期运行/成本、S5真实端点多房间、S6老人体验、S7可选多角色均有缺口。下一轮从S2的单入口组装与fake/API同权限证据开始；保留已完成代码和用户未提交文档，不自动提交。
+
+- S1独立只读评审确认设备档案校验、资源限制和自定义配置传递成立，未发现高/中代码问题。审阅环境定向5项中配置解析3项通过，CLI2项因spawnSync EPERM无法启动，不能将主执行方CLI结果写成独立复验。静态确认全部事件使用档案标识、恢复进程收到同一绝对路径。评审指出单麦文案与S1表的旧状态，收口时修正；无源码突变、联网、硬件或家庭库操作。
+
+- 上一目标轮有具体进展：S0新增运行时/迁移/测试/demo并完成744项离线门禁，本轮实时核对工作区仍在codex/ambient-software、HEAD1668969，上述产物未提交。用户扩大持续目标，授权自主设计与逐步执行；目标仍active，不把S0或S1作为完整目标成功。
+- 完成 [整体架构与验收地图](design/companion-target-architecture.md)：本地轻量宿主/API Provider或Harness、稳定前缀与摘要失效/缓存计量、可替换端点、弱设备资源与恢复、老人生活提醒、多角色调度。方案分S0–S7，逐个里程碑验收；当前只实施S1，未联网或验证健康功能。
+- S1解析器先红（缺导出），随后3项全绿1070.9308ms；自定义房间/设备CLI回归先红（--profile未支持），实现后解析+CLI共5项pass5 fail0，5972.0622ms、exit0；类型检查exit0。JSON档案限64KiB/64端点，闭合字段/标识/能力/必需端点/单房间检查；文件读取真正限字节而非仅先stat。未知驱动拒绝，错误不回显文件内容。CLI将同一profile传恢复子进程，非默认设备可运行，无新依赖或硬件访问。
+- 当前正在全量最终门禁与只读评审，完成后补数字。已知限制：adapter只支持已过滤事件与模拟播放，没有物理驱动registry；多speaker只选首个在线；单房间；输入/输出账本保留与实际入口装配仍在后续阶段。
+
+### 2026-10-05 单主人软件闭环：实施与验证
+
+- 最终文档复验：补上新增评审记录的「最后更新」标记后，`npm run check:docs` 检查 114 份 markdown，失效链接 0、不存在文件引用 0、缺少新鲜度标记 0，exit 0；`git diff --check` exit 0。
+
+- **最终收口**：基线 HEAD `1668969`、分支 `codex/ambient-software`，未提交工作区；代码编辑停止后顺序运行 `npm run check:types` exit 0、`npm test` tests 744 / pass 744 / fail 0 / skipped 0 / duration_ms 56651.3971 / exit 0。`npm run demo:ambient` exit 0，实际摘要 duplicateInputs=1、guestMemoryWrites=0、reminderStatus=acknowledged、childRecovery=true、outputs=6、hardwareVerified=false。`check:docs` 首次收口检查 113 份，三类问题 0，exit 0；新增评审记录后再次检查结果见下条。后续只修改文档，不改变本次门禁所验代码。
+- 最终字节 SHA256：ambient-runtime.ts＝`3352ADFA44DCACDF77E137C0E0136636410B32B7B86B08DEF670039C57E6A5DC`；ambient-runtime.test.ts＝`A5C5893B45B93C90F1D7C85F01F06C1BAB2DD954AA22177F73292DE3AD5D7B71`；demo-ambient.ts＝`3C6EFF095DFF78A0D3BE61FC1A9F5D15436C1735ED5F658FC292EE4B6538461D`。完整命令原始日志在本机临时目录 `xixi-ambient-final-test.log`，可用以上命令重新生成。
+- 独立评审五项已修复，证据与边界见 [评审记录](review/ambient-software-review-2026-10-05.md)。四个任务完成；设计/ADR/架构/领域/安全/测试/交接/文档地图同步。下一步仅接一条实际聊天入口并验证相同协议，再考虑替换真实身份与音频端点；真实硬件、实际杀进程、异步外部动作 fencing、长期账本清理仍未验证或实现。未新增依赖、未联网、未修改旧迁移、未自动提交。
+
+- 任务 4 的 CLI 已实现 `npm run demo:ambient`：临时库、真子进程恢复、主人/访客、多模拟麦克风去重、插话、提醒播放后 delivered 和显式 acknowledged；标注 hardwareVerified=false。独立评审在临时库复现并发现四项缺陷：失权宿主仍可写提醒、多人主人可写工具、未 tick 时播放绕过在场 TTL、提醒说出内部元数据。均新增回归先红再修复；随后复审发现私人→公开→私人缓存使审批绑定 guest 工具链，再补切换回归并修复。最新定向 24 项 pass 24 fail 0，3309.1205ms，类型检查 exit 0；全量最终门禁正在复验。
+- 全量首轮修复后实测 743 项、pass 742 fail 1、56342.7363ms；唯一红是旧提醒审批断言要求 sourceEventId 指向确认轮，而现在 ToolContext 转发冻结的原请求身份，应指向创建请求轮。修改该断言并保留原始请求关联，不去掉验证。最终结果以下方收口记录为准。
+- CAS 加工具权限检查与 afterTurn/模型返回复核，保护当前同步内置提醒；不冒充异步外部工具的分布式锁。播放开始/完成复核在场/独处/同意/quiet；批准工具也先过同样隐私规则。ADR 见 [0021](adr/0021-ambient-software-checkpoint-and-identity.md)。实际杀进程与硬件未验，checkpoint/提醒分事务可能漏播，长期账本保留策略未实现。
+
+- 任务 2/3 实测：checkpoint 与提醒表定向 8 项 pass 8 fail 0，765.4347ms；新增模拟场景 11 项 pass 11 fail 0，1875.5451ms，均 exit 0。工具 schema 第一轮全量暴露 8 条 MCP 回归失败，根因是适配器加入的 `$comment` 注解不在 contracts 支持列表；补充这一不参与验证的标准注解后 MCP/工具边界定向 15 项全绿（1229.4824ms），不放宽任何约束关键字。
+- 实施调整：模拟宿主复用 `buildProactiveCandidates` + `ProactiveEngine`，直接把 queued 写入交付 seam；不复用把内容生成视作提醒已投递的 `ProactiveLoop` 回调。这样实际模拟播放完成才改变 reminder 状态，旧入口保持原行为。增加原始轮次 actor 接缝与主人关系/话题过滤，访客历史和偏好不被算给主人。
+- 新增迁移 009 runtime_checkpoints；旧迁移未改，更新了两处迁移列表与提醒测试中旧的「最新」假设。checkpoint 事务带 CAS 与审计；实时在场/回应窗口重启后清空，已撤销同意保持撤销；软件在途输出变 interrupted，不重播。CLI 真子进程回归先红，正在完成演示与剩余异常回归。
+
+- 用户授权「规划，然后行动」，本会话顺序执行；设计见 [ambient-software](design/ambient-software.md)，任务清单见 [实施计划](plans/2026-10-05-ambient-software.md)。沿用当前工作区，保留前次审查文档；本次不联网、不碰物理设备、不自动提交。
+- 工具执行边界复用 contracts 的 fail-closed schema 子集，增加取消信号；写操作超时明确 outcome unknown/retrySafe false，不能承诺底层必然终止。审批宿主缺 registry 时先抛错、保持 pending。提醒工具描述根据 durable sink 表达真实能力。
+- 新增回归先红后绿：定向 12 项 pass 12 fail 0，duration_ms 1149.334，exit 0；check:types exit 0。全量门禁在运行；checkpoint 的恢复/CAS 回归已先红（方法尚未实现），接下来完成持久化与模拟端点运行时。
+
+### 2026-10-04 项目健康审查（基线 1668969）
+
+- 完成文档与核心边界审查，报告见 [项目健康审查](review/project-health-audit-2026-10-04.md)。本轮只新增审查记录，没有修改生产行为或调用真实 API。
+- 实测：`check:types` exit 0；全量离线 tests 719、pass 719、fail 0、skipped 0、duration_ms 57457.8693、exit 0（首次沙箱运行被 spawn EPERM 阻止，数字来自沙箱外复验）；记录前 `check:docs` 检查 109 份、三类问题均 0、exit 0。
+- 三条额外离线探针复现：错类型工具参数仍执行；5ms 超时的工具 40ms 后仍产生一次副作用；审批无 registry 时落 approved 后抛 NO_REGISTRY，补上 registry 再试返回 refused、pending 0、execution null。复跑命令与原始输出在报告 §4/§2。
+- 已核实四个 live 入口未接插件、durable reminder 与审批宿主；提醒描述承诺到点提醒但默认内存桩不会自动响。文档链接门禁不能检测 handoff 的旧状态摘要，也不能发现 progress-v03 将历史 27% 当成现状的口径漂移。
+- 下一步：先补工具边界与审批异常回归，再验收单入口的提醒创建、重启、到期与投递闭环；其他里程碑不在本轮实施。未做真人、在线模型、断电窗口与多日主动性复测。
+
 | 能力 | 证据 | 状态 |
 |---|---|---|
 | 文本多轮对话（无需每句唤醒） | `npm run eval:conversation:judge`：8 场景 / 20 轮，接受 18、拒绝 2（电视音频与安静模式） | ✅ |

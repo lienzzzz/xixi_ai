@@ -110,7 +110,7 @@ test('心情端到端：夸奖改变心情 → 进散文提示词（无数字）
 
     // 提示词：散文进 system，数值只进 sections[].debug。
     const prompt = h.engine.buildPrompt({ sessionId: h.sessionId, text: '嗯，我回来了。' });
-    assert.ok(prompt.system.includes('你现在的心情'), '心情必须进提示词（散文）');
+    assert.ok(prompt.user.includes('你现在的心情'), '心情必须进动态提示词（散文）');
     assert.doesNotMatch(prompt.system, /valence|energy|0\.\d\d\d/, '模型看不到数值或参数名');
     const moodSection = prompt.sections.find((section) => section.name === 'mood');
     assert.ok(moodSection !== undefined);

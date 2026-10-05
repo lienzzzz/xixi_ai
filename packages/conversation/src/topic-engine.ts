@@ -899,7 +899,7 @@ function readUserTurns(store: XixiStore): UserTurn[] {
   const turns: UserTurn[] = [];
   for (const event of store.readEvents({ type: 'conversation.turn', limit: Number.MAX_SAFE_INTEGER })) {
     const payload = event.payload as Record<string, unknown>;
-    if (payload['role'] !== 'user') continue;
+    if (payload['role'] !== 'user' || event.actor !== 'father') continue;
     const text = typeof payload['text'] === 'string' ? payload['text'].trim() : '';
     if (text.length === 0) continue;
     const at = new Date(event.timestamp);

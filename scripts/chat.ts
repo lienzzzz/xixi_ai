@@ -27,11 +27,13 @@
  */
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
+import { resolve } from 'node:path';
+import { runResidentChat, residentOption, residentWiring, createResidentDecider } from './resident-chat.ts';
 
 import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type ToolCallRecord, type ToolRegistry, type TurnModelProvider } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
 import { ConversationEngine } from '@xixi/conversation';
-import { openXixiStore, PERSONALITY_PROPERTIES, personalityProperty, resolveCanonicalDataDir, type XixiConfig } from '@xixi/domain';
+import { openXixiStore, loadXixiConfig, PERSONALITY_PROPERTIES, personalityProperty, resolveCanonicalDataDir, type XixiConfig } from '@xixi/domain';
 import { WeatherClient, type MimoClient } from '@xixi/model-adapters';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
@@ -198,6 +200,7 @@ export function buildDirectAdapter(options: ChatDirectAdapterOptions): MimoBrain
     scope: CONVERSATION_SCOPE,
     timezone: options.config.identity.timezone,
     language: options.config.identity.language,
+    model: options.config.models.llm.model,
   });
 }
 
@@ -215,16 +218,25 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   }
 
   // The direct adapter reads the key from the environment or .env (§20.4: never from source).
-  for (const [key, value] of Object.entries(readDotEnv())) {
+  for (const [key, value] of Object.entries(useFake || argv.includes('--print-wiring') ? {} : readDotEnv())) {
     if (process.env[key] === undefined) process.env[key] = value;
   }
 
-  const config = loadConfig();
+  let dataDir: string | undefined;
+  let config: XixiConfig;
+  try {
+    dataDir = residentOption(argv, '--data-dir');
+    const configured = residentOption(argv, '--config');
+    residentOption(argv, '--profile');
+    if (useFake && useDsh) throw new Error('INVALID_CLI_ARGUMENTS');
+    config = configured === undefined ? loadConfig() : loadXixiConfig(resolve(configured));
+  } catch { console.error('[参数错误] 配置或参数不可用。'); process.exitCode = 2; return; }
   const mode: ChatMode = useFake ? 'fake' : useDsh ? 'dsh' : 'mimo';
 
   // The offline wiring report (t14): what this entry hands the model, with no model call and no
   // store. The chain comes from the same builder `buildAdapter` uses, so it cannot drift from it.
   if (argv.includes('--print-wiring')) {
+    if (!useDsh) { console.log(JSON.stringify(residentWiring(config, argv.includes('--private')))); return; }
     const chain = buildChatToolChain(mode, config);
     console.log(
       JSON.stringify({
@@ -244,8 +256,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
    * `XIXI_CHAT_DATA_DIR` is still honoured (tests and parallel instances), but it now sits *below*
    * the household switch — see `resolveCanonicalDataDir` for the precedence table.
    */
-  const store = openXixiStore({ dataDir: resolveCanonicalDataDir({ legacyEnv: 'XIXI_CHAT_DATA_DIR', cwd: REPO_ROOT }) });
-  const session = store.latestSession() ?? store.createSession();
+  const store = openXixiStore({ dataDir: dataDir === undefined ? resolveCanonicalDataDir({ legacyEnv: 'XIXI_CHAT_DATA_DIR', cwd: REPO_ROOT }) : resolve(dataDir) });
   store.seedSelfProfile(config.personality.base);
   if (Object.keys(personalityOverride).length > 0) {
     // Explicitly an administrative override, not learned adjustment (M3).
@@ -258,6 +269,22 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     console.log(`人格已按命令行覆盖：${applied}`);
     console.log(`生效人格（已写入 self_profile，重启后仍是它）：${JSON.stringify(store.selfProfile())}`);
   }
+
+  if (!useDsh) {
+    try {
+      const decider = useFake ? () => ({ speak: true, reasonCode: 'good_moment' })
+        : createResidentDecider(new MimoBrainAdapter({ model: config.models.llm.model, language: config.identity.language }));
+      await runResidentChat({ argv, store, config, fake: useFake, decide: decider,
+        ...(useFake ? { weatherClient: offlineWeatherSource() } : {}),
+        onToolCall: (record) => process.stderr.write(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}\n`),
+        modelFactory: (registry) => useFake ? new FakeBrainAdapter({ registry, timezone: config.identity.timezone }) : buildDirectAdapter({ config, toolChain: registry }),
+      });
+      store.recordHealth('chat', 'ok', 'resident session ended');
+    } finally { store.close(); }
+    return;
+  }
+  console.log('DSH 使用原有会话路径；宿主审批与提醒投递尚未接入此分支。');
+  const session = store.latestSession() ?? store.createSession();
 
   function buildAdapter(): TurnModelProvider {
     // One chain for the REPL's text turns, built by the console's own factory (t14/T5-F1): the

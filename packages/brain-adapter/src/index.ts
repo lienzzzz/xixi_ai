@@ -22,6 +22,8 @@ export {
 } from './errors.ts';
 export { FakeBrainAdapter, scriptedToolPlan, sayToolResult, type FakeBrainOptions, type ScriptedOutcome, type ScriptedToolPlan, type ScriptedToolRequest } from './fake.ts';
 export { isSilenceReply, MimoBrainAdapter, runInferJson, SILENCE_TOKEN, type MimoBrainAdapterOptions } from './mimo.ts';
+export { DEFAULT_MAX_ROUND_BYTES, RoundContextBudgetExceeded } from './round-budget.ts';
+export { type BrainUsage, type BrainRoundUsage } from './usage.ts';
 /**
  * Pack Phase 2 agent runtime, re-exported so every entry point (text or voice) builds
  * its tool chain in one place: `createToolRegistry` → `MimoBrainAdapter`/`FakeBrainAdapter`

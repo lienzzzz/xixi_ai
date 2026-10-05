@@ -103,6 +103,12 @@ npm run install:profile  # 幂等：把仓库内的西西 DSH profile 装进 .ds
 npm run chat             # 交互式对话（直连 MiMo，实时路径）
 npm run chat -- --fake   # 完全离线的对话演示
 npm run chat -- --dsh    # 走 DSH Harness（慢，但会话在 DSH 里）
+npm run demo:context     # 离线120轮上下文/数据库重开/访客隔离；字节预算不等于token或缓存命中
+npm run demo:round-budget # 离线实际宿主工具循环预算与SSE用量；非金额上限/真实缓存验证
+npm run demo:history-invalidation # 离线记忆变更/历史失效/重启；原始审计仍保留
+npm run demo:history-recall # 离线30轮/有界旧原话/公开隔离/删除截止；非真人感验证
+npm run demo:input-backpressure # 离线有界FIFO/满时零prepare/释放；非RSS或硬件吞吐验证
+npm run probe:runtime-ledger # 临时库1024 tick账本增长；-- --events=4最小自检，RSS为采样
 
 # 验收与评测（会真实调用，按需运行）
 npm run verify:m0              # M0 验收：两进程重启恢复
@@ -127,9 +133,10 @@ npm run voice:noise            # 噪声鲁棒性回归：干净+噪声夹具 →
 # 调试与文档
 npm run turns -- data/chat/xixi.sqlite 6   # 看事件日志里的最近轮次（含 tool_name）
 node scripts/probe-tools.ts                # 诊断实时工具路径
-node scripts/chat.ts --print-wiring        # 四个 live 入口都支持（离线、不调模型、不建库）：
+node scripts/chat.ts --private --print-wiring # 四个 live 入口都支持（离线、不调模型、不建库）：
                                            #   打印该入口交给模型的工具链（language / maxToolRounds / 工具与权限），
-                                           #   用来证明「同一套工具与权限」在入口之间逐字段相同。
+                                           #   chat显式声明private后与其他入口基础权限比较；
+                                           #   不带--private时如实报告公开权限，隐藏/拒绝写工具。
                                            #   另有 scripts/voice-device-check.ts、scripts/eval-realism.ts、
                                            #   scripts/eval-conversation.ts 同样支持；设备自检入口没有离线端到端
                                            #   证据（端到端需真实 WAV + 硬件 + 真实 ASR），见 docs/progress.md §4

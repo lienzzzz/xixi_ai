@@ -52,6 +52,23 @@ function probeTool(overrides: Partial<AgentTool> & { readonly name: string }): P
 }
 
 const TOOL = 'xixi_pay_probe';
+
+test('missing registry leaves an approval pending and can be wired then retried', async () => {
+  const store = openStore(tempDir(), () => REQUESTED_AT);
+  try {
+    const manager = new ToolApprovalManager({ store, settings: ASK_SETTINGS, now: () => REQUESTED_AT });
+    const tool = probeTool({ name: TOOL });
+    const registry = new ToolRegistry({ tools: [tool], approval: manager, permission: new ToolPermission({ askTools: [TOOL] }) });
+    const asked = await registry.execute({ name: TOOL, arguments: { amount: 1 } }, { scope: 'conversation', timezone: 'Asia/Shanghai', now: REQUESTED_AT });
+    const approvalId = String(asked.payload['approvalId']);
+    await assert.rejects(manager.approve({ approvalId }), { code: 'NO_REGISTRY' });
+    assert.equal(manager.get(approvalId)?.status, 'pending');
+    assert.equal(tool.calls.count, 0);
+    manager.useRegistry(registry);
+    assert.equal((await manager.approve({ approvalId })).execution?.record.ok, true);
+    assert.equal(tool.calls.count, 1);
+  } finally { store.close(); }
+});
 const ASK_SETTINGS = { ask: [TOOL], ttlSeconds: 300 } as const;
 const REQUESTED_AT = new Date('2026-10-05T09:00:00+08:00');
 

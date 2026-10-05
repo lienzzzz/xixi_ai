@@ -1,5 +1,43 @@
 # 接手交接书（Handoff）
 
+## 2026-10-05 暂停交接（当前状态）
+
+用户变更计划，明确要求暂停；持续目标已标记 paused。本次只收口文档、离线门禁、提交与推送，不再开始新功能。下方各阶段的「下一步/在途」是历史记录，以本节为准；恢复开发须有用户的新指示。
+
+已落地：S0 单主人模拟常驻闭环、S1 设备档案、S2 终端宿主、S3 四步上下文保护、S4 输入反压；账本增长探针和基线报告已保存。尚未实施：持久输入账本拆分、输出/审计保留策略、外部异步动作 fencing、金额费用上限。尚未验证：真实供应商缓存与真人感、真实设备/断电；DSH及其他 live 入口仍未接入终端宿主保证。恢复时先读 [progress](progress.md) 与 [账本基线](recon/runtime-ledger-growth-2026-10-05.md)，不要把测量当作优化完成。
+
+收口评审补充待办：账本探针成功路径已验证临时目录清理；初始化或close抛错时的清理仍需补强，本次仅记录。
+
+2026-10-05当前S4第二步：`npm run probe:runtime-ledger` 临时库测出1024 tick时checkpoint185642字节，未调用模型；详见 [基线与源码指纹](recon/runtime-ledger-growth-2026-10-05.md)。计划下一步将输入去重账本拆成索引行，保留原子claim及重启防重；优化尚未实施，输出账本仍在checkpoint。
+
+2026-10-05 S4第一步：AmbientRuntime/TerminalCompanion有界FIFO，构造参数maxPendingEvents默认64（1至1024），满时INPUT_BACKPRESSURE，未接纳工作零claim/执行；成功/失败释放，close等待。终端超过4096字符接纳前拒绝。生产者需保留未接纳输入；FIFO控制命令无抢占，checkpoint仍可能长期增长。见 [反压设计](design/input-backpressure.md) 与 [progress](progress.md)。
+
+2026-10-05 S3第四步：私人context可从同会话200条主人用户消息词面召回2条完整原话（合计2048字节），不读取其他会话/访客/助手，变更截止和重启仍生效。配置 `context.history_recall.enabled=false` 关闭，演示 `npm run demo:history-recall`；无锚点/同义查询不保证，API真人感未验。详见 [设计](design/history-recall.md)。
+
+2026-10-05 S3第三步新增迁移010；有来源记忆变更会事务性清空该会话已有工作历史，重启后持续生效。新输入/其他会话/Raw Event保留。`npm run demo:history-invalidation` 离线验证；来源缺失和DSH服务端历史尚不保证失效，详见 [设计](design/history-invalidation.md) 与 [progress](progress.md)。
+
+2026-10-05 S3第二步已实现每轮JSON数据预算（默认65536字节）、工具批次前/逐个结果后门禁、确定性工具定义与成功轮次usage聚合。全量778通过、0失败；`npm run demo:round-budget` 走实际终端和离线SSE替身，无真实API/硬件。失败轮次累计usage尚不交付，不是金额上限。详见 [设计](design/agent-round-budget.md) 与 [progress](progress.md)；下一块为原文纠正/删除传播，阶段通过后继续执行。
+
+## S3第一步上下文（2026-10-05）
+
+先跑 `npm run demo:context`，实际终端宿主/临时库120轮＋恢复/记忆验证，假模型无网络。config.context.budget已被解析并传到统一PromptAssembler：默认总文本32768字节/历史8192字节，超量淘汰旧完整消息和辅助行，当前输入/硬政策不能裁切。respond按本次eventId排除当前历史；mood/audience在user动态情境，self仍为可选稳定设定。私人和公开context层不同，分别看前缀，不用总hash数量冒称同一缓存。设计见 [上下文预算](design/context-budget.md)，数字见最新progress。后续S3软件已增加usage、工具预算、来源历史失效和有界原话检索；真实供应商缓存/同语料真人感未验，当前已顺序进入S4。
+
+## S2终端入口（2026-10-05）
+
+直连与fake聊天已接入TerminalCompanion/AmbientRuntime，先跑 `npm run demo:resident`，或 `npm run chat -- --fake`。默认公开，`/alone` 人工声明独处后开放私人上下文和主人写工具；`/public`、`/privacy`、`/quiet` 控制边界。审批、提醒与静默落库，输出全部打印成功才确认提醒投递。重启不会自动复播中断输出。API用HTTP/SSE替身验收，未调用真实供应商或设备。
+
+`chat --print-wiring` 如实报告公开权限；比较四入口原有基础工具配置须加 `--private`。DSH和其他三个入口仍是旧路径，不能套用终端宿主的审批/交付保证。设计见 [终端宿主](design/terminal-resident-chat.md)，结果见 [progress](progress.md) 最新S2段；下一步S3上下文预算与长对话验证。以下S1与旧轮记录按历史判读。
+
+## 持续目标与S1设备档案（2026-10-05历史阶段记录）
+
+用户要求面向独居老人、弱算力/API大脑、模块化多设备、真人感与长期记忆、缓存友好和可选多角色；完整目标见 [整体设计](design/companion-target-architecture.md)。当前S1使用严格JSON设备档案，演示参数 `--profile`，支持自定义房间/标识与单麦克风；它接收过滤事件和模拟播放，不提供真实驱动。S1结束后优先推进S2单实际聊天入口装配；缓存预算、长期资源/成本、硬件与老人体验、多角色按阶段逐步验证，不能视为已完成。
+
+## 2026-10-05 S0接手入口：单主人软件闭环（历史阶段记录）
+
+先跑 `npm run demo:ambient`：临时库、离线模型、多模拟麦克风、访客隔离、插话、独立子进程恢复、提醒播放/确认。实现范围和限制见 [设计](design/ambient-software.md)，验证数字见 [progress](progress.md) 顶部。迁移 009 增加 checkpoint；工具统一 schema 校验和写超时 unknown；ToolContext 已转发 sessionId/actorId/sourceEventId，审批执行保留原始请求身份；无 registry 的审批保持 pending。
+
+本轮只接新增模拟宿主，四个既有 live 入口的插件/审批/durable reminder 接线仍未完成。下一步先将一条实际入口接入已验证的软件宿主协议，再逐个替换模拟身份/音频/播放端点；不同时推进多个里程碑。现有正常跨进程恢复与人工 claim 中断测试不等于实际杀进程或断电验收；长期账本压缩、外部异步动作 fencing 仍需设计。下文是历史交接记录，遇到状态冲突以本节和最新 progress 为准。
+
 > 最后更新：2026-10-03（第五轮 `xixi-v02-round5` 收口中，见下面 §0；第四轮已收口）
 > 权威来源：`docs/progress.md`（结论与数字）、`docs/recon/*`（外部系统实测）、代码与测试
 > 若与代码不一致，以代码为准，并请立即修正本文件

@@ -185,6 +185,9 @@ export class ToolApprovalManager implements ToolApprovalGate {
     }
 
     const actorId = input.actorId ?? UNKNOWN_ACTOR;
+    if (this.#registry === undefined) {
+      throw new ToolApprovalError('NO_REGISTRY', '审批宿主还没有接上工具链（useRegistry）');
+    }
     const approved = this.#approvals.transition(current.approvalId, 'approved', {
       at,
       actorId,
@@ -192,9 +195,6 @@ export class ToolApprovalManager implements ToolApprovalGate {
       source: this.#source,
     });
 
-    if (this.#registry === undefined) {
-      throw new ToolApprovalError('NO_REGISTRY', '审批宿主还没有接上工具链（useRegistry）');
-    }
     const execution = await this.#registry.execute(
       { name: approved.approval.toolName, arguments: approved.approval.frozenArgs },
       {

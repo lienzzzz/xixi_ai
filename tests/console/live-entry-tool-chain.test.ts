@@ -113,7 +113,7 @@ test('四个 live 入口报告的工具链与 console 是同一条', { timeout: 
   );
 
   for (const entry of ENTRIES) {
-    const result = await run(entry.script, ['--print-wiring']);
+    const result = await run(entry.script, entry.name === 'chat' ? ['--print-wiring', '--private'] : ['--print-wiring']);
     assert.equal(result.status, 0, `${entry.script} --print-wiring 必须 exit 0：\n${result.out}`);
     const wiring = wiringOf(result.out);
     assert.equal(wiring.entry, entry.name, `${entry.script} 报告的入口名`);
@@ -124,6 +124,10 @@ test('四个 live 入口报告的工具链与 console 是同一条', { timeout: 
     // hard-coded one, and every entry has to say which language it configured.
     assert.equal(wiring.language, config.identity.language, `${entry.script} 的回复过滤语言必须来自部署配置`);
   }
+  const publicReport = wiringOf((await run('scripts/chat.ts', ['--print-wiring'])).out);
+  assert.equal(publicReport['audience'], 'public');
+  assert.deepEqual(publicReport['tools'], expected.tools.filter((name) => name !== 'xixi_set_reminder_stub'));
+  assert.equal((publicReport['permissions'] as Record<string, string>)['xixi_set_reminder_stub'], 'deny');
 });
 
 // V0.3 P0-A: the compatibility surface in `scripts/field-test.ts` must keep handing out the *same*

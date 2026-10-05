@@ -173,6 +173,7 @@ export {
   type RecordMoodInput,
   type RecordPresenceInput,
   type RecordTurnInput,
+  type RuntimeCheckpoint,
   type SelfProfileChange,
   type SelfProfileEntry,
   type SessionRecord,

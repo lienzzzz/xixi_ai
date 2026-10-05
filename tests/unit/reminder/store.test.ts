@@ -67,10 +67,11 @@ function expectCode(code: string, run: () => unknown): void {
   }
 }
 
-test('008_reminders 是新增迁移：清单最新，表的列就是 pack §7 的八个字段加程序事实', () => {
+test('008_reminders 是独立的已发布迁移：表的列就是 pack §7 的八个字段加程序事实', () => {
   const files = listMigrationFiles();
-  assert.equal(files.at(-1)?.name, '008_reminders.sql', '提醒的表是本轮新增的迁移');
-  assert.equal(files.at(-2)?.name, '007_tool_approvals.sql', '007 是 t4 的审批表，本任务不得改写它');
+  const index = files.findIndex((file) => file.name === '008_reminders.sql');
+  assert.ok(index >= 0, '已发布提醒迁移仍在清单中');
+  assert.equal(files[index - 1]?.name, '007_tool_approvals.sql', '已发布迁移的次序不变');
 
   const dir = tempDir();
   const store = openStore(dir);

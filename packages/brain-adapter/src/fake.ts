@@ -287,6 +287,7 @@ export class FakeBrainAdapter implements TurnModelProvider {
       };
 
       const iterator = runAgentLoop(step, messages, {
+        ...(input.maxRoundBytes === undefined ? {} : { maxRoundBytes: input.maxRoundBytes }),
         registry,
         scope: adapter.#scope,
         context: {
@@ -318,6 +319,7 @@ export class FakeBrainAdapter implements TurnModelProvider {
         brainSessionId: `fake-${input.sessionId}`,
         latencyMs: 0,
         finishReason: 'stop',
+        usage: outcome.usage,
       };
     }
 

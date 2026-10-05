@@ -1,5 +1,11 @@
 # 领域模型：事件、持久化与人格
 
+2026-10-05：recentContextUserTurns限定同会话、actor=father、role=user、截止之后，最多200条。它提供原话候选，不修改审计/记忆或创建长期事实；见 [旧原话检索](history-recall.md)。
+
+2026-10-05 新增迁移010_context_history_cutoffs.sql：每会话schema_version=1、through_sequence、reason_code及updated_at，无原文。有来源的记忆内容编辑、删除与状态变更同事务推进截止；recentContextTurns过滤旧历史，recentTurns保留审计。见 [历史失效](history-invalidation.md)。
+
+2026-10-05 新增迁移 `009_runtime_checkpoints.sql`：runtime_checkpoints 按 checkpoint_key 保存 schema_version=1、正整数 revision、JSON value 和 updated_at。`readRuntimeCheckpoint` 读取，`writeRuntimeCheckpoint` 按 expectedRevision 做事务 CAS，同时记录 system.health 行为码；冲突不覆盖。未增加事件类型或改写旧迁移。`recordTurn` 可显式传 actor，主人关系与话题投影只统计 father 的用户轮次，访客不会计入主人画像。软件宿主细节见 [ambient-software](ambient-software.md)。
+
 > 最后更新：2026-10-04（V0.3 P2 收口：事件类型 6 → **8** 类（`tool.approval.changed` / `reminder.changed`）、
 > §5.5 补迁移 007 的 `tool_approvals` 与 008 的 `reminders`、006 只加列不建表）
 > 权威来源：`packages/contracts/src/*.ts`、`packages/contracts/schemas/**`、`packages/domain/src/{store,migrations,personality,config,clock}.ts`、`packages/domain/src/migrations/001_initial.sql`

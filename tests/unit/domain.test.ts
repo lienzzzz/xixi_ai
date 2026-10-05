@@ -420,6 +420,8 @@ test('004_memory 是新增迁移：四张表落地，旧库照旧能打开', () 
       // （八个字段：id/owner/what/due_at/timezone/status/created_at/source_event_id）。
       // 同样是**新增**：001–007 七个文件一字未动。
       '008_reminders.sql',
+      '009_runtime_checkpoints.sql',
+      '010_context_history_cutoffs.sql',
     ],
     '已发布的迁移只能新增，不能改写（005_mood 是第五轮 t4 新增的心情表）',
   );

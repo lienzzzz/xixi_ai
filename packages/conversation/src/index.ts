@@ -51,6 +51,7 @@ export {
   type WorldStateLite,
 } from './prompt.ts';
 export { DEFAULT_SILENCE_TOLERANCE, moodToleranceScale } from './personality.ts';
+export { DEFAULT_CONTEXT_BUDGET, resolveContextBudget, promptTextBytes, type ContextBudgetSettings, type PromptBudgetReport } from './context-budget.ts';
 export {
   normalizeReplyText,
   REPLY_LIMITS,

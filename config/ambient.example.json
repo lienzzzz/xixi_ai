@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "roomId": "living",
+  "devices": [
+    { "id": "camera", "roomId": "living", "kind": "camera", "adapter": "filtered-events" },
+    { "id": "mic1", "roomId": "living", "kind": "microphone", "adapter": "filtered-events" },
+    { "id": "mic2", "roomId": "living", "kind": "microphone", "adapter": "filtered-events" },
+    { "id": "speaker", "roomId": "living", "kind": "speaker", "adapter": "simulated-playback" }
+  ]
+}

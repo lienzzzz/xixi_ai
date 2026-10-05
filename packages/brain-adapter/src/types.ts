@@ -1,5 +1,6 @@
 import type { JsonValue } from '@xixi/contracts';
 import type { TurnAction, TurnRole } from '@xixi/domain';
+import type { BrainUsage } from './usage.ts';
 
 /**
  * The provider seam from 《方案》§25, shrunk to what every harness really has
@@ -66,6 +67,7 @@ export interface BrainImageInput {
 }
 
 export interface UserTurnInput {
+  readonly maxRoundBytes?: number;
   readonly sessionId: string;
   readonly text: string;
   /**
@@ -115,6 +117,7 @@ export type BrainTurnChunk =
   | { readonly type: 'notice'; readonly code: string; readonly detail: string };
 
 export interface BrainTurnResult {
+  readonly usage?: BrainUsage;
   /** §55: silence and backchannel are first-class outcomes, not failures. */
   readonly action: TurnAction;
   readonly text: string | null;

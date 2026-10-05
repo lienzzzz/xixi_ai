@@ -22,6 +22,8 @@ import type { MimoMessage, MimoToolDefinition } from '@xixi/model-adapters';
 import type { ToolRegistry } from './tool-registry.ts';
 import type { AgentScope } from './tools.ts';
 import type { BrainTurnChunk } from './types.ts';
+import { assertRoundBudget, resolveRoundBytes } from './round-budget.ts';
+import { aggregateUsage, type BrainUsage, type BrainRoundUsage } from './usage.ts';
 
 export interface AgentToolCall {
   readonly id: string;
@@ -31,6 +33,7 @@ export interface AgentToolCall {
 }
 
 export interface AgentStepOutcome {
+  readonly usage?: BrainRoundUsage;
   /** Which model actually answered this round. */
   readonly model: string;
   readonly finishReason: string | null;
@@ -54,6 +57,7 @@ export interface AgentStep {
 }
 
 export interface AgentLoopResult {
+  readonly usage: BrainUsage;
   /** Last non-empty spoken text of the turn (`''` when nothing was said). */
   readonly text: string;
   readonly model: string;
@@ -66,6 +70,7 @@ export interface AgentLoopResult {
 }
 
 export interface AgentLoopOptions {
+  readonly maxRoundBytes?: number;
   readonly registry: ToolRegistry;
   readonly scope: AgentScope;
   /**
@@ -110,9 +115,12 @@ export async function* runAgentLoop(
   let model = '';
   let finishReason: string | null = null;
   let rounds = 0;
+  const maxBytes = resolveRoundBytes(options.maxRoundBytes);
+  const usage: BrainRoundUsage[] = [];
 
   for (let round = 1; ; round += 1) {
     const tools = options.registry.definitionsForRound(options.scope, round);
+    assertRoundBudget(messages, tools, maxBytes);
     const iterator = step.call(messages, tools, round);
     let outcome: AgentStepOutcome;
     for (;;) {
@@ -124,6 +132,7 @@ export async function* runAgentLoop(
       yield next.value;
     }
     rounds = round;
+    if (outcome.usage !== undefined) usage.push(outcome.usage);
     model = outcome.model;
     finishReason = outcome.finishReason;
     if (outcome.spokenText.trim().length > 0) text = outcome.spokenText;
@@ -141,6 +150,7 @@ export async function* runAgentLoop(
         function: { name: call.name, arguments: call.arguments },
       })),
     });
+    assertRoundBudget(messages, tools, maxBytes);
     for (const call of outcome.toolCalls) {
       const execution = await options.registry.execute(call, {
         scope: options.scope,
@@ -157,8 +167,9 @@ export async function* runAgentLoop(
       usedTools.push(execution.record.name);
       yield { type: 'tool', name: execution.record.name };
       messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(execution.payload) });
+      assertRoundBudget(messages, tools, maxBytes);
     }
   }
 
-  return { text, model, finishReason, usedTools, rounds, messages };
+  return { text, model, finishReason, usedTools, rounds, messages, usage: aggregateUsage(rounds, usage) };
 }

@@ -41,10 +41,8 @@ export const REMINDER_SOURCE = 'reminder';
  * `ToolExecutionContext` (V0.3 P2-B).
  *
  * They are supplied **by the entry**, never by the model (铁律 1/8): `owner` decides whose reminder
- * this is, `sourceEventId` points the reminder back at the turn that created it. The tool layer
- * cannot see them yet — `ToolContext` carries only `timezone`/`now` — so the host rebinds them at the
- * turn boundary through {@link DurableReminderSink.beginTurn}; that is the same information, taken
- * from the same place, one layer up.
+ * this is, `sourceEventId` points back at the originating request. ToolContext forwards these
+ * fields, including frozen approval identity; beginTurn remains the fallback for older hosts.
  */
 export interface ReminderTurnIdentity {
   readonly sessionId?: string | undefined;
@@ -76,6 +74,7 @@ export interface DurableReminderSinkOptions {
  * leaves this call (it is not stored anywhere — see `008_reminders.sql`).
  */
 export class DurableReminderSink implements ReminderSink {
+  readonly durable = true;
   readonly #reminders: ReminderStore;
   readonly #timezone: string;
   readonly #settings: ReminderSettings;
@@ -134,10 +133,16 @@ export class DurableReminderSink implements ReminderSink {
     return { resolution, change };
   }
 
-  schedule(input: { readonly what: string; readonly when: string; readonly recordedAt: string }): ScheduledReminder {
+  schedule(input: { readonly what: string; readonly when: string; readonly recordedAt: string;
+    readonly sessionId?: string; readonly actorId?: string; readonly sourceEventId?: string }): ScheduledReminder {
     const at = new Date(input.recordedAt);
     const now = Number.isFinite(at.getTime()) ? at : this.#now();
-    const { change } = this.scheduleAt({ what: input.what, when: input.when, now });
+    const { change } = this.scheduleAt({ what: input.what, when: input.when, now, identity: {
+      ...this.#identity,
+      ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+      ...(input.actorId === undefined ? {} : { actorId: input.actorId }),
+      ...(input.sourceEventId === undefined ? {} : { sourceEventId: input.sourceEventId }),
+    } });
     return {
       id: change.reminder.id,
       what: change.reminder.what,

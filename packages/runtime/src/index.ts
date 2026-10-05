@@ -137,6 +137,8 @@ export {
 } from './proactive-runtime.ts';
 // V0.3 P1-b：三个入口共用的「一轮之后的记忆提取」装配（chat / 试用页 / voice-turn 都调它）。
 export { createTurnExtraction, type TurnExtraction, type TurnExtractionOptions } from './turn-extraction.ts';
+export { AmbientRuntime, type AmbientRuntimeOptions, type AmbientSnapshot } from './ambient-runtime.ts';
+export { parseAmbientEvent, type AmbientActor, type AmbientDevice, type AmbientEvent, type AmbientOutput, type AmbientResult, type AmbientScene } from './ambient-types.ts';
 
 // V0.3 P2-E：durable 提醒（pack 03 §7）的宿主侧。`DurableReminderSink` 接进工具链当 `reminderSink`，
 // `ReminderScheduler` 跑到点与五态；两条都写 `reminder.changed` 事件（与表同一事务）。
@@ -151,3 +153,5 @@ export {
   type ReminderTickReport,
   type ReminderTurnIdentity,
 } from './reminder-runtime.ts';
+export { parseEndpointProfile, loadEndpointProfile, type EndpointProfile, type EndpointDevice } from './endpoint-profile.ts';
+export { TerminalCompanion, type TerminalCompanionOptions, type TerminalResult } from './terminal-companion.ts';

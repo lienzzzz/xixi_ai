@@ -1,5 +1,21 @@
 # 架构（当前实现）
 
+2026-10-05 S4第一步：TerminalCompanion与AmbientRuntime分别使用共享BoundedQueue，默认64个pending输入（含执行中），满时接纳前反压，关闭等待已有任务。输入先校验/同步冻结；无队列持久化或账本压缩，见 [设计](design/input-backpressure.md)。
+
+2026-10-05 S3第四步：domain提供截止之后同会话主人原话候选，conversation做词面/条数/字节筛选，prompt仅在私人动态user块放JSON历史数据。无额外模型调用或摘要，见 [设计](design/history-recall.md)。
+
+2026-10-05 S3第三步：domain的记忆变更与工作历史截止在同一SQLite事务，conversation使用过滤历史，审计历史不改写。来源缺失/DSH服务端上下文未覆盖，见 [设计](design/history-invalidation.md)。
+
+2026-10-05 S3第二步：brain-adapter的AgentLoop在每轮模型、工具批次前及每个结果后检查JSON数据预算；默认65536字节。MiMo成功轮次实际usage经BrainTurnResult到ConversationTurn，缺失为unknown/null，DSH未接入该观测。见 [设计与边界](design/agent-round-budget.md)。
+
+2026-10-05 S3第一步：ConversationEngine → PromptAssembler → context-budget，在模型接缝之前统一限制system/history/user文本字节。当前事件ID排除出history，硬政策/当前话语必须完整；mood/audience位于动态user，必要情境不裁切。预算仅文本，不涵盖工具循环/图片/HTTP/供应商token或金额。原文窗口外的话题连续性与摘要协议未实现。证据见 [上下文设计](design/context-budget.md)。
+
+2026-10-05 S2：chat直连/fake → TerminalCompanion → AmbientRuntime → ConversationEngine/ToolRegistry/SQLite。TerminalCompanion把人工独处/访客声明和命令转成事件；15秒tick不刷新在场证据。程序控制写权限、审批、失败写工具回复与播放账本；分段打印全部成功才完成交付。模型可读空气，但不能绕过权限。DSH及其余入口未接此宿主；详见 [终端设计](design/terminal-resident-chat.md)。
+
+整体目标与证据地图见 [持续目标设计](design/companion-target-architecture.md)。S1新增严格v1端点档案解析器和 `config/ambient.example.json`，CLI按配置构造模拟宿主；只支持filtered-events输入与simulated-playback输出，不包含真实驱动、跨房间输出路由或模型接口新实现。
+
+2026-10-05 新增独立的软件模拟入口 `scripts/demo-ambient.ts` → `AmbientRuntime` → 既有对话/主动/工具/提醒引擎 → 领域 SQLite。一个房间可注册多个模拟麦克风与扬声器；事件串行处理，去重与输出账本写入迁移 009 checkpoint。私人/公开/访客/未知身份分会话，程序校验工具权限与播放隐私。详见 [设计](design/ambient-software.md) 与 [ADR-0021](adr/0021-ambient-software-checkpoint-and-identity.md)。既有四个 live 入口未接本宿主；真实多设备算法未实现。
+
 > 最后更新：2026-10-04（V0.3 P2 收口：插件内核与 MCP 适配器、工具审批、真实 News、durable Reminder、Provider 三接口拆分；
 > 本节新增 §6.2 把「内核已交付」与「入口未接线」分开写）
 > 权威来源：`packages/**`、`apps/brain-dsh/**`、`services/{voice-edge,perception-edge}/**`、`scripts/**`、`tests/**`；`docs/progress.md`（结论与数字）、`docs/progress-v03.md`（各 Phase 的交付与遗留）、`docs/recon/*`（外部系统实测）、`docs/adr/*`（**不写死区间**：以 `ls docs/adr` 的实际内容为准）

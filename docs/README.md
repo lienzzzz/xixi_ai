@@ -1,5 +1,25 @@
 # 西西项目文档地图
 
+**2026-10-05 已按用户要求暂停开发。** 本次仅收口与推送；当前状态与未完成项见 [暂停交接](handoff.md) 和 [进度](progress.md)。后续阶段需用户重新指示，下面的阶段路线不表示继续执行授权。
+
+2026-10-05当前S4第二步：[账本测量基线](recon/runtime-ledger-growth-2026-10-05.md)、[计划](plans/2026-10-05-runtime-ledger-probe.md)。`npm run probe:runtime-ledger` 离线临时库串行tick，报告checkpoint/SQLite/RSS增长；尚未优化持久化，不能视为设备实测。
+
+2026-10-05 S4第一步：[输入反压](design/input-backpressure.md)、[计划](plans/2026-10-05-input-backpressure.md)、[ADR-0027](adr/0027-bounded-host-input-queues.md)。两处宿主有界FIFO默认64，满时明确拒绝未接纳输入；演示 `npm run demo:input-backpressure`，账本压缩尚未实现。
+
+2026-10-05 S3第四步：[有界旧原话](design/history-recall.md)、[计划](plans/2026-10-05-history-recall.md)、[ADR-0026](adr/0026-bounded-source-quotes-for-long-context.md)。私人同会话词面召回2条完整历史引用，旧截止继续有效；演示 `npm run demo:history-recall`，不是生成式摘要或真人感验收。
+
+2026-10-05 S3第三步：[历史失效](design/history-invalidation.md)、[计划](plans/2026-10-05-history-invalidation.md)、[ADR-0025](adr/0025-source-session-context-invalidation.md)。有来源记忆变更事务性排除旧工作历史，原始审计保留；演示 `npm run demo:history-invalidation`。
+
+2026-10-05 S3第二步：[工具循环预算](design/agent-round-budget.md)、[计划](plans/2026-10-05-agent-round-budget.md)、[ADR-0024](adr/0024-agent-round-budget-and-observed-usage.md)。`npm run demo:round-budget` 离线验证工具预算和实际usage接线；金额上限及真实缓存未实现/未验证。
+
+2026-10-05 S3第一步：[上下文预算](design/context-budget.md)、[计划](plans/2026-10-05-context-budget.md)、[ADR-0023](adr/0023-bounded-text-context-and-stable-prefix.md)。可运行 `npm run demo:context`；当前事件去重、完整原文预算及私人前缀稳定已接入对话引擎，S3整体的真实缓存/真人感评测尚未验收。
+
+2026-10-05 S2：`npm run chat` 的直连与 `--fake` 已接入统一终端宿主，默认公开，`/alone` 是人工独处声明；审批、提醒与静默可以重启恢复。先读 [终端设计](design/terminal-resident-chat.md) 和 [计划](plans/2026-10-05-terminal-resident-chat.md)，无设备验收用 `npm run demo:resident`。DSH与其他入口尚未接入；最终数字见 [progress](progress.md)。
+
+持续目标（2026-10-05）：[整体架构与阶段验收](design/companion-target-architecture.md)，弱算力/API优先、可配置设备、对话缓存、长期记忆、老人陪伴和可选多角色。S1/S2与S3四步软件验收通过，当前S4常驻资源；S3真实缓存/真人感仍待验证。S1证据见 [设备档案计划](plans/2026-10-05-endpoint-profile.md)。不以单阶段通过宣称整体完成。
+
+2026-10-05 新增单主人软件闭环：[设计](design/ambient-software.md)、[实施计划](plans/2026-10-05-ambient-software.md)、[ADR-0021](adr/0021-ambient-software-checkpoint-and-identity.md)。无设备验收入口为 `npm run demo:ambient`；本次实测与边界见 [progress](progress.md) 顶部。
+
 > 最后更新：2026-10-04（V0.3 **P2 收口 t15**：登记 [progress-v03.md](progress-v03.md) 的 P2 段与 P2 的**四份** ADR（0017/0018/0019/0020）与新一份复验报告 `verification/t14-p2-gate-independent-verification-2026-10-04.md`）
 > 面向：接手本项目的编码 Agent / 维护者
 > 本文件告诉你「先读什么、什么最权威、改代码后必须更新哪些文档」。

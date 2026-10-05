@@ -299,7 +299,7 @@ test('没有上下文时提示词逐字不变；接上之后每一段才出现�
   assert.ok(connected.user.includes('父亲不喜欢绿茶。'), '记忆的正文进了提示词');
   assert.ok(connected.user.includes('你不必等他开口才说话。'), '关系摘要也进了');
   assert.ok(connected.user.includes('他说要去镇上办证'), '未完话题也进了');
-  assert.ok(connected.system.includes('别提到家里人的私事'), '听众那一段在稳定前缀里');
+  assert.ok(connected.user.includes('别提到家里人的私事'), '听众那一段在动态情境里');
 
   // 条数（注入几家）只进 Debug：模型看到的是句子，不是统计。
   const memorySection = connected.sections.find((section) => section.name === 'memories');
@@ -335,11 +335,11 @@ test('心情以散文进提示词：没有数字、没有不存在的经历，�
   };
   const withMood = assembler.assemble(input({ mood }));
 
-  // 散文进了稳定前缀，而且带一句「这是状态不是事实」的边界（pack §23 的可执行版本）。
-  assert.ok(withMood.system.includes('你现在的心情'));
-  assert.ok(withMood.system.includes('不是发生过的某件事'));
+  // Dynamic mood stays outside the stable identity prefix without losing the state boundary.
+  assert.ok(withMood.user.includes('你现在的心情'));
+  assert.ok(withMood.user.includes('不是发生过的某件事'));
   for (const line of mood.prose) {
-    assert.ok(withMood.system.includes(line), `每一句散文都该进提示词：${line}`);
+    assert.ok(withMood.user.includes(line), `每一句散文都该进提示词：${line}`);
   }
   // 模型看不到数字：`0.31` / `0.72` 不许出现在 system 或 user 里。
   assert.doesNotMatch(withMood.system, /0\.31|0\.72|valence|energy/, 'system 里不许出现数值或参数名');
@@ -349,13 +349,14 @@ test('心情以散文进提示词：没有数字、没有不存在的经历，�
   // Debug UI 看得到数值（挂在 `sections[].debug` 上，**不拼进** system/user）。
   const moodSection = withMood.sections.find((section) => section.name === 'mood');
   assert.ok(moodSection !== undefined, '心情必须是可寻址的一段（§22.2）');
-  assert.equal(moodSection.part, 'system');
+  assert.equal(moodSection.part, 'user');
   assert.ok((moodSection.debug ?? '').includes(String(mood.valence)), 'Debug 段里保留数值供核对');
   assert.ok(!withMood.system.includes('valence='), '数值绝不能拼进模型看的 system');
 
   // 心情不同 → 说话方式不同（否则「轻微影响语气」没有可观察结果）。
   const low = assembler.assemble(input({ mood: { ...mood, valence: 0.05, energy: 0.05, prose: moodProse({ valence: 0.05, energy: 0.05 }) } }));
-  assert.notEqual(low.system, withMood.system);
+  assert.equal(low.system, withMood.system);
+  assert.notEqual(low.user, withMood.user);
 
   // 久未更新的心情要说明「多半淡了」，否则一句早上的心情会被当成此刻的心情。
   const stale = assembler.assemble(input({ mood: { ...mood, updatedAt: '2026-10-01T01:00:00+08:00' } }));

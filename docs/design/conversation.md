@@ -1,5 +1,15 @@
 # 对话层：FSM、提示词组装与沉默
 
+2026-10-05 S3第四步：历史引用由history-recall.ts独立筛选，私人context才启用；prompt.recalledHistory可按整行预算淘汰，不改变稳定system或当前输入。最多2条/2048字节，仅词面匹配，见 [设计](history-recall.md)。
+
+2026-10-05 S3第三步：workingMemory使用recentContextTurns，排除有来源记忆变更时该会话全部已有历史；审计仍使用recentTurns。新输入仍按事件ID去重，重启不恢复被排除历史。详见 [传播设计](history-invalidation.md)。
+
+2026-10-05 S3第二步：引擎传递 `context.budget.max_round_bytes`（默认65536），超限仍记录已接受决策和不带原文的健康原因码；成功返回可选usage（schemaVersion=1），不存在的供应商计数为null。见 [工具循环预算](agent-round-budget.md)。
+
+2026-10-05 S3第一步：当前事件按eventId排除，历史仍可保留重复原话。新增UTF-8文本总预算/历史预算，保留完整当前输入和硬政策，优先淘汰历史再删辅助整行；超固定预算失败。心情/听众移到user，稳定system保留身份/政策/有效人格/可选self。下文若引用旧心情/听众system位置，以本段为准。诊断schemaVersion=1、字节与淘汰计数、prefixHash不含原文；没有供应商缓存命中证据。详见 [预算设计](context-budget.md)。
+
+2026-10-05 S2：ConversationEngine可注入程序 `replyGuard`，终端宿主依据本轮实际写工具结果替换失败后的完成宣称，替换先于会话记录和分段输出。启用guard时暂存文本流，最终回复验证后才输出，避免先漏出错误宣称；既有notice继续传到终端。当前终端按最终分段打印并停顿，首字延迟优化属于后续S3验证，不能视为已达到实时语音指标。
+
 > 最后更新：2026-10-04（V0.3 P2 收口：§15 的「模型侧候选评估」改为「已随 P2-F 退役」，并补候选来源里的**到点提醒**；
 > 见 [ADR-0019](../adr/0019-news-and-reminder-data-model.md) 与 [ADR-0020](../adr/0020-provider-three-interfaces-and-mcp-deps.md)）
 > 权威来源：`packages/conversation/src/{fsm,prompt,engine,personality,segments,proactive}.ts`、`packages/brain-adapter/src/{types,tools,mimo}.ts`、`packages/contracts/schemas/events/conversation.decision.v1.json`、`packages/domain/src/store.ts`

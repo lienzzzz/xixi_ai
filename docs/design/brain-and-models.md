@@ -1,5 +1,11 @@
 # 大脑与模型：`TurnModelProvider` 三接口、MiMo 直连、DSH Harness
 
+2026-10-05 S3第二步：AgentLoop限制messages/tools的JSON数据字节，工具列表稳定排序，不剪裁工具参数或结果；MiMo区分usage、缓存及推理字段是否实际存在，并聚合成功轮次。fake不伪造用量，DSH尚无usage接线。边界见 [设计](agent-round-budget.md) 与 [ADR-0024](../adr/0024-agent-round-budget-and-observed-usage.md)。
+
+2026-10-05 S3第一步：统一引擎交给Provider的prompt已经过文本预算，当前话语不会再作为本次history发送。budget只覆盖三段文本，不限制工具循环中新增加的schema/result/图片。prefixHash是system摘要，不能冒称cachedTokens实测；当前demo使用FakeBrainAdapter，真实供应商缓存和真人感评测尚待后续。
+
+2026-10-05 S2直连终端用既有TurnModelProvider和ToolRegistry对话；主动判断通过StructuredInferenceProvider.inferJson，仅接受speak布尔值和枚举reason_code，坏结构/异常保守不说话。程序拥有硬门禁和身份权限。当前API装配经HTTP/SSE替身验证，未真调用供应商；DSH继续旧路径。模型ID使用配置值。详见 [终端宿主](terminal-resident-chat.md)。
+
 > 最后更新：2026-10-04（V0.3 P2-F/P2 收口：§2 从七成员 `BrainAdapter` 改成三个接口，四个能力退役并注明归属；
 > 新增「两条接缝在生产侧没有消费者」的口径，见 [ADR-0020](../adr/0020-provider-three-interfaces-and-mcp-deps.md)）
 > 权威来源：`packages/brain-adapter/src/{types,mimo,dsh,tools,errors,scripted,fake}.ts`、`packages/model-adapters/src/{mimo,weather,errors}.ts`、`apps/brain-dsh/src/transport.ts`、`apps/brain-dsh/profile/cordis.patch.yml`、`plugins/xixi-tools/index.js`、`scripts/verify-structured-output.ts`、[recon/mimo-api-probe-2026-09-29.md](../recon/mimo-api-probe-2026-09-29.md)、ADR-0002/0005/0008/0020、[progress.md](../progress.md) §2.3/§2.6/§2.10/§2.11

@@ -1,5 +1,21 @@
 # 设计文档索引与维护规则
 
+2026-10-05：[输入反压](input-backpressure.md) 和 [ADR-0027](../adr/0027-bounded-host-input-queues.md) 约束单宿主待处理输入，不是整体内存或持久账本上限。
+
+2026-10-05：[有界旧原话检索](history-recall.md) 限定私人同会话与来源截止；无生成摘要，事实性/权限仍由程序控制。
+
+2026-10-05当前增量：[来源会话历史失效](history-invalidation.md) 与 [ADR-0025](../adr/0025-source-session-context-invalidation.md)，限定本地工作历史，不等于原始数据彻底删除。
+
+2026-10-05当前增量：[S3工具循环预算](agent-round-budget.md)、[ADR-0024](../adr/0024-agent-round-budget-and-observed-usage.md)。逐个结果后门禁与用量存在标记已接入；真实缓存、失败轮次累计计量及金额上限仍有缺口。
+
+2026-10-05当前增量：[S3上下文第一步](context-budget.md)。完整原文文本预算与动态情境分离已经接入，API缓存收益/真人感仍未验证；整体路线见 [阶段验收](companion-target-architecture.md)。
+
+2026-10-05：当前S2设计为 [终端宿主](terminal-resident-chat.md)，持续路线见 [整体架构](companion-target-architecture.md)。直连/fake已有统一宿主；其他入口的旧设计不能视为已接入这一保证。
+
+[整体目标架构](companion-target-architecture.md) 定义长期目标与S0–S7证据地图；当前设备档案实现位于 `packages/runtime/src/endpoint-profile.ts`，示例 `config/ambient.example.json`，演示支持 `--profile`。档案声明的是已过滤事件与模拟播放，尚无物理驱动注册器。
+
+2026-10-05 新增 [单主人软件闭环](ambient-software.md)：模拟设备事件、身份隔离、checkpoint、去重、审批与提醒播放闭环。权威实现为 `packages/runtime/src/ambient-runtime.ts` 与 `ambient-types.ts`、domain 的迁移 009 和 checkpoint 方法；验收在 `tests/integration/ambient-runtime.test.ts` 与 `ambient-demo.test.ts`。
+
 > 最后更新：2026-10-04（V0.3 P2 收口：表 1 的 `brain-and-models.md` 描述改成三个 Provider 接口；
 > 更正「`security-and-privacy.md` 尚不存在」这条过期陈述；维护规则 4 分清两种「没有」）
 > 权威来源：本文的规则本身由 `docs/README.md`（文档地图与权威性排序）与 `AGENTS.md`（铁律、语言与命名）约束；每份设计文档的权威源见表 2

@@ -53,6 +53,11 @@ export interface ToolContext {
   /** IANA timezone for relative dates such as "明天". */
   readonly timezone: string;
   readonly now: Date;
+  /** Cooperative cancellation; a timeout does not prove that a write was rolled back. */
+  readonly signal?: AbortSignal;
+  readonly sessionId?: string;
+  readonly actorId?: string;
+  readonly sourceEventId?: string;
 }
 
 export interface ToolCallRecord {
@@ -156,7 +161,10 @@ export interface ScheduledReminder {
 
 /** Where `xixi_set_reminder_stub` puts a reminder (the PoC sink is in-process). */
 export interface ReminderSink {
-  schedule(input: { readonly what: string; readonly when: string; readonly recordedAt: string }): Promise<ScheduledReminder> | ScheduledReminder;
+  /** Durable hosts explicitly declare that the recorded reminder has a scheduler. */
+  readonly durable?: boolean;
+  schedule(input: { readonly what: string; readonly when: string; readonly recordedAt: string;
+    readonly sessionId?: string; readonly actorId?: string; readonly sourceEventId?: string }): Promise<ScheduledReminder> | ScheduledReminder;
 }
 
 export interface ReminderToolOptions {
@@ -187,7 +195,9 @@ export function createReminderTool(options: ReminderToolOptions = {}): AgentTool
   const now = options.now ?? (() => new Date());
   return {
     name: 'xixi_set_reminder_stub',
-    description: '帮用户记一件事，到点提醒。用户说“提醒我……”时使用。记下后用自己的话说一声就好，不要念字段名。',
+    description: options.sink?.durable === true
+      ? '帮用户保存持久提醒，到期后由宿主调度。用户说“提醒我……”时使用；以工具结果为准，不要念字段名。'
+      : '临时记录用户的一件事；不会到点自动提醒，重启会丢失。必须向用户说明这个限制。',
     parameters: {
       type: 'object',
       properties: {
@@ -200,13 +210,17 @@ export function createReminderTool(options: ReminderToolOptions = {}): AgentTool
     risk: 'write',
     scopes: WRITE_SCOPES,
     timeoutMs: 5_000,
-    async execute(args) {
+    async execute(args, context) {
       const what = typeof args.what === 'string' ? args.what.trim() : '';
       if (what.length === 0) return { registered: false, error: '要提醒什么还不清楚' };
       const when = typeof args.when === 'string' && args.when.trim().length > 0 ? args.when.trim() : '尽快';
       const recordedAt = now().toISOString();
-      const reminder = await sink.schedule({ what, when, recordedAt });
-      return { registered: true, id: reminder.id, what: reminder.what, when: reminder.when, recordedAt, note: '已经记下；到点不会自动响，需要人看一眼' };
+      const reminder = await sink.schedule({ what, when, recordedAt,
+        ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+        ...(context.actorId === undefined ? {} : { actorId: context.actorId }),
+        ...(context.sourceEventId === undefined ? {} : { sourceEventId: context.sourceEventId }) });
+      return { registered: true, id: reminder.id, what: reminder.what, when: reminder.when, recordedAt,
+        note: sink.durable === true ? '提醒已持久保存，到期后由宿主考虑投递' : '只是临时记录；到点不会自动响，重启会丢失' };
     },
   };
 }

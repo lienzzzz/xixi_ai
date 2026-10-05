@@ -410,7 +410,7 @@ test('audience 是可选层，但一旦给出就真的改变提示词（public �
     });
     const withPublic = publicEngine.buildPrompt({ sessionId: h.sessionId, text: '那绿茶呢', at: NOW });
     assert.ok(!withPublic.user.includes('明天下午我要去镇上办证'), 'public 时家里的私事不进提示词');
-    assert.ok(withPublic.system.includes('别提到家里人的私事'), '而且要在稳定前缀里说明原因');
+    assert.ok(withPublic.user.includes('别提到家里人的私事'), '而且要在动态情境里说明原因');
   } finally {
     h.store.close();
   }

@@ -66,6 +66,9 @@ export interface MimoUsage {
 }
 
 export interface MimoChatResult {
+  readonly usageReported?: boolean;
+  readonly cachedTokensReported?: boolean;
+  readonly reasoningTokensReported?: boolean;
   readonly text: string;
   readonly toolCalls: readonly MimoToolCall[];
   readonly model: string;
@@ -214,6 +217,7 @@ export class MimoClient {
       })),
       model: payload.model ?? options.model ?? this.defaultModel,
       usage: toUsage(payload),
+      ...usagePresence(payload.usage),
       finishReason: choice.finish_reason ?? null,
       firstTokenMs: null,
       totalMs: Date.now() - startedAt,
@@ -236,6 +240,7 @@ export class MimoClient {
     let firstTokenMs: number | null = null;
     const toolCalls = new Map<string, { name: string; args: string }>();
     let usage: MimoUsage = emptyUsage();
+    let presence = usagePresence(undefined);
     let model = options.model ?? this.defaultModel;
     let finishReason: string | null = null;
 
@@ -265,7 +270,7 @@ export class MimoClient {
           continue;
         }
         if (event.model !== undefined) model = event.model;
-        if (event.usage !== undefined) usage = toUsage({ usage: event.usage });
+        if (event.usage !== undefined) { usage = toUsage({ usage: event.usage }); presence = usagePresence(event.usage); }
         const choice = event.choices?.[0];
         if (choice === undefined) continue;
         if (choice.finish_reason != null) finishReason = choice.finish_reason;
@@ -291,6 +296,7 @@ export class MimoClient {
       toolCalls: [...toolCalls.values()].map((call, index) => ({ id: `call_${index}`, name: call.name, arguments: call.args || '{}' })),
       model,
       usage,
+      ...presence,
       finishReason,
       firstTokenMs,
       totalMs: Date.now() - startedAt,
@@ -531,6 +537,15 @@ function toUsage(payload: RawResponse): MimoUsage {
 
 function emptyUsage(): MimoUsage {
   return { promptTokens: 0, completionTokens: 0, totalTokens: 0, reasoningTokens: 0, cachedTokens: 0 };
+}
+
+function usagePresence(usage: RawResponse['usage']) {
+  const integer = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+  const usageReported = usage != null && integer(usage.prompt_tokens) && integer(usage.completion_tokens) && integer(usage.total_tokens);
+  const cached = usage?.prompt_tokens_details?.cached_tokens;
+  const reasoning = usage?.completion_tokens_details?.reasoning_tokens;
+  return { usageReported, cachedTokensReported: usageReported && integer(cached) && cached <= usage!.prompt_tokens!,
+    reasoningTokensReported: usageReported && integer(reasoning) && reasoning <= usage!.completion_tokens! };
 }
 
 /** Parse a model's JSON reply, treating whitespace padding as the defect it is. */
