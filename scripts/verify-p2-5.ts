@@ -36,7 +36,8 @@
  *     入口们共同调用的装配点 `createResidentRuntime`（控制台/试用页/CLI 都是它）；**读**那一步用的是
  *     文字入口 `createChatRuntime` + 真实时钟，所以「到点」是它自己判断出来的。
  *   * 场景 2 的主动那一步由本脚本按 `runtime.reminderSeams` 的一行接法驱动：**没有任何 live 入口
- *     写过那一行**（`git grep -n 'reminderSeams' -- scripts` 零命中，T8 的披露）。脚本把这句如实打印，
+ *     写过那一行**（判据：`git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts'` 应为 0 命中
+ *     —— 必须排除本脚本自己，否则这条判据会被它自己打破，见 P2.5-K 那次 buildToolChain 的教训）。脚本把这句如实打印，
  *     不把「接缝可用」写成「活的西西已经在说提醒」。
  *   * 场景 4 的「相关连接」由探针插件自己用文件标记表示（`activate` 置 `{open:true}`，`deactivate` /
  *     `dispose` 都置 `{open:false}`）：生产里这一处是 MCP transport 的 `close()`，探针要证明的是
@@ -432,7 +433,8 @@ async function scenarioReminder(): Promise<Record<string, unknown>> {
 
       console.log(
         '  口径：上面这对接缝取自装配点（`runtime.reminderSeams`），由本脚本按文档那一行接进循环。\n' +
-          '        **没有任何 live 入口写过那一行**（`git grep -n reminderSeams -- scripts` 零命中，T8 的披露），\n' +
+          '        **没有任何 live 入口写过那一行**（判据 `git grep -n reminderSeams -- scripts\n' +
+          "          ':!scripts/verify-p2-5.ts' 应为 0 命中；T8 的披露），\n" +
           '        所以这条证据是「接缝可用 + 到点会被主动路径说出来」，不是「活的西西已经在说提醒」。',
       );
 
@@ -446,7 +448,7 @@ async function scenarioReminder(): Promise<Record<string, unknown>> {
         spoken: spoken === null ? null : { text: spoken.text, trigger: spoken.trigger, initiativeKind: spoken.initiativeKind },
         seamsSource: 'runtime.reminderSeams（装配点自己的那一对）',
         seamsWiredByEntry: false,
-        seamsNote: 'scripts/ 下还没有入口写「...runtime.reminderSeams」这一行（git grep -n reminderSeams -- scripts 零命中）',
+        seamsNote: "scripts/ 下还没有入口写「...runtime.reminderSeams」这一行（判据 git grep -n reminderSeams -- scripts ':!scripts/verify-p2-5.ts' 应为 0 命中；排除本脚本自己）",
       };
     } finally {
       if (runtime !== undefined) await runtime.stop().catch(() => undefined);

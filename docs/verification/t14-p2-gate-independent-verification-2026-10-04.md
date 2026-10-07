@@ -22,7 +22,8 @@
 >    （`node scripts/chat.ts --print-wiring` 今天在三个内置之外列出 `news.search` / `news.latest` / `news.for_interests`），
 >    提醒落的是 `DurableReminderSink`。复核：`git grep -l 'createResidentRuntime(' -- scripts`；
 >    反证 `git grep -n 'buildToolChain(' -- scripts` 应 **0 命中**。**仍未接**的是「到点提醒由入口自己说出来」
->    那一行（`git grep -n 'reminderSeams' -- scripts` 零命中）——所以「她到点会开口」今天仍**只是接缝可用**。
+>    那一行（`git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts'` 零命中；**排除验收脚本自己**
+>    ——见下面第 4 条）——所以「她到点会开口」今天仍**只是接缝可用**。
 > 2. **「27%」是一次历史观测，不能当现状**：t27 用**同一份探针**重跑得改前 21/22（95.5%）、改后 22/22（100%），
 >    另一次改前单独复跑 14/17（82.4%）；「自称提醒、库里 0 行」的口吻样本改前 3 次、改后 0 次（样本太小，不据此宣称效果）。
 >    **故「27% 与 4 次假承诺」同日同口径不可复现，「提示词层是根因」这个判断不成立**——下面所有 27% 的读数

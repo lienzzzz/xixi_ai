@@ -116,7 +116,8 @@ acknowledge(id, at)  delivered → acknowledged（谁听到了回答，谁调）
 >    `ReminderScheduler`，四个 live 入口与控制台、试用页都拿它给的；提醒真的落 `reminders` 表、重启后仍在
 >    （复核：`git grep -l 'createResidentRuntime(' -- scripts`；以及 `npm run verify:p2.5 -- --scenario=reminder --offline`）。
 >    **仍未接的一环是另一件事**：到点由**主动循环**说出来要入口那一行 `...runtime.reminderSeams`
->    （`git grep -n 'reminderSeams' -- scripts` 零命中）——所以「活的西西已经在说到点提醒」今天**不成立**。
+>    （`git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts'` 零命中；**排除验收脚本自己**——
+>    P2.5-K 那条 buildToolChain 判据就是被它自己打破的）——所以「活的西西已经在说到点提醒」今天**不成立**。
 > 2. **「27% 未达标」已更正**：那是 2026-10-04 上午的一次观测、**同日同口径不可复现**（t27 用同一份探针重跑得
 >    改前 21/22、改后 22/22，另一次改前单独复跑 14/17），「提示词层是根因」这个判断**不成立**；
 >    P2-H 的 `WRITE_OPERATION_RULE` 确实落了生产代码，但**它的效果本次测不出来**。**不要拿 27% 当现状。**
