@@ -32,6 +32,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { CONVERSATION_SCOPE, buildToolChain } from '../../scripts/field-test.ts';
+import { FakeBrainAdapter } from '@xixi/brain-adapter';
+import type { InlinePlugin } from '@xixi/plugins';
 import { CONVERSATION_SCOPE as RUNTIME_SCOPE, buildToolChain as runtimeBuildToolChain } from '@xixi/runtime';
 import { REPO_ROOT, loadConfig } from '../../scripts/lib/harness.ts';
 
@@ -143,6 +145,67 @@ test('P0-A：field-test 的兼容表面与 @xixi/runtime 是同一份声明', ()
     viaPackage.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name),
     '两条路径必须给出同一套工具',
   );
+});
+
+/**
+ * V0.3 P2.5-B：试用页那条链也是装配点给的（`scripts/serve-chat.ts` 的 `createTrialRuntime`
+ * → `createResidentRuntime`），所以「启用插件之后这个页面仍然跑得完一轮文字对话」要有一条证据。
+ *
+ * 用的是**入口自己的装配函数**（不是测试里另写一份装配），只多传两样：一个 inline 插件、一个离线
+ * 替身模型。名字选 `news.latest` 是因为替身看到「新闻」就会请求它 —— 于是这一轮把整条路走通：
+ * 插件在 `start()` 里挂进链 → 模型请求 → 核心执行 → 回复来自插件工具的载荷。
+ */
+test('试用页：启用插件后跑得完一轮文字对话，插件工具真的被执行（P2.5-B）', async () => {
+  const page = await import('../../scripts/serve-chat.ts');
+  const calls = { count: 0 };
+  const newsPlugin: InlinePlugin = {
+    manifest: { schemaVersion: 1, id: 'xixi.test-news', name: 'xixi.test-news', version: '0.1.0', permissions: ['tool.register'], capabilities: ['tool'] },
+    module: {
+      activate: () => ({
+        tools: [
+          {
+            tool: {
+              name: 'news.latest',
+              description: '用例插件提供的头条（离线、无网络）',
+              parameters: { type: 'object', properties: {}, additionalProperties: false },
+              risk: 'read',
+              scopes: ['conversation'],
+              async execute() {
+                calls.count += 1;
+                return { items: [{ title: '插件头条' }] };
+              },
+            },
+          },
+        ],
+      }),
+    },
+  };
+  const trial = page.createTrialRuntime({
+    plugins: { inline: [newsPlugin] },
+    model: ({ toolChain }) => new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE }),
+  });
+  try {
+    assert.equal(trial.state, 'created');
+    await trial.start();
+    assert.equal(trial.state, 'started');
+    assert.deepEqual(
+      trial.toolChain.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name).sort(),
+      ['news.latest', 'xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'].sort(),
+      '插件工具必须挂在这一页的那条链上（模型可见）',
+    );
+    // 入口自己那个运行时（模块级）也走同一个装配函数：链就是它的注册表。
+    assert.equal(page.runtime.toolChain, page.runtime.plugins.registry);
+
+    const session = trial.store.createSession();
+    const turn = await trial.conversation.respond({ sessionId: session.sessionId, text: '有什么新闻？', addressed: true });
+    assert.equal(turn.accepted, true);
+    assert.equal(turn.toolName, 'news.latest', `这一轮必须走插件工具，实际 ${String(turn.toolName)}`);
+    assert.match(String(turn.text), /插件头条/, `回复必须来自插件工具的载荷：${String(turn.text)}`);
+    assert.equal(calls.count, 1, '插件工具必须真的被执行了一次');
+  } finally {
+    await trial.stop();
+    assert.deepEqual(trial.toolChain.names(), [], '关停之后链应当被清空（插件工具真的撤下来了）');
+  }
 });
 
 test('文字 CLI 的离线分支真的执行工具，而不是只把链打印出来', { timeout: SPAWN_TIMEOUT_MS }, async () => {

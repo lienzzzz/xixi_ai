@@ -83,6 +83,8 @@ test('shutdownAll 先停服务、再把排队的后台提取跑完、最后关�
           store.close();
         },
       },
+      // V0.3 P2.5-B：本页的常驻运行时也要在关库**之前**停下来（插件层关停 + 撤回挂载 + 清空链）。
+      resident: { stop: async () => void steps.push('resident.stop') },
       log: () => {},
     });
 
@@ -90,8 +92,8 @@ test('shutdownAll 先停服务、再把排队的后台提取跑完、最后关�
     assert.equal(preferencesAtClose, 1, '排队的提取真的落了库（读数取在关库之前的那一刻）');
     assert.deepEqual(
       steps,
-      ['server.close', 'server.closeAllConnections', 'extractor.flush(1)', 'store.close'],
-      '顺序：先停止接受新请求 → 跑完队列 → 关库',
+      ['server.close', 'server.closeAllConnections', 'extractor.flush(1)', 'resident.stop', 'store.close'],
+      '顺序：先停止接受新请求 → 跑完队列 → 停常驻运行时（插件层）→ 关库',
     );
     // `Error` as the predicate (not `undefined`, which the types reject and which asserted nothing
     // about *what* was thrown): the store must refuse to be used after `close()`.
@@ -149,9 +151,14 @@ test('真入口把收尾挂上了：import.meta.main 块里调用 installShutdow
   const main = source.indexOf('if (import.meta.main) {');
   assert.ok(main > 0, 'serve-chat.ts 必须有 import.meta.main 块');
   const block = source.slice(main);
+  // V0.3 P2.5-B：真入口现在把**四样**真东西交出去 —— 原来的 server / extractor / store，加本页的
+  // 常驻运行时 `resident`（不吃掉这一条：少任何一个都会红）。每个名字都必须出现，而 `resident`
+  // 还必须是那个 runtime 变量本身（不是随便一个对象）。
   assert.match(
     block,
-    /installShutdownHandlers\(\{\s*server,\s*extractor,\s*store\s*\}\)/,
-    '真入口必须把真实的 server / extractor / store 接到信号收尾上（只定义函数不算接线）',
+    /installShutdownHandlers\(\{[^}]*\bserver\b[^}]*\bextractor\b[^}]*\bstore\b[^}]*\bresident\s*:\s*runtime\b[^}]*\}/,
+    '真入口必须把真实的 server / extractor / store / resident 接到信号收尾上（只定义函数不算接线）',
   );
+  // 插件层要在监听之前起来：`start()` 才是把插件/MCP 工具挂进链的那一步。
+  assert.match(block, /await runtime\.start\(\)/, '真入口必须在监听之前启动常驻运行时（否则插件工具不在链上）');
 });

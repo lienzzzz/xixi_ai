@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { WeatherClient } from '@xixi/model-adapters';
+import type { InlinePlugin } from '@xixi/plugins';
 
 import { concatWav, readWav, readWavInfo, sliceWav } from '../../scripts/lib/wav.ts';
 import {
@@ -468,6 +469,88 @@ test('a voice turn about the weather runs the tool, and text and voice share tha
     assert.equal(called.filter((line) => line.startsWith('[tool] xixi_get_weather ok')).length, 2, called.join(' | '));
   } finally {
     await handle.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * V0.3 P2.5-B 的端到端证据：**启用插件之后这个入口仍然起得来、并且跑得完一轮文字对话**。
+ *
+ * 为什么名字是 `news.latest`：离线替身（`FakeBrainAdapter` 的默认 `toolPlan`）看到「新闻」两个字就会
+ * 请求 `news.latest`（P2-D 起新闻由插件提供），于是这一轮把整条路走通：
+ *
+ *   插件在 `runtime.start()` 里跑完九步生命周期 → 工具被挂进**那条**链（模型可见）→
+ *   模型请求它 → 核心执行它 → 回复就是它的结果。
+ *
+ * 全程离线、不联网、不花钱；而且断言的是**行为**（那一轮真的调用了工具、回复来自它的载荷），
+ * 不是「源码里出现了某个函数名」（AGENTS §9.24）。
+ */
+test('启用插件后：插件工具在模型可见的链上，而且真被一轮文字对话用到（P2.5-B）', async () => {
+  const root = tempDir();
+  const calls = { count: 0 };
+  const newsPlugin: InlinePlugin = {
+    manifest: { schemaVersion: 1, id: 'xixi.test-news', name: 'xixi.test-news', version: '0.1.0', permissions: ['tool.register'], capabilities: ['tool'] },
+    module: {
+      activate: () => ({
+        tools: [
+          {
+            tool: {
+              name: 'news.latest',
+              description: '用例插件提供的头条（离线、无网络）',
+              parameters: { type: 'object', properties: {}, additionalProperties: false },
+              risk: 'read',
+              scopes: ['conversation'],
+              async execute() {
+                calls.count += 1;
+                return { items: [{ title: '插件头条' }] };
+              },
+            },
+          },
+        ],
+      }),
+    },
+  };
+  const handle = await createFieldServer({
+    port: 0,
+    offline: true,
+    ttsEnabled: false,
+    voiceDir: join(root, 'voice'),
+    dataDir: join(root, 'data'),
+    presenceDataDir: join(root, 'presence'),
+    reportDir: join(root, 'recon'),
+    autoPrune: false,
+    probeRunner: createFakeProbeRunner(),
+    plugins: { inline: [newsPlugin] },
+    log: () => {},
+  });
+  try {
+    // ① 模型可见：状态页读的就是运行时那条链，插件工具在列表里（控制台不再自己拼链）。
+    const state = (await (await fetch(`${handle.url}/api/field/state`)).json()) as Record<string, any>;
+    assert.deepEqual(
+      [...state.tools.names].sort(),
+      ['news.latest', 'xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'].sort(),
+      `插件工具必须对模型可见：${JSON.stringify(state.tools.names)}`,
+    );
+    assert.equal(handle.runtime.toolChain, handle.runtime.plugins.registry, '状态页与运行时必须是同一条链，不是两份');
+    assert.equal(handle.runtime.state, 'started');
+
+    // ② 真跑得完一轮：模型请求 → 核心执行插件工具 → 回复来自它的载荷。
+    const turn = (await (
+      await fetch(`${handle.url}/api/turn`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: '有什么新闻？', speak: false }),
+      })
+    ).json()) as Record<string, any>;
+    assert.equal(turn.toolName, 'news.latest', `这一轮必须走插件工具，实际 ${String(turn.toolName)}`);
+    assert.match(String(turn.reply), /插件头条/, `回复必须来自插件工具的载荷：${String(turn.reply)}`);
+    assert.doesNotMatch(String(turn.reply), INTERNAL_WORDING, '插件工具的结果也要被说成人话');
+    assert.equal(calls.count, 1, '插件工具必须真的被执行了一次');
+  } finally {
+    await handle.close();
+    // ③ 关停真的把插件工具撤下来了，而不是「插件还在、只是没人看」。
+    assert.deepEqual(handle.runtime.toolChain.names(), [], 'close() 之后链应当被清空');
+    assert.equal(handle.runtime.state, 'stopped');
     rmSync(root, { recursive: true, force: true });
   }
 });

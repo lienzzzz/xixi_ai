@@ -12,9 +12,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 
-import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type TurnModelProvider } from '@xixi/brain-adapter';
+import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type ToolRegistry, type TurnModelProvider } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
-import { ConversationEngine, TopicEngine } from '@xixi/conversation';
+import { TopicEngine } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
 import { openXixiStore, resolveCanonicalDataDir } from '@xixi/domain';
 
@@ -48,10 +48,15 @@ import {
   type VoiceDeps,
   type VoiceTurnBody,
 } from './field-test.ts';
-// V0.3 P0-A: the tool chain moved to `@xixi/runtime` (pack `04_RUNTIME_CONSOLIDATION.md` §1
-// Step A). The trial page still imports the rest of its shared voice/console seams from
-// `field-test.ts`; only the two runtime symbols left that file.
-import { CONVERSATION_SCOPE, buildToolChain, createTurnExtraction } from '@xixi/runtime';
+// V0.3 P2.5-B: 试用页的工具链、插件内核、审批宿主、提醒与引擎都从装配点取（`createResidentRuntime`）；
+// 本文件不再直接调 `buildToolChain`，也不再自己 new `ConversationEngine` / 建提取器。
+import {
+  CONVERSATION_SCOPE,
+  createResidentRuntime,
+  type PluginChainOptions,
+  type ResidentModelInput,
+  type XixiResidentRuntime,
+} from '@xixi/runtime';
 import { toOffsetIso } from '@xixi/contracts';
 // Pack Phase 8: the streaming speech pieces. Chunking itself lives in `handleVoiceTurn` (one
 // `ClauseChunker` for every entry), so this file no longer imports the chunker at all — the
@@ -99,10 +104,10 @@ if (pruned.removed.length > 0) {
   console.log(`[privacy] 按保留策略清理 ${pruned.removed.length} 个音频文件（${Math.round(pruned.bytesFreed / 1024)} KB）：${pruned.removed.map((item) => item.name).join('、')}`);
 }
 
-function buildAdapter(): TurnModelProvider {
-  // Pack Phase 2: the trial page builds the same chain as the console and the file-driven
-  // voice turn — one registry, four built-ins, permissions and the round cap outside the model.
-  const registry = buildToolChain(config, { onToolCall: (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`) });
+function buildAdapter(registry: ToolRegistry): TurnModelProvider {
+  // V0.3 P2.5-B: 这条链**不再由本入口拼**，它是常驻运行时（`createResidentRuntime`）给出的那一条
+  // （`runtime.plugins.registry`）：内置工具、权限政策、轮数上限都在装配点里定，插件/MCP/news
+  // 的工具也是在 `runtime.start()` 里挂进同一个注册表的。本函数只决定「哪一个模型」。
   if (USE_FAKE) return new FakeBrainAdapter({ registry, scope: CONVERSATION_SCOPE });
   if (!USE_DSH) {
     return new MimoBrainAdapter({
@@ -131,23 +136,49 @@ function buildAdapter(): TurnModelProvider {
   });
 }
 
-// pack Phase 4：长期记忆与反馈学习。一轮说完之后**异步**提取（`afterTurn` 只入队，不 await），
-// 所以试用页的回复速度与「她要不要写记忆」无关；学习到的偏移通过 `store.selfProfile()` 影响提示词。
-// V0.3 P1-b：装配改走三个入口共用的工厂（`@xixi/runtime` 的 `createTurnExtraction`）——
-// 纠错闭环与 Tier 2 的政策只在一处，入口之间的行为不会再各写一份。
-const extraction = createTurnExtraction({
-  store,
-  config,
-  onError: (error: unknown) => console.log(`[memory] 后台提取出错（不影响这一轮）：${error instanceof Error ? error.message : String(error)}`),
-});
-const extractor = extraction.extractor;
-const engine = new ConversationEngine({
-  adapter: buildAdapter(),
-  store,
-  config,
-  turnTimeoutMs: 90_000,
-  afterTurn: extraction.afterTurn,
-});
+/** 这个页面的插件层接缝（V0.3 P2.5-B）：`inline` / `news` / `mcpServers` / `pluginDirectory`。 */
+export interface TrialRuntimeOptions {
+  /**
+   * 插件链选项。入口自己**不给**（`XixiConfig` 还没有 `plugins` 段，「配置文件 → 插件」是 P2.5-H），
+   * 所以今天的生产路径就是「没有插件」；测试与将来的配置接线都从这里注入。
+   */
+  readonly plugins?: PluginChainOptions;
+  /** 覆盖模型（默认按 `--fake` / `--dsh` / 直连 MiMo 决定；测试注入替身走这里）。 */
+  readonly model?: ResidentModelInput;
+}
+
+/**
+ * 试用页的常驻运行时（V0.3 P2.5-B）：**链 + 插件内核 + 审批宿主 + durable 提醒 + 引擎**一次装配。
+ *
+ * 为什么要有这个函数而不在模块顶层直接 `createResidentRuntime(...)`：入口自己的参数是进程级常量
+ * （`--fake` / `--dsh` / 端口都在模块作用域读出来），测试要证明「启用插件之后这个入口仍然跑得完一轮
+ * 文字对话」就得在**同一个装配函数**上多传一个插件。所以装配只有这一处，入口调它用默认参数，
+ * 测试调它注入插件与替身模型——两者走的是同一条代码路径，不是两份。
+ */
+export function createTrialRuntime(options: TrialRuntimeOptions = {}): XixiResidentRuntime {
+  return createResidentRuntime({
+    config,
+    store,
+    ...(options.plugins ?? {}),
+    onToolCall: (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
+    log: (line) => console.log(line),
+    // pack Phase 4：长期记忆与反馈学习。一轮说完之后**异步**提取（`afterTurn` 只入队，不 await），
+    // 所以试用页的回复速度与「她要不要写记忆」无关；学习到的偏移通过 `store.selfProfile()` 影响提示词。
+    // V0.3 P1-b/P2.5-B：这份装配（含 `createTurnExtraction` 的纠错闭环与 Tier 2 政策）现在只在装配点里，
+    // 入口之间不会再各写一份。
+    memory: { onError: (error: unknown) => console.log(`[memory] 后台提取出错（不影响这一轮）：${error instanceof Error ? error.message : String(error)}`) },
+    conversation: { turnTimeoutMs: 90_000 },
+    model: options.model ?? (({ toolChain }) => buildAdapter(toolChain)),
+  });
+}
+
+/**
+ * 本进程的常驻运行时：工具链、插件内核、审批宿主、提醒调度器、记忆提取与引擎都在它身上。
+ * 插件工具是在 `start()` 里挂进链的，所以 `import.meta.main` 块在监听之前先 `await runtime.start()`。
+ */
+export const runtime: XixiResidentRuntime = createTrialRuntime();
+const extractor = runtime.extraction.extractor;
+const engine = runtime.conversation;
 
 let session = store.latestSession() ?? store.createSession();
 
@@ -522,11 +553,23 @@ function json(response: ServerResponse, status: number, payload: unknown): void 
   response.end(body);
 }
 
-/** 收尾要用的三样东西（收窄成接口，测试可以直接驱动真收尾而不必起一个进程）。 */
+/** 收尾要用的几样东西（收窄成接口，测试可以直接驱动真收尾而不必起一个进程）。 */
 export interface ShutdownDeps {
   readonly server: { close(): unknown; closeAllConnections?: () => void };
   readonly extractor: { flush(): Promise<void>; readonly pending: number };
   readonly store: { close(): void };
+  /**
+   * V0.3 P2.5-B：本页的常驻运行时（`createResidentRuntime` 的返回值）。给了它就多走一步
+   * `stop()`，而且**必须在 `store.close()` 之前**：
+   *
+   *  * 插件层走完关停（九步生命周期收尾、MCP 连接在这里断开）→ 撤回 `mount()` 复制进链的副本 →
+   *    清空前链；
+   *  * `stop()` 的第一步本来就是 `extraction.drain()`，也就是上面那次 `flush()` 的完整形态；
+   *  * 关停报告（还有几条提醒、几条待批）要读得到库，所以顺序不能反。
+   *
+   * 不给它的调用方（测试里的窄替身）只走原来的三步，行为不变。
+   */
+  readonly resident?: { stop(): Promise<unknown> } | undefined;
   readonly log?: (line: string) => void;
 }
 
@@ -542,9 +585,9 @@ export interface ShutdownReport {
  * 所以「说完最后一句 → 按 Ctrl+C」这一瞬间队列里通常还有一轮。进程默认的 SIGINT 行为是直接终止，
  * `extractor` 的 `exit` 兜底**不一定来得及**，而且库也不是正常关闭的 —— 记忆会少一条，日志里什么也看不出来。
  *
- * 顺序就是它写在代码里的理由：先停止接受新连接（不再有新轮次入队），再跑完队列，最后关库。
- * `closeAllConnections` 是给浏览器 keep-alive 用的：不关掉它，`server.close()` 会等长连接自己结束，
- * 于是「Ctrl+C 之后还挂在那里」。
+ * 顺序就是它写在代码里的理由：先停止接受新连接（不再有新轮次入队），再跑完队列，再让常驻运行时
+ * 停下来（插件层），最后关库。`closeAllConnections` 是给浏览器 keep-alive 用的：不关掉它，
+ * `server.close()` 会等长连接自己结束，于是「Ctrl+C 之后还挂在那里」。
  */
 export async function shutdownAll(deps: ShutdownDeps): Promise<ShutdownReport> {
   const log = deps.log ?? ((line: string): void => console.log(line));
@@ -552,8 +595,9 @@ export async function shutdownAll(deps: ShutdownDeps): Promise<ShutdownReport> {
   deps.server.close();
   deps.server.closeAllConnections?.();
   await deps.extractor.flush();
+  await deps.resident?.stop();
   deps.store.close();
-  log(`[shutdown] 已停止接受新请求，跑掉 ${flushed} 轮排队的后台提取，库已正常关闭`);
+  log(`[shutdown] 已停止接受新请求，跑掉 ${flushed} 轮排队的后台提取${deps.resident === undefined ? '' : '，插件层已关停'}，库已正常关闭`);
   return { flushed };
 }
 
@@ -576,7 +620,13 @@ export function installShutdownHandlers(deps: ShutdownDeps & { readonly exit?: (
     shuttingDown = true;
     log(`\n收到 ${signal}：先跑完排队的后台提取再退出…`);
     try {
-      await shutdownAll({ server: deps.server, extractor: deps.extractor, store: deps.store, log });
+      await shutdownAll({
+        server: deps.server,
+        extractor: deps.extractor,
+        store: deps.store,
+        ...(deps.resident === undefined ? {} : { resident: deps.resident }),
+        log,
+      });
       exit(0);
     } catch (error) {
       log(`[shutdown] 收尾失败：${error instanceof Error ? error.message : String(error)}`);
@@ -1228,9 +1278,14 @@ input.focus();
  * the program — importing it must not bind a port.
  */
 if (import.meta.main) {
+  // V0.3 P2.5-B：插件/MCP/news 的工具是在 `start()` 里挂进工具链的（九步生命周期跑完再 mount），
+  // 所以**监听之前**先启动常驻运行时 —— 页面从第一轮起看到的就是「插件已经在链上」的那条链。
+  // 启动失败如实抛出（在 `main` 的 catch 里以中文原因结束），绝不静默降级成「这个部署没有插件」。
+  await runtime.start();
+
   // preflight ⑦: Ctrl+C（SIGINT）与 kill / 任务管理器结束进程（SIGTERM）都走同一条收尾：
-  // 停止接受新连接 → 跑完排队的后台提取 → 关库 → 退出码 0。
-  installShutdownHandlers({ server, extractor, store });
+  // 停止接受新连接 → 跑完排队的后台提取 → 停插件层 → 关库 → 退出码 0。
+  installShutdownHandlers({ server, extractor, store, resident: runtime });
 
   server.on('error', (error: NodeJS.ErrnoException) => {
     if (error.code === 'EADDRINUSE') {

@@ -54,6 +54,7 @@ import {
   DshBrainAdapter,
   FakeBrainAdapter,
   MimoBrainAdapter,
+  type ToolRegistry,
   type TurnModelProvider,
 } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
@@ -73,7 +74,6 @@ import {
   splitReplyIntoSegments,
   TOPIC_SOURCES,
   TopicEngine,
-  TurnMemoryExtractor,
   type TopicEngineStatus,
   type TopicSource,
   type ProactiveDecider,
@@ -88,20 +88,21 @@ import { MimoClient, WeatherClient } from '@xixi/model-adapters';
 // Steps A/B/C). The list below is what this console itself uses; the compatibility block above the
 // first declaration re-exports the old public surface for callers that have not migrated yet.
 import {
+  createResidentRuntime,
   type DroppedSegment,
   type LookOnceTrigger,
   type LookOnceUploadInfo,
+  type PluginChainOptions,
   type PresenceView,
   type SpeechSegment,
   type VadResult,
+  type XixiResidentRuntime,
 } from '@xixi/runtime';
 import {
   CANONICAL_DATA_DIR,
   CANONICAL_DATA_DIR_ENV,
   CANONICAL_STORE_ENTRIES,
-  MemoryStore,
   openXixiStore,
-  parseSelfModelSettings,
   resolveCanonicalDataDir,
   SelfModel,
   type XixiConfig,
@@ -152,12 +153,17 @@ export const AUDIO_PYTHON = resolvePython({ envVar: 'XIXI_AUDIO_PYTHON', venvs: 
  * the local bindings this file needs), so what an old caller gets here is the same declaration
  * the migrated callers get from the package — not a copy that could drift. That identity is
  * asserted in `tests/console/live-entry-tool-chain.test.ts`.
+ *
+ * V0.3 P2.5-B: **this console no longer calls `buildToolChain` itself** — `createFieldServer` takes
+ * its chain from `createResidentRuntime` (see `runtime.toolChain` below). The re-export stays
+ * because (a) old callers still import it and (b) that test's expected side is deliberately read
+ * through the console's own compatibility surface, which is what keeps this block honest.
  */
 import * as runtime from '@xixi/runtime';
 
 // Compatibility surface: the declarations that live in `@xixi/runtime` after V0.3 P0-A, re-exported
-// under their old names so an un-migrated caller (`scripts/serve-chat.ts` takes its whole
-// voice/console seam list from here) keeps working.
+// under their old names so an un-migrated caller (`scripts/chat.ts` takes its whole voice/console
+// seam list from here) keeps working.
 export const CONVERSATION_SCOPE = runtime.CONVERSATION_SCOPE;
 export const RuntimeError = runtime.RuntimeError;
 export const buildSpeechAudio = runtime.buildSpeechAudio;
@@ -1986,6 +1992,12 @@ export interface FieldServerOptions {
   /** Tool data sources (weather/news/reminders), injectable so an offline run stays offline. */
   readonly toolOverrides?: ToolChainOptions;
   /**
+   * 插件层（V0.3 P2.5-B）：控制台**默认为空**，因为 `XixiConfig` 今天还没有 `plugins` 段
+   * （「配置文件 → 插件」是 P2.5-H 的活），所以这是把插件 / MCP / news 交给这个入口的唯一接缝：
+   * `inline`、`news`、`mcpServers`、`pluginDirectory` 都由它进来，装配点照常跑九步生命周期。
+   */
+  readonly plugins?: PluginChainOptions;
+  /**
    * Test seam for the open-thread clock (the same shape `TopicEngine` already takes).
    *
    * The unfinished-topic state machine is time-driven: a thread expires `followupWindowHours`
@@ -2003,6 +2015,14 @@ export interface FieldServerHandle {
   readonly port: number;
   readonly url: string;
   readonly turns: readonly ConsoleTurn[];
+  /**
+   * V0.3 P2.5-B：这个控制台用的常驻运行时（`createResidentRuntime` 的返回值）。
+   *
+   * 暴露它是因为页面之外的维护者/测试需要看**真实的装配状态**：链是不是就是 `runtime.plugins.registry`、
+   * 插件工具到底挂上没挂上（`toolChain.names()`）、审批是不是这个宿主（`runtime.approvals`）、
+   * 提醒调度器上还有几条到点的（`runtime.reminders`）。`close()` 之后它已关停、链已清空。
+   */
+  readonly runtime: XixiResidentRuntime;
   close(): Promise<void>;
 }
 
@@ -2031,22 +2051,55 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   }
   store.recordHealth('field-test', 'ok', `console started (offline=${offline})`);
 
-  // One chain for the console's text turns and its voice turns (pack Phase 2): the
-  // offline stand-in runs the same loop and registry as the real adapter, so both
-  // entry points share the four built-ins, the permission policy and the round cap.
-  const engineTools = buildToolChain(config, {
+  /**
+   * V0.3 P2.5-B：控制台不再自己拼一套运行时。
+   *
+   * `createResidentRuntime` 一次给出全部：工具链、插件内核（MCP 与 news 都从它进来）、审批宿主、
+   * durable 提醒 sink 与调度器、一轮之后的记忆提取，以及**提示词权威校验过的** `ConversationEngine`。
+   * 控制台从这里取两样东西就够了：
+   *
+   *   * `runtime.toolChain` —— 文字与语音共用的那条链（与 `runtime.plugins.registry` 是同一个对象），
+   *     两个适配器都拿它构造，所以「语音与文字同一条链」现在不是控制台自己保证的，而是装配点给的；
+   *   * `runtime.conversation` —— 引擎；`afterTurn` 由装配点内部接到共享的提取器上（此前是控制台
+   *     自己 new 一个 `TurnMemoryExtractor`，也就是全仓最后一个「自己拼一套」的位置）。
+   *
+   * 插件/MCP/news 的工具是在 `start()` 里挂进这条链的，所以下面构造完立刻启动（见 `await runtime.start()`）。
+   * `options.plugins` 是这个入口今天的插件来源：`XixiConfig` 还没有 `plugins` 段（P2.5-H/T12 才接线），
+   * 所以「配置文件 → 插件」那一步还没有；测试与将来的配置接线都从这里注入（`inline` / `news` /
+   * `mcpServers` / `pluginDirectory`）。
+   */
+  const runtime = createResidentRuntime({
+    config,
+    store,
     ...(options.toolOverrides ?? {}),
+    ...(options.plugins ?? {}),
+    // 注入的时钟走**同一个**接缝：工具（`xixi_get_current_time` / 提醒解析）与装配点自己的审批/提醒
+    // 宿主读的是同一只钟，测试里不会出现「话题按固定时间走、工具按真实时间走」这种两套时间。
+    ...(options.now === undefined ? {} : { now: options.now }),
     onToolCall: (record) => log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
+    conversation: { turnTimeoutMs: 90_000 },
+    // 长期记忆与反馈学习（pack Phase 4）：一轮说完之后**异步**提取，不阻塞回复。`SelfModel` 的三层
+    // （基础+学习+会话覆盖）由 `store.selfProfile()` 统一读出来，所以学习到的偏移会自动影响提示词、
+    // FSM 窗口与主动引擎的阈值 —— 面板上显示的人格也已经是有效值。
+    memory: { onError: (error) => log(`[memory] 后台提取出错（不影响这一轮）：${error instanceof Error ? error.message : String(error)}`) },
+    log,
+    /**
+     * 模型仍是控制台的决定（直连 MiMo / DSH / 离线替身 / 测试注入），装配点只把**它自己那条链**递进来：
+     * 适配器每一轮从同一个注册表取工具定义，所以 `start()` 之后挂上的插件工具能被看见。
+     */
+    model: ({ toolChain }) => buildAdapter(toolChain),
   });
+  const engineTools = runtime.toolChain;
+  const engine = runtime.conversation;
 
-  function buildAdapter(): TurnModelProvider {
+  function buildAdapter(registry: ToolRegistry): TurnModelProvider {
     if (options.adapterOverride !== undefined) return options.adapterOverride;
-    if (offline) return new FakeBrainAdapter({ registry: engineTools, scope: CONVERSATION_SCOPE });
+    if (offline) return new FakeBrainAdapter({ registry, scope: CONVERSATION_SCOPE });
     if (!options.useDsh) {
       return new MimoBrainAdapter({
         client,
         maxCompletionTokens: 400,
-        registry: engineTools,
+        registry,
         scope: CONVERSATION_SCOPE,
         timezone: config.identity.timezone,
         // t21: the reply-hygiene filter needs the deployment language to tell English reasoning from
@@ -2068,26 +2121,17 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   }
 
   /**
-   * 长期记忆与反馈学习（pack Phase 4）：一轮说完之后**异步**提取，不阻塞回复。
-   *
-   * `SelfModel` 的三层（基础+学习+会话覆盖）由 `store.selfProfile()` 统一读出来，所以学习到的偏移
-   * 会自动影响提示词、FSM 窗口与主动引擎的阈值 —— 面板上显示的人格也已经是有效值。
+   * 插件/MCP/news 的工具**只在 `start()` 里**进入工具链（`buildPluginRuntime.start()` 跑完九步生命周期
+   * 再 `mountPluginTools`），所以第一次模型调用之前必须启动；启动失败就如实抛出去，绝不静默降级成
+   * 「这个部署没有插件」—— 那是两件事。半启动的内核（MCP 可能已经连上）在抛出之前收掉，库也一并关掉。
    */
-  const memory = new MemoryStore(store);
-  const selfModel = new SelfModel(store, parseSelfModelSettings(config.selfModel));
-  const extractor = new TurnMemoryExtractor({
-    store,
-    selfModel,
-    memory,
-    onError: (error) => log(`[memory] 后台提取出错（不影响这一轮）：${error instanceof Error ? error.message : String(error)}`),
-  });
-  const engine = new ConversationEngine({
-    adapter: buildAdapter(),
-    store,
-    config,
-    turnTimeoutMs: 90_000,
-    afterTurn: (job) => extractor.enqueue(job),
-  });
+  try {
+    await runtime.start();
+  } catch (error) {
+    await runtime.stop().catch(() => undefined);
+    store.close();
+    throw error;
+  }
   let session = store.latestSession() ?? store.createSession();
 
   // -------------------------------------------------- proactive card state (t42)
@@ -2432,13 +2476,13 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
         return { textSegmented: true, ttsSegmented: mode === 'streaming', mode, note: segmentTtsNote(mode) };
       })(),
       model: { configured: client.hasKey, offline },
-      // Pack Phase 2: the console states which capabilities its conversation scope really
-      // offers, so "四个内置工具 + 最多四轮" is visible without reading the source.
+      // V0.3 P2.5-B: 这条链现在由常驻运行时给出（`runtime.plugins.registry`），
+      // 控制台的状态页因此能说出「模型看得见哪些工具、上限几轮」—— 面板读的是装配点的事实。
       tools: {
         scope: CONVERSATION_SCOPE,
         maxRounds: engineTools.maxToolRounds,
         names: engineTools.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name),
-        note: '文字与语音共用这一条工具链；权限与轮数在模型之外判定（模型看不到被拒绝的工具）',
+        note: '文字与语音共用这一条工具链；权限与轮数在模型之外判定（模型看不到被拒绝的工具）。插件/MCP/news 的工具在启动时常驻运行时挂进同一条链。',
       },
       calibration,
       presence,
@@ -2990,20 +3034,31 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
     })();
   });
 
-  await new Promise<void>((resolvePort, rejectPort) => {
-    const onError = (error: NodeJS.ErrnoException): void => {
-      rejectPort(
-        error.code === 'EADDRINUSE'
-          ? new RuntimeError('PORT_IN_USE', `端口 ${options.port} 已被占用（可能已经开着一个现场测试或 npm run web）`, `换一个端口：npm run field-test -- --port ${options.port + 1}；或先关掉占用该端口的程序`, 500)
-          : new RuntimeError('LISTEN_FAILED', `无法在本机监听 ${options.port}：${error.message}`, '检查防火墙/安全软件是否拦了 Node 监听本机端口', 500),
-      );
-    };
-    server.once('error', onError);
-    server.listen(options.port, '127.0.0.1', () => {
-      server.off('error', onError);
-      resolvePort();
+  try {
+    await new Promise<void>((resolvePort, rejectPort) => {
+      const onError = (error: NodeJS.ErrnoException): void => {
+        rejectPort(
+          error.code === 'EADDRINUSE'
+            ? new RuntimeError('PORT_IN_USE', `端口 ${options.port} 已被占用（可能已经开着一个现场测试或 npm run web）`, `换一个端口：npm run field-test -- --port ${options.port + 1}；或先关掉占用该端口的程序`, 500)
+            : new RuntimeError('LISTEN_FAILED', `无法在本机监听 ${options.port}：${error.message}`, '检查防火墙/安全软件是否拦了 Node 监听本机端口', 500),
+        );
+      };
+      server.once('error', onError);
+      server.listen(options.port, '127.0.0.1', () => {
+        server.off('error', onError);
+        resolvePort();
+      });
     });
-  });
+  } catch (error) {
+    /**
+     * V0.3 P2.5-B：监听失败（端口被占等）时，这个进程里**已经建起来**的运行时与库要收掉再抛出去。
+     * 否则调用方看到「启动失败」，而进程里留着一条开着链的插件运行时（MCP 可能已经连上）与一个开着的库 ——
+     * 「库不是正常关闭的」正是这个仓库最不想重复的事故形态。
+     */
+    await runtime.stop().catch(() => undefined);
+    store.close();
+    throw error;
+  }
   const address = server.address();
   const port = typeof address === 'object' && address !== null ? address.port : options.port;
   return {
@@ -3011,23 +3066,36 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
     port,
     url: `http://127.0.0.1:${port}`,
     turns,
-    close: () =>
-      new Promise<void>((resolveClose) => {
+    runtime,
+    close: async () => {
+      await new Promise<void>((resolveClose) => {
         server.close(() => resolveClose());
         // Browsers/undici keep sockets alive; without this a test (or Ctrl+C)
         // waits for the keep-alive timeout before the process can exit.
         server.closeAllConnections();
-        for (const candidate of [store, presenceStore]) {
-          const close = (candidate as { close?: () => void } | null | undefined)?.close;
-          if (typeof close === 'function') {
-            try {
-              (candidate as { close: () => void }).close();
-            } catch {
-              /* already closed */
-            }
+      });
+      /**
+       * V0.3 P2.5-B：**关库之前**先把常驻运行时停下来，它做两件控制台以前没做的事：
+       *
+       *  * 把这一轮还没写完的后台提取排空（`extraction.drain()` —— 控制台此前从不 drain，
+       *    「说完最后一句就 Ctrl+C」那一轮只能靠提取器自己的定时器，库已经关了就是丢）；
+       *  * 让插件层走完关停：九步生命周期收尾（MCP 连接在这里断开）→ 撤回 `mount()` 复制进链的副本 →
+       *    清空前链上剩下的内置工具。
+       *
+       * 幂等（`stop()` 第二次返回同一份报告），所以重复 `close()` 不会关两遍。
+       */
+      await runtime.stop();
+      for (const candidate of [store, presenceStore]) {
+        const close = (candidate as { close?: () => void } | null | undefined)?.close;
+        if (typeof close === 'function') {
+          try {
+            (candidate as { close: () => void }).close();
+          } catch {
+            /* already closed */
           }
         }
-      }),
+      }
+    },
   };
 }
 
@@ -6363,17 +6431,20 @@ export async function runSelfTest(options: { log?: (line: string) => void } = {}
         })
       ).json()) as Record<string, any>;
       const internalWording = /xixi_[a-z_]+|tool_call|arguments|parameters|JSON|工具调用|不认识的参数/;
+      // 出厂控制台不带任何插件，所以模型可见的就是三个内置工具（V0.3 P2-D 起新闻由插件提供，
+      // 不再是内置第四个）。这条以前写死成 `length === 4`，是 P2-D 之后留下来的过期字面量——
+      // 它会把「少了一个工具」和「多了一个插件工具」两种情况都判错，所以直接点名三个。
+      const builtIns = Array.isArray(toolState.tools?.names) ? [...(toolState.tools.names as string[])].sort() : [];
       check(
         '语音问天气真的调用了工具，回复没有工具内部字样；文字路径走的是同一条链',
-        Array.isArray(toolState.tools?.names) &&
-          toolState.tools.names.length === 4 &&
+        builtIns.join(',') === ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'].sort().join(',') &&
           toolState.tools.maxRounds === 4 &&
           toolVoice.toolName === 'xixi_get_weather' &&
           toolText.toolName === 'xixi_get_weather' &&
           String(toolVoice.reply).includes('明天成都') &&
           !internalWording.test(String(toolVoice.reply)) &&
           !internalWording.test(String(toolText.reply)),
-        `工具 ${String(toolState.tools?.names).slice(0, 80)}｜语音 ${String(toolVoice.toolName)}：${String(toolVoice.reply).slice(0, 40)}｜文字 ${String(toolText.toolName)}`,
+        `工具 ${builtIns.join('、')}｜语音 ${String(toolVoice.toolName)}：${String(toolVoice.reply).slice(0, 40)}｜文字 ${String(toolText.toolName)}`,
       );
     } finally {
       await toolHandle.close();
