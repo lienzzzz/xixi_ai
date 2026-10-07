@@ -466,7 +466,7 @@ node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v02-wip
 
 > **V0.3 P2.5 注（2026-10-08）**：上面这一段是**第四轮当时的读数，保留不改**。入口与工具集今天都变了：
 > 唯一装配点是 `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime()`，入口取 `runtime.toolChain`，
-> 插件工具（含 `news.*`）真的在入口的模型可见清单里（`git grep -n 'buildToolChain(' -- scripts` 应 0 命中）。
+> 插件工具（含 `news.*`）真的在入口的模型可见清单里（`git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'` 应 0 命中）。
 > 逐条明细见本文 **§12**。
 
 **语言接线的口径（§9.13 更正，别再写成「堵住了一条会泄漏的通道」）**：`MimoBrainAdapter` 的 `language` 取自 `config.identity.language`，
@@ -987,7 +987,7 @@ command-compact (@deepseek-ai/dsh-command-compact): pending (waiting for service
 
 ```powershell
 git grep -l 'createResidentRuntime(' -- scripts   # 走常驻装配点的：七个入口脚本 + 验收脚本
-git grep -n 'buildToolChain(' -- scripts          # 应为 0 命中：入口不再自己拼链
+git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'          # 应为 0 命中：入口不再自己拼链
 node scripts/chat.ts --print-wiring               # 模型可见的工具与权限（离线、不调模型、不建库）
 npm run verify:p2.5 -- --offline                  # 四个真入口场景（零费用、不联网）
 ```

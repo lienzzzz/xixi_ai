@@ -150,7 +150,7 @@ resume 的两个硬约束（相同 cwd、相同 profile）在 `CliDshTransport` 
   `scripts/voice-device-check.ts`、真人感评测 `scripts/eval-realism.ts`、对话评测 `scripts/eval-conversation.ts`、
   现场测试控制台 `scripts/field-test.ts`、试用页 `scripts/serve-chat.ts`。
   复核：`git grep -l 'createResidentRuntime(' -- scripts`（七个入口 + 验收脚本）；
-  反证 `git grep -n 'buildToolChain(' -- scripts` 应 **0 命中**（`buildToolChain` 只是装配点内部的一步）。
+  反证 `git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'` 应 **0 命中**（`buildToolChain` 只是装配点内部的一步）。
   离线自证：支持该开关的入口跑 `--print-wiring` 打印 `{entry,language,maxToolRounds,tools,permissions,plugins}`
   后退出（不调模型、不建库），实测四入口**除 `entry` 外逐字段相同**；工具清单**以实跑为准**
   （默认含三个内置与三个 `news.*` 插件工具，见下面工具表）。

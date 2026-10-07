@@ -48,7 +48,7 @@
    `tool.register` / `sensor.events`）与五能力，配对关系见 [ADR-0017](../adr/0017-plugin-boundary-and-four-prohibitions.md)。
    **V0.3 P2.5 之后入口里看得到插件工具**：四个 live 入口与控制台、试用页经
    `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime()` 取 `runtime.toolChain`
-   （`git grep -l 'createResidentRuntime(' -- scripts`；反证 `git grep -n 'buildToolChain(' -- scripts` 应为 **0 命中**），
+   （`git grep -l 'createResidentRuntime(' -- scripts`；反证 `git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'` 应为 **0 命中**），
    而插件工具在 `start()` 里挂进同一个注册表 —— 实测：`node scripts/chat.ts --print-wiring` 在三个内置之外
    列出 `news.search` / `news.latest` / `news.for_interests`。
    可见性由 `listForAgent(scope)` 过滤（V0.3 P2-B 起改成「**除 deny 之外都广告**」，否则 `ask` 的工具模型看不见、

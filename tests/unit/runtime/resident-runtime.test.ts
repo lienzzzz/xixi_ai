@@ -927,6 +927,14 @@ function wiringMismatches(block: string, wired: (entry: string) => boolean): str
   if (!/git grep -n 'buildToolChain\(/.test(block)) {
     problems.push('缺少「谁还在自己拼链」的可复核命令');
   }
+  // P2.5-K 的教训：判据不能比事实宽。**live 入口**不该自己拼链；`scripts/` 下的诊断探针、确定性仿真与
+  // 验收脚本允许调它（各自有理由、写在工作区那块的排除项说明里），所以这里只核**入口**，不核整个目录。
+  for (const entry of LIVE_ENTRIES) {
+    const text = readFileSync(join(SCRIPTS_DIR, `${entry}.ts`), 'utf8');
+    if (text.includes('buildToolChain(')) {
+      problems.push(`scripts/${entry}.ts 还在自己拼链（live 入口必须走装配点取链）`);
+    }
+  }
   // 提醒回路那句仍然承重（P2.5-F 之前它必须还在），别在改口时被顺手删掉。
   if (!/提醒回路尚未接线/.test(block)) {
     problems.push('「提醒回路尚未接线」这句口径不见了');
@@ -963,7 +971,7 @@ test('接线口径由调用图判定：给得出可复核命令，点名了入�
     '## 接线状态（合成的口径，只用来做反事实）',
     ' * ```text',
     " * git grep -n 'createResidentRuntime(' -- scripts",
-    " * git grep -n 'buildToolChain(' -- scripts",
+    " * git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'",
     ' * ```',
     ' *  * **live 入口已经接线**：`scripts/chat.ts`、`scripts/serve-chat.ts`、`scripts/field-test.ts`、`scripts/voice-turn.ts`',
     ' *  * **提醒回路尚未接线**：…',

@@ -41,7 +41,8 @@
  *
  * ```text
  * git grep -n 'createResidentRuntime(' -- scripts   # 已经走本装配点的入口（每个 live 入口都该命中）
- * git grep -n 'buildToolChain(' -- scripts          # 还在自己拼链的地方（入口不该命中：命中就是漏接线）
+ * git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'
+ *                                                   # 还在自己拼链的地方（**live 入口**不该命中：命中就是漏接线）
  * ```
  *
  * 事实是：
@@ -50,9 +51,16 @@
  *    现场测试控制台、试用页、文字 CLI、语音单轮，以及三个附带入口（设备自检、真人感评测、对话评测）
  *    的工具链都是**本装配点的链**（`runtime.toolChain`），插件/MCP/news 的工具在 `start()` 里挂进
  *    同一个注册表 —— 所以「插件工具对模型可见」在真实入口里成立。
- *    两个例外都不算入口：`scripts/probe-tools.ts` 是**诊断探针**，仍然直接调 `buildPluginRuntime`（故意不
- *    经本装配点）；`scripts/eval-proactive-timeline.ts` 是**确定性仿真**（假大脑 + 模拟时钟、不带工具），
- *    它自己 `new ConversationEngine` 是设计的一部分，不是漏接线。
+ *    三个**不算入口**的东西，第二条命令的排除项与它们一一对应：
+ *    `scripts/probe-tools.ts` 是**诊断探针**（直接调 `buildPluginRuntime`，故意不经本装配点）；
+ *    `scripts/eval-proactive-timeline.ts` 是**确定性仿真**（假大脑 + 模拟时钟、不带工具，自己
+ *    `new ConversationEngine` 是设计的一部分）；
+ *    `scripts/verify-p2-5.ts` 是**验收脚本**（它用 `buildToolChain(config)` 枚举内置写工具名，因为读名字
+ *    只需要配置、不需要开库；见 P2.5-K）。
+ *    **P2.5-K 的教训**：第一版的判据写成「`-- scripts` 应为 0 命中」，而这个验收脚本自己就成了第 1 个命中 ——
+ *    判据比事实宽，事实一变它就假（与 P2.5-C 那次「两份入口清单各自过期一次」同源）。所以这里给的是
+ *    **排除后的**命令，并把排除项逐个说明；`tests/unit/runtime/resident-runtime.test.ts` 有一条用例
+ *    按本块点名的入口逐个核，防止它再悄悄变假。
  *    （「入口尚未接线」这几个字只作为**历史引文**留在这里：P2.5-A 就是这么写下这条债的，而它已经还清。
  *    口径的现状一律用上面两条命令核，不要读这半句。）
  *  * **提醒回路尚未接线**：接缝已经在本装配点上（`runtime.reminderSeams`，入口一行展开即可），但

@@ -407,7 +407,7 @@ C:\Users\zz\AppData\Local\Temp\t11-store\xixi.sqlite
      ——入口的 sink 还是内存版；`git grep -n 'DurableReminderSink\|ReminderScheduler' -- scripts` 零命中。
    - 根因一句话：内核/MCP/news/审批/提醒的**装配点**都已交付，但**入口仍只调 `buildToolChain`**。
      **⚠ 2026-10-08 更正（就地，原文上一行不改）**：这句**已经不成立**——七个入口脚本都走
-     `createResidentRuntime()`，`git grep -n 'buildToolChain(' -- scripts` 今天 **0 命中**。当前口径见本文件末的 P2.5 段。
+     `createResidentRuntime()`，`git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'` 今天 **0 命中**。当前口径见本文件末的 P2.5 段。
      （上面两条读数本身是当天的实测，按 §9.21 保留。）
 2. **提醒的可靠性未达标（连装配点也算上）**：同一句话、同一条交付链、真模型 **22 次保存了逐条记录的尝试里只有 6 次真的调用了工具（27%）**；
    其余 16 次里 **4 次回复明说「记下了」而库里没有行、没有任何事件**。根因在提示词/行为层（`HARD_POLICY` 只要求「可核查的**事实**」走工具，
@@ -419,7 +419,7 @@ C:\Users\zz\AppData\Local\Temp\t11-store\xixi.sqlite
 > **2026-10-08 加注（V0.3 P2.5）**：上面四条是 **P2 收口当时的读数，原文与其中每个数字都保留**。
 > 第 1 条**已由 P2.5 还清**——四个 live 入口与控制台、试用页都走常驻装配点 `createResidentRuntime()`
 > （`git grep -l 'createResidentRuntime(' -- scripts` 命中七个入口 + 验收脚本；反证
-> `git grep -n 'buildToolChain(' -- scripts` **0 命中**），`node scripts/chat.ts --print-wiring` 今天在三个内置之外
+> `git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'` **0 命中**），`node scripts/chat.ts --print-wiring` 今天在三个内置之外
 > 列出 `news.search` / `news.latest` / `news.for_interests`。
 > 第 2 条**已被更正**：那是 2026-10-04 上午的一次观测、**同日同口径不可复现**（t27 用同一份探针重跑得
 > 改前 21/22、改后 22/22，另一次改前单独复跑 14/17），「提示词层是根因」这个判断**不成立**——
@@ -504,7 +504,7 @@ C:\Users\zz\AppData\Local\Temp\t11-store\xixi.sqlite
 
 ```powershell
 git grep -l 'createResidentRuntime(' -- scripts   # 七个入口脚本 + 验收脚本
-git grep -n 'buildToolChain(' -- scripts          # 应为 0 命中
+git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'          # 应为 0 命中
 node scripts/chat.ts --print-wiring               # 插件工具（含 news.*）真的在模型可见清单里
 npm run verify:p2.5 -- --offline                  # 四个真入口场景，exit 0，零费用不联网
 ```

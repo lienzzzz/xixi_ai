@@ -57,7 +57,7 @@
 - 另：**闸门本身目前是好的**（t14 的反事实只是临时把它改成恒真）。所以 `t20` 之后基线端到端探针**应当通过**；要验「覆盖缺口补上了」，正解是**对新用例做突变检验**（临时让 `renderGate` 恒真 → 断言**新用例**会红 → 按副本还原并报哈希），而不是期待基线探针变红。
 
 **P2 轮（`xixi-v03-p2`）留给下一轮的清单**（各任务收口时交回；编号是 P2 轮的，别与上面 P0/P1 轮的 t 编号混读）：
-1. ~~**四条「未接线」**~~ → **已由 V0.3 P2.5 关闭（2026-10-08，逐条复核命令见 §0.2）**：① 四个 live 入口都改走常驻装配点 `createResidentRuntime()`（`git grep -l 'createResidentRuntime(' -- scripts` 命中七个入口 + 验收脚本；反证 `git grep -n 'buildToolChain(' -- scripts` **0 命中**）；② 提示词装配点上真的有 `verifyOnAssemble` 的调用点（`git grep -n 'verifyOnAssemble(' -- packages/runtime/src`），行为证据在 `tests/unit/runtime/resident-runtime.test.ts`；③ `ToolApprovalManager` 由装配点接成 `approvalGate` 并经 `useRegistry()` 闭合（注意 `git grep -n 'approvalGate' -- scripts` 仍是 0 命中，**这是对的**——接线在装配点内部）；④ durable 提醒的 sink 与 scheduler 由装配点给（`runtime.reminderSink` / `runtime.reminders`）。**仍未接的一条**是「到点由主动循环说出来」那一行，见 §0.2。
+1. ~~**四条「未接线」**~~ → **已由 V0.3 P2.5 关闭（2026-10-08，逐条复核命令见 §0.2）**：① 四个 live 入口都改走常驻装配点 `createResidentRuntime()`（`git grep -l 'createResidentRuntime(' -- scripts` 命中七个入口 + 验收脚本；反证 `git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'` **0 命中**）；② 提示词装配点上真的有 `verifyOnAssemble` 的调用点（`git grep -n 'verifyOnAssemble(' -- packages/runtime/src`），行为证据在 `tests/unit/runtime/resident-runtime.test.ts`；③ `ToolApprovalManager` 由装配点接成 `approvalGate` 并经 `useRegistry()` 闭合（注意 `git grep -n 'approvalGate' -- scripts` 仍是 0 命中，**这是对的**——接线在装配点内部）；④ durable 提醒的 sink 与 scheduler 由装配点给（`runtime.reminderSink` / `runtime.reminders`）。**仍未接的一条**是「到点由主动循环说出来」那一行，见 §0.2。
 2. **manifest 的 tool 级 approval 声明**（今天只有 `config.tools.approval.ask` 在起作用，`packages/plugins/src/manifest.ts` 无 approval token）——captain 试排过本轮小任务，连撞两次依赖重叠，**明确留到下一轮**（P2.5-G 只做到「声明 → 权限策略」与运行时闭环，没动 manifest）。
 3. ~~**`PluginRuntimeMount.start()` 不幂等**（t19 的 O1）~~ → **已由 P2.5-I（t4）修掉**：重复启动**响亮拒绝**（`PluginAlreadyStartedError` / `PLUGIN_ALREADY_STARTED`，在任何步骤之前拒绝、不重复激活），常驻运行时这一层还有第二道门（`RESIDENT_RUNTIME_ALREADY_STARTED`）；用例在 `tests/unit/plugins/lifecycle.test.ts`。**相邻的一处仍未修**：per-plugin `dispose()` 不是插件级终态（§0.2「已知问题」）。
 4. **热插拔后 `shutdown()` 的 `unmounted` 少报**（t19 的 O2；只是报告口径，结束态正确）。
@@ -86,7 +86,7 @@
 
 ```powershell
 git grep -l 'createResidentRuntime(' -- scripts   # 走常驻装配点的入口（七个入口脚本 + 验收脚本）
-git grep -n 'buildToolChain(' -- scripts          # 应为 0 命中：入口不再自己拼链
+git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'          # 应为 0 命中：入口不再自己拼链
 node scripts/chat.ts --print-wiring               # 模型可见工具（离线、不调模型、不建库）
 npm run verify:p2.5 -- --offline                  # 四个真入口场景（零费用、不联网）
 ```
@@ -423,7 +423,7 @@ npm run voice:bargein                # 0 次调用：打断判定延迟（纯本
 | 「真人感」指标与前后对比 | ✅ 有可重跑口径（三分指标 + 黄金对话语料） | `node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v01-vanilla.json`（改造前，不花钱）与同目录的 `-v02-wip.json`；完整对比见 [`benchmarks/realism-metrics.md`](benchmarks/realism-metrics.md) |
 | 制品清洗（工具标记 / 英文推理） | ✅ 程序层已落地（`REPLY_HYGIENE`；沉默原因码 `ARTIFACT_ONLY_REPLY`）；⚠️ 订阅覆盖不齐：试用页与控制台已订阅 `onNotice`，`chat.ts` / `voice-turn.ts` 未订阅 | `npm test`（`tests/unit/core/engine-reply-hygiene.test.ts`）；缺口见 `progress.md` §4 第 10 条 |
 | 人格可调并体现在行为 | ✅ 完成 | `eval:conversation:judge`（低/高话多组长度差 **2.57×**：22.3 字 vs 57.3 字，见 `docs/progress.md` §0） |
-| 工具与工具链（**三个内置**：时间 / 天气 / 提醒；新闻是插件工具 `news.*`） | ✅ 完成；**七个入口脚本经同一个常驻装配点 `createResidentRuntime()` 取链**（`git grep -n 'buildToolChain(' -- scripts` 应 0 命中） | `node scripts/probe-tools.ts`；逐入口自证 `node <入口> --print-wiring`（离线，不调模型、不建库；插件工具应出现在 `tools` 与 `plugins.mounted` 里）；端到端 `npm run verify:p2.5 -- --offline` |
+| 工具与工具链（**三个内置**：时间 / 天气 / 提醒；新闻是插件工具 `news.*`） | ✅ 完成；**七个入口脚本经同一个常驻装配点 `createResidentRuntime()` 取链**（`git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'` 应 0 命中） | `node scripts/probe-tools.ts`；逐入口自证 `node <入口> --print-wiring`（离线，不调模型、不建库；插件工具应出现在 `tools` 与 `plugins.mounted` 里）；端到端 `npm run verify:p2.5 -- --offline` |
 | 直连 MiMo 实时路径（流式 + 工具循环） | ✅ 完成 | `npm run chat` |
 | DSH Harness 路径（含 profile 与工具插件） | ✅ 完成（M0 验收） | `npm run verify:m0` / `npm run verify:provider` |
 | 语音输入（浏览器采集 → VAD → ASR → 对话 → TTS） | ✅ 完成 | 页面按住🎤；或 POST `/api/voice`。**多段语音全部使用**（不再只取第一段），整段录音不落盘（`docs/field-test-report` 见下） |

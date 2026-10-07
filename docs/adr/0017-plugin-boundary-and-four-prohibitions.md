@@ -99,7 +99,7 @@ discover → validate → permission → load → activate(ctx) → register cap
 > **加注（2026-10-08，V0.3 P2.5 落笔；本 ADR 原文一字未改）**：上面两处「未接线」的**现状变了**——
 > ① **入口已接线**：七个入口脚本都走 `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime()`
 > （它内部调 `buildPluginRuntime(...).start()`），所以「插件工具对模型可见」在真实入口里成立。
-> 复核：`git grep -l 'createResidentRuntime(' -- scripts`；反证 `git grep -n 'buildToolChain(' -- scripts` 为 **0 命中**
+> 复核：`git grep -l 'createResidentRuntime(' -- scripts`；反证 `git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'` 为 **0 命中**
 > （`probe-tools.ts` 仍是诊断探针，故意不经装配点）。
 > ② 上面四条接线项里 **1–3 已落地**（入口走装配点；提示词装配点上有 `verifyOnAssemble` 的调用点；
 > `ToolApprovalManager` 由装配点接成 `approvalGate` 并经 `useRegistry()` 闭合）；**第 4 条（manifest 的 tool 级 approval

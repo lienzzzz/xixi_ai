@@ -31,6 +31,14 @@
 >    都已经不是现状**：前者由 P2.5-E 改名为 `xixi_set_reminder`（文案「已经记下」，无兼容别名）；后者的调用点
 >    自 P2.5-A（`507f65d`）起就落在 `createResidentRuntime` 上（写这份报告时它确实还没有，所以原文是对的，
 >    只是今天过期了）。现状以 [`../progress.md`](../progress.md) §12 与 [`../progress-v03.md`](../progress-v03.md) 的 P2.5 段为准。
+> 4. **上面第 1、2 条更正注里引的那条反证命令，范围要缩小一格**（2026-10-08，P2.5-K 落笔）：`git grep -n 'buildToolChain(' -- scripts`
+>    今天给出 **1 条命中**，而它不是漏接线——命中的是 P2.5-K 新增的验收脚本 `scripts/verify-p2-5.ts`
+>    （它用 `buildToolChain(config)` 枚举内置写工具名：读名字只需要配置、不需要开库）。精确命令是
+>    `git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'`（应为 0 命中）；并且**按入口逐个核**：
+>    `scripts/{chat,serve-chat,field-test,voice-turn,voice-device-check,eval-realism,eval-conversation}.ts`
+>    这七个 live 入口都不许出现 `buildToolChain(`。这条纪律已由
+>    `tests/unit/runtime/resident-runtime.test.ts` 的接线口径用例守住（把任一入口改回自己拼链，那条用例会红）。
+>    **本报告正文仍然一字未改**，上面四条都是注。
 
 ## 0. 怎么复跑
 
