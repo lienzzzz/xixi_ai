@@ -4,6 +4,7 @@ import { load as loadYaml } from 'js-yaml';
 
 import { DomainError } from './errors.ts';
 import { personalityProperty } from './personality.ts';
+import { parsePluginSettings, type PluginSettings } from './plugin-settings.ts';
 
 /**
  * Project configuration (§42). YAML is required by the plan's own config
@@ -71,6 +72,19 @@ export interface XixiConfig {
    * `asap_minutes`（「尽快」的宽限）。**没有「提醒静默时段」**：那属于主动路径的硬底线（铁律 3）。
    */
   readonly reminders?: Record<string, unknown>;
+  /**
+   * 插件层（V0.3 P2.5-H，pack `03_AGENT_PLUGIN.md` §1/§4/§6）。可选：缺段 = 出厂默认
+   * （`DEFAULT_PLUGIN_SETTINGS`：插件层开着、但不声明任何东西，于是每个入口的装配与今天逐字相同）。
+   *
+   * **这一段是已解析的强类型，不是原始 `Record`**（与 `tools` / `reminders` 的写法不同）：那两段是
+   * 调参段，坏值退回默认；这一段决定**跑什么**（本地插件目录、新闻来源、MCP 服务器），所以越界值、
+   * 写错的键名、拼错的 transport 一律在**加载配置时**带着路径报错（`parsePluginSettings`），
+   * 而不是留一个「看起来配了、其实没生效」的键 —— 那正是这一步要消灭的失败形态。
+   *
+   * 值的形状（YAML 里能写的只有字符串与布尔，函数写不进去）：见 `PluginSettings`；
+   * 「命令或地址 → 开连接的函数」那一层在 `packages/runtime/src/resident-runtime.ts`。
+   */
+  readonly plugins?: PluginSettings;
 }
 
 function fail(problem: string, file: string): never {
@@ -172,6 +186,9 @@ export function parseXixiConfig(source: string, file = '<inline>'): XixiConfig {
     features: section(xixi, 'features', file),
     tools: optionalSection(xixi, 'tools'),
     reminders: optionalSection(xixi, 'reminders'),
+    // The one section that is parsed here rather than handed out raw: it decides what runs, so a bad
+    // value must fail the load instead of defaulting (see `plugin-settings.ts`).
+    plugins: parsePluginSettings(xixi['plugins'], file),
   };
 }
 

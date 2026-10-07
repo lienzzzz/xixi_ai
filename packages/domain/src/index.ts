@@ -20,6 +20,21 @@ export {
   type TransitionToolApprovalOptions,
 } from './approvals.ts';
 export { loadXixiConfig, parseXixiConfig, type XixiConfig } from './config.ts';
+export {
+  DEFAULT_PLUGIN_SETTINGS,
+  MCP_SERVER_NAME_MAX_CHARS,
+  MCP_TIMEOUT_MS_MAX,
+  MCP_TIMEOUT_MS_MIN,
+  parsePluginSettings,
+  type PluginHttpMcpServer,
+  type PluginMcpRisk,
+  type PluginMcpServerSetting,
+  type PluginMcpTransportKind,
+  type PluginNewsSetting,
+  type PluginNewsSourceSetting,
+  type PluginSettings,
+  type PluginStdioMcpServer,
+} from './plugin-settings.ts';
 export { DomainError, type DomainErrorCode } from './errors.ts';
 export {
   assertNewReminder,
