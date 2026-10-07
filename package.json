@@ -41,7 +41,7 @@
     "js-yaml": "^5.4.2"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-tools": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
     "@types/node": "24.19.1",
     "typescript": "7.0.2"
   }

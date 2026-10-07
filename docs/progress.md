@@ -2,7 +2,9 @@
 
 > 更新规则：每完成一个可独立理解的步骤就立刻追加/更新本文，写清「做了什么、验证结果、下一步、已知问题」。
 > 这台机器偶发蓝屏，**本文是崩溃后恢复工作的唯一依据**。
-> 最后更新：2026-10-07（**双机环境：Linux（WSL2）移植**，见 §10——五个平台假设缺陷、静默 skip 变真跑、门禁 720/720/110，以及这台机器上验不了的四类事）。
+> 最后更新：2026-10-07（§11 **DSH 版本适配 0.1.7-rc.2 → 0.2.0-rc.2**：`verify:provider` 已修复并实测通过；
+> 同日另有 §10 **双机环境：Linux（WSL2）移植**——五个平台假设缺陷、静默 skip 变真跑、门禁 720/720/110，
+> 以及这台机器上验不了的四类事，其中 ① DSH 路径已由 §11 关闭）。
 > 上一版：2026-10-04（V0.3 **P2 集成收口 t15**：交付、Gate 实测、两个场景、未达标项与四条下一阶段接线项进
 > [docs/progress-v03.md](progress-v03.md) 的 P2 段；本文新增 §9，并更正 §2.5 里 `BrainAdapter` 七个成员的旧口径）。
 > 上一版：2026-10-04（V0.3 P0 + P1 集成收口 t16：交付、Gate 实测与遗留进 §8 与 [docs/progress-v03.md](progress-v03.md)；
@@ -80,7 +82,10 @@
 
 ### 2.1 环境事实（详见 [AGENTS.md](../AGENTS.md) 第 4 节）
 
-- DSH `@deepseek-ai/dsh` **0.1.7-rc.2**（Developer Preview / RC），项目内 DSH_HOME = `<repo>/.dsh`（已 gitignore）。
+- DSH `@deepseek-ai/dsh` **0.2.0-rc.2**（Developer Preview / RC），项目内 DSH_HOME = `<repo>/.dsh`（已 gitignore）。
+  **2026-10-07 更正**：仓库原先钉 `0.1.7-rc.2`，而本机全局装的是 `0.2.0-rc.2`，两者不匹配导致工具插件 bundle 被跳过
+  （`verify:provider` 必失败）；已按「适配当前版本」把 peer 与 devDependency 一并升到 `0.2.0-rc.2`，
+  实测 `install:profile` 与 `verify:provider` 双双通过，见 §11。
 - Node v24.21.0 原生运行 `.ts`（无需编译）；`node:sqlite`（SQLite 3.53.4，JSON1）可用 → M0 运行时只依赖 `js-yaml`。
 - 本机**没有 Docker / mosquitto / ffmpeg**。系统 Python 是 **3.14.7**（不满足 Pipecat/LiveKit），
   语音侧一律用隔离 venv 里的 **Python 3.12.10**（`.venvs/{voice-pipecat,voice-livekit,field-probe,cv4}`，见 §2.7 与 §2.7b）。
@@ -98,7 +103,7 @@
    `api: openai-completions`、`baseURL: https://api.xiaomimimo.com/v1`（不带 `/chat/completions`）、`apiKeyEnv: MIMO_API_KEY`。
 3. 凭据解析顺序（DSH 凭据 seam）：**进程环境快照** → `$DSH_HOME/.credentials.yaml` → **`<cwd>/.env`** → `$DSH_HOME/.env`。
    因此把 `.env` 放在仓库根、并以仓库根为 cwd 启动 `dsh` 即可；注意环境变量是**启动时快照**，启动后再 export 无效。
-4. 工具插件：`plugins/xixi-tools`（`defineTool` + `dsh.bundle.patch`），`@deepseek-ai/dsh-tools@0.1.7-rc.2` 作为 devDependency 固定在仓库根，插件 import 自然解析。
+4. 工具插件：`plugins/xixi-tools`（`defineTool` + `dsh.bundle.patch`），`@deepseek-ai/dsh-tools@0.2.0-rc.2` 作为 devDependency 固定在仓库根，插件 import 自然解析。
 5. 一轮对话：`node <dsh>/lib/bin.js --profile xixi --json [--session-id <id>] "<task>"`；stdout 是 NDJSON
    （`session` / `status` / `thinking` / `tool_call` / `tool_result` / `text` / `final`），`final.text` 是回答。
 6. **恢复会话的约束**：必须同一 cwd、同一 profile 组合，且 `--session-id` 要带。会话落盘在
@@ -874,10 +879,76 @@ skip 条件同时从「文件存在」收紧成「解释器能 `import numpy, vo
 **这台机器上验不了的四类事**（细节与原因见 recon 报告 §4，**任何文档不许写成已验**）：
 ① DSH 路径——全局 DSH 是 **0.2.0-rc.2**，而 `plugins/xixi-tools/package.json` 的 peerDependency 钉 **0.1.7-rc.2**，
 组合 profile 时该 bundle 被跳过，`npm run install:profile` 报 `composed profile does not contain "xixi-tools"`；
-全局安装目录归 root、本机无 sudo，换版本要用户自己来；② 一切真实模型调用（**没有 `.env` / `MIMO_API_KEY`**）；
+全局安装目录归 root、本机无 sudo，换版本要用户自己来（**2026-10-07 已修**：按用户指示改为「适配当前版本」——
+把仓库升到 `0.2.0-rc.2` 而不是降全局 DSH，`install:profile` 与 `verify:provider` 已双双通过，见 §11；本条保留为历史记录）；② 一切真实模型调用（**没有 `.env` / `MIMO_API_KEY`**）；
 ③ 麦克风 / 扬声器 / 摄像头真机采集（WSL2 默认不暴露音频与 `/dev/video*`）；
 ④ `field-test --self-test` 的 30 通过 / 2 失败——两条都是 Windows 专属读数（`pycaw`），是环境缺失不是回归。
 
 **给下一轮的纪律**（已写进 [`AGENTS.md`](../AGENTS.md) §10）：绝对路径用 `node:path`；
 解释器/工具路径按布局探测且**全仓只留一份实现**；测试不许依赖 gitignored 产物、更不许因此静默 skip；
 种子数据写死绝对日期 + 判定读 `Date.now()` = 定时炸弹（判据：「这条用例放到 30 天后跑还绿吗？」）。
+
+## 11. DSH 版本适配：0.1.7-rc.2 → 0.2.0-rc.2（2026-10-07，用户指示「修复 verify:provider，适配当前版本」）
+
+### 11.1 故障与根因（改前实测）
+
+`npm run verify:provider` 改前**失败**，报 `expected a xixi_get_current_time tool call, saw null`。
+根因不是密钥、也不是模型，而是**版本不匹配导致工具插件整个没被加载**：
+
+```
+dsh: skipping profile bundle "dsh-xixi-tool": Error: Plugin dsh-xixi-tool@0.1.0 is incompatible with
+dsh 0.2.0-rc.2: peerDependencies {"@deepseek-ai/dsh-tools":"0.1.7-rc.2"}. Exact-version exemption: not active.
+```
+
+DSH 的判定实现在 `@deepseek-ai/dsh-app-boot` 的 `evaluatePluginCompatibility`：把插件 `peerDependencies`
+的每一条与 **dsh 运行时版本**做 `semver.satisfies(runtimeVersion, range, {includePrerelease: true})`。
+本机全局 DSH 是 **0.2.0-rc.2**（`~/.npm-global`，归 root、无 sudo），仓库钉 **0.1.7-rc.2** → 不满足 → bundle 跳过
+→ 模型看不到任何 xixi 工具，于是回答「我没看到这个工具」。**注意**：该判定比的是 dsh 运行时版本，
+所以 `@deepseek-ai/dsh-tools` 这个包名在这里只是键名，改 peer 的**值**即可。
+
+### 11.2 处置：升仓库，不降全局、也不开豁免
+
+用户指示「适配当前版本」，因此**不**用 `dsh plugin allow-version`（那是显式接受崩溃风险），而是把仓库升到与运行时一致：
+
+- `plugins/xixi-tools/package.json`：peerDependency `0.1.7-rc.2` → **`0.2.0-rc.2`**（精确写法，零歧义）
+- 根 `package.json`：devDependency `@deepseek-ai/dsh-tools` 同步到 **`0.2.0-rc.2`**
+- `package-lock.json`：**必须整份重新解析**（见 11.3）
+
+0.2.0 的 `@deepseek-ai/dsh-tools` 把 11 个 `@deepseek-ai/dsh-*`（`dsh-agent` / `dsh-llm` / `dsh-session` /
+`dsh-system-prompt` / `dsh-scope` / `dsh-sandbox(-policy)` / `dsh-invariants` / `dsh-ptc-runtime` /
+`dsh-user-approval` / `cordis`）声明为 **peerDependencies**（0.1.7 没有这一层），而旧 lock 里它们锁在 0.1.7-rc.2
+→ `npm install` 报 ERESOLVE。三条路里只有一条对：
+
+| 做法 | 结果 |
+|---|---|
+| `--legacy-peer-deps` | **错**：只装 12 个包、11 个 peer 全跳过，`check:types` 会因缺 `@deepseek-ai/dsh-llm` 等崩 |
+| `--package-lock-only` | **错**：在旧 lock 上做增量，仍解析出 17 处 0.1.7-rc.2，ERESOLVE 照旧 |
+| **删 lock 全新解析 + `npm ci`** | **对**：50 个包、DSH 族全 0.2.0-rc.2、零 0.1.7 残留 |
+
+### 11.3 实测（本机同一次运行，改后）
+
+- `npm run install:profile` → exit 0，`verified: profile composes llm-pi-ai with the MiMo route and the xixi tool plugin`
+  （**改前这一步必抛** `composed profile does not contain "xixi-tools"`）
+- `npm run verify:provider` → exit 0，**`toolName: "xixi_get_current_time"`**，`diagnostics.toolCalls` 有真实调用，
+  `eventTypes` 含 `tool_call` 与 `tool_result`，latency 9889 ms，回答是工具返回的时间戳
+- `npm run check:types` → exit 0
+- `npm test` → **720 项 / pass 720 / fail 0 / skipped 0**（与升级前基线逐项一致，零回归）
+- `npm run check:docs` → 110 份，三个 0
+
+**依赖树对照**：`node_modules/@xixi/*` 的 9 个 workspace 链接由 npm workspaces 自动重建
+（`plugins/*` 不在 workspaces 内，由 `install:profile` 的 link 负责），无需手工补链。
+
+### 11.4 已知残留（本次**未**修，如实登记）
+
+两条来自 DSH 宿主的警告在**改前改后都存在**，且不影响上述验收（`verify:provider` 仍 exit 0）：
+
+```
+dsh: warning: 2 entries did not activate
+permission (@deepseek-ai/dsh-permission-presets): pending (waiting for service: shell)
+command-compact (@deepseek-ai/dsh-command-compact): pending (waiting for service: commands)
+```
+
+两条都卡在 `waiting for service: shell`——0.2.0 的 `shell` 服务由 `dsh-terminal-bash` / `dsh-bash-local`
+一类内置插件提供，而 `xixi` profile 的 bundle 列表只有 `dsh-base` + `dsh-headless` + 工具插件，
+没有 shell 那一条。**影响面**：permission-presets 与 command-compact 未激活；本次验收路径用不到这两条，
+但它们不是「已解决」。另有 `all_proxy names a SOCKS proxy` 一条，是本机代理环境变量带来的噪音，与仓库无关。

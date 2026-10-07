@@ -25,7 +25,7 @@
 | 系统 Python | `python3` = 3.13.11（**不用**，与 Windows 侧的 3.14 同理：语音依赖不支持） | 系统 3.14.7（不用） |
 | `.venvs/voice-pipecat` | pipecat-ai **1.12.0**、onnxruntime **1.24.4**、numpy **2.5.3**、soundfile 0.13.1、soxr 1.0.0、loguru 0.7.3、pillow 12.3.0 | pipecat-ai 1.12.0、onnxruntime 1.24.4、pillow 12.3 |
 | `.venvs/cv4` | opencv-python-headless **4.14.0.94**、numpy **2.5.3**、onnxruntime **1.30.0** | 逐项相同（opencv 4.14.0.94 / numpy 2.5.3） |
-| DSH（全局） | **0.2.0-rc.2**（与仓库钉的 0.1.7-rc.2 **不匹配**，见 §4） | 0.1.7-rc.2 |
+| DSH（全局） | **0.2.0-rc.2**（勘测当时与仓库钉的 0.1.7-rc.2 **不匹配**，见 §4；**当晚已把仓库升到 0.2.0-rc.2 完成对齐**） | 0.1.7-rc.2 |
 | 磁盘 | 920G 可用 | — |
 
 **pipecat 版本与 Windows 侧逐字一致（1.12.0）**，这不是巧合：`pipecat-ai[silero]` 在 Linux 上同样**不拉 torch**
@@ -191,6 +191,7 @@ AssertionError: 刚提取出来是候选，还没问过
 | 项 | 为什么 | 怎么才能验 |
 |---|---|---|
 | **DSH 路径（M0 / `verify:provider` / `--dsh`）** | 全局 DSH 是 **0.2.0-rc.2**，而 `plugins/xixi-tools/package.json` 的 peerDependency 钉的是 **0.1.7-rc.2**。组合 profile 时 DSH 直接**跳过**这个 bundle：`Plugin dsh-xixi-tool@0.1.0 is incompatible with dsh 0.2.0-rc.2: peerDependencies {...}`，于是 `npm run install:profile` 的 `verifyBoot()` 报 `composed profile does not contain "xixi-tools"`。全局安装目录 `~/.npm-global` **归 root**，本机没有 sudo，所以换版本要用户自己来（`npm i -g @deepseek-ai/dsh@0.1.7-rc.2`，或把插件 peer 升到 0.2.0-rc.2）。 | 装与仓库一致的 DSH 版本后 `npm run install:profile` → `npm run verify:m0` |
+| ↳ **已于 2026-10-07 关闭（同一晚）** | 用户指示「修复 `verify:provider`，适配当前版本」，选了**升仓库**这条路（不动全局、不开 `allow-version` 豁免）：插件 peer 与根 devDependency 一并升到 `0.2.0-rc.2`，`package-lock.json` 整份重新解析（0.2.0 把 11 个 `@deepseek-ai/dsh-*` 升格为 peer，旧 lock 会 ERESOLVE）。 | **已实测通过**：`install:profile` exit 0、`verify:provider` exit 0 且 `toolName: "xixi_get_current_time"`；同一次运行 `npm test` 720/720、`check:types` exit 0。过程与三条依赖解析岔路见 [`../progress.md`](../progress.md) §11 |
 | **一切真实模型调用**（`chat` / `web` / `verify:*` / `eval:*` / `voice:turn` 真跑） | 本机**没有 `.env`**（`MIMO_API_KEY` 缺失，`.env` 在 `.gitignore` 里、不会随检出来） | 填 `.env` 后按 `README.md` 的命令跑 |
 | **麦克风 / 扬声器 / 摄像头（真机采集）** | WSL2 默认不把音频与摄像头设备暴露给 Linux 侧；`sounddevice` 需要 PortAudio/ALSA 设备，`cv2.VideoCapture` 需要 `/dev/video*`。**离线自检本来就不碰硬件**，所以能跑；真采集不能。 | 在 Windows 侧跑（`npm run field-test`），或给 WSL 配 USB 设备直通 |
 | **`field-test --self-test` 的两条 FAIL** | 30 项通过 / **2 项失败**，两条都是 Windows 专属读数：F7 的「输入采集增益」走 `pycaw`（Windows Core Audio），另一条同源。**这是环境缺失，不是回归**（离线自检在 Windows 上是 32/32）。 | 在 Windows 上跑同一条命令 |

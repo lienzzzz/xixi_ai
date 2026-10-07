@@ -53,6 +53,15 @@
 > 建 venv 的命令、移植挖出的平台假设缺陷与「这台机器上验不了的四类事」见
 > [`docs/recon/linux-port-environment-2026-10-07.md`](docs/recon/linux-port-environment-2026-10-07.md)（**动手前先读**）。
 > 跨平台纪律见 §10。
+>
+> **DSH 版本（2026-10-07 更正，Linux 侧生效）**：仓库原本钉 `@deepseek-ai/dsh-tools@0.1.7-rc.2`，
+> 而全局 DSH 是 **`0.2.0-rc.2`**；两者不匹配时 DSH 会**跳过**工具插件 bundle，模型看不到任何 xixi 工具，
+> `npm run verify:provider` 必失败（报「expected a tool call, saw null」）。现已把插件 `peerDependencies`
+> 与根 devDependency 一并升到 **`0.2.0-rc.2`**，`install:profile` 与 `verify:provider` 实测通过。
+> **纪律**：插件 `peerDependencies` 比的是 **dsh 运行时版本**（`@deepseek-ai/dsh-app-boot` 的
+> `evaluatePluginCompatibility` 用 `semver.satisfies` 逐条判定），升级 DSH 时要**同时**改这一处与根 devDependency；
+> 另注意 0.2.0 把 11 个 `@deepseek-ai/dsh-*` 升格为 peer，旧 lock 会 ERESOLVE——**不要用 `--legacy-peer-deps`**
+> （会跳过全部 peer，`check:types` 崩），要**删 lock 全新解析**。详见 `docs/progress.md` §11。
 
 | 项 | 事实 |
 |---|---|
