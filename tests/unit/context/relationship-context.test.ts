@@ -96,6 +96,60 @@ test('关系笔记有限量：它们是「我们怎么相处」，不是「我�
   assert.equal(buildRelationshipContext({ styleHints: relationshipStyleHints({}), recentStats: EMPTY_STATS, notes: ['  '] }).prose.some((line) => line.trim().length === 0), false);
 });
 
+/**
+ * V0.3 P2.5-J 修的缺陷二：关系笔记**没有听众过滤**。
+ *
+ * 改之前 `buildRelationshipContext` 收下 `notes` 就直接压成散文 —— 它连「谁在听」都不接，
+ * 于是「他嫌话多：少说、少主动、少追问」这类相处细节在 `public`（有外人 / 电视 / 媒体在场）
+ * 下也会进模型可见的文本。`relationship_notes` 表没有逐条可见性的列，所以能做的只有按听众
+ * 模式整批给或整批不给：`private` / `family` 照旧，`public` 一条都不给（计划文档 Issue B 的
+ * 保守解，与未完话题在 `public` 下的既有做法一致）。
+ *
+ * 这条用例压的是**过滤发生在选择阶段**：`notes` 与 `prose` 一起是空的，而不是「散文里有、
+ * 指望模型自己不说」。反事实（本任务实测过）：把 `notesVisibleTo` 改成恒等返回（不过滤），
+ * 下面 public 那两组断言同时红。
+ */
+test('关系笔记按听众过滤：public 下一条都不给，而且是选择阶段就丢掉', () => {
+  const notes = ['他嫌话多：少说、少主动、少追问', '他喜欢被叫「爸」'];
+  const base = { styleHints: relationshipStyleHints({}), recentStats: EMPTY_STATS, notes };
+
+  // 没给听众（= 保守的 family）、家里人在场、只有父亲：三种都照旧看得到（这是既有行为，不许回退）。
+  const visible = [
+    buildRelationshipContext(base),
+    buildRelationshipContext({ ...base, audience: { mode: 'family', actor: null, note: '家里人在场' } }),
+    buildRelationshipContext({ ...base, audience: { mode: 'private', actor: 'father', note: '只有父亲' } }),
+  ];
+  for (const context of visible) {
+    assert.deepEqual(context.notes, notes, '这几个听众下笔记照旧全部保留');
+    for (const note of notes) {
+      assert.ok(context.prose.some((line) => line.includes(note)), `散文里也照旧有它：${note}`);
+    }
+  }
+
+  // 有外人可能：一条都不给 —— 结构化的 `notes` 与给模型的 `prose` 同时为空。
+  const withPublic = buildRelationshipContext({ ...base, audience: { mode: 'public', actor: 'unknown_person', note: '有外人在' } });
+  assert.deepEqual(withPublic.notes, [], '结构化字段也一起空：面板看到的 = 模型看到的');
+  for (const note of notes) {
+    assert.equal(
+      withPublic.prose.some((line) => line.includes(note)),
+      false,
+      `public 下这条笔记不许出现在任何一句里：${note}`,
+    );
+  }
+  // 「整段不出现」与「真的过滤了」长得不一样，所以留一条与听众无关的断言：
+  // 没有外人时该说的那几句照旧在（否则这条用例可能只因为散文全空而绿）。
+  assert.ok(withPublic.prose.length > 0, `关系摘要本身还在：${JSON.stringify(withPublic.prose)}`);
+  assert.ok(withPublic.prose.some((line) => line.includes('还没主动开过口')), '与听众无关的那一句照旧');
+
+  // 限量照旧（过滤不会把 `RELATIONSHIP_NOTE_LIMIT` 一起改掉）。
+  const many = buildRelationshipContext({
+    styleHints: relationshipStyleHints({}),
+    recentStats: EMPTY_STATS,
+    notes: Array.from({ length: 6 }, (_, index) => `这是第${index}条相处笔记`),
+  });
+  assert.equal(many.prose.filter((line) => line.startsWith('这是第')).length, RELATIONSHIP_NOTE_LIMIT);
+});
+
 test('context.memory 的读取：默认值、新段优先于老段、越界报错', () => {
   const defaults = parseContextMemorySettings(undefined, undefined);
   assert.equal(defaults.maxItems, 6);

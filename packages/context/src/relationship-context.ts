@@ -1,12 +1,14 @@
 /**
  * 关系上下文（pack `docs/02_MEMORY_CONTEXT.md` §6）。
  *
- * 两条纪律：
+ * 三条纪律：
  *   1. **只给与当前行为有关的摘要**，不把全统计给 LLM。所以这里给模型的是几句中文，
  *      而不是 7 天窗口里的每一个计数 —— 计数留在 `recentStats` 里给面板与测试。
  *   2. **没有的数据不编**：`interruptionRate` 目前恒为 `null`（打断还没有落库的事件，
  *      见 `MemoryStore.snapshot` 的说明），渲染时那句「被打断」就不出现；
  *      「最近没有主动开口」与「主动开口从没人应」是两种不同的处境，措辞也不同（避免除以零的假象）。
+ *   3. **关系笔记按听众过滤，而且过滤在「选择」这一步**（V0.3 P2.5-J，见 `notesVisibleTo`）：
+ *      有外人可能时一条都不给 —— 不是先写进散文再指望模型自己不说。
  *
  * `styleHints` 用的是 `@xixi/conversation` 里 `personalityDirectives` 的**同一套档位区间**
  * （0.33/0.66 这类），抄的是数字而不是实现，所以「提示词里说她话多」与「关系摘要里说她话多」
@@ -78,15 +80,44 @@ export interface RelationshipInputs {
   readonly styleHints: RelationshipStyleHints;
   readonly recentStats: RelationshipRecentStats;
   readonly notes: readonly string[];
+  /**
+   * 这一轮「谁在听」（P2.5-J）。**只有它决定关系笔记给不给模型** —— `relationship_notes` 表
+   * 没有逐条可见性的列，所以能做的只有「按听众模式整批给或整批不给」（见 `notesVisibleTo`）。
+   *
+   * 省略 = 保守的 `family`（`DEFAULT_AUDIENCE`，与检索层的 `visibleTo` 同一口径）。
+   */
+  readonly audience?: AudienceContext | undefined;
+}
+
+/**
+ * 关系笔记的听众过滤 —— **在压平成散文之前**做（V0.3 P2.5-J 修的那个缺陷）。
+ *
+ * 口径（计划文档 Issue B 给的保守解，与未完话题在 `public` 下的既有做法一致）：
+ *   * `private` / `family`：照旧全部保留。默认档就是 `family`（「拿不准谁在听」时的保守口径），
+ *     而关系笔记没有逐条可见性 schema —— 没有一条能被单独判定为「当着外人不能说」；
+ *   * `public`（有外人 / 电视 / 媒体在场）：**一条都不给**。不做逐条挑选是刻意的：
+ *     挑选需要一个「这条是 family-safe 的」标记，而库里没有这个字段，凭猜就是编。
+ *
+ * 为什么必须在这一步过滤，而不是「先注入、再在提示词里让模型自己避免说」：模型看到的散文里
+ * 只要出现「他嫌话多」这类相处细节，说不说就变成了**模型**的判断 —— 而隐私边界属于程序
+ * （铁律 1）。返回空数组的效果是 `prose` 里根本不出现那几句（`renderRelationshipProse`
+ * 只渲染交给它的笔记），`RelationshipContext.notes` 也一并是空的：面板看到的 = 模型看到的。
+ */
+function notesVisibleTo(notes: readonly string[], audience: AudienceContext | undefined): readonly string[] {
+  const mode = audience?.mode ?? DEFAULT_AUDIENCE.mode;
+  return mode === 'public' ? [] : notes;
 }
 
 /** 装配：算出模型看得到的那几句散文（`prose`）。 */
 export function buildRelationshipContext(inputs: RelationshipInputs): RelationshipContext {
+  // 过滤放在这里（而不是渲染里）：压平成字符串之后，逐条元数据（将来真加了可见性列的话）
+  // 就已经没有地方可用了 —— 见 `notesVisibleTo` 的说明。
+  const notes = notesVisibleTo(inputs.notes, inputs.audience);
   return {
     styleHints: inputs.styleHints,
     recentStats: inputs.recentStats,
-    notes: inputs.notes,
-    prose: renderRelationshipProse(inputs.styleHints, inputs.recentStats, inputs.notes),
+    notes,
+    prose: renderRelationshipProse(inputs.styleHints, inputs.recentStats, notes),
   };
 }
 

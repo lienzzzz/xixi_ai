@@ -224,6 +224,9 @@ export class ContextBuilder {
       styleHints: hints,
       recentStats: stats,
       notes: snapshot.notes.map((note) => note.note),
+      // P2.5-J 修的缺陷：`audience` 以前只是被收下、从没被用过，于是关系笔记**不经过**听众过滤
+      // 就压成散文进了提示词（`public` 下也一样）。过滤在 `buildRelationshipContext` 的选择阶段做。
+      audience,
     });
   }
 

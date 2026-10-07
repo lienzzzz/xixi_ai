@@ -257,6 +257,55 @@ test('the context block tells the model when it is, including time of day', () =
   assert.ok(morning.user.includes('+08:00'), 'timestamps keep an explicit offset');
 });
 
+/**
+ * V0.3 P2.5-J 修的第一个缺口：`ContextBuilder` 算出来的世界状态进不了提示词。
+ *
+ * 装配器现在有两种世界状态来源，**互斥**：
+ *   * `worldState`（来自 `ContextBuilder.render().worldLines`，含在场判断）—— 有它就用它；
+ *   * `world`（`worldStateLite`，只有时间 / 时区 / 时段 / 星期）—— 只在没有上下文层时被读。
+ *
+ * 这一条用例压两件事：世界行**真的**进了 `user` 与 `world-state` 段；时间与星期**不重复**
+ * （两条路同时拼进去就会出现两遍「现在：」）。反事实：把 `worldState` 分支删掉 → 前三组断言红；
+ * 把两条路改成「都拼」→ 「只出现一次」那组红。
+ */
+test('世界状态那一段：上下文层给了行就用它，轻量写法只在没有上下文层时兜底（时间与星期不重复）', () => {
+  const contextLines = [
+    '现在：2026-09-29T23:10:00.000+08:00（Asia/Shanghai）',
+    '时段：深夜　星期：周二',
+    '在场：他这会儿在家。',
+    '- 家里常说的地点：成都',
+  ];
+  const connected = assembler.assemble(input({ worldState: { lines: contextLines } }));
+
+  assert.ok(connected.user.includes('在场：他这会儿在家。'), `在场判断必须进提示词：\n${connected.user}`);
+  // 渲染器给附行时自带 `- `，装配器再加一次就是 `- - …`：这里压住归一化。
+  assert.ok(connected.user.includes('- 家里常说的地点：成都'), '附行只有一个前缀');
+  assert.equal(connected.user.includes('- - '), false, '不许出现双重前缀');
+
+  // 不重复：上下文层的行替代（而不是叠加在）轻量写法上。
+  for (const marker of ['现在：', '时段：', '星期：', '周二']) {
+    assert.equal(connected.user.split(marker).length - 1, 1, `「${marker}」只许出现一次：\n${connected.user}`);
+  }
+  // 段本身仍叫 world-state、仍在同一个位置（Debug UI 按名字与顺序核对）。
+  assert.deepEqual(connected.sections.map((section) => section.name), ['core-identity', 'safety-policy', 'effective-style', 'world-state', 'current-turn']);
+  const worldSection = connected.sections.find((section) => section.name === 'world-state');
+  assert.ok(worldSection !== undefined);
+  assert.ok(worldSection.text.includes('在场：他这会儿在家。'), '面板读的段正文里也有它');
+  assert.equal(worldSection.text.split('\n')[0], contextLines[0], '段正文用的是上下文层那一行，且不带 `- `');
+
+  // 没有上下文层时逐字回到从前：轻量写法那两行 + 没有在场。
+  const bare = assembler.assemble(input());
+  assert.equal(bare.user.includes('在场'), false, '没有上下文层就没有在场判断');
+  assert.equal(bare.user.split('现在：').length - 1, 1);
+  assert.equal(bare.user.split('星期：').length - 1, 1);
+  assert.ok(bare.user.includes('时段：深夜　星期：周二'), '轻量写法本身一字未改');
+
+  // 上下文层给了空数组时也一样回退（世界状态那段不许整段空着）—— 这条守的是回退那个守卫本身。
+  const emptyContextWorld = assembler.assemble(input({ worldState: { lines: [] } }));
+  assert.ok(emptyContextWorld.user.includes('时段：深夜　星期：周二'), '空数组退回轻量写法');
+  assert.equal(emptyContextWorld.user.split('现在：').length - 1, 1, '回退时也不会多出一份时间');
+});
+
 test('sections are addressable so the Debug UI can show exactly what the model saw', () => {
   const prompt = assembler.assemble(input());
   const names = prompt.sections.map((section) => section.name);

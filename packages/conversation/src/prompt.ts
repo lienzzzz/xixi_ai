@@ -68,6 +68,20 @@ export interface WorldStateLite {
 }
 
 /**
+ * 世界状态那一段（V0.3 P2.5-J）：**已经渲染好的行**，来自 `@xixi/context` 的
+ * `ContextBuilder.render().worldLines`（含在场判断与地点那几行附行）。
+ *
+ * 它存在时 `AssembleInput.world`（`WorldStateLite`）就不再使用，后者降级为「这一轮没有
+ * 上下文层」时的回退。两条路**互斥**，所以「现在 / 时段 / 星期」在提示词里只会出现一遍 ——
+ * 这不是约定，而是这么拼出来的。
+ *
+ * 省略时与从前逐字相同：老调用方（没接 `@xixi/context` 的那些）不必知道这个特性存在。
+ */
+export interface WorldSection {
+  readonly lines: readonly string[];
+}
+
+/**
  * 记忆那一段（V0.3 P1 / pack `docs/02_MEMORY_CONTEXT.md` §1 §3）。
  *
  * **已经渲染好的行**（`ContextBuilder.render` 的输出）：装配器不做检索、不做排序、也不碰库。
@@ -107,7 +121,19 @@ export interface AudienceSection {
 export interface AssembleInput {
   readonly identityName: string;
   readonly personality: Readonly<Record<string, number>>;
+  /**
+   * 世界状态的**轻量写法**（时间、时区、时段、星期）。它是 `worldStateLite()` 的输出，
+   * 在今天只做一件事：`worldState` 没给（= 这一轮没有上下文层）时的**回退**。
+   *
+   * P2.5-J 之前它是进提示词的那一份，于是 `ContextBuilder` 算出来的在场判断根本到不了模型；
+   * 现在真实装配点给的是 `worldState`（见 `WorldSection`），这份只在回退路径上被读。
+   */
   readonly world: WorldStateLite;
+  /**
+   * 世界状态那一段的**上下文层版本**（P2.5-J 的接线）：给了就用它，`world` 转为回退。
+   * 省略 = 这一轮没有上下文层（老调用方、`contextBuilder: false`）。
+   */
+  readonly worldState?: WorldSection | undefined;
   readonly conversationState: string;
   readonly turnIndex: number;
   /**
@@ -402,12 +428,18 @@ export class PromptAssembler {
       ...(audienceText === null ? [] : [audienceText]),
     ].join('\n\n');
 
+    // 世界状态：上下文层给了行就用它（含在场判断），否则退回轻量写法。两条路**互斥**，
+    // 所以「现在 / 时段 / 星期」不会出现两遍（P2.5-J 验收之一）。
+    // 给了空数组也当成「没有」：世界状态那一段不该整段空着（回退里至少有时间与星期）。
+    const contextWorld = input.worldState === undefined || input.worldState.lines.length === 0 ? null : input.worldState.lines;
     const worldLines = [
-      `现在：${input.world.now}（${input.world.timezone}）`,
-      `时段：${input.world.timeOfDay}　星期：${input.world.weekday}`,
+      ...(contextWorld === null
+        ? [`现在：${input.world.now}（${input.world.timezone}）`, `时段：${input.world.timeOfDay}　星期：${input.world.weekday}`]
+        : contextWorld.map(worldBodyLine)),
       `会话状态：${input.conversationState}（本会话第 ${input.turnIndex + 1} 轮）`,
       ...(input.mood === undefined ? [] : [`心情：${moodFreshnessLine(input.mood)}`]),
-      ...(input.world.extra ?? []),
+      // 轻量写法自己的附行跟着它一起回退（顺序与从前逐字一致）；上下文层给的行里已经有它自己的附行。
+      ...(contextWorld === null ? (input.world.extra ?? []) : []),
     ];
 
     // The real prior turns, as roles. This is the *only* copy that reaches the model:
@@ -482,6 +514,19 @@ export class PromptAssembler {
       ],
     };
   }
+}
+
+/**
+ * 上下文层那一行的**正文**：去掉 `renderWorldLines` 附行自带的 `- ` 前缀。
+ *
+ * 为什么需要这一步：`user` 里每一行由装配器统一加 `- `（见下面 `worldLines.map(...)`），
+ * 而 `@xixi/context` 的 `renderWorldLines` 给附行（`- 家里常说的地点：成都`）时自己已经带了
+ * 同一个前缀 —— 不归一化就会渲染成 `- - 家里常说的地点：成都`。归一化放在**装配器**这一侧，
+ * 于是 `world-state` 段与别的段形状一致：`sections[].text` 不带前缀，`user` 里带。
+ */
+function worldBodyLine(line: string): string {
+  const trimmed = line.trim();
+  return trimmed.startsWith('- ') ? trimmed.slice(2).trim() : trimmed;
 }
 
 /** 记忆那一段：标题 + 三种标记的行。空数组 = 整段不出现（不是「这一段是空的」）。 */

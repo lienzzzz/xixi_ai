@@ -30,7 +30,7 @@ import {
   renderSelfLines,
   type RetrievedMemory,
 } from '@xixi/context';
-import { ConversationEngine, MEMORY_SECTION_HEADING } from '@xixi/conversation';
+import { ConversationEngine, MEMORY_SECTION_HEADING, worldStateLite } from '@xixi/conversation';
 import { fixedClock, MemoryStore, OpenThreadStore, openXixiStore, type XixiConfig, type XixiStore } from '@xixi/domain';
 
 const NOW = new Date('2026-10-01T20:00:00+08:00');
@@ -411,6 +411,145 @@ test('audience 是可选层，但一旦给出就真的改变提示词（public �
     const withPublic = publicEngine.buildPrompt({ sessionId: h.sessionId, text: '那绿茶呢', at: NOW });
     assert.ok(!withPublic.user.includes('明天下午我要去镇上办证'), 'public 时家里的私事不进提示词');
     assert.ok(withPublic.system.includes('别提到家里人的私事'), '而且要在稳定前缀里说明原因');
+  } finally {
+    h.store.close();
+  }
+});
+
+/**
+ * V0.3 P2.5-J 修的第一个缺口（**真实装配点**）：`ContextBuilder` 早就算出了世界状态（含在场判断），
+ * 但引擎组提示词时没有把它送进去 —— 用的是 `worldStateLite` 的轻量版本（时间 / 时区 / 时段 / 星期），
+ * 于是库里写着「他这会儿在家」，正常聊天时模型根本看不到。
+ *
+ * 这一条走的是真东西：真 `openXixiStore` + 真 `recordPresenceChanged`（事件与投影一个事务）+
+ * 真 `ConversationEngine` + 它自己建的 `ContextBuilder`，所以「提示词里有在场」是端到端的事实。
+ *
+ * 反事实（本任务实测过）：把 `#contextSections` 里的 `worldState` 那一行删掉 → 「在场判断必须到模型那里」
+ * 那条断言红（这正是本任务修之前的样子）。
+ */
+test('世界状态（含在场判断）进真实装配点的提示词，而且时间与星期只出现一遍', () => {
+  const h = harness();
+  try {
+    h.store.recordPresenceChanged({ present: true, confidence: 0.9, ttlSeconds: 3_600, sourceDetail: 't6 fixture' });
+
+    const context = h.engine.buildUserTurnContext({ sessionId: h.sessionId, text: '我在家吗', at: NOW });
+    assert.ok(context !== null);
+    assert.equal(context.world.presence?.present, true, '库里那一行说的是「在家」');
+    assert.equal(context.world.presence?.stale, false, 'TTL 之内，不算过期');
+
+    const prompt = h.engine.buildPrompt({ sessionId: h.sessionId, text: '我在家吗', at: NOW });
+    assert.ok(prompt.user.includes('在场：他这会儿在家。'), `在场判断必须到模型那里：\n${prompt.user}`);
+    const worldSection = prompt.sections.find((section) => section.name === 'world-state');
+    assert.ok(worldSection !== undefined, '世界状态是一段可寻址的段（Debug UI 按名字读它）');
+    assert.ok(worldSection.text.includes('在场：他这会儿在家。'), '段正文里也有它');
+    // 不重复：上下文层那一份**替代**了轻量写法，而不是两份一起拼进来。
+    for (const marker of ['现在：', '时段：', '星期：', '周四']) {
+      assert.equal(prompt.user.split(marker).length - 1, 1, `「${marker}」只许出现一次：\n${prompt.user}`);
+    }
+    // 主动开口那条路走同一份装配（同一个 `#contextSections`），所以世界状态一样在里面。
+    const proactive = h.engine.buildProactivePrompt({
+      directive: '（这是「主动开口」时机。）',
+      fact: '我在家吗',
+      at: NOW,
+      sessionId: h.sessionId,
+    });
+    assert.ok(proactive.user.includes('在场：他这会儿在家。'), '主动开口也看得到在场判断');
+  } finally {
+    h.store.close();
+  }
+});
+
+/**
+ * 验收第三条：**上下文层关掉时退回原来的轻量写法**，而且这条回退有用例守着。
+ *
+ * `contextBuilder: false` 是「记忆层有没有改变回复行为」的对照开关（见上一条用例），
+ * 它必须与 P0 一样只有那两行世界状态：不出现「在场」，也不出现第二份时间。
+ */
+test('上下文层关掉时，世界状态退回轻量写法（不是整段消失、也不是两份叠在一起）', () => {
+  const h = harness();
+  try {
+    h.store.recordPresenceChanged({ present: true, confidence: 0.9, ttlSeconds: 3_600 });
+    const bare = new ConversationEngine({
+      adapter: new FakeBrainAdapter(),
+      store: h.store,
+      config: CONFIG,
+      clock: fixedClock(NOW, 1_000),
+      offsetMinutes: 480,
+      contextBuilder: false,
+    });
+    const prompt = bare.buildPrompt({ sessionId: h.sessionId, text: '在吗', at: NOW });
+    assert.equal(prompt.user.includes('在场'), false, '关掉上下文层就没有在场判断（它属于上下文层那一份）');
+
+    const lite = worldStateLite(NOW, 'Asia/Shanghai', 480);
+    const worldSection = prompt.sections.find((section) => section.name === 'world-state');
+    assert.ok(worldSection !== undefined, '这一段在两条路径下都存在，只是内容来源不同');
+    assert.equal(
+      worldSection.text.split('\n').slice(0, 2).join('\n'),
+      `现在：${lite.now}（${lite.timezone}）\n时段：${lite.timeOfDay}　星期：${lite.weekday}`,
+      `退回的必须是轻量写法那两行、逐字不变：\n${worldSection.text}`,
+    );
+    assert.equal(prompt.user.split('现在：').length - 1, 1, '只有一处「现在」');
+    assert.equal(prompt.user.split('时段：').length - 1, 1, '只有一处「时段」');
+  } finally {
+    h.store.close();
+  }
+});
+
+/**
+ * V0.3 P2.5-J 修的第二个缺口（**真实装配点**）：关系笔记没有听众过滤。
+ *
+ * `#relationship(at, audience)` 收了 `audience` 却完全没用它（逐行核对过），笔记被压成纯字符串
+ * 直接进了模型可见的散文；有外人可能时也一样。现在过滤发生在**选择阶段**：`buildRelationshipContext`
+ * 在有外人可能时拿到的是空笔记数组，所以它不是「注入了再让模型自己别说」。
+ *
+ * 这条用例按「模型可见文本」的每一段逐个断言（system / user / history / 每个 section），
+ * 而不是只看 `user`：只要有一处漏出去，隐私边界就没有成立。
+ */
+test('有外人在场时关系笔记不进模型可见文本的任何一段；默认口径照旧看得见', () => {
+  const h = harness();
+  try {
+    const note = '他嫌话多：少说、少主动、少追问';
+    h.memory.recordNote({ aspect: 'chat_style', note, sourceType: 'explicit_correction' });
+
+    // ① 默认口径（没人说「谁在听」= family）照旧看得见 —— 否则这条用例可能只是因为「笔记从不出现」而绿。
+    const family = h.engine.buildPrompt({ sessionId: h.sessionId, text: '那绿茶呢', at: NOW });
+    assert.ok(family.user.includes(note), `默认口径下关系笔记在提示词里：\n${family.user}`);
+
+    const publicEngine = new ConversationEngine({
+      adapter: new FakeBrainAdapter(),
+      store: h.store,
+      config: CONFIG,
+      clock: fixedClock(NOW, 1_000),
+      offsetMinutes: 480,
+      audience: { mode: 'public', actor: 'unknown_person', note: '有外人在' },
+    });
+
+    // ② 有外人可能：模型可见的每一段都不许有那条笔记。
+    const withPublic = publicEngine.buildPrompt({ sessionId: h.sessionId, text: '那绿茶呢', at: NOW });
+    const modelVisible = [
+      withPublic.system,
+      withPublic.user,
+      ...withPublic.history.map((turn) => turn.content),
+      ...withPublic.sections.map((section) => section.text),
+    ];
+    for (const text of modelVisible) {
+      assert.equal(text.includes(note), false, `public 下关系笔记不许出现在模型可见的文本里：\n${text}`);
+    }
+    // 关系摘要那一段还在（是过滤掉一条，不是整段消失）：否则上面那句可能只是「段不存在」的假绿。
+    const relationship = withPublic.sections.find((section) => section.name === 'relationship');
+    assert.ok(relationship !== undefined, '关系摘要这一段仍然在');
+    assert.ok(relationship.text.includes('最近7天'), `与听众无关的那几句照旧：\n${relationship.text}`);
+
+    // ③ 结构化视图（面板读它）也一起是空的：面板看到的 = 模型看到的。
+    const context = publicEngine.buildUserTurnContext({ sessionId: h.sessionId, text: '那绿茶呢', at: NOW });
+    assert.ok(context !== null);
+    assert.deepEqual(context.relationship.notes, []);
+    assert.equal(context.relationship.prose.some((line) => line.includes(note)), false);
+
+    // ④ 读空气（主动决策）那条路用的是同一个渲染出口，所以一样过滤 —— 两处不许漂。
+    const decision = publicEngine.buildProactiveDecisionContext({ fact: '他嫌话多', at: NOW });
+    assert.ok(decision !== null, '有上下文层时决策摘要照旧给');
+    assert.equal(decision.relationship.some((line) => line.includes(note)), false, `决策摘要里也不许有：${JSON.stringify(decision.relationship)}`);
   } finally {
     h.store.close();
   }

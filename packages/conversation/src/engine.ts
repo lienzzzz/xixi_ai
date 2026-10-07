@@ -497,6 +497,8 @@ export class ConversationEngine {
     return this.#assembler.assemble({
       identityName: this.#config.identity.name,
       personality: this.#store.selfProfile(),
+      // 世界状态的**回退**（P2.5-J）：上下文层开着时，进提示词的是 `#contextSections` 里那份
+      // `ContextBuilder` 渲染的世界行（含在场判断）；这一份轻量写法只在关掉上下文层时被读。
       world: worldStateLite(at, this.#config.identity.timezone, this.#offsetMinutes),
       // Advanced at the turn's own timestamp, not the wall clock: replay must
       // follow the supplied `at`, which is also what `respond()` decides with.
@@ -543,6 +545,7 @@ export class ConversationEngine {
     return this.#assembler.assemble({
       identityName: this.#config.identity.name,
       personality: this.#store.selfProfile(),
+      // 与 `buildPrompt` 同一条：这是回退，上下文层给的世界行（含在场）优先。
       world: worldStateLite(at, this.#config.identity.timezone, this.#offsetMinutes),
       conversationState,
       turnIndex,
@@ -601,11 +604,18 @@ export class ConversationEngine {
    *
    * 这是「上下文只有一处装配入口」这句话的**唯一**落地点：引擎不在这里增删任何一块，
    * 它只做搬运（渲染由 `ContextBuilder.render` 做，于是出口闸门在那一侧只有一处）。
+   *
+   * P2.5-J：`worldState` 也是搬的一块 —— `ContextBuilder` 算出来的世界行（含在场判断）以前在这里
+   * 被漏掉了，提示词用的是 `worldStateLite` 的轻量版本，于是库里写着「他这会儿在家」模型也看不到。
+   * 现在这里的 `worldState` 进提示词，`buildPrompt` / `buildProactivePrompt` 里那个 `worldStateLite`
+   * 只在**这一块缺席**（= 关掉上下文层）时才被读，两条路互斥，不会重复。
+   * （字段名不叫 `world`：那个名字是 `AssembleInput` 上的轻量回退，重名会让展开后的类型变成联合。）
    */
   #contextSections(
     context: ConversationContext | ProactiveContext | undefined,
     at: Date,
   ): {
+    worldState?: { readonly lines: readonly string[] };
     memories?: { readonly lines: readonly string[]; readonly injected: number; readonly droppedAtRender: number };
     relationship?: { readonly lines: readonly string[] };
     openThreads?: { readonly lines: readonly string[] };
@@ -616,6 +626,7 @@ export class ConversationEngine {
     const rendered = this.#context?.render(context, at);
     if (rendered === undefined) return {};
     return {
+      worldState: { lines: rendered.worldLines },
       memories: {
         lines: rendered.memoryLines,
         injected: context.memories.length,
