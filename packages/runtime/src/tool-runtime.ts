@@ -20,15 +20,16 @@
  * plugin tool is copied into the same registry the built-ins live in, so it is subject to the same
  * permission policy, round cap and timeout.
  *
- * **接线状态（一句话口径，细节见 `PluginRuntimeMount`）：内核已交付且本装配点已接线——`start()` 跑完
- * 生命周期并挂载，插件工具对模型可见；但四个 live 入口（`scripts/chat.ts`、`scripts/serve-chat.ts`、
- * `scripts/field-test.ts`、`scripts/voice-turn.ts`）今天仍只调 `buildToolChain`，**入口尚未接线**。**
+ * **接线状态（诚实记录，AGENTS §9.24）：内核已交付且本装配点已接线——`start()` 跑完生命周期并挂载，
+ * 插件工具对模型可见；入口侧本条**不下断言**：一条入口算「已接线」，当且仅当它调 `createResidentRuntime`，
+ * 逐入口口径与复核命令写在 `./resident-runtime.ts` 顶部那块（**唯一出处**，本条不复述清单 —— 两份清单
+ * 各自过期过一次，就是这么来的）。**
  *
- * **审批声明这一层（V0.3 P2.5-B）**：`buildToolChain` / `buildPluginRuntime` 构造的**权限策略**直接来自
+ * **审批声明这一层（V0.3 P2.5-G）**：`buildToolChain` / `buildPluginRuntime` 构造的**权限策略**直接来自
  * 声明面（`resolveToolApprovalSettings` → `ToolPermission.askTools`），所以「哪些工具要先问一句」在这一层
  * 就已经是模型可见工具链的判定结果（`ask` 仍然被广告给模型，只有 `deny` 不可见）。持久化宿主
  * （`ToolApprovalManager`）由 `createResidentRuntime` 构造并经 `approvalGate` 注入；**入口是否真的经过它，
- * 取决于入口是否走 `createResidentRuntime`** —— 那是上面那条「入口尚未接线」里的同一件事。
+ * 与「入口是否走 `createResidentRuntime`」是同一件事**（逐入口状态见 `./resident-runtime.ts`）。
  *
  * 下一条线在 `./resident-runtime.ts`：`createResidentRuntime` 把本条的工具链、插件内核、审批宿主、
  * durable 提醒与 `ConversationEngine` 组装成**一个对象**（V0.3 P2.5-A）。它是上面那条「入口接线」的
@@ -286,13 +287,14 @@ export interface PluginShutdownReport {
  *  * **已接**：`start()` 跑完九步生命周期**并**调用 `mountPluginTools`，所以启动之后插件/MCP 工具真的
  *    在模型可见的工具链里（`definitionsForRound` 能查到、能被核心执行）——这条有 `runtime-wiring`
  *    用例钉住。
- *  * **未接**：四个 live 入口（`scripts/chat.ts` 等）今天仍然只调 `buildToolChain`，也就是说
- *    **内核已交付、入口尚未接线**。把 `buildPluginRuntime` 接到入口，是下一阶段的显式接线项之一。
- *  * **未接**：提示词侧的 `verify`（`verifyOnAssemble`）也还没有调用点，真实装配点
- *    `packages/conversation` 的 `PromptAssembler` 不在本任务的 inScope 里。同样登记为下一阶段的
- *    显式接线项。
+ *  * **入口侧**：内核已接线，但「入口是否真的经过内核」取决于入口是否走 `createResidentRuntime` ——
+ *    逐入口口径与复核命令见 `./resident-runtime.ts` 顶部那块（唯一出处）。本条不写「都还没接」或
+ *    「都接了」这类会过期的话。
+ *  * **提示词侧**：`verifyOnAssemble` 的调用点在 `./resident-runtime.ts`（装配点把 assembler 包住了），
+ *    所以校验对**经过装配点**的提示词成立；`packages/conversation` 自己的 `PromptAssembler` 不在本文件
+ *    的 inScope 里，是否还有别的调用点要另核（`grep -rn "verifyOnAssemble("`）。
  *
- * 这两条「未接」是状态，不是待办装饰：任何文档/回报都不得把它们写成已接线。
+ * 上面这些是状态，不是待办装饰：任何文档/回报都不得把「未接」写成「已接」。
  */
 export interface PluginRuntimeMount {
   readonly registry: ToolRegistry;

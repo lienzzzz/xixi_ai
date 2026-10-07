@@ -20,6 +20,9 @@
  * `extraction.afterTurn` 交给引擎（下面单独断言 `packages/runtime/src/resident-runtime.ts`）。
  * 注意这条源码级核对**永远只是补充**：真正的防线是上面那三段行为证据，一条都不许删。
  *
+ * V0.3 P2.5-C：`chat.ts` 与 `voice-turn.ts` 也迁到装配点了，所以今天三个入口全走第二条路。
+ * 判据仍写成二选一：它拦的是「入口自己 new 一个提取器」（第三条路），而不是钉住某个函数名。
+ *
  * Run: `npm run test:console`（也在 `npm test` 里）。
  */
 import assert from 'node:assert/strict';
@@ -161,8 +164,8 @@ test('三个入口用的是同一份装配：自己调共享工厂，或走常�
   //
   // V0.3 P2.5-B：`afterTurn` 上收进装配点之后，入口有两种合法形态，源码级核对的对象因此是
   // 「有没有走共享装配」而不是某个具体函数名：
-  //   ① 入口自己调 `createTurnExtraction(...)`（`chat.ts` / `voice-turn.ts` 今天这样）；
-  //   ② 入口走 `createResidentRuntime(...)`（`scripts/serve-chat.ts` 这样），afterTurn 由装配点接管。
+  //   ① 入口自己调 `createTurnExtraction(...)`（保留的合法形态：共享工厂仍然可以被直接调用）；
+  //   ② 入口走 `createResidentRuntime(...)`（P2.5-C 之后三个入口都是这样），afterTurn 由装配点接管。
   // 第三条路——入口自己 new 一个提取器——会让这条用例红，那正是它要拦的。
   const sources = ['scripts/chat.ts', 'scripts/serve-chat.ts', 'scripts/voice-turn.ts'];
   const failures: string[] = [];

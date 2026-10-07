@@ -15,6 +15,7 @@
  *   node scripts/eval-realism.ts --corpus=all --repeat=3   # 同语料跑 3 次（样本小，必须看抖动）
  *   node scripts/eval-realism.ts --fake                # 离线替身（只验证管线，结论不采信）
  *   node scripts/eval-realism.ts --print-wiring         # 离线：打印这条入口交给模型的工具链，然后退出
+ *                                                        #   （含插件提供的 news.search / news.latest / news.for_interests）
  *   node scripts/eval-realism.ts --no-gate             # 只测量：有违规也 exit 0
  *   node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-09-30-v01.json
  *                                                      # 不调用模型，从保存的原文复算指标
@@ -34,13 +35,22 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { FakeBrainAdapter, MimoBrainAdapter, type ToolCallRecord, type ToolRegistry, type TurnModelProvider } from '@xixi/brain-adapter';
-import { ConversationEngine, evaluateProactiveGates, parseProactiveSettings, resolveReplyLimits, splitReplyIntoSegments, type ProactiveGateContext } from '@xixi/conversation';
-import { openXixiStore, type XixiConfig } from '@xixi/domain';
+import { FakeBrainAdapter, MimoBrainAdapter, type ToolRegistry, type TurnModelProvider } from '@xixi/brain-adapter';
+import { evaluateProactiveGates, parseProactiveSettings, resolveReplyLimits, splitReplyIntoSegments, type ConversationEngine, type ProactiveGateContext } from '@xixi/conversation';
+import { openXixiStore, type XixiConfig, type XixiStore } from '@xixi/domain';
 import { WeatherClient } from '@xixi/model-adapters';
+import { createRssNewsSource } from '@xixi/plugins/news';
 // V0.3 P0-A: the shared tool chain lives in `@xixi/runtime` now (pack `04_RUNTIME_CONSOLIDATION.md`
 // §1 Step A); `scripts/field-test.ts` keeps a compatibility re-export for un-migrated callers.
-import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
+// V0.3 P2.5-C: 工具链、插件内核（news 从这里进来）、审批宿主、durable 提醒、提取与引擎全部来自常驻
+// 装配点 `createResidentRuntime` —— 本文件不再自己拼链，也不再自己 new 引擎。
+import {
+  CONVERSATION_SCOPE,
+  createResidentRuntime,
+  type PluginChainOptions,
+  type ResidentModelInput,
+  type XixiResidentRuntime,
+} from '@xixi/runtime';
 
 import { CORPUS, FORBIDDEN_PATTERNS, type Scenario } from '../tests/scenarios/corpus.ts';
 import { GOLDEN_CONVERSATIONS, type GoldenConversation } from '../tests/scenarios/golden-conversations.ts';
@@ -226,37 +236,33 @@ function offlineWeatherSource(): WeatherClient {
 }
 
 /**
- * The one tool chain this runner talks through (pack Phase 2, extended in t14/T5-F1): the console's
- * own factory, so a realism run reaches the same four built-ins with the same permissions and the
- * same four-round cap as the console. `onToolCall` prints what actually ran — an offline run that
- * answers a weather turn must show the tool in its log, not a lucky-looking sentence.
+ * 这个部署的新闻来源（V0.3 P2.5-C，与 `scripts/chat.ts` 同一份口径）。
+ *
+ * 显式给出而不是留空：`news.*` 三个工具照样会被广告给模型，而没有来源的调用只有 `items: []`
+ * （`asked: 0`），模型很容易读成「今天没什么新闻」。P2.5-H 会把它换成配置驱动；在那之前它是每个
+ * 入口一份的声明。
  */
-function evalToolChain(config: XixiConfig, onToolCall?: (record: ToolCallRecord) => void): ToolRegistry {
-  return buildToolChain(config, {
-    ...(onToolCall === undefined ? {} : { onToolCall }),
+const NEWS_FEED_URL = 'https://feeds.bbci.co.uk/news/world/rss.xml';
+
+/** `--fake` 的离线保证：给插件网络授权的 fetch 一用即抛（离线桩提供的是编出来的标题，不能当新闻念）。 */
+const offlinePluginFetch = (async (input: string | URL | Request) => {
+  throw new Error(`--fake 是离线运行，不允许联网：${String(input)}`);
+}) as unknown as typeof fetch;
+
+/** 这个入口的插件层入参：来源是新闻插件，`offline` 换掉它的网络授权。 */
+function realismPluginLayer(offline: boolean): Pick<PluginChainOptions, 'news' | 'fetchImpl' | 'weatherClient'> {
+  return {
     ...(useFake ? { weatherClient: offlineWeatherSource() } : {}),
-  });
+    ...(offline ? { fetchImpl: offlinePluginFetch } : {}),
+    news: { sources: [(env) => createRssNewsSource({ name: 'BBC World', url: NEWS_FEED_URL, fetchImpl: env.fetchImpl })] },
+  };
 }
 
-// The offline wiring report (t14): what this runner hands the model, with no model call and no store.
-if (has('print-wiring')) {
-  const chain = evalToolChain(config);
-  console.log(
-    JSON.stringify({
-      entry: 'eval-realism',
-      language: config.identity.language,
-      maxToolRounds: chain.maxToolRounds,
-      tools: chain.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name),
-      permissions: Object.fromEntries(chain.names().map((name) => [name, chain.check(name, CONVERSATION_SCOPE).verdict])),
-    }),
-  );
-  process.exit(0);
-}
-
-const toolChain = evalToolChain(config, (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`));
-const dataDir = mkdtempSync(join(tmpdir(), 'xixi-realism-'));
-
-function makeAdapter(): TurnModelProvider {
+/**
+ * 这个 runner 的模型装配：链由装配点给，本函数只决定「哪一个模型」。
+ * `--fake` 走离线替身（它跑的是真注册表上的真工具循环，所以离线也真的执行工具）。
+ */
+function makeAdapter(toolChain: ToolRegistry): TurnModelProvider {
   if (useFake) return new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE });
   return new MimoBrainAdapter({
     maxCompletionTokens: 400,
@@ -268,6 +274,72 @@ function makeAdapter(): TurnModelProvider {
     language: config.identity.language,
   });
 }
+
+export interface RealismRuntimeOptions {
+  readonly config: XixiConfig;
+  readonly store: XixiStore;
+  /** 覆盖模型装配（`--print-wiring` 给一个永不被调用的替身）。 */
+  readonly model?: ResidentModelInput | undefined;
+  /** 报告路径：插件的网络授权换成一用即抛的 fetch。 */
+  readonly offlinePlugins?: boolean | undefined;
+  /** 生命周期横幅往哪写（默认 stdout）；报告路径改成 stderr，好让 stdout 只剩报告那一行 JSON。 */
+  readonly log?: ((line: string) => void) | undefined;
+}
+
+/**
+ * 这个 runner 的常驻运行时（V0.3 P2.5-C）：工具链、插件内核（news 从这里进来）、审批宿主、
+ * durable 提醒、记忆提取与引擎一次装好。每个场景各建一个（场景之间不共享库、也不会互相传染人格）。
+ *
+ * The one tool chain this runner talks through (pack Phase 2, extended in t14/T5-F1, moved onto the
+ * resident assembly point in V0.3 P2.5-C): `createRealismRuntime` hands the chain out, so a realism
+ * run reaches the same built-ins with the same permissions and the same round cap as every other
+ * entry — plus whatever the plugins mount (news). `onToolCall` prints what actually ran: an offline
+ * run that answers a weather turn must show the tool in its log, not a lucky-looking sentence.
+ */
+export function createRealismRuntime(options: RealismRuntimeOptions): XixiResidentRuntime {
+  const { config, store } = options;
+  return createResidentRuntime({
+    config,
+    store,
+    ...realismPluginLayer(options.offlinePlugins === true || useFake),
+    onToolCall: (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
+    log: options.log ?? ((line) => console.log(line)),
+    conversation: { turnTimeoutMs: 90_000 },
+    model: options.model ?? (({ toolChain }) => makeAdapter(toolChain)),
+  });
+}
+
+// The offline wiring report (t14, P2.5-C): what this runner hands the model, with no model call and no store.
+if (has('print-wiring')) {
+  const runtime = createRealismRuntime({
+    config,
+    store: openXixiStore({ dbPath: ':memory:' }),
+    offlinePlugins: true,
+    // 报告的 stdout 只有那一行 JSON（脚本要能直接管道给 jq）：装配点自己的横幅改走 stderr。
+    log: (line) => process.stderr.write(`${line}\n`),
+    model: ({ toolChain }) => new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE }),
+  });
+  try {
+    const started = await runtime.start();
+    const chain = runtime.toolChain;
+    console.log(
+      JSON.stringify({
+        entry: 'eval-realism',
+        language: config.identity.language,
+        maxToolRounds: chain.maxToolRounds,
+        tools: chain.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name),
+        permissions: Object.fromEntries(chain.names().map((name) => [name, chain.check(name, CONVERSATION_SCOPE).verdict])),
+        plugins: { mounted: [...started.mounted], skipped: [...started.skipped], refused: [...started.refused] },
+      }),
+    );
+  } finally {
+    await runtime.stop();
+    runtime.store.close();
+  }
+  process.exit(0);
+}
+
+const dataDir = mkdtempSync(join(tmpdir(), 'xixi-realism-'));
 
 /** One scenario = one fresh store + session, so runs do not leak into each other. */
 async function runScenario(
@@ -282,8 +354,8 @@ async function runScenario(
   before?: (index: number, engine: ConversationEngine) => void,
 ): Promise<{ rounds: RoundRecord[]; violations: Violation[]; replyChars: number[] }> {
   const store = openXixiStore({ dataDir });
-  const adapter = makeAdapter();
-  const engine = new ConversationEngine({ adapter, store, config, turnTimeoutMs: 90_000 });
+  const runtime = createRealismRuntime({ config, store });
+  const engine = runtime.conversation;
   store.seedSelfProfile(config.personality.base);
   if (personality !== undefined) store.overrideSelfProfile(personality, `eval-realism:${id}`);
   const session = store.createSession();
@@ -292,6 +364,8 @@ async function runScenario(
   const violations: Violation[] = [];
   const chars: number[] = [];
   try {
+    // 插件/MCP/news 的工具是在 `start()` 里挂进链的（九步生命周期跑完再 mount），所以第一轮之前先启动。
+    await runtime.start();
     for (const [index, turn] of turns.entries()) {
       if (before !== undefined) before(index, engine);
       let result: Awaited<ReturnType<typeof engine.respond>> | null = null;
@@ -345,6 +419,8 @@ async function runScenario(
       }
     }
   } finally {
+    // 关库之前先关停运行时（`stop()` 先 drain 提取，再关停插件层、清空链）；顺序不能反。
+    await runtime.stop();
     store.close();
   }
   return { rounds, violations, replyChars: chars };

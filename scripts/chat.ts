@@ -17,6 +17,8 @@
  *   node scripts/chat.ts --personality verbosity=0.1,talkativeness=0.2
  *   node scripts/chat.ts --personality=verbosity=0.1
  *   node scripts/chat.ts --print-wiring   # 离线：打印这条入口交给模型的工具链，然后退出
+ *                                         #   （不调模型、不建库、不联网；工具集里含插件提供的
+ *                                         #    news.search / news.latest / news.for_interests）
  *   echo "西西，明天天气怎么样？`n那后天呢？" | node scripts/chat.ts
  *
  * `--personality` is an administrative baseline override (the M3 seam), applied
@@ -30,15 +32,23 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type ToolCallRecord, type ToolRegistry, type TurnModelProvider } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
-import { ConversationEngine } from '@xixi/conversation';
-import { openXixiStore, PERSONALITY_PROPERTIES, personalityProperty, resolveCanonicalDataDir, type XixiConfig } from '@xixi/domain';
+import { openXixiStore, PERSONALITY_PROPERTIES, personalityProperty, resolveCanonicalDataDir, type XixiConfig, type XixiStore } from '@xixi/domain';
 import { WeatherClient, type MimoClient } from '@xixi/model-adapters';
+import { createRssNewsSource } from '@xixi/plugins/news';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
 // V0.3 P0-A: the shared tool chain moved to `@xixi/runtime`; `scripts/field-test.ts` still
 // re-exports it for anyone that has not migrated yet (this entry has — it no longer imports
 // the console script at all). See pack `04_RUNTIME_CONSOLIDATION.md` §1 Step A.
-import { CONVERSATION_SCOPE, buildToolChain, createTurnExtraction } from '@xixi/runtime';
+// V0.3 P2.5-C: 这个入口的工具链、插件内核（news 从这里进来）、审批宿主、durable 提醒、提取与引擎
+// 全部来自常驻装配点 `createResidentRuntime` —— 本文件不再自己拼链，也不再自己 new 引擎。
+import {
+  CONVERSATION_SCOPE,
+  createResidentRuntime,
+  type PluginChainOptions,
+  type ResidentModelInput,
+  type XixiResidentRuntime,
+} from '@xixi/runtime';
 
 export interface PersonalityArgsResult {
   /**
@@ -159,18 +169,104 @@ function offlineWeatherSource(): WeatherClient {
 }
 
 /**
- * The one tool chain this entry talks through (pack Phase 2, extended in t14/T5-F1).
+ * 这个部署的新闻来源（V0.3 P2.5-C）。
  *
- * It is the console's own `buildToolChain`, not a CLI-local copy of the built-in set: the registry,
- * the permission policy and the round cap are therefore the same objects the field-test console and
- * the trial page use, and a new tool joins every entry at once. `--fake` gets an in-memory weather
- * source so the offline demo stays offline; every other mode keeps the real one.
+ * 今天它是**入口里显式给出**的一条公开 RSS —— 与手动探针 `node scripts/probe-tools.ts --news-live`
+ * 用的是同一个默认 feed。为什么不能「先不配来源」：`news.*` 三个工具是插件的 manifest 声明的，
+ * 没有来源时它们**照样会被广告给模型**，而调用只会得到 `items: []`（`asked: 0`）—— 模型很容易把它
+ * 读成「今天没什么新闻」，那正是这个仓库反复禁止的「拿不到就编」。真来源取不到时，`problems` 里带着
+ * 来源自己的话进返回，模型能如实说「我这边取不到」。
+ *
+ * P2.5-H（`config.plugins.news.sources`）会把这一段换成配置驱动；在那之前它是**每个入口一份**的
+ * 显式声明，改的时候四处一起改（四个入口的工具集由 `tests/console/live-entry-tool-chain.test.ts`
+ * 钉成同一条，来源差异只能靠这份注释人工核对）。
+ */
+const NEWS_FEED_URL = 'https://feeds.bbci.co.uk/news/world/rss.xml';
+
+/**
+ * `--fake`（以及 `--print-wiring`）的离线保证：**给插件网络授权的 fetch 一用即抛**。
+ *
+ * `--fake` 的天气走一个离线夹具（它是**固定读数**的演示数据），新闻不一样：离线桩提供的是**编出来的
+ * 标题**，让用户会看到的入口念出假新闻比编天气危险得多（铁律 8 的精神）。所以 `--fake` 只保证
+ * 「绝不联网」——真去取就抛在这里，而不是悄悄发出去、也不是拿假头条顶上。
+ */
+const offlinePluginFetch = (async (input: string | URL | Request) => {
+  throw new Error(`这次运行是离线的，不允许联网：${String(input)}`);
+}) as unknown as typeof fetch;
+
+/** 这个入口的插件层入参：来源是新闻插件，离线开关换掉它的网络授权。 */
+function chatPluginLayer(mode: ChatMode, offline: boolean): Pick<PluginChainOptions, 'news' | 'fetchImpl' | 'weatherClient'> {
+  return {
+    ...(mode === 'fake' ? { weatherClient: offlineWeatherSource() } : {}),
+    ...(offline ? { fetchImpl: offlinePluginFetch } : {}),
+    news: {
+      // The factory form: the real source is built from the **granted** fetch (`ctx.network`), so the
+      // manifest's `network` permission is load-bearing rather than decorative — and the offline
+      // switch above reaches the source instead of being bypassed by a captured global.
+      sources: [(env) => createRssNewsSource({ name: 'BBC World', url: NEWS_FEED_URL, fetchImpl: env.fetchImpl })],
+    },
+  };
+}
+
+export interface ChatRuntimeOptions {
+  readonly config: XixiConfig;
+  /** 这个进程的库。报告路径传一个一次性内存库，真实路径传 household/`XIXI_CHAT_DATA_DIR`。 */
+  readonly store: XixiStore;
+  readonly mode: ChatMode;
+  /** 覆盖模型装配（测试注入替身走这里；不给就按 `mode` 决定）。 */
+  readonly model?: ResidentModelInput | undefined;
+  readonly onToolCall?: ((record: ToolCallRecord) => void) | undefined;
+  /**
+   * 把插件的 `network` 授权换成「一用即抛」的 fetch（`--fake` 自动开，`--print-wiring` 显式开）。
+   * 开着就**结构上不可能联网**：任何插件请求都会在 `offlinePluginFetch` 里抛出来。
+   */
+  readonly offlinePlugins?: boolean | undefined;
+  /** 生命周期横幅往哪写（默认 stdout）。报告路径改成 stderr，好让 stdout 只剩报告那一行 JSON。 */
+  readonly log?: ((line: string) => void) | undefined;
+}
+
+/**
+ * 这个入口的常驻运行时（V0.3 P2.5-C）：**工具链、插件内核、审批宿主、durable 提醒、记忆提取与引擎
+ * 一次装好**，本文件只决定「哪一个模型」与「插件层配了什么」。
+ *
+ * 为什么要有这个函数而不在 `main()` 里直接 `createResidentRuntime(...)`：`--print-wiring` 与真实一轮
+ * 必须是**同一份装配**（报告里的工具集就是真一轮交给模型的工具集），差别只允许有三处，而且都是为了
+ * 离线报告：一次性内存库、一用即抛的 fetch、注入的替身模型 —— 见 `printWiring`。
+ */
+export function createChatRuntime(options: ChatRuntimeOptions): XixiResidentRuntime {
+  const { config, store, mode } = options;
+  const offline = options.offlinePlugins === true || mode === 'fake';
+  return createResidentRuntime({
+    config,
+    store,
+    ...chatPluginLayer(mode, offline),
+    onToolCall:
+      options.onToolCall ??
+      ((record) => process.stderr.write(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}\n`)),
+    log: options.log ?? ((line) => console.log(line)),
+    conversation: { turnTimeoutMs: 60_000 },
+    model: options.model ?? (({ toolChain }) => buildChatAdapter({ mode, config, store, toolChain })),
+  });
+}
+
+/**
+ * 这个入口的**核心链**（不含插件工具），留给离线用例驱动适配器。
+ *
+ * 兼容表面（V0.3 P2.5-C）：入口自己不再调它 —— `main()` 与 `--print-wiring` 都走 `createChatRuntime`。
+ * 保留它是因为 `tests/console/chat-reply-language.test.ts`（不在本次改动范围）用它拿一个注册表来跑
+ * `buildDirectAdapter`；而这里给的是**同一个装配点的链**，不是第二条 `buildToolChain`：权限政策、
+ * 轮数上限、`--fake` 的离线天气源因此只有一处定义，改一处两条路一起变。
+ *
+ * 未启动，所以看到的是三个内置工具（插件工具要 `runtime.start()` 之后才挂进来）；库是一次性内存库，
+ * 不落盘、不碰 household 库。
  */
 export function buildChatToolChain(mode: ChatMode, config: XixiConfig, onToolCall?: (record: ToolCallRecord) => void): ToolRegistry {
-  return buildToolChain(config, {
+  return createChatRuntime({
+    config,
+    mode,
+    store: openXixiStore({ dbPath: ':memory:' }),
     ...(onToolCall === undefined ? {} : { onToolCall }),
-    ...(mode === 'fake' ? { weatherClient: offlineWeatherSource() } : {}),
-  });
+  }).toolChain;
 }
 
 export interface ChatDirectAdapterOptions {
@@ -185,10 +281,10 @@ export interface ChatDirectAdapterOptions {
  * real thing instead of a lookalike.
  *
  * Two t14 fixes live here. T5-F1: the adapter is handed the shared *registry* (not a bare
- * `defaultTools` list), so this CLI gets the same four built-ins, the same permissions and the same
- * four-round cap as the console. T5-F3: the reply-hygiene filter is told the **deployment language**
- * from the config; the adapter's own default is a hard-coded `zh-CN`, and a deployment that speaks
- * something else must not silently inherit that assumption.
+ * `defaultTools` list), so this CLI gets the same built-ins (three since P2-D), the same permissions
+ * and the same four-round cap as the console. T5-F3: the reply-hygiene filter is told the **deployment
+ * language** from the config; the adapter's own default is a hard-coded `zh-CN`, and a deployment that
+ * speaks something else must not silently inherit that assumption.
  */
 export function buildDirectAdapter(options: ChatDirectAdapterOptions): MimoBrainAdapter {
   return new MimoBrainAdapter({
@@ -199,6 +295,28 @@ export function buildDirectAdapter(options: ChatDirectAdapterOptions): MimoBrain
     timezone: options.config.identity.timezone,
     language: options.config.identity.language,
   });
+}
+
+/**
+ * 按 `mode` 选这一轮的模型适配器（V0.3 P2.5-C：链由装配点给，本函数只决定「哪一个模型」）。
+ *
+ * 适配器在装配时就构造好了，但**只在这一轮真的说话时才会被调用** —— `--print-wiring` 因此可以走
+ * 同一个装配而不碰模型（`MimoClient` 的构造不读密钥、不发请求；缺密钥只在真正发起请求时才报）。
+ */
+export function buildChatAdapter(options: { readonly mode: ChatMode; readonly config: XixiConfig; readonly store: XixiStore; readonly toolChain: ToolRegistry }): TurnModelProvider {
+  if (options.mode === 'fake') return new FakeBrainAdapter({ registry: options.toolChain, scope: CONVERSATION_SCOPE });
+  if (options.mode === 'dsh') {
+    const transport = new CliDshTransport({
+      dshHome: DSH_HOME,
+      profile: DSH_PROFILE,
+      cwd: REPO_ROOT,
+      env: harnessEnv(),
+      timeoutMs: 240_000,
+      onDiagnostic: (line) => process.stderr.write(`[dsh] ${line}\n`),
+    });
+    return new DshBrainAdapter({ transport, store: options.store });
+  }
+  return buildDirectAdapter({ config: options.config, toolChain: options.toolChain });
 }
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
@@ -222,19 +340,10 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   const config = loadConfig();
   const mode: ChatMode = useFake ? 'fake' : useDsh ? 'dsh' : 'mimo';
 
-  // The offline wiring report (t14): what this entry hands the model, with no model call and no
-  // store. The chain comes from the same builder `buildAdapter` uses, so it cannot drift from it.
+  // The offline wiring report (t14, P2.5-C): what this entry hands the model, with no model call and
+  // no store.
   if (argv.includes('--print-wiring')) {
-    const chain = buildChatToolChain(mode, config);
-    console.log(
-      JSON.stringify({
-        entry: 'chat',
-        language: config.identity.language,
-        maxToolRounds: chain.maxToolRounds,
-        tools: chain.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name),
-        permissions: Object.fromEntries(chain.names().map((name) => [name, chain.check(name, CONVERSATION_SCOPE).verdict])),
-      }),
-    );
+    await printWiring(config, mode);
     return;
   }
 
@@ -259,44 +368,20 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     console.log(`生效人格（已写入 self_profile，重启后仍是它）：${JSON.stringify(store.selfProfile())}`);
   }
 
-  function buildAdapter(): TurnModelProvider {
-    // One chain for the REPL's text turns, built by the console's own factory (t14/T5-F1): the
-    // `--fake` branch runs the real loop over the real registry, so "offline" exercises the tool
-    // path instead of skipping it, and `--dsh` is untouched because the harness owns its tools.
-    const toolChain = buildChatToolChain(mode, config, (record) =>
-      process.stderr.write(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}\n`),
-    );
-    if (useFake) return new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE });
-    if (useDsh) {
-      const transport = new CliDshTransport({
-        dshHome: DSH_HOME,
-        profile: DSH_PROFILE,
-        cwd: REPO_ROOT,
-        env: harnessEnv(),
-        timeoutMs: 240_000,
-        onDiagnostic: (line) => process.stderr.write(`[dsh] ${line}\n`),
-      });
-      return new DshBrainAdapter({ transport, store });
-    }
-    return buildDirectAdapter({ config, toolChain });
-  }
-
-  const adapter = buildAdapter();
   /**
-   * V0.3 P1-b：这个入口以前**没有**接过 `afterTurn` —— 命令行里聊过的事不进记忆，
-   * 而试用页会（同一个西西因此表现不一致）。装配与另外两个入口共用同一份工厂：
-   * `afterTurn` 只入队不 await，`drain()` 在关库之前把排队与在飞的活跑完。
+   * V0.3 P2.5-C：**装配一次** —— 工具链、插件内核、审批宿主、durable 提醒、记忆提取与引擎都在
+   * `runtime` 上。`afterTurn` 由装配点内部接到共享提取器（V0.3 P1-b 的同一份工厂：只入队不 await），
+   * 而 `runtime.stop()` 内含 `extraction.drain()`，所以关库之前的那条纪律还在。
+   *
+   * 插件/MCP/news 的工具是在 `start()` 里挂进链的（九步生命周期跑完再 mount），所以**说话之前**
+   * 先启动：第一轮起模型看到的就是「插件已经在链上」的那条链。
    */
-  const extraction = createTurnExtraction({ store, config });
-  const engine = new ConversationEngine({
-    adapter,
-    store,
-    config,
-    turnTimeoutMs: 60_000,
-    afterTurn: extraction.afterTurn,
-  });
+  const runtime = createChatRuntime({ config, store, mode });
+  await runtime.start();
+  const engine = runtime.conversation;
 
-  console.log(`西西（${adapter.describe().provider} / ${adapter.describe().model}）已就绪。`);
+  const described = engine.adapter.describe();
+  console.log(`西西（${described.provider} / ${described.model}）已就绪。`);
   console.log(`会话 ${session.sessionId}，已有 ${session.turnCount} 轮；人格 ${JSON.stringify(store.selfProfile())}`);
   console.log(
     `跟进窗口 ${engine.lingerMs}ms（由人格 silence_tolerance=${engine.silenceTolerance} 缩放）；` +
@@ -391,9 +476,60 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     await handle(line);
   }
   store.recordHealth('chat', 'ok', 'session ended');
-  // 关库之前先把后台提取跑完（t9 F3 的同一纪律：数据丢失不能是无声的）。
-  await extraction.drain();
+  /**
+   * 关库之前先关停常驻运行时（t9 F3 的同一纪律：数据丢失不能是无声的）：`stop()` 的第一件事就是
+   * `extraction.drain()`（排队与在飞的提取跑完），然后才关停插件层、清空链。**顺序不能反** ——
+   * 关停报告里的「还有几条提醒 / 几条待批」要读得到库。
+   */
+  await runtime.stop();
   store.close();
+}
+
+/**
+ * `--print-wiring` 的报告（V0.3 P2.5-C）：这条入口交给模型的工具集，**离线**打印。
+ *
+ * 三条离线保证，都是结构性的，而不是「这次恰好没发生」：
+ *
+ *  * **不建库**：库是一次性内存库（`StoreOptions.dbPath` 给测试用的那条 `:memory:`），不落盘、
+ *    不碰 household 库；
+ *  * **不联网**：插件的 `network` 授权被换成「一用即抛」的 `offlinePluginFetch`；
+ *  * **不调模型**：注入一个**永不被调用**的替身（`--fake` 用的那个 `FakeBrainAdapter`），而不是按
+ *    `mode` 装配真适配器 —— 真适配器会解析 DSH 安装路径 / 建客户端，那些与本报告无关，却能让报告
+ *    因为一台没装 DSH 的机器失败。所以**无密钥、无 DSH 也能 exit 0**。
+ *
+ * 工具集**不是手写清单**：它是 `start()` 跑完九步生命周期、插件工具真的挂进链**之后**的注册表，
+ * 而 `plugins.mounted` 是那次挂载自己的记录 —— 两句话互相印证，不可能各写一份。
+ */
+async function printWiring(config: XixiConfig, mode: ChatMode): Promise<void> {
+  const runtime = createChatRuntime({
+    config,
+    mode,
+    store: openXixiStore({ dbPath: ':memory:' }),
+    offlinePlugins: true,
+    // 报告的 stdout 只有那一行 JSON（脚本要能直接管道给 jq）：装配点自己的横幅改走 stderr。
+    log: (line) => process.stderr.write(`${line}\n`),
+    // 替身模型：报告只读工具链，这条路径从不发起一轮（见上面的三条保证）。
+    model: ({ toolChain }) => new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE }),
+  });
+  try {
+    const started = await runtime.start();
+    const chain = runtime.toolChain;
+    console.log(
+      JSON.stringify({
+        entry: 'chat',
+        language: config.identity.language,
+        maxToolRounds: chain.maxToolRounds,
+        tools: chain.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name),
+        permissions: Object.fromEntries(chain.names().map((name) => [name, chain.check(name, CONVERSATION_SCOPE).verdict])),
+        // 插件那一层的实况：这次 `start()` 挂了什么进来、拒了什么（内置工具不会被覆盖，所以
+        // 「工具集里多出来的那三个」只能来自这里）。
+        plugins: { mounted: [...started.mounted], skipped: [...started.skipped], refused: [...started.refused] },
+      }),
+    );
+  } finally {
+    await runtime.stop();
+    runtime.store.close();
+  }
 }
 
 // Guarded so tests can import `parsePersonalityArgs` without opening the store,

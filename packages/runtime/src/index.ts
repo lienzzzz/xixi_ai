@@ -154,8 +154,9 @@ export {
 
 // V0.3 P2.5-A：**唯一的常驻装配点**。上面这些零件（工具链、插件内核、审批宿主、durable 提醒、
 // 提取、引擎）在这里被组装成一个对象，live 入口只调一次取用。
-// **接线状态：四个 live 入口尚未接线**（它们仍然各自拼一套），提醒也还没有接进主动循环 ——
-// 这两句的完整口径与逐条说明在 `./resident-runtime.ts` 顶部的接线状态块里，别在别处另写一份。
+// **接线状态：live 入口已经接线**（工具链与引擎都取自这里），**提醒回路尚未接线**（`runtime.reminders`
+// 还没有 tick 调用点，也没接进 `ProactiveLoop`）—— 逐入口的事实与两条可复核命令在
+// `./resident-runtime.ts` 顶部的接线状态块里，别在别处另写一份名单。
 export {
   createResidentRuntime,
   type ResidentConversationOptions,

@@ -22,11 +22,17 @@
  * importing them from `scripts/field-test.ts`, which makes this file the regression test for that
  * compatibility surface — if it ever loses the symbols, this test fails to even load.
  *
+ * V0.3 P2.5-C note: the four entries now take their chain from the resident assembly point
+ * (`createResidentRuntime`), so the plugin's tools are in it as well. The **plugin half of the
+ * expectation comes from the plugin's own exported names** (`NEWS_SEARCH_TOOL` …), never from a
+ * copied list, and `plugins.mounted` (the start report's own record of what the kernel mounted) has to
+ * agree with it — a report that listed tools nobody mounted would fail here.
+ *
  * Run: `npm run test:console` (also part of `npm test`).
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -34,6 +40,7 @@ import { test } from 'node:test';
 import { CONVERSATION_SCOPE, buildToolChain } from '../../scripts/field-test.ts';
 import { FakeBrainAdapter } from '@xixi/brain-adapter';
 import type { InlinePlugin } from '@xixi/plugins';
+import { NEWS_FOR_INTERESTS_TOOL, NEWS_LATEST_TOOL, NEWS_SEARCH_TOOL } from '@xixi/plugins/news';
 import { CONVERSATION_SCOPE as RUNTIME_SCOPE, buildToolChain as runtimeBuildToolChain } from '@xixi/runtime';
 import { REPO_ROOT, loadConfig } from '../../scripts/lib/harness.ts';
 
@@ -44,6 +51,15 @@ const ENTRIES = [
   { name: 'eval-realism', script: 'scripts/eval-realism.ts' },
   { name: 'eval-conversation', script: 'scripts/eval-conversation.ts' },
 ] as const;
+
+/**
+ * 插件 `xixi.news` 贡献的三个工具，按它自己的登记顺序（`createNewsTools` 依次登记 search → latest →
+ * for_interests，`mountPluginTools` 按同一顺序复制进链）。
+ *
+ * 名字取自 `@xixi/plugins/news` 的导出常量而不是抄一份字面量：插件里改名时这条期望跟着动，
+ * 而 `plugins.mounted` 会把「报告里的工具集」与「内核这次真的挂了什么」钉在一起。
+ */
+const NEWS_TOOLS = [NEWS_SEARCH_TOOL, NEWS_LATEST_TOOL, NEWS_FOR_INTERESTS_TOOL] as const;
 
 const SPAWN_TIMEOUT_MS = 90_000;
 
@@ -84,28 +100,34 @@ function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
-test('四个 live 入口报告的工具链与 console 是同一条', { timeout: SPAWN_TIMEOUT_MS }, async () => {
+test('四个 live 入口报告的工具链与 console 是同一条（含插件提供的新闻工具）', { timeout: SPAWN_TIMEOUT_MS }, async () => {
   const config = loadConfig();
   const consoleChain = buildToolChain(config);
+  const builtIns = consoleChain.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name);
   const expected = {
     maxToolRounds: consoleChain.maxToolRounds,
-    tools: consoleChain.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name),
-    permissions: Object.fromEntries(consoleChain.names().map((name) => [name, consoleChain.check(name, CONVERSATION_SCOPE).verdict])),
+    // 内核的三个内置 + 插件挂上来的三个（P2.5-C：链由常驻装配点给，插件工具真的在链上）。
+    tools: [...builtIns, ...NEWS_TOOLS],
+    permissions: {
+      ...Object.fromEntries(consoleChain.names().map((name) => [name, consoleChain.check(name, CONVERSATION_SCOPE).verdict])),
+      // 新闻工具是 read、声明在 conversation 作用域，而这个部署没有声明任何审批（`tools.approval.ask` 为空）。
+      ...Object.fromEntries(NEWS_TOOLS.map((name) => [name, 'allow'])),
+    },
   };
   // A sanity check on the expectation itself: if the console ever stops exposing the built-ins, the
   // four comparisons below would all trivially agree on an empty set.
-  assert.equal(expected.tools.length, 3, 'console 的内置工具集应当是三个（pack Phase 2，P2-D 起新闻改由插件提供）');
+  assert.equal(builtIns.length, 3, 'console 的内置工具集应当是三个（pack Phase 2，P2-D 起新闻改由插件提供）');
   assert.equal(expected.maxToolRounds, 4, '轮数上限由注册表钳制（pack Phase 2）');
   // V0.3 P0-A: name them. Until this line the four comparisons could still all agree on the
   // *wrong* tools; the extraction moved the assembly point, so the built-in set itself is
   // part of what "the same chain" means.
   assert.deepEqual(
-    expected.tools,
+    builtIns,
     ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder'],
     '内置工具集就是这三个（pack Phase 2；新闻不是内置工具了）',
   );
   assert.deepEqual(
-    expected.permissions,
+    Object.fromEntries(consoleChain.names().map((name) => [name, consoleChain.check(name, CONVERSATION_SCOPE).verdict])),
     {
       xixi_get_current_time: 'allow',
       xixi_get_weather: 'allow',
@@ -125,6 +147,44 @@ test('四个 live 入口报告的工具链与 console 是同一条', { timeout: 
     // T5-F3 is part of the same wiring: the reply filter needs the deployment language, not a
     // hard-coded one, and every entry has to say which language it configured.
     assert.equal(wiring.language, config.identity.language, `${entry.script} 的回复过滤语言必须来自部署配置`);
+    // P2.5-C：这三个工具是**插件挂上来的**，不是写死在入口里的清单 —— `plugins.mounted` 是那次
+    // `start()` 自己的记录，与上面的 `tools` 必须对得上（工具集与挂载记录各写一份就会在这里红）。
+    const plugins = wiring.plugins as { mounted?: unknown; skipped?: unknown; refused?: unknown } | undefined;
+    assert.ok(plugins !== undefined, `${entry.script} 的报告必须带插件层的实况（P2.5-C）`);
+    assert.deepEqual(plugins.mounted, [...NEWS_TOOLS], `${entry.script} 的新闻工具必须来自插件的那次挂载`);
+    assert.deepEqual(plugins.skipped, [], `${entry.script}：内置工具名没有被插件覆盖`);
+    assert.deepEqual(plugins.refused, [], `${entry.script}：这条链上没有工具被权限政策拒绝`);
+  }
+});
+
+/**
+ * P2.5-C 的「离线」是**结构性**的，不是「这次恰好没发生」：四个入口的 `--print-wiring` 都不许
+ * 建库（报告路径用的是一次性内存库 `:memory:`）。
+ *
+ * 判据是可观察的：把一个**不存在**的数据目录交给它们（`XIXI_DATA_DIR` 是 household 的总开关，
+ * 三个 legacy 变量是各自的开关），跑完之后那个目录仍然不存在。一个真的打开了库的实现会在
+ * `openXixiStore` 里 `mkdirSync` 出它，于是这条立刻红。
+ *
+ * 同一条用例顺手钉住「无密钥也能 exit 0」：`MIMO_API_KEY` 显式给空串（`.env` 因此不会把它补回来），
+ * 所以任何真的构造/调用直连模型的实现都会在这一步露馅。
+ */
+test('四个入口的 --print-wiring 不建库、不要密钥（P2.5-C）', { timeout: SPAWN_TIMEOUT_MS }, async () => {
+  const dir = tempDir('xixi-wiring-nostore-');
+  rmSync(dir, { recursive: true, force: true });
+  try {
+    assert.equal(existsSync(dir), false, '判据本身要先成立：这个目录起点是不存在的');
+    for (const entry of ENTRIES) {
+      const result = await run(entry.script, ['--print-wiring'], {
+        XIXI_DATA_DIR: dir,
+        XIXI_CHAT_DATA_DIR: dir,
+        XIXI_VOICE_DATA_DIR: dir,
+        MIMO_API_KEY: '',
+      });
+      assert.equal(result.status, 0, `${entry.script} --print-wiring 必须在无密钥下 exit 0：\n${result.out}`);
+      assert.equal(existsSync(dir), false, `${entry.script} --print-wiring 不得建库（数据目录不该被创建）：${dir}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
   }
 });
 

@@ -31,18 +31,32 @@
  *
  * ## 接线状态（诚实记录，AGENTS §9.24）
  *
- * 这个文件是**装配点**，不是**接线**。今天的事实是：
+ * 这个文件是**装配点**。要看「谁接了线」，请复核下面两条命令的命中，**不要引用写死在文档里的名单或计数**
+ * （名单会随代码变化而过期，命令不会）：
  *
- *  * **入口尚未接线**：四个 live 入口（`scripts/chat.ts`、`scripts/serve-chat.ts`、
- *    `scripts/field-test.ts`、`scripts/voice-turn.ts`）仍然各自调 `buildToolChain` /
- *    `buildPluginRuntime`，一个都还没有走 `createResidentRuntime`。P2.5-B（四个入口改走本装配点）
- *    是后续任务；在那之前，「插件工具对模型可见」这条**已经成立的能力，在真实入口里还看不到**。
+ * ```text
+ * git grep -n 'createResidentRuntime(' -- scripts   # 已经走本装配点的入口（每个 live 入口都该命中）
+ * git grep -n 'buildToolChain(' -- scripts          # 还在自己拼链的地方（入口不该命中：命中就是漏接线）
+ * ```
+ *
+ * 事实是：
+ *
+ *  * **P2.5-A 写下的「入口尚未接线」是一条已经还清的债**：上面第一条命令的命中就是还款凭证。
+ *    现场测试控制台、试用页、文字 CLI、语音单轮，以及三个附带入口（设备自检、真人感评测、对话评测）
+ *    的工具链都是**本装配点的链**（`runtime.toolChain`），插件/MCP/news 的工具在 `start()` 里挂进
+ *    同一个注册表 —— 所以「插件工具对模型可见」在真实入口里成立。
+ *    两个例外都不算入口：`scripts/probe-tools.ts` 是**诊断探针**，仍然直接调 `buildPluginRuntime`（故意不
+ *    经本装配点）；`scripts/eval-proactive-timeline.ts` 是**确定性仿真**（假大脑 + 模拟时钟、不带工具），
+ *    它自己 `new ConversationEngine` 是设计的一部分，不是漏接线。
+ *    （「入口尚未接线」这几个字只作为**历史引文**留在这里：P2.5-A 就是这么写下这条债的，而它已经还清。
+ *    口径的现状一律用上面两条命令核，不要读这半句。）
  *  * **提醒回路尚未接线**：`ReminderScheduler` 只是被装配出来（`runtime.reminders`），
  *    **没有任何 tick 调用点**，也没有接进 `ProactiveLoop`（那是 P2.5-F）。也就是说「到点她会说出来」
  *    今天仍然只是**手调 `tick()` 才看得见**的事，不是活的。
- *  * **提示词权威在本装配点上是接上的**：`ConversationEngine` 拿到的 assembler 是
- *    `verifyOnAssemble(...)` 包过的（插件贡献要进提示词就得先过 `verify`）。但**没有 live 入口经过本装配点**，
- *    所以「生产 Prompt 被守住」这句话今天同样只在装配点内部为真 —— 不要写成已经守住真实入口的提示词。
+ *  * **提示词权威的调用点在本装配点上**：`ConversationEngine` 拿到的 assembler 是
+ *    `verifyOnAssemble(...)` 包过的（插件贡献要进提示词就得先过 `verify`），而上面那些入口的引擎都是
+ *    本装配点给的 `runtime.conversation`。这句话只说「入口的提示词真的路过了校验包装」；**校验器自己能
+ *    拦住什么，以 `packages/plugins/src/prompt-authority.ts` 的接线状态为准**（那份文件顶部的口径是唯一出处）。
  */
 import type { TurnModelProvider } from '@xixi/brain-adapter';
 import type { StructuredMemoryExtractor } from '@xixi/context';

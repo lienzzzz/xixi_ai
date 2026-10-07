@@ -42,14 +42,22 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
-import { FakeBrainAdapter, type TurnModelProvider } from '@xixi/brain-adapter';
-import { ConversationEngine } from '@xixi/conversation';
+import { FakeBrainAdapter, MimoBrainAdapter, type ToolRegistry, type TurnModelProvider } from '@xixi/brain-adapter';
 import { MimoClient } from '@xixi/model-adapters';
-import { openXixiStore, resolveCanonicalDataDir } from '@xixi/domain';
+import { openXixiStore, resolveCanonicalDataDir, type XixiConfig, type XixiStore } from '@xixi/domain';
+import { createRssNewsSource } from '@xixi/plugins/news';
 // V0.3 P0-A: the tool chain moved to `@xixi/runtime` (pack `04_RUNTIME_CONSOLIDATION.md` §1
 // Step A). This voice entry and the console still must not drift into two chains — they simply
 // share the runtime package's one now instead of the console script's.
-import { CONVERSATION_SCOPE, buildToolChain, createTurnExtraction } from '@xixi/runtime';
+// V0.3 P2.5-C: 工具链、插件内核（news 从这里进来）、审批宿主、durable 提醒、提取与引擎全部来自常驻
+// 装配点 `createResidentRuntime` —— 本文件不再自己拼链，也不再自己 new 引擎 / 建提取器。
+import {
+  CONVERSATION_SCOPE,
+  createResidentRuntime,
+  type PluginChainOptions,
+  type ResidentModelInput,
+  type XixiResidentRuntime,
+} from '@xixi/runtime';
 
 import { REPO_ROOT, loadConfig, printEvidence, readDotEnv, resolvePython } from './lib/harness.ts';
 import { concatWav, readWavInfo, readWav } from './lib/wav.ts';
@@ -147,6 +155,72 @@ function runPython(args: string[]): Promise<string> {
       if (code === 0 || code === 2) resolve(stdout);
       else reject(new Error(`VAD failed (exit ${code}): ${stderr.slice(-400)}`));
     });
+  });
+}
+
+/**
+ * 这个部署的新闻来源（V0.3 P2.5-C，与 `scripts/chat.ts` 同一份口径）。
+ *
+ * 今天它是**入口里显式给出**的一条公开 RSS（与 `node scripts/probe-tools.ts --news-live` 的默认
+ * feed 相同）。不能「先不配来源」：`news.*` 三个工具照样会被广告给模型，而没有来源的调用只会得到
+ * `items: []`（`asked: 0`），模型很容易读成「今天没什么新闻」——那正是这个仓库反复禁止的「拿不到就编」。
+ * P2.5-H 会把这一段换成 `config.plugins.news.sources`；在那之前它是**每个入口一份**的显式声明
+ * （四个入口的工具集由 `tests/console/live-entry-tool-chain.test.ts` 钉成同一条）。
+ */
+const NEWS_FEED_URL = 'https://feeds.bbci.co.uk/news/world/rss.xml';
+
+/**
+ * `--fake` 的离线保证：给插件网络授权的 fetch **一用即抛**。
+ *
+ * 天气那半没有这个问题（`--fake` 的天气是固定读数的夹具），新闻不一样：离线桩给的是**编出来的标题**，
+ * 让入口念出假新闻比编天气危险得多（铁律 8 的精神）。所以 `--fake` 只保证「绝不联网」，真去取就抛。
+ */
+const offlinePluginFetch = (async (input: string | URL | Request) => {
+  throw new Error(`--fake 是离线运行，不允许联网：${String(input)}`);
+}) as unknown as typeof fetch;
+
+export interface VoiceTurnRuntimeOptions {
+  readonly config: XixiConfig;
+  readonly store: XixiStore;
+  /** 离线运行（`--fake`）：插件的网络授权换成一用即抛的 fetch。 */
+  readonly offline: boolean;
+  /** 覆盖模型装配（测试注入替身走这里）。 */
+  readonly model?: ResidentModelInput | undefined;
+}
+
+/**
+ * 这个入口的常驻运行时（V0.3 P2.5-C）：工具链、插件内核（news 从这里进来）、审批宿主、
+ * durable 提醒、记忆提取与引擎一次装好；本函数只决定「插件层配了什么」与「哪一个模型」。
+ */
+export function createVoiceTurnRuntime(options: VoiceTurnRuntimeOptions): XixiResidentRuntime {
+  const { config, store, offline } = options;
+  const plugins: Pick<PluginChainOptions, 'news' | 'fetchImpl'> = {
+    ...(offline ? { fetchImpl: offlinePluginFetch } : {}),
+    news: { sources: [(env) => createRssNewsSource({ name: 'BBC World', url: NEWS_FEED_URL, fetchImpl: env.fetchImpl })] },
+  };
+  return createResidentRuntime({
+    config,
+    store,
+    ...plugins,
+    onToolCall: (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
+    log: (line) => console.log(line),
+    conversation: { turnTimeoutMs: 60_000 },
+    model: options.model ?? (({ toolChain }) => buildVoiceTurnAdapter({ offline, config, toolChain })),
+  });
+}
+
+/**
+ * Pack Phase 2 / V0.3 P2.5-C：链由装配点给，本函数只决定「哪一个模型」。
+ * 适配器在这一轮真的说话时才会被调用，所以 `--fake` 与「有没有密钥」都与工具集无关。
+ */
+export function buildVoiceTurnAdapter(options: { readonly offline: boolean; readonly config: XixiConfig; readonly toolChain: ToolRegistry }): TurnModelProvider {
+  if (options.offline) return new FakeBrainAdapter({ registry: options.toolChain, scope: CONVERSATION_SCOPE });
+  return new MimoBrainAdapter({
+    maxCompletionTokens: 400,
+    registry: options.toolChain,
+    scope: CONVERSATION_SCOPE,
+    timezone: options.config.identity.timezone,
+    language: options.config.identity.language,
   });
 }
 
@@ -253,37 +327,21 @@ const store = openXixiStore({ dataDir: voiceDataDir });
 store.seedSelfProfile(config.personality.base);
 const session = store.latestSession() ?? store.createSession();
 /**
- * V0.3 P1-b：一轮之后的记忆提取（pack §4 §5）。`afterTurn` **只入队、不 await**，
- * 所以语音的延迟与「她要不要写记忆」无关；`drain()` 在关库之前把排队与在飞的活跑完。
+ * V0.3 P2.5-C：**装配一次** —— 工具链、插件内核（news 从这里进来）、审批宿主、durable 提醒、
+ * 记忆提取与引擎都在 `runtime` 上。
+ *
+ * 两条纪律都还在，只是搬进了装配点：
+ *
+ *  * V0.3 P1-b：一轮说完之后的提取走装配点共享的那份工厂（`afterTurn` 只入队、不 await），
+ *    所以语音的延迟与「她要不要写记忆」无关；
+ *  * `runtime.stop()` 内含 `extraction.drain()`，关库之前排队与在飞的活一定跑完。
+ *
+ * 插件/MCP/news 的工具是在 `start()` 里挂进链的（九步生命周期跑完再 mount），所以**处理第一个
+ * wav 之前**先启动：语音问天气/新闻时，模型看到的已经是一条带插件工具的链。
  */
-const extraction = createTurnExtraction({ store, config });
-/**
- * Pack Phase 2: the file-driven voice entry uses the *same* tool chain as the text
- * entries (`buildToolChain` → one registry with the four built-ins). Before this, the
- * voice path had no tools at all: asking about the weather by voice could only be
- * answered from memory.
- */
-const toolChain = buildToolChain(config, {
-  onToolCall: (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
-});
-const adapter: TurnModelProvider = useFake
-  ? new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE })
-  : new (await import('@xixi/brain-adapter')).MimoBrainAdapter({
-      maxCompletionTokens: 400,
-      registry: toolChain,
-      scope: CONVERSATION_SCOPE,
-      timezone: config.identity.timezone,
-      language: config.identity.language,
-    });
-const engine = new ConversationEngine({
-  adapter,
-  store,
-  config,
-  turnTimeoutMs: 60_000,
-  // V0.3 P1-b：这个入口以前**没有**接过 `afterTurn` —— 语音里说过的事不会进记忆，
-  // 而文字入口会（同一个西西因此表现不一致）。装配与另外两个入口共用同一份工厂。
-  afterTurn: extraction.afterTurn,
-});
+const runtime = createVoiceTurnRuntime({ config, store, offline: useFake });
+await runtime.start();
+const engine = runtime.conversation;
 mkdirSync(OUT_DIR, { recursive: true });
 
 const results: VoiceTurnResult[] = [];
@@ -566,7 +624,8 @@ const latency = {
 };
 
 const evidence = {
-  adapter: adapter.describe(),
+  // V0.3 P2.5-C：适配器不再由本文件构造，它是装配点给的引擎的适配器（同一个对象在真跑这一轮）。
+  adapter: engine.adapter.describe(),
   sessionId: session.sessionId,
   turns: results,
   stitchedReplyWav: conversationWav,
@@ -594,6 +653,7 @@ mkdirSync(dirname(outPath), { recursive: true });
 writeFileSync(outPath, `=== 语音闭环（夹具音频 → VAD → ASR → 对话 → 流式 TTS）===\n${JSON.stringify(serializable, null, 2)}\n`, 'utf8');
 console.log(`\n[evidence] 本批产物已写入 ${outPath}（--compare ${outPath} 可复算对照，不调 API）`);
 store.recordHealth('voice-edge', 'ok', `voice turn batch of ${wavs.length}`);
-// 关库之前先把后台提取跑完（t9 F3 的同一纪律：数据丢失不能是无声的）。
-await extraction.drain();
+// 关库之前先关停常驻运行时（t9 F3 的同一纪律：数据丢失不能是无声的）：`stop()` 先 drain 提取，
+// 再关停插件层、清空链；关停报告要读库，所以顺序不能反。
+await runtime.stop();
 store.close();

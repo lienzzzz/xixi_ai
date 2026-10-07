@@ -11,17 +11,26 @@
  *   python -m voice_edge.loopback tests/audio-fixtures/direct-question.wav data/voice/loopback.wav
  *   node scripts/voice-device-check.ts --wav data/voice/loopback.wav --expect "西西，明天天气怎么样？"
  *   node scripts/voice-device-check.ts --print-wiring   # 离线：打印这条入口交给模型的工具链，然后退出
+ *                                                      #   （含插件提供的 news.search / news.latest / news.for_interests）
  */
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 
-import { MimoBrainAdapter, type ToolCallRecord, type ToolRegistry } from '@xixi/brain-adapter';
-import { ConversationEngine } from '@xixi/conversation';
+import { FakeBrainAdapter, MimoBrainAdapter } from '@xixi/brain-adapter';
 import { MimoClient } from '@xixi/model-adapters';
 // V0.3 P0-A: the shared tool chain lives in `@xixi/runtime` now (pack `04_RUNTIME_CONSOLIDATION.md`
 // §1 Step A); `scripts/field-test.ts` keeps a compatibility re-export for un-migrated callers.
-import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
-import { openXixiStore, type XixiConfig } from '@xixi/domain';
+// V0.3 P2.5-C: 工具链、插件内核（news 从这里进来）、审批宿主、durable 提醒、提取与引擎全部来自常驻
+// 装配点 `createResidentRuntime` —— 本文件不再自己拼链，也不再自己 new 引擎。
+import {
+  CONVERSATION_SCOPE,
+  createResidentRuntime,
+  type PluginChainOptions,
+  type ResidentModelInput,
+  type XixiResidentRuntime,
+} from '@xixi/runtime';
+import { openXixiStore, type XixiConfig, type XixiStore } from '@xixi/domain';
+import { createRssNewsSource } from '@xixi/plugins/news';
 
 import { REPO_ROOT, loadConfig, printEvidence, readDotEnv, resolvePython } from './lib/harness.ts';
 import { characterSimilarity } from './lib/similarity.ts';
@@ -75,27 +84,96 @@ function similarity(a: string, b: string): number {
 }
 
 /**
- * The one tool chain this entry talks through (pack Phase 2, extended in t14/T5-F1): the console's
- * own factory, so the device check runs the same four built-ins, the same permissions and the same
- * round cap as every other live entry — a real microphone question about the weather now reaches the
- * weather tool instead of being answered from memory.
+ * 这个部署的新闻来源（V0.3 P2.5-C，与另外几个入口同一份口径）。
+ *
+ * 今天它是**入口里显式给出**的一条公开 RSS（与 `node scripts/probe-tools.ts --news-live` 的默认
+ * feed 相同）；P2.5-H 会把它换成 `config.plugins.news.sources`。不给来源不行：`news.*` 三个工具
+ * 照样会被广告给模型，而没有来源的调用只有 `items: []`，模型很容易读成「今天没什么新闻」。
  */
-function deviceToolChain(config: XixiConfig, onToolCall?: (record: ToolCallRecord) => void): ToolRegistry {
-  return buildToolChain(config, onToolCall === undefined ? {} : { onToolCall });
+const NEWS_FEED_URL = 'https://feeds.bbci.co.uk/news/world/rss.xml';
+
+/** `--print-wiring` 的离线保证：给插件网络授权的 fetch 一用即抛。 */
+const offlinePluginFetch = (async (input: string | URL | Request) => {
+  throw new Error(`--print-wiring 是离线报告，不允许联网：${String(input)}`);
+}) as unknown as typeof fetch;
+
+/** 这个入口的插件层入参：来源是新闻插件，离线开关换掉它的网络授权。 */
+function devicePluginLayer(offline: boolean): Pick<PluginChainOptions, 'news' | 'fetchImpl'> {
+  return {
+    ...(offline ? { fetchImpl: offlinePluginFetch } : {}),
+    news: { sources: [(env) => createRssNewsSource({ name: 'BBC World', url: NEWS_FEED_URL, fetchImpl: env.fetchImpl })] },
+  };
+}
+
+export interface DeviceCheckRuntimeOptions {
+  readonly config: XixiConfig;
+  readonly store: XixiStore;
+  /** 真实自检用已经建好的 MiMo 客户端（ASR 与 TTS 也用它）；不给就由适配器自己建。 */
+  readonly client?: MimoClient | undefined;
+  /** 覆盖模型装配（`--print-wiring` 给一个永不被调用的替身）。 */
+  readonly model?: ResidentModelInput | undefined;
+  /** 报告路径：插件的网络授权换成一用即抛的 fetch。 */
+  readonly offlinePlugins?: boolean | undefined;
+  /** 生命周期横幅往哪写（默认 stdout）；报告路径改成 stderr，好让 stdout 只剩报告那一行 JSON。 */
+  readonly log?: ((line: string) => void) | undefined;
+}
+
+/**
+ * 这个入口的常驻运行时（V0.3 P2.5-C）：工具链、插件内核、审批宿主、durable 提醒、记忆提取与引擎
+ * 一次装好 —— 真实麦克风问一句天气，走的就是控制台/文字入口同一条链与同一份权限政策。
+ */
+export function createDeviceCheckRuntime(options: DeviceCheckRuntimeOptions): XixiResidentRuntime {
+  const { config, store } = options;
+  return createResidentRuntime({
+    config,
+    store,
+    ...devicePluginLayer(options.offlinePlugins === true),
+    onToolCall: (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`),
+    log: options.log ?? ((line) => console.log(line)),
+    conversation: { turnTimeoutMs: 60_000 },
+    model:
+      options.model ??
+      (({ toolChain }) =>
+        new MimoBrainAdapter({
+          ...(options.client === undefined ? {} : { client: options.client }),
+          maxCompletionTokens: 400,
+          registry: toolChain,
+          scope: CONVERSATION_SCOPE,
+          timezone: config.identity.timezone,
+          language: config.identity.language,
+        })),
+  });
 }
 
 /** The offline wiring report (`--print-wiring`): what this entry hands the model, without a model call. */
-function printWiring(config: XixiConfig): void {
-  const chain = deviceToolChain(config);
-  console.log(
-    JSON.stringify({
-      entry: 'voice-device-check',
-      language: config.identity.language,
-      maxToolRounds: chain.maxToolRounds,
-      tools: chain.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name),
-      permissions: Object.fromEntries(chain.names().map((name) => [name, chain.check(name, CONVERSATION_SCOPE).verdict])),
-    }),
-  );
+async function printWiring(config: XixiConfig): Promise<void> {
+  // 与真实一轮**同一个装配函数**（`createDeviceCheckRuntime`），三处差别都是为了离线：一次性内存库、
+  // 一用即抛的 fetch、永不被调用的替身模型。
+  const runtime = createDeviceCheckRuntime({
+    config,
+    store: openXixiStore({ dbPath: ':memory:' }),
+    offlinePlugins: true,
+    // 报告的 stdout 只有那一行 JSON（脚本要能直接管道给 jq）：装配点自己的横幅改走 stderr。
+    log: (line) => process.stderr.write(`${line}\n`),
+    model: ({ toolChain }) => new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE }),
+  });
+  try {
+    const started = await runtime.start();
+    const chain = runtime.toolChain;
+    console.log(
+      JSON.stringify({
+        entry: 'voice-device-check',
+        language: config.identity.language,
+        maxToolRounds: chain.maxToolRounds,
+        tools: chain.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name),
+        permissions: Object.fromEntries(chain.names().map((name) => [name, chain.check(name, CONVERSATION_SCOPE).verdict])),
+        plugins: { mounted: [...started.mounted], skipped: [...started.skipped], refused: [...started.refused] },
+      }),
+    );
+  } finally {
+    await runtime.stop();
+    runtime.store.close();
+  }
 }
 
 async function runDeviceCheck(): Promise<void> {
@@ -120,19 +198,14 @@ async function runDeviceCheck(): Promise<void> {
   const store = openXixiStore({ dataDir: join(REPO_ROOT, 'data', 'voice-device') });
   store.seedSelfProfile(config.personality.base);
   const session = store.createSession();
-  const engine = new ConversationEngine({
-    adapter: new MimoBrainAdapter({
-      client,
-      maxCompletionTokens: 400,
-      registry: deviceToolChain(config, (record) => console.log(`[tool] ${record.name} ${record.ok ? 'ok' : `failed: ${record.error}`}`)),
-      scope: CONVERSATION_SCOPE,
-      timezone: config.identity.timezone,
-      language: config.identity.language,
-    }),
-    store,
-    config,
-    turnTimeoutMs: 60_000,
-  });
+  /**
+   * V0.3 P2.5-C：装配一次（链 + 插件内核 + 审批宿主 + durable 提醒 + 提取 + 引擎），然后在回答之前
+   * `start()` —— 插件/MCP/news 的工具是在那一步挂进链的，所以从「透过空气录进来的第一句话」起，
+   * 模型看到的就是带插件工具的那条链。
+   */
+  const runtime = createDeviceCheckRuntime({ config, store, client });
+  await runtime.start();
+  const engine = runtime.conversation;
   const turn = await engine.respond({ sessionId: session.sessionId, text: transcription.text, addressed: true });
   let replyWav: string | null = null;
   if (turn.action === 'SPEAK' && turn.text !== null) {
@@ -141,6 +214,8 @@ async function runDeviceCheck(): Promise<void> {
     const { writeFileSync } = await import('node:fs');
     writeFileSync(replyWav, audio);
   }
+  // 关库之前先关停运行时（它内含提取的 drain，并撤下插件工具）；关停报告要读库，所以顺序不能反。
+  await runtime.stop();
   store.close();
 
   const ok = score >= MIN_SIMILARITY;
@@ -167,6 +242,7 @@ async function runDeviceCheck(): Promise<void> {
 // The body is behind the entry guard so the wiring above can be read (and imported) without a
 // device: the check itself needs a real recording, a Python venv and a live ASR call.
 if (import.meta.main) {
-  if (args.includes('--print-wiring')) printWiring(loadConfig());
+  // P2.5-C：报告要起一次常驻装配（挂上插件工具再读链），所以这里 await —— 不等它跑完进程就结束了。
+  if (args.includes('--print-wiring')) await printWiring(loadConfig());
   else await runDeviceCheck();
 }
