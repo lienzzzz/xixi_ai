@@ -1992,9 +1992,11 @@ export interface FieldServerOptions {
   /** Tool data sources (weather/news/reminders), injectable so an offline run stays offline. */
   readonly toolOverrides?: ToolChainOptions;
   /**
-   * 插件层（V0.3 P2.5-B）：控制台**默认为空**，因为 `XixiConfig` 今天还没有 `plugins` 段
-   * （「配置文件 → 插件」是 P2.5-H 的活），所以这是把插件 / MCP / news 交给这个入口的唯一接缝：
-   * `inline`、`news`、`mcpServers`、`pluginDirectory` 都由它进来，装配点照常跑九步生命周期。
+   * 插件层（V0.3 P2.5-B/H）：控制台**默认为空**。`XixiConfig` 自 P2.5-H 起**有** `plugins` 段了
+   * （`packages/domain/src/plugin-settings.ts` 的 `parsePluginSettings`），装配点的
+   * `pluginChainOptions()` 把「配置声明了 news / MCP / directories 就由配置说了算、没声明才用这里给的」
+   * 收在一处；所以这个接缝是**测试与「配置没声明时」的注入点**，不再是「把插件交给入口的唯一来源」。
+   * `inline`、`news`、`mcpServers`、`pluginDirectory` 都从这里进，装配点照常跑九步生命周期。
    */
   readonly plugins?: PluginChainOptions;
   /**
@@ -2064,9 +2066,9 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
    *     自己 new 一个 `TurnMemoryExtractor`，也就是全仓最后一个「自己拼一套」的位置）。
    *
    * 插件/MCP/news 的工具是在 `start()` 里挂进这条链的，所以下面构造完立刻启动（见 `await runtime.start()`）。
-   * `options.plugins` 是这个入口今天的插件来源：`XixiConfig` 还没有 `plugins` 段（P2.5-H/T12 才接线），
-   * 所以「配置文件 → 插件」那一步还没有；测试与将来的配置接线都从这里注入（`inline` / `news` /
-   * `mcpServers` / `pluginDirectory`）。
+   * `options.plugins` 是这个入口的注入点（测试用），而**生产路径的插件来源是配置**：`XixiConfig` 自
+   * P2.5-H 起有 `plugins` 段，装配点的 `pluginChainOptions()` 按「配置声明了就由配置说了算、没声明才用
+   * 这里给的」合并（`inline` / `news` / `mcpServers` / `pluginDirectory`）。
    */
   const runtime = createResidentRuntime({
     config,

@@ -139,8 +139,10 @@ function buildAdapter(registry: ToolRegistry): TurnModelProvider {
 /** 这个页面的插件层接缝（V0.3 P2.5-B）：`inline` / `news` / `mcpServers` / `pluginDirectory`。 */
 export interface TrialRuntimeOptions {
   /**
-   * 插件链选项。入口自己**不给**（`XixiConfig` 还没有 `plugins` 段，「配置文件 → 插件」是 P2.5-H），
-   * 所以今天的生产路径就是「没有插件」；测试与将来的配置接线都从这里注入。
+   * 插件链选项。入口自己**不给**——生产路径的插件来源是配置：`XixiConfig` 自 P2.5-H 起有 `plugins` 段
+   * （`news` / `mcp` / `directories` / `enabled`），装配点的 `pluginChainOptions()` 按「配置声明了就由
+   * 配置说了算、没声明才用这里给的」合并。所以这个接缝是**测试与「配置没声明时」的注入点**，
+   * 不再是「生产路径就是没有插件」。
    */
   readonly plugins?: PluginChainOptions;
   /** 覆盖模型（默认按 `--fake` / `--dsh` / 直连 MiMo 决定；测试注入替身走这里）。 */

@@ -27,8 +27,13 @@
  * **接线状态（诚实口径，AGENTS §9.24）**：本模块是一个完整的插件（manifest 与九步生命周期都走 P2-A 的
  * `PluginManager`），离线端到端证据在 `tests/unit/core/tool-loop.test.ts` 与
  * `node scripts/probe-tools.ts --news` 里。它在装配点上的开关是 `@xixi/runtime` 的
- * `buildPluginRuntime(config, { news: … })`；**四个 live 入口（`scripts/chat.ts` 等）今天仍只调
- * `buildToolChain`，端到端接线登记为下一阶段项**——这一点与 MCP 的接线状态是同一句话，不得写成「入口已接新闻」。
+ * `buildPluginRuntime(config, { news: … })`。
+ *
+ * **入口侧已接（V0.3 P2.5-C 起）**：七个入口脚本都经 `createResidentRuntime()` 取链，而
+ * `scripts/chat.ts` 等四个入口显式给了 `news.sources`，所以 `news.*` 真的出现在模型可见的工具清单里。
+ * 复核：`node scripts/chat.ts --print-wiring`（应列出 `news.search` / `news.latest` / `news.for_interests`）、
+ * `git grep -n 'createRssNewsSource' -- scripts`。第二句是「插件话题进主动路径」，那一条**尚未**由入口接
+ * （`git grep -n 'readPluginTopics' -- scripts` 零命中）——不要把它与「新闻工具可用」混为一谈。
  */
 export {
   createNewsDesk,
