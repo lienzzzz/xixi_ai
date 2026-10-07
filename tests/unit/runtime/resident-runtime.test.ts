@@ -818,6 +818,105 @@ test('接线口径由调用图判定：给得出可复核命令，点名了入�
 });
 
 /**
+ * 关停的第二扇门（round 3 复审的 T21-F1）：链必须保持空，**谁的调用都不例外**。
+ *
+ * 缺陷本体（captain 在 5ddec1d 上独立复现过）：内核 `loadInline()` 在 `disposeAll()` 之后仍能把插件
+ * 复活成 `active`，而 `ToolRegistry.dispose()` 只做 `#tools.clear()`、**不是终态** —— 于是
+ * `loadInline` → `runtime.plugins.mount()` 会把工具写回同一条链：`state` 仍是 `stopped`，而
+ * `definitionsForRound()` 又开始把工具交给模型，并且 `stop()` 已被记忆化、不会再来清第二次
+ * （实测：`mounted=["demo.late"]`、链上 `["demo.late"]`、state 仍是 stopped）。
+ *
+ * **为什么 `start()` 那道门不够**：`ToolRegistry.dispose()` 只做 `#tools.clear()`、**不是终态**，而
+ * `disposeAll()` 只释放**当时**的能力登记 —— 一个关停后才经 `loadInline()` 加载的插件会把能力重新登记
+ * 进同一个 `CapabilityRegistry`（本用例第 2 条断言钉住这个事实）。这时 `mount()` 就有东西可写回链上：
+ * 实测撤掉守卫 → `mounted=["demo.late"]`、链上 `["demo.late"]`、`definitionsForRound()` 又把工具交给
+ * 模型，而 `state` 仍是 `stopped`，且记忆化的 `stop()` 不会再来清第二次。
+ *
+ * **反事实（在仓外副本实测）**：把 `guardedPlugins.mount` 里那道 `closed` 守卫改成恒假 → 本用例红在
+ * 「链必须保持空」/「模型不该看到任何工具」上。所以守卫是承重证据，不是装饰。
+ *
+ * 关键在**用一个新的插件**（`xixi.late`）：拿 rig 自己那个已被 `disposeAll()` 处理过的插件去 `loadInline`，
+ * 它既不会重新登记能力、也不会往链上写东西，那时用例就会变成恒真（撤掉守卫也全绿）——这是本条用例
+ * 第一版踩过的坑，写在这里免得后人再踩。
+ */
+test('关停之后 mount() 不再往链上挂东西：state 与链不可能不一致（撤掉守卫就红）', async () => {
+  const r = rig();
+  try {
+    const { runtime } = r;
+    await runtime.start();
+    const first = await runtime.stop();
+    assert.equal(runtime.state, 'stopped');
+    assert.deepEqual(runtime.toolChain.names(), [], 'stop() 已经清空链');
+
+    // 内核层今天仍能复活一个**新**插件，并把它的能力重新登记进同一个注册表 —— 这正是第二扇门的入口。
+    const late = inlinePlugin('xixi.late', probeTool('demo.late'));
+    const instance = await runtime.plugins.runtime.manager.loadInline(late);
+    assert.equal(instance.state, 'active', '内核层事实：disposeAll 之后 loadInline 仍能复活插件');
+    assert.deepEqual(
+      runtime.plugins.runtime.capabilities.list(),
+      [{ kind: 'tool', name: 'demo.late', pluginId: 'xixi.late' }],
+      '关停后加载的插件会把能力重新登记 —— 所以 mount() 真的有东西可挂（这条件不成立时本用例就是恒真）',
+    );
+
+    // 不变量：常驻 runtime 已经关停，所以调用必须被**明确拒绝** —— 不是静默什么都不做（调用方会以为挂上了），
+    // 更不是悄悄挂上（那正是 T21-F1 的缺陷本体）。
+    assert.throws(
+      () => runtime.plugins.mount(),
+      (error: unknown) => {
+        assert.ok(error instanceof RuntimeError, '该抛 runtime 自己的错误类型');
+        assert.equal(error.code, 'RESIDENT_RUNTIME_CLOSED');
+        return true;
+      },
+    );
+
+    assert.equal(runtime.state, 'stopped', 'state 不许因为一次 mount 调用而变');
+    assert.deepEqual(runtime.toolChain.names(), [], '链必须保持空 —— 这正是 T21-F1 的缺陷点');
+    assert.equal(runtime.toolChain.definitionsForRound(CONVERSATION_SCOPE, 1), undefined, '模型不该看到任何工具');
+
+    // 记忆化的 stop() 不会来清第二次，所以「关停后不许再挂」只能靠这道守卫，而不是靠再清一遍。
+    // 第二次 stop() 返回的是**第一次那份报告**（引用相等），其中 `unmounted` 记的是启动期那次挂载
+    // 撤回的东西（rig 的 demo.echo）——它不可能是「关停后新挂的工具」。
+    const second = await runtime.stop();
+    assert.equal(second, first, 'stop() 幂等：第二次返回同一份报告（记忆化），不会再来清一次');
+    assert.deepEqual(second.plugins.unmounted, ['demo.echo'], '那份报告记的是启动期挂载的撤回，不是新挂的东西');
+    assert.deepEqual(runtime.toolChain.names(), [], '第二次 stop() 之后链仍然是空的');
+  } finally {
+    dispose(r);
+  }
+});
+
+/**
+ * 关停是**同步**的终态（round 3 复审的 T21-F2）：`stop()` 不 `await` 也已经开始关门。
+ *
+ * 为什么要有这条：终态标记虽然写在 `shutdown()` 的第一行，但「第一行」与「第一个 `await` 之前」是两件事
+ * ——把那个赋值挪到 `await extraction.drain()` 之后，交付用例与 t19 的 11 项检查**全都还是绿的**，
+ * 窗口却回来了。所以这句注释必须有判据：`stop()` 的 promise 还挂着就立刻 `start()`，必须被终态门拒。
+ *
+ * 反事实：把 `closed = true` 从 `shutdown()` 第一行移到 `await` 之后，这条立刻红。
+ */
+test('stop() 不 await 就开始关门：promise 还挂着时 start() 已经被终态门拒（挪走那行就红）', async () => {
+  const r = rig();
+  try {
+    const { runtime } = r;
+    // 这条 runtime **一次都没 start 过** —— 正是 `startCalled` 单独关不住的那条路。
+    const stopping = runtime.stop();
+    await assert.rejects(
+      () => runtime.start(),
+      (error: unknown) => {
+        assert.ok(error instanceof RuntimeError);
+        assert.equal(error.code, 'RESIDENT_RUNTIME_ALREADY_STOPPED', '拒因必须是终态门，不是「已经启动过」');
+        return true;
+      },
+    );
+    await stopping;
+    assert.equal(runtime.state, 'stopped');
+    assert.deepEqual(runtime.toolChain.names(), []);
+  } finally {
+    dispose(r);
+  }
+});
+
+/**
  * 已知缺口登记（AGENTS §9.25⑤）：装配点里两条防线的坏输入**今天构造不出来**，所以它们的用例写不了，
  * 不许拿恒真的假用例充数。这里如实记下为什么不可达，以及什么时候要回来补：
  *

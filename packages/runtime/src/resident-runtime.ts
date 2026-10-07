@@ -545,11 +545,46 @@ export function createResidentRuntime(options: ResidentRuntimeOptions): XixiResi
    * 「stop 了但没 start 过」 path: that runtime still passed the first guard, `plugins.start()` came
    * back empty (the kernel is disposed; `loadAll` is a bring-up-what-you-can entry point), and the
    * object reported `state: 'started'` with an **empty** chain — 「看起来起来了、其实什么都调不了」.
+   *
+   * 这扇门管的是**两条**路，不是一条（round 3 复审抓到的第二扇门）：
+   *  * `start()` 见它抛 `RESIDENT_RUNTIME_ALREADY_STOPPED`；
+   *  * `runtime.plugins.mount()` 见它抛 `RESIDENT_RUNTIME_CLOSED`。
+   *
+   * 为什么连 `mount()` 也要拦：`ToolRegistry.dispose()` 只做 `#tools.clear()`，**不是终态** —— 谁在关停
+   * 之后再 `mount()` 一次（例如内核 `loadInline()` 复活了一个插件），`mountPluginTools` 的 `register()`
+   * 就会把工具重新写回同一条链。于是 `state` 还是 `stopped`，而 `definitionsForRound()` 又开始把工具交给
+   * 模型，并且 `stop()` 已经被记忆化、再也不会来清第二次。口径：**关停之后链必须保持空**，谁的调用都不例外
+   * （见下面 `guardedPlugins` 与对应用例）。
    */
   let closed = false;
   let stopPromise: Promise<ResidentShutdownReport> | undefined;
 
+  /**
+   * `plugins` 的对外视图：除了 `mount()` 之外全部透传。
+   *
+   * 只包这一个方法，是因为它是**关停后唯一还能往链上写东西的公开入口**（`start()`/`shutdown()` 自身都幂等，
+   * 而 `registry` / `runtime` / `notes` 是读的）。返回的对象在 `runtime.plugins` 位置上，所以调用方拿不到
+   * 一个绕开这道门的 `mount`。
+   */
+  const guardedPlugins: PluginRuntimeMount = {
+    ...plugins,
+    mount: () => {
+      if (closed) {
+        throw new RuntimeError(
+          'RESIDENT_RUNTIME_CLOSED',
+          '这个常驻 runtime 已经关停：mount() 不会再往工具链里挂任何东西，要热插拔就新建一个 runtime。',
+          'ToolRegistry.dispose() 只清空注册表、不是终态，所以关停后的 mount() 会把工具重新写回链上：' +
+            'state 仍是 stopped，而模型又能看到工具，且记忆化的 stop() 不会再来清第二次。',
+        );
+      }
+      return plugins.mount();
+    },
+  };
+
   async function shutdown(): Promise<ResidentShutdownReport> {
+    // The terminal flag is the **first statement**, before the first `await`: a `stop()` that is under
+    // way must already have closed the door, otherwise a `start()` (or a mount) can slip in behind it
+    // and land on a half-shut runtime. Nothing here is async before this line, so there is no window.
     closed = true;
     // ① The engine's background work first: Tier-2 extraction is in flight, and 「数据丢失不能是无声的」
     //    (the same discipline every entry follows before closing the store).
@@ -577,7 +612,7 @@ export function createResidentRuntime(options: ResidentRuntimeOptions): XixiResi
     store,
     toolChain,
     conversation,
-    plugins,
+    plugins: guardedPlugins,
     approvals,
     reminders,
     reminderSink,
