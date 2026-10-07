@@ -21,6 +21,7 @@
     "test:console": "node --test \"tests/console/**/*.test.ts\"",
     "install:profile": "node scripts/install-dsh-profile.ts",
     "verify:m0": "node scripts/verify-m0.ts",
+    "verify:p2.5": "node scripts/verify-p2-5.ts",
     "demo:m0:text": "node scripts/demo-m0-text.ts",
     "demo:m0:restart": "node scripts/demo-m0-restart.ts",
     "verify:provider": "node scripts/verify-provider-route.ts",
