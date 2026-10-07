@@ -579,22 +579,44 @@ export class PluginManager {
     return this.#pipeline(discovered, 'activate');
   }
 
-  /** Step 9 — `dispose`: release whatever is left, then let the plugin tear itself down. */
+  /** Step 9 — `dispose`: run step 8 first (`deactivate`), then let the plugin tear itself down. */
   async dispose(pluginId: string): Promise<boolean> {
     const runtime = this.#runtimes.get(pluginId);
     if (runtime === undefined) return false;
     if (runtime.state === 'disposed') return false;
+
+    // 先走第 8 步、再走第 9 步 —— 这正是本文件顶部那条生命周期（… → health → deactivate → dispose）。
+    // 以前这里直接 `#stopRunning` + `dispose`、跳过第 8 步：能力确实被释放了（`#stopRunning` 是幂等的），
+    // 但**只在 `deactivate` 里做清理的插件那个钩子永远不会跑**（例如 `xixi.news` 的 `live.length = 0`）。
+    // P2.5-K 的真入口验收探针实测到钩子序列是 activate→dispose、`deactivateRan: false`，与文档契约不符。
+    // `deactivate()` 自己判断 `state !== 'active'`（已经停过的插件不会重复跑钩子），失败路径也不伪造这一步。
+    //
+    // 第 8 步**抛了也要继续走第 9 步**：两个钩子释放的可能是不同的东西（连接 vs 定时器），一个失败不能
+    // 让另一个也不跑——所以这里记下错误、把 dispose 钩子跑完，再把错误抛出去（宿主仍能看到失败）。
+    let step8Error: unknown;
     try {
-      const released = this.#stopRunning(runtime);
+      await this.deactivate(pluginId);
+    } catch (cause) {
+      step8Error = cause;
+    }
+
+    try {
+      // 到这里能力已经由第 8 步释放；`released` 只用于报告（`deactivate()` 内部已经报过一次）。
+      const released = runtime.capabilities.length;
       await runtime.module?.dispose?.();
       runtime.state = 'disposed';
       this.#push(pluginId, 'dispose', 'ok', `释放了 ${released} 项能力`);
-      return true;
     } catch (cause) {
       runtime.state = 'failed';
       this.#push(pluginId, 'dispose', 'failed', cause instanceof Error ? cause.message : String(cause));
       throw fail('dispose', cause);
     }
+
+    if (step8Error !== undefined) {
+      // 第 9 步成功了、第 8 步失败了：状态是 disposed，但失败必须让宿主看见。
+      throw fail('deactivate', step8Error);
+    }
+    return true;
   }
 
   /** Dispose every plugin (shutdown). One failure must not strand the rest. */
