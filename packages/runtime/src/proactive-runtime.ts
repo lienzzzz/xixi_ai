@@ -51,6 +51,8 @@ import type {
 } from '@xixi/conversation';
 import { DEFAULT_PRESENCE_TTL_SECONDS, openXixiStore, type XixiStore } from '@xixi/domain';
 
+import { PLUGIN_TOPIC_INTENT, type PluginTopicCandidate, type PluginTopicReader } from './capability-bridge.ts';
+
 // The look-once shapes moved to `./errors.ts` in Step B (the composer's `vision` / `onUpload`
 // seams declare them); the repository root moved to `./repo.ts` in Step C. Both are imported
 // here rather than re-declared: this file used to be part of `scripts/field-test.ts`, where the
@@ -443,6 +445,15 @@ export interface ProactiveCandidateContext {
    * `reminder.changed` 事件，调用方只负责把到点的那几条递进来。
    */
   readonly remindersDue?: readonly ReminderCandidateInput[] | undefined;
+  /**
+   * 插件贡献的话题（V0.3 P2.5-C，来自 `CapabilityRegistry` 的 `topic_source`，由
+   * `capability-bridge.ts` 正规化）。
+   *
+   * 与 `openThreads` / `remindersDue` 并列，但**排在所有内置来源之后**：插件只能增加候选，不能把程序
+   * 自己知道的事挤出这一次考虑（ADR-0017 的边界——插件是来源，不是优先级）。判定仍然全在引擎里：
+   * 这一项只是多几条可被评分与被拦的候选，`reason_code`、社会预算与读空气一一照旧。
+   */
+  readonly pluginTopics?: readonly PluginTopicCandidate[] | undefined;
   readonly limit?: number;
 }
 
@@ -629,7 +640,36 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
     );
   }
 
-  return plans.slice(0, limit);
+  // 6. plugin_topic — 插件贡献的话题（V0.3 P2.5-C；来源见 `capability-bridge.ts`）。
+  //
+  // **它们在 `limit` 之外追加**，两条理由都不是随手选的：
+  //
+  //  ① 插件不能挤掉程序自己的候选。`limit`（默认 3）管的是「内置来源这一次最多考虑几条」，插件只追加，
+  //     所以「谁先被考虑」这个顺序不因装了插件而改变 —— 既有来源的相对顺序逐字不变。
+  //  ② 反过来也要防：把插件候选塞进 `limit` 里，排在后面的内置来源（时间钩子、话题池、随机闲聊）就会
+  //     因为装了一个新闻插件而永远轮不到 —— 那正是这个仓库反复修过的「接了线却永远说不上话」。
+  //
+  // 候选 id 钉在**话题文本**上（不带日期），所以同一条外部话题说过一次就不会被说第二遍；
+  // `topicRef` 是话题本身，于是话题重复惩罚对同一件事也生效。判定全部照旧在引擎里（铁律 3）。
+  //
+  // 借 `topic_pool` 这一个 trigger 是有意的：trigger 枚举属于 `@xixi/conversation`（本任务不改），
+  // 于是「话题池开关」同时也是插件话题的开关（关掉话题池 = 不要没头没脑地开新话题），而
+  // `initiative_kind` 走它的默认值 `external_sharing` —— 「分享外面的事」，与新闻这类来源相符。
+  // 代价如实记下：面板的 `triggerLabel` 会说「话题池里轮到一个」，来源由 `fact` 与 `intent` 区分。
+  const pluginPlans: ProactiveCandidatePlan[] = (context.pluginTopics ?? [])
+    .filter((candidate) => candidate.topic.trim().length > 0)
+    .map((candidate) =>
+      planFor(
+        'topic_pool',
+        `plugin-${candidate.capability}-${hashText(candidate.topic)}`,
+        candidate.line,
+        candidate.fact,
+        candidate.components,
+        { topicRef: candidate.topic, intent: PLUGIN_TOPIC_INTENT },
+      ),
+    );
+
+  return [...plans.slice(0, limit), ...pluginPlans];
 }
 
 /**
@@ -644,6 +684,12 @@ export function buildProactiveCandidates(context: ProactiveCandidateContext): Pr
  */
 function offlineLineFor(plan: ProactiveCandidatePlan, spoken: readonly string[]): string {
   if (plan.candidate.initiativeKind === 'open_loop_followup' && plan.line.trim().length > 0) return plan.line;
+  /**
+   * 插件话题也说自己那一句。`topic_pool` 的固定短句是「你前面提到过一件事」——而这条候选是她**从外面
+   * 带回来**的，照念那句话就是撒谎（未完话题走自己那句也是同一个理由）。这条判据是**必须**的：
+   * 离线/无密钥时 `offlineLineFor` 的返回值就是真正被说出口的内容。
+   */
+  if (plan.candidate.intent === PLUGIN_TOPIC_INTENT && plan.line.trim().length > 0) return plan.line;
   return pickOfflineLine(plan.candidate.trigger, { recentLines: spoken, spokenCount: spoken.length });
 }
 
@@ -846,6 +892,20 @@ export interface ProactiveLoopOptions {
    */
   readonly readDueReminders?: (() => readonly ReminderCandidateInput[]) | undefined;
   /**
+   * 插件贡献的话题（V0.3 P2.5-C）。生产实现是 `capability-bridge.ts` 的桥：
+   *
+   * ```ts
+   * readPluginTopics: async (now) => (await runtime.capabilities.topics.propose({ now })).candidates,
+   * ```
+   *
+   * 参数是**这一 tick 的 `now`**（与 `readContext` 收决策输入同一个取向）：提案用它判断新鲜度，所以
+   * 它必须是评分用的那一刻，而不是另一个时钟读到的另一刻。省略 = 这一轮不带插件候选，输入逐字不变。
+   *
+   * 读失败不会毁掉这一轮：抛出来的错误会被记一行日志，然后当作「这一轮没有插件候选」继续（常驻循环
+   * 的定时器里抛出去就是一次 unhandled rejection，第三方插件不该有这种权力）。
+   */
+  readonly readPluginTopics?: PluginTopicReader | undefined;
+  /**
    * 一条提醒**真的被说出口**之后回调（`candidate → delivered` 的那一步）。
    *
    * 由循环在「已经决定了要说、内容也已经生成」之后调用：参数是提醒 id 与这一轮的时刻。生产实现
@@ -1025,6 +1085,7 @@ export class ProactiveLoop {
         recentUserTopics: this.#options.readRecentUserTopics?.(),
         openThreads,
         remindersDue: this.#options.readDueReminders?.(),
+        pluginTopics: await this.#readPluginTopics(now),
         random: this.#options.random,
         spokenCount: this.#spoken.length,
         recentLines: this.#spoken.slice(-4),
@@ -1052,6 +1113,27 @@ export class ProactiveLoop {
       return outcome;
     } finally {
       this.#ticking = false;
+    }
+  }
+
+  /**
+   * 插件话题那一条读法：**失败不毁这一轮**，但也不静默。
+   *
+   * 常驻循环的定时器是 `void this.tickOnce()`（`start()` 里那一行），所以一个从这里抛出去的插件错误会
+   * 变成一次 unhandled rejection —— 插件是第三方、不可信来源，不该有这种权力。这一层兜住它、记一行、
+   * 按「这一轮没有插件候选」继续；其它来源与所有判定一律照旧。桥自己已经逐来源兜了一层，这是第二层，
+   * 防的是「调用方接的不是桥」或桥自身出问题这两种情形。
+   */
+  async #readPluginTopics(now: Date): Promise<readonly PluginTopicCandidate[] | undefined> {
+    const read = this.#options.readPluginTopics;
+    if (read === undefined) return undefined;
+    try {
+      return await read(now);
+    } catch (error) {
+      this.#options.log?.(
+        `[proactive-loop] 插件话题源读失败（${error instanceof Error ? error.message : String(error)}）：这一轮不带插件候选，其余来源照旧`,
+      );
+      return undefined;
     }
   }
 

@@ -27,7 +27,12 @@
  *    after `stop()`); this factory only holds the handle it was handed. There is no `mode` option
  *    either: `fake` / `dsh` / `mimo` is a decision about the adapter, and the adapter is injected.
  *  * it does not build a `ProactiveLoop`. The loop needs seams only the entry has (session, presence,
- *    settings, TTS), and the reminder feed into it is P2.5-F. `reminders` is here, ready to be ticked.
+ *    settings, TTS), and the reminder feed into it is P2.5-F: `reminders` is here ready to be ticked,
+ *    and the two options the loop takes for it (`readDueReminders` / `onReminderDelivered`) are
+ *    handed out as `runtime.reminderSeams` — writing that one line is the entry's job, not this
+ *    factory's. The same is true of the plugin-topic feed (P2.5-C): `capabilities` is assembled (and
+ *    reads this runtime's own capability registry), but `ProactiveLoopOptions.readPluginTopics` is the
+ *    entry's line to write — there is no call site in `scripts/` yet, and this file does not claim one.
  *
  * ## 接线状态（诚实记录，AGENTS §9.24）
  *
@@ -50,9 +55,19 @@
  *    它自己 `new ConversationEngine` 是设计的一部分，不是漏接线。
  *    （「入口尚未接线」这几个字只作为**历史引文**留在这里：P2.5-A 就是这么写下这条债的，而它已经还清。
  *    口径的现状一律用上面两条命令核，不要读这半句。）
- *  * **提醒回路尚未接线**：`ReminderScheduler` 只是被装配出来（`runtime.reminders`），
- *    **没有任何 tick 调用点**，也没有接进 `ProactiveLoop`（那是 P2.5-F）。也就是说「到点她会说出来」
- *    今天仍然只是**手调 `tick()` 才看得见**的事，不是活的。
+ *  * **提醒回路尚未接线**：接缝已经在本装配点上（`runtime.reminderSeams`，入口一行展开即可），但
+ *    **还没有调用点** —— `git grep -n 'new ProactiveLoop(' -- scripts` 那三处都在 `scripts/` 下，
+ *    不在本装配点的 inScope 里。所以「到点她会说出来」今天仍然只是**手调 tick() 才看得见**的事，不是活的；
+ *    真正接上以后，这句话与钉它的那条用例要一起改（AGENTS §9.24 的口径纪律）。
+ *  * **配置真的能管插件了（P2.5-H）**：`xixi.plugins` 段由 `@xixi/domain` 的 `parsePluginSettings` **严格**解析
+ *    （越界的值、写错的键名、拼错的 transport 都在**加载配置**时带路径报错，而不是留一个看起来生效的键），
+ *    本文件在装配时消费它：`directories` → 内核的插件来源、`news` → 新闻来源、`mcp.servers` → MCP 服务器的
+ *    **连接函数**（`mcpServerSpecs` 是「命令或地址 → 开连接」的唯一一层，SDK 在 `connect()` 里动态 import）。
+ *    合并规则是「配置声明了就由配置说了算，没声明就照旧」；出厂配置里 `news.enabled` 是 `false`、`mcp.servers`
+ *    是空表，所以默认工具集与接线前逐字相同。**仍未接的一环**：四个 CLI 入口今天各自带一条 RSS 来源，
+ *    要让「来源全部来自配置」成立，得先有一条 `scripts/` 的任务把入口里那份显式来源删掉，再把
+ *    `plugins.news.enabled` 翻成 `true` —— 在那之前，配置这一路真正生效的是**没有自带来源的入口**
+ *    （现场测试控制台、试用页）与 `mcp.servers`。
  *  * **提示词权威的调用点在本装配点上**：`ConversationEngine` 拿到的 assembler 是
  *    `verifyOnAssemble(...)` 包过的（插件贡献要进提示词就得先过 `verify`），而上面那些入口的引擎都是
  *    本装配点给的 `runtime.conversation`。这句话只说「入口的提示词真的路过了校验包装」；**校验器自己能
@@ -61,11 +76,22 @@
 import type { TurnModelProvider } from '@xixi/brain-adapter';
 import type { StructuredMemoryExtractor } from '@xixi/context';
 import { ConversationEngine, PromptAssembler, type ConversationEngineOptions } from '@xixi/conversation';
-import { parseReminderSettings, type XixiConfig, type XixiStore } from '@xixi/domain';
-import { verifyOnAssemble, type PluginState } from '@xixi/plugins';
+import {
+  DEFAULT_PLUGIN_SETTINGS,
+  parseReminderSettings,
+  type PluginMcpServerSetting,
+  type PluginSettings,
+  type XixiConfig,
+  type XixiStore,
+} from '@xixi/domain';
+import { FilePluginSource, verifyOnAssemble, type PluginState } from '@xixi/plugins';
+import { createRssNewsSource, type NewsPluginOptions, type NewsSourceEnv } from '@xixi/plugins/news';
+import type { McpServerSpec, McpTransport } from '@xixi/plugins/mcp';
 import type { ToolRegistry } from '@xixi/brain-adapter';
 
+import { createPluginCapabilityBridge, type PluginCapabilityBridge } from './capability-bridge.ts';
 import { RuntimeError } from './errors.ts';
+import type { ProactiveLoopOptions } from './proactive-runtime.ts';
 import { DurableReminderSink, ReminderScheduler } from './reminder-runtime.ts';
 import { ToolApprovalManager } from './tool-approval.ts';
 import {
@@ -138,10 +164,15 @@ export interface ResidentMemoryOptions {
  *  * `reminderSink` — the durable sink is built here (`runtime.reminderSink`); accepting another one
  *    would let a caller replace persistence with an in-memory array without any error.
  *
- * There is no `news` / `mcpServers` source other than this argument today: `XixiConfig` has no
- * `plugins` section yet (`packages/domain/src/config.ts`), so reading one would be reading a key
- * nothing writes. Wiring 「配置文件 → 插件」 is P2.5-H; until then `config/xixi.example.yaml` documents
- * those options as comments, and the honest position is that they are passed in explicitly.
+ * There is one more source for `news` / `mcpServers` / `pluginDirectory` since P2.5-H: the deployment
+ * config (`xixi.plugins`, parsed by `@xixi/domain`'s `parsePluginSettings`). The two combine by one
+ * rule — **配置声明了这一段就由配置说了算，没声明就照旧用这里给的**（`pluginChainOptions` 是唯一实现）：
+ *
+ *  * `plugins.enabled: false`（总开关）盖过一切，连这里给的 `inline` 也不装；
+ *  * `plugins.news.enabled: true` / 非空的 `plugins.mcp.servers` = 这个部署接管了新闻/MCP，
+ *    入口自己写的那一份被顶掉；
+ *  * 出厂配置（`config/xixi.example.yaml`）里 `news.enabled` 是 `false`、`servers` 是空的，所以
+ *    「没写就是照旧」这条路就是今天的行为 —— 加配置**不改变**任何入口的默认工具集。
  */
 export interface ResidentRuntimeOptions extends Omit<PluginChainOptions, 'registry' | 'approvalGate' | 'reminderSink'> {
   readonly config: XixiConfig;
@@ -208,8 +239,56 @@ export interface XixiResidentRuntime {
   readonly approvals: ToolApprovalManager;
   readonly reminders: ReminderScheduler;
   readonly reminderSink: DurableReminderSink;
+  /**
+   * 主动循环的两个提醒接缝（V0.3 P2.5-F）——入口那一处 `new ProactiveLoop` 一行展开：
+   *
+   * ```ts
+   * new ProactiveLoop({ ..., ...runtime.reminderSeams });
+   * ```
+   *
+   * 两条必须**成对**接线，所以做成一个对象而不是两个散字段：
+   *
+   *   * `readDueReminders`：**先跑到点、再取候选** —— `markDue()`（`pending → due`，全库唯一比时钟的地方）
+   *     加 `candidateInputs()`（`due → candidate`，然后返回**全部** `candidate` 行：上一个 tick 成为候选、
+   *     当时没说的话，这一 tick 仍在列表里，不会被静默丢掉）。只做后半句是个隐形陷阱：`candidateInputs`
+   *     从不让 `pending` 行变老，于是没人 tick 过的提醒会永远停在 `pending`，循环连看都看不到它；
+   *   * `onReminderDelivered`：`candidate → delivered` 的记账。循环只在「决定了要说、内容也生成了」
+   *     之后才调它（见 `proactive-runtime.ts` 的调用点），所以这里不判该不该说 ——
+   *     **到点只是成为候选，说不说由主动路径判定**（铁律 3）。只接一半的后果是提醒被反复提议却
+   *     永远停在 `candidate`。
+   *
+   * 类型直接取自 `ProactiveLoopOptions`（而不是在这里另写一份形状），所以「接缝恰好是循环要的那两个」
+   * 由编译器保证，改了一边另一边立刻红。
+   *
+   * **接缝没有参数**：`readDueReminders()` 读的是本 runtime 的 `now`，所以入口要把**同一个时钟**交给
+   * 循环与装配点（两处给不同的时钟 = 「到点」判定与候选读取各看一个时刻，那正是这个仓库最讨厌的隐形不一致）。
+   *
+   * **怎么接进主动循环**（放给入口那一行，与 `capabilities` 同一个先例）。今天仓库里还没有调用点：
+   * 那三处在 `scripts/` 下（`git grep -n 'new ProactiveLoop(' -- scripts`），本任务的 inScope 之外。
+   * 本文件只保证**接缝可用**，不声称「活的西西已经在说到点提醒」。
+   */
+  readonly reminderSeams: {
+    readonly readDueReminders: NonNullable<ProactiveLoopOptions['readDueReminders']>;
+    readonly onReminderDelivered: NonNullable<ProactiveLoopOptions['onReminderDelivered']>;
+  };
   /** Post-turn memory extraction, already wired into the engine as `afterTurn`. */
   readonly extraction: TurnExtraction;
+  /**
+   * 插件能力的宿主侧桥（V0.3 P2.5-C）：今天只消费 `topic_source`，也就是「插件想说什么话题」。
+   *
+   * 它读的是 `plugins.runtime.capabilities` 这一份注册表（与工具链同一个内核），所以 `start()` 之后
+   * 注册的能力立刻可见、插件停用后随之消失 —— 桥不缓存任何名单。
+   *
+   * **怎么接进主动循环**（一行，给入口/控制台的那一处 `new ProactiveLoop`）：
+   *
+   * ```ts
+   * readPluginTopics: async (now) => (await runtime.capabilities.topics.propose({ now })).candidates,
+   * ```
+   *
+   * 今天仓库里还没有调用点：那一处在 `scripts/` 下（本任务的 inScope 之外）。本文件只保证**能力可见**
+   * 与**形状可用**，不声称「活的西西已经在用新闻话题」——那句要等入口接上以后才成立。
+   */
+  readonly capabilities: PluginCapabilityBridge;
   readonly state: ResidentRuntimeState;
   /**
    * Run the nine-step plugin lifecycle **and** mount what the plugins registered.
@@ -233,6 +312,113 @@ function countIfReadable(read: () => number): number | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * 配置里的新闻来源 → 新闻插件的入参（V0.3 P2.5-H）。
+ *
+ * 规则只有一条：**配置声明了就由配置说了算**。`plugins.news` 段没写（`null`）或写了 `enabled: false`
+ * 时配置**不管这一段**，入口自己声明的 `news` 原样生效（今天四个 CLI 入口各自带一条 RSS，控制台与试用页
+ * 一个都不带 —— 出厂配置正是 `enabled: false`，所以这些日子照旧）；`enabled: true` 时配置**接管**：
+ * 下面这些来源就是所有入口的来源，入口自带的那份被顶掉（顶掉是故意的：一个部署想换 feed，不该因为四个
+ * 入口各写了一份就改不动）。
+ *
+ * 来源用工厂形式（`(env) => …`）而不是直接给一个 `NewsSource`：真来源必须建在**插件拿到的网络授权**
+ * （`ctx.network.fetch`）之上，否则 manifest 里的 `network` 权限就只是装饰，离线开关也绕不过去 ——
+ * 这与 `scripts/chat.ts` 里那一段显式声明是同一个形状。
+ */
+function newsOptionsFromConfig(settings: PluginSettings, declared: NewsPluginOptions | undefined): NewsPluginOptions | undefined {
+  const news = settings.news;
+  if (news === null || !news.enabled) return declared;
+  return {
+    sources: news.sources.map(
+      (source) =>
+        (env: NewsSourceEnv): ReturnType<typeof createRssNewsSource> =>
+          createRssNewsSource({ name: source.name, url: source.url, fetchImpl: env.fetchImpl }),
+    ),
+    ...(news.interests.length === 0 ? {} : { interests: [...news.interests] }),
+  };
+}
+
+/**
+ * 配置里的 MCP 服务器 → `McpServerSpec[]` —— **「命令或地址」变成「开连接的函数」的那一层，全仓唯一一处**。
+ *
+ * 为什么这一层必须存在：`McpServerSpec.connect` 是一个工厂，而 YAML 里只能写 `command`/`args` 或
+ * `url`（`packages/domain/src/plugin-settings.ts` 的配置类型里**没有**函数）。翻译发生在这里，所以
+ * 「配置」与「连接」两边各自只有一种形状。
+ *
+ * 为什么连接体里是**动态** `import()`：`@modelcontextprotocol/client` 是 `@xixi/plugins` 的依赖，
+ * 而那件事本身就是 `./mcp` 子路径存在的理由（「不跑 MCP 的部署不付这份代价」，见
+ * `packages/plugins/mcp/index.ts`）。写成静态 import 会把 SDK 连同它的依赖（jose / cross-spawn /
+ * eventsource…）拖进**每一个** live 入口的加载图，哪怕一个 MCP 服务器都没配；放进 `connect()`，
+ * 代价只在那台服务器真的被连的时候付一次。
+ *
+ * 连接是**惰性**的：构造 spec 与调用 `connect()` 都不发生在这里 —— 内核在自己的 `activate()` 里才连，
+ * 那时失败了也只记成一条 `degraded` 健康报告（`McpClientAdapter.discover()` 契约规定不抛），
+ * 启动不会因为一台服务器不在而崩。
+ */
+function mcpServerSpecs(servers: readonly PluginMcpServerSetting[]): McpServerSpec[] {
+  return servers
+    .filter((server) => server.enabled)
+    .map((server): McpServerSpec => {
+      const common = {
+        name: server.name,
+        risk: server.risk,
+        ...(server.timeoutMs === null ? {} : { timeoutMs: server.timeoutMs }),
+      };
+      if (server.transport === 'stdio') {
+        const { command, args } = server;
+        return {
+          ...common,
+          connect: async (): Promise<McpTransport> => {
+            const { StdioClientTransport } = await import('@modelcontextprotocol/client/stdio');
+            return new StdioClientTransport({ command, args: [...args] });
+          },
+        };
+      }
+      const { url } = server;
+      return {
+        ...common,
+        connect: async (): Promise<McpTransport> => {
+          const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/client');
+          return new StreamableHTTPClientTransport(new URL(url));
+        },
+      };
+    });
+}
+
+/**
+ * MCP 的那一半，规则与新闻相同：配置声明了服务器就由配置说了算（包括「一台都别连」——
+ * 服务器全写 `enabled: false` 也是**声明**，不是「没声明」），没声明就照旧用入口给的那份。
+ */
+function mcpServersFromConfig(settings: PluginSettings, declared: readonly McpServerSpec[] | undefined): McpServerSpec[] | undefined {
+  if (settings.mcpServers.length === 0) return declared === undefined ? undefined : [...declared];
+  return mcpServerSpecs(settings.mcpServers);
+}
+
+/**
+ * 装配点的插件层入参：把入口自己的声明（`PluginChainOptions`）与配置文件里的声明合成一份。
+ *
+ * 合并规则（P2.5-H，逐条可核）：
+ *
+ *  * `plugins.enabled: false` —— 插件层**总开关**，它盖过一切：news / MCP / 目录 / inline 都不装
+ *    （一个部署想退回「没有插件内核」的西西，这是唯一的键）。
+ *  * `plugins.news` / `plugins.mcp.servers` —— **声明了就是配置说了算**（见上面两个函数）。
+ *  * `plugins.directories` —— 本地插件目录，作为**额外的来源**追加在内核的来源列表后面（内核本来
+ *    就吃一个来源列表，多一个目录不会顶掉任何一个入口自己给的来源；`pluginDirectory` 那条老接缝照旧）。
+ *    目录不存在时内核发现不到插件、也不抛（`FilePluginSource` 的既有口径），这是配置管不到的运行期事实。
+ */
+function pluginChainOptions(options: PluginChainOptions, settings: PluginSettings): PluginChainOptions {
+  const layer = settings.enabled;
+  const directories = layer ? settings.directories.map((directory) => new FilePluginSource(directory)) : [];
+  return {
+    ...options,
+    inline: layer ? [...(options.inline ?? [])] : [],
+    news: layer ? newsOptionsFromConfig(settings, options.news) : undefined,
+    mcpServers: layer ? mcpServersFromConfig(settings, options.mcpServers) : undefined,
+    sources: layer ? [...(options.sources ?? []), ...directories] : undefined,
+    pluginDirectory: layer ? options.pluginDirectory : undefined,
+  };
 }
 
 /**
@@ -268,14 +454,54 @@ export function createResidentRuntime(options: ResidentRuntimeOptions): XixiResi
   });
 
   // The chain and the plugin kernel: the same `buildPluginRuntime` P2 already had, with the two hosts
-  // injected. Everything else (built-ins, permission policy, round cap, MCP, news) is unchanged.
-  const plugins = buildPluginRuntime(config, { ...options, approval, approvalGate: approvals, reminderSink });
+  // injected plus whatever the deployment config declares (P2.5-H: directories / news / MCP).
+  // Everything else (built-ins, permission policy, round cap) is unchanged.
+  const pluginSettings = config.plugins ?? DEFAULT_PLUGIN_SETTINGS;
+  const plugins = buildPluginRuntime(
+    config,
+    {
+      ...pluginChainOptions(options, pluginSettings),
+      approval,
+      approvalGate: approvals,
+      reminderSink,
+    },
+  );
   const toolChain = plugins.registry;
   approvals.useRegistry(toolChain);
 
   // Passive on purpose: no timer, no tick. Whoever wants 「到点」 — the proactive loop (P2.5-F) or a
   // test — calls `runtime.reminders.tick(now)`; this factory does not decide when the clock advances.
   const reminders = new ReminderScheduler({ store, ...(now === undefined ? {} : { now }) });
+
+  /**
+   * The two seams the proactive loop takes for reminders (P2.5-F), in one pair so an entry cannot wire
+   * half of them (see the interface doc).
+   *
+   * `readDueReminders` is the **whole clock pass**: `markDue` (pending → due, the only place the clock
+   * is compared) and then `candidateInputs` (due → candidate, then *every* candidate row as an input).
+   * Doing only the second half is a silent trap — `candidateInputs` never ages a `pending` row, so a
+   * reminder nobody else ticked would stay `pending` forever and the loop would never even see it
+   * (the counterexample test in `tests/integration/reminder/durable-reminder.test.ts` reds on it).
+   *
+   * `onReminderDelivered` is pure accounting: the loop calls it only after she actually spoke.
+   */
+  const reminderSeams = {
+    readDueReminders: () => {
+      reminders.markDue();
+      return reminders.candidateInputs();
+    },
+    onReminderDelivered: (reminderId: string, at: Date) => {
+      reminders.deliver(reminderId, at);
+    },
+  };
+
+  // 插件能力的宿主侧桥（P2.5-C）：只读上面那一份 `CapabilityRegistry`，无缓存、无副作用，所以 `start()`
+  // 之后新注册的 `topic_source` 立刻可见，停用的插件随之不再提案。它**不含**任何判定：插件只提案。
+  const capabilities = createPluginCapabilityBridge({
+    capabilities: plugins.runtime.capabilities,
+    timezone: config.identity.timezone,
+    ...(log === undefined ? {} : { log }),
+  });
 
   const extraction = createTurnExtraction({
     store,
@@ -354,7 +580,9 @@ export function createResidentRuntime(options: ResidentRuntimeOptions): XixiResi
     approvals,
     reminders,
     reminderSink,
+    reminderSeams,
     extraction,
+    capabilities,
     get state(): ResidentRuntimeState {
       return state;
     },
