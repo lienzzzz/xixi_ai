@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 import { CliDshTransport, parseDshJsonLines, resolveDshBinJs } from '@xixi/brain-dsh';
 import { BrainError, type DshTurnRequest } from '@xixi/brain-adapter';
@@ -77,5 +78,39 @@ test('a missing harness cwd is refused at construction time', () => {
   assert.throws(
     () => new CliDshTransport({ dshHome: 'E:\\worker2\\.dsh', profile: 'xixi', cwd: 'E:\\definitely-missing-dir' }),
     (error: unknown) => error instanceof BrainError && error.code === 'TRANSPORT_FAILED',
+  );
+});
+
+/**
+ * npm does not place a global package in the same directory on both platforms:
+ * Windows keeps it next to the shim (`<prefix>/dsh.cmd` + `<prefix>/node_modules/…`),
+ * POSIX puts the shim in `bin/` and the package in `lib/node_modules/`. Deriving the
+ * entry point from `dirname(shim)` only therefore works on Windows, and the symptom is a
+ * `TRANSPORT_FAILED` on a machine where `dsh` is plainly on PATH.
+ *
+ * This asserts the *shape* of the resolved path (not just "the file exists"), so a
+ * regression to the single-candidate lookup fails here instead of only in an environment
+ * where dsh happens to be installed the other way.
+ */
+test('the harness entry point is derived from the shim in both npm global layouts', () => {
+  const binJs = resolveDshBinJs();
+  assert.equal(basename(binJs), 'bin.js');
+  assert.ok(
+    binJs.replace(/\\/g, '/').includes('@deepseek-ai/dsh/lib/bin.js'),
+    `入口点应当就是 harness 包里的 lib/bin.js：${binJs}`,
+  );
+  // The shim itself must be on PATH — otherwise this test says nothing about layout handling.
+  const shim = execFileSync(process.platform === 'win32' ? 'where' : 'which', ['dsh'], { encoding: 'utf8' })
+    .split(/\r?\n/)
+    .find((line) => line.trim().length > 0);
+  assert.ok(shim !== undefined && shim.trim().length > 0, 'dsh 应当在 PATH 上');
+  const shimDir = dirname(shim.trim()).replace(/\\/g, '/');
+  const resolvedDir = dirname(binJs).replace(/\\/g, '/');
+  const expected = [`${shimDir}/node_modules/@deepseek-ai/dsh/lib`, `${shimDir}/../lib/node_modules/@deepseek-ai/dsh/lib`].map((p) =>
+    resolve(p).replace(/\\/g, '/'),
+  );
+  assert.ok(
+    expected.includes(resolvedDir),
+    `解析结果应落在两种 npm 全局布局之一里：${resolvedDir}（shim 在 ${shimDir}）`,
   );
 });

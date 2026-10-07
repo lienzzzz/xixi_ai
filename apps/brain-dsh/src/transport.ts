@@ -50,6 +50,16 @@ const DEFAULT_TIMEOUT_MS = 180_000;
  * The npm shim on Windows is a `.cmd` that cannot be spawned directly, so the
  * shim's location is used only to find the real `lib/bin.js` beside it, which is
  * then run with the current Node.
+ *
+ * Two layouts have to be tried, because npm does not put the global package in the
+ * same place on both platforms (both observed on this machine):
+ *
+ *   * Windows: `<prefix>/dsh.cmd` with the package at `<prefix>/node_modules/@deepseek-ai/dsh`;
+ *   * POSIX:   `<prefix>/bin/dsh` with the package at `<prefix>/lib/node_modules/@deepseek-ai/dsh`
+ *     — note the extra `lib/`, so deriving from `dirname(shim)` alone misses it.
+ *
+ * The error lists every path that was tried: "I could not find it" is only actionable
+ * when it says where it looked.
  */
 export function resolveDshBinJs(explicit?: string): string {
   if (explicit !== undefined && explicit.length > 0) {
@@ -68,13 +78,18 @@ export function resolveDshBinJs(explicit?: string): string {
       detail: `${cause instanceof Error ? cause.message : String(cause)}; set DSH_BIN_JS to .../@deepseek-ai/dsh/lib/bin.js`,
     });
   }
-  const candidate = join(dirname(shim.trim()), 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
-  if (!existsSync(candidate)) {
-    throw new BrainError('TRANSPORT_FAILED', 'cannot derive the harness entry point from the dsh shim', {
-      detail: `looked for ${candidate}; set DSH_BIN_JS explicitly`,
-    });
+  const shimDir = dirname(shim.trim());
+  const candidates = [
+    join(shimDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+    // POSIX global installs: `<prefix>/bin/dsh` → `<prefix>/lib/node_modules/…`.
+    join(shimDir, '..', 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
   }
-  return candidate;
+  throw new BrainError('TRANSPORT_FAILED', 'cannot derive the harness entry point from the dsh shim', {
+    detail: `looked for ${candidates.join(' and ')}; set DSH_BIN_JS explicitly`,
+  });
 }
 
 export interface ParsedDshOutput {

@@ -19,6 +19,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { resolveDshBinJs } from '../apps/brain-dsh/src/transport.ts';
+
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PROFILE_NAME = 'xixi';
 const BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless', 'dsh-xixi-tool'];
@@ -33,15 +35,10 @@ function log(message: string): void {
 }
 
 function dshBinJs(): string {
-  if (process.env.DSH_BIN_JS !== undefined && existsSync(process.env.DSH_BIN_JS)) return process.env.DSH_BIN_JS;
-  const finder = process.platform === 'win32' ? 'where' : 'which';
-  const shim =
-    execFileSync(finder, ['dsh'], { encoding: 'utf8' })
-      .split(/\r?\n/)
-      .find((line) => line.trim().length > 0) ?? '';
-  const candidate = join(dirname(shim.trim()), 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
-  if (!existsSync(candidate)) throw new Error(`cannot find the dsh entry point next to ${shim.trim()}`);
-  return candidate;
+  // One implementation, in the place that owns spawning the harness: it knows both npm global
+  // layouts (Windows `<prefix>/node_modules/…`, POSIX `<prefix>/lib/node_modules/…`). Keeping a
+  // second copy here is how the two drift apart — this one only handled the Windows shape.
+  return resolveDshBinJs();
 }
 
 function runDsh(args: string[]): string {

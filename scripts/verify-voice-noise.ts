@@ -46,7 +46,7 @@ import { join } from 'node:path';
 
 import { MimoClient } from '@xixi/model-adapters';
 
-import { REPO_ROOT, printEvidence, readDotEnv } from './lib/harness.ts';
+import { REPO_ROOT, printEvidence, readDotEnv, resolvePython } from './lib/harness.ts';
 import { characterSimilarity, FIXTURE_TEXTS } from './lib/similarity.ts';
 import { readWav, sliceWav } from './lib/wav.ts';
 
@@ -54,7 +54,7 @@ for (const [key, value] of Object.entries(readDotEnv())) {
   if (process.env[key] === undefined) process.env[key] = value;
 }
 
-const PYTHON = process.env.XIXI_PYTHON ?? join(REPO_ROOT, '.venvs', 'voice-pipecat', 'Scripts', 'python.exe');
+const PYTHON = resolvePython({ venvs: ['voice-pipecat'] });
 const FIXTURE_DIR = join(REPO_ROOT, 'tests', 'audio-fixtures');
 const NOISY_DIR = join(FIXTURE_DIR, 'noisy');
 const OUT_DIR = join(REPO_ROOT, 'data', 'voice');

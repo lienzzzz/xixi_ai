@@ -6,7 +6,9 @@
 **不可替换**的是长期状态与行为策略（WorldState、Memory、FutureHook、SelfModel、RelationshipModel、
 RoutineModel、Proactive policy、Conversation state）。
 
-当前进度（2026-10-03，第五轮收口）：**M0 文本 Harness 已验收；噪声鲁棒语音前端、摄像头在场检测（M6）、
+当前进度（2026-10-07：仓库现在同时在 **Windows 与 Linux/WSL2** 上跑，三门禁在这台 Linux 机器上全绿——`npm test` 720/720；
+移植细节与「这台机器上验不了的事」见 [`docs/recon/linux-port-environment-2026-10-07.md`](docs/recon/linux-port-environment-2026-10-07.md)。
+以下能力清单仍是 2026-10-03 第五轮收口的快照）：**M0 文本 Harness 已验收；噪声鲁棒语音前端、摄像头在场检测（M6）、
 现场测试控制台、主动开口（主动性 V2：硬底线 + 模型读空气）、多段回复与 pack Phase 8 的流式语音输出均已落地**；
 「真人感」改造（提示词改成「身份与说话方式」、回复容量 180 → 480 字、制品清洗）已落地并有**同口径的前后对比**
 （见 [`docs/benchmarks/realism-metrics.md`](docs/benchmarks/realism-metrics.md)）；
@@ -62,6 +64,29 @@ npm run eval:conversation:judge            # 对话质量评测（含评审模�
 ```
 
 需要外网时可能要走代理：`$env:HTTPS_PROXY='http://127.0.0.1:7890'`、`$env:NODE_USE_ENV_PROXY='1'`。
+
+### 在 Linux（WSL2）上跑
+
+仓库现在**同时在 Windows 与 Linux 上跑**，两条命令的差别只有「依赖放哪」与「shell 语法」：
+
+```bash
+npm install --cache /tmp/npm-xixi-cache        # 私有缓存：~/.npm 可能被 root 占着（本机没有 sudo）
+
+# Python 3.12 的两个 venv（WSL 里用系统 /usr/bin/python3.12，不要用 conda 的 3.13）
+uv venv --python /usr/bin/python3.12 --seed .venvs/voice-pipecat      # VAD/分段前端
+uv venv --python /usr/bin/python3.12 --seed .venvs/cv4                # 摄像头在场（opencv<5）
+.venvs/voice-pipecat/bin/python3 -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    "pipecat-ai[silero]>=1.10,<2" numpy soundfile soxr loguru
+.venvs/cv4/bin/python3 -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    "opencv-python-headless<5" numpy onnxruntime
+
+npm run check:types && npm test && npm run check:docs
+```
+
+入口会**自己找**这两个 venv（`Scripts/python.exe` 与 `bin/python3` 都试，见
+[`docs/recon/linux-port-environment-2026-10-07.md`](docs/recon/linux-port-environment-2026-10-07.md)），
+不需要设 `XIXI_PYTHON`。**这台机器上验不了**的几件事（DSH 版本、真实模型调用、麦克风/摄像头硬件、
+自检的两项 Windows 专属读数）也逐条写在那份报告里——**不要把它们写成已验**。
 
 ## 已验证的范围（每条都有可重跑的证据）
 

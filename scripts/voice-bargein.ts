@@ -38,7 +38,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { REPO_ROOT, printEvidence } from './lib/harness.ts';
+import { REPO_ROOT, printEvidence, resolvePython } from './lib/harness.ts';
 import { readWav, readWavInfo, sliceWav } from './lib/wav.ts';
 import {
   chunkClauses,
@@ -55,7 +55,7 @@ import {
   truncateOnBargeIn,
 } from '../services/voice-edge/voice_edge/voice_stream.ts';
 
-const PYTHON = process.env.XIXI_PYTHON ?? join(REPO_ROOT, '.venvs', 'voice-pipecat', 'Scripts', 'python.exe');
+const PYTHON = resolvePython({ venvs: ['voice-pipecat'] });
 /** §33 target for "user starts speaking → stop playing". */
 const TARGET_MS = 500;
 

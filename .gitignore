@@ -13,3 +13,6 @@ vendor/
 .agent-teams/
 __pycache__/
 *.pyc
+
+# 用户上传的当前代码快照（与仓库 HEAD 同源，仅作对照，不进版本库）
+xixi_ai_current.zip

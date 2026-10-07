@@ -1,6 +1,9 @@
 # 西西项目文档地图
 
-> 最后更新：2026-10-04（V0.3 **P2 收口 t15**：登记 [progress-v03.md](progress-v03.md) 的 P2 段与 P2 的**四份** ADR（0017/0018/0019/0020）与新一份复验报告 `verification/t14-p2-gate-independent-verification-2026-10-04.md`）
+> 最后更新：2026-10-07（新增 [`recon/linux-port-environment-2026-10-07.md`](recon/linux-port-environment-2026-10-07.md)：
+> 仓库现在也在 **Linux（WSL2）** 上跑——本机版本矩阵、两个 venv 的建法、移植挖出的五个平台假设缺陷、
+> 以及**这台机器上验不了的四类事**；Windows 侧的环境事实见 [`recon/field-test-environment-2026-09-30.md`](recon/field-test-environment-2026-09-30.md)。
+> 此前更新：2026-10-04（V0.3 **P2 收口 t15**））
 > 面向：接手本项目的编码 Agent / 维护者
 > 本文件告诉你「先读什么、什么最权威、改代码后必须更新哪些文档」。
 
@@ -123,6 +126,7 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | [`verification/t14-p2-gate-independent-verification-2026-10-04.md`](verification/t14-p2-gate-independent-verification-2026-10-04.md) | **Phase 2（P2 gate）的独立复验**：两个场景用真模型 + 真文件库跑通并留档；四个 live 入口未接线与提醒的 27% 可靠性**按未达标写**；四条 gate 的实测数字 |
 | [`verification/t15-p1-independent-verification-2026-10-04.md`](verification/t15-p1-independent-verification-2026-10-04.md)（附可重跑探针 `t15-probe.mjs`） | **Phase 1 的独立复验**：四条技术验收自己复算（文件库 + 每步新进程）、两个场景真模型实跑、**pack 旗舰场景按原句未达标的三条写在最前面**（不替实现者圆场） |
 | [`v03/ACTUAL_RUNTIME_MAP.md`](v03/ACTUAL_RUNTIME_MAP.md) | **V0.3 Phase 0 的运行时地图**：pack 点名的十个概念（`buildToolChain` / `ProactiveLoop` / `createModelComposer` / `createModelDecider` / voice helpers / Memory extractor / 各入口 DB / perception DB / prompt builder / DSH 与直连）各自的定义处、调用点、目标包与迁移步；每行附一条可复跑的 `git grep`。另含对 pack 审计报告 `00_CODE_AUDIT.md` 的逐项复核（15 条：一致 / 偏差，附证据） |
+| [`recon/linux-port-environment-2026-10-07.md`](recon/linux-port-environment-2026-10-07.md) | **Linux（WSL2）移植的环境勘测**：本机版本矩阵、两个 venv 的建法与三个装包坑、移植在代码里挖出的**五个平台假设缺陷**（含一条定时炸弹用例与 4 条被静默 skip 的用例）、这台机器上**验不了**的四类事（DSH 版本不匹配 / 无密钥 / 无音频与摄像头设备 / 自检两项 Windows 专属），以及移植前后的门禁实测对照 |
 
 ## 2. 权威性排序（冲突时按这个判）
 

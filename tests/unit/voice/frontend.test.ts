@@ -6,7 +6,7 @@
  * suite and then asserting the *published artefacts* (noisy fixtures, manifest, calibration
  * JSON) are internally consistent. No microphone, no network, no VAD model is needed.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,10 +14,19 @@ import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { characterSimilarity, FIXTURE_TEXTS, normaliseForComparison } from '../../../scripts/lib/similarity.ts';
+import { resolvePython } from '../../../scripts/lib/harness.ts';
 import { readWav, readWavInfo } from '../../../scripts/lib/wav.ts';
 
 const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
-const PYTHON = process.env.XIXI_PYTHON ?? join(REPO_ROOT, '.venvs', 'voice-pipecat', 'Scripts', 'python.exe');
+/** 16 kHz mono is what `voice_edge.calibrate` targets (`TARGET_RATE`) and what the fixtures are. */
+const DEFAULT_SAMPLE_RATE = 16_000;
+/**
+ * Same resolution as the entries that actually spawn the voice service (`scripts/voice-turn.ts`
+ * and friends) — Windows `Scripts/python.exe`, POSIX `bin/python3`. Hardcoding the Windows path
+ * here did not fail loudly on Linux: it made the four Python-backed cases below **skip**, so the
+ * gate looked green while the front end was not being tested at all.
+ */
+const PYTHON = resolvePython({ venvs: ['voice-pipecat'] });
 const VOICE_EDGE = join(REPO_ROOT, 'services', 'voice-edge');
 const NOISY_DIR = join(REPO_ROOT, 'tests', 'audio-fixtures', 'noisy');
 const manifestPath = join(NOISY_DIR, 'manifest.json');
@@ -46,6 +55,14 @@ function loadManifest(): NoisyManifest {
 }
 
 const pythonAvailable = existsSync(PYTHON);
+/**
+ * The resolver now falls back to `python3` on PATH when no venv exists, and a bare interpreter
+ * that lacks the front end's dependencies would turn "skipped" into "failed" on a machine that
+ * never had the venv. Probe the thing the cases below actually need — numpy for the DSP and the
+ * importable `voice_edge` package — so the skip condition keeps meaning what it says.
+ */
+const pythonUsable =
+  pythonAvailable && spawnSync(PYTHON, ['-c', 'import numpy, voice_edge.frontend'], { cwd: VOICE_EDGE, stdio: 'ignore' }).status === 0;
 
 test('noisy fixture set covers >= 3 SNR tiers with a recorded generation method', () => {
   assert.ok(existsSync(manifestPath), 'tests/audio-fixtures/noisy/manifest.json is missing');
@@ -230,22 +247,51 @@ async function checkPythonUnittest(): Promise<void> {
   assert.ok(ran >= 30, `expected at least 30 python tests, got ${ran}`);
 }
 
+/**
+ * Write a few seconds of quiet room noise as 16-bit mono PCM.
+ *
+ * Why not just read `data/recon/ambient-5s.wav`: that file lives in the gitignored `data/` tree,
+ * so it exists only on the machine where the T0 recon was run. Depending on it made the F8 case
+ * above fail on any other checkout — and, before the skip condition was fixed, made it *skip*
+ * (which reads as coverage while measuring nothing). The contract under test is "the calibrate
+ * CLI recommends exactly what the front end applies", which needs *an* ambient recording, not
+ * that particular one.
+ *
+ * Deterministic on purpose (`random.Random(7)`): a seed fixed in the source is reproducible,
+ * and nothing here depends on the interpreter's global RNG state.
+ */
+const AMBIENT_WAV_SCRIPT = [
+  'import math, random, struct, sys, wave',
+  'path, rate, seconds = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])',
+  'rng = random.Random(7)',
+  'n = int(rate * seconds)',
+  "with wave.open(path, 'wb') as handle:",
+  '    handle.setnchannels(1)',
+  '    handle.setsampwidth(2)',
+  '    handle.setframerate(rate)',
+  '    frames = bytearray()',
+  '    for index in range(n):',
+  '        value = 0.006 * math.sin(2 * math.pi * 55 * index / rate) + 0.004 * (rng.random() * 2 - 1)',
+  "        frames += struct.pack('<h', int(max(-1.0, min(1.0, value)) * 32767))",
+  '    handle.writeframes(bytes(frames))',
+].join('\n');
+
+async function writeAmbientWav(path: string, seconds = 3): Promise<void> {
+  const rate = DEFAULT_SAMPLE_RATE;
+  const result = await runAsync(PYTHON, ['-c', AMBIENT_WAV_SCRIPT, path, String(rate), String(seconds)], VOICE_EDGE);
+  assert.equal(result.status, 0, `生成环境噪声夹具失败：\n${result.stdout}\n${result.stderr}`);
+  assert.ok(existsSync(path), `夹具没有落盘：${path}`);
+}
+
 async function checkCalibrateContract(): Promise<void> {
   const outDir = mkdtempSync(join(tmpdir(), 'xixi-calibrate-'));
   const reportPath = join(outDir, 'noise-floor.json');
   const profilePath = join(outDir, 'frontend-profile.json');
+  const ambientPath = join(outDir, 'ambient.wav');
+  await writeAmbientWav(ambientPath);
   const result = await runAsync(
     PYTHON,
-    [
-      '-m',
-      'voice_edge.calibrate',
-      '--wav',
-      join(REPO_ROOT, 'data', 'recon', 'ambient-5s.wav'),
-      '--json-out',
-      reportPath,
-      '--profile-out',
-      profilePath,
-    ],
+    ['-m', 'voice_edge.calibrate', '--wav', ambientPath, '--json-out', reportPath, '--profile-out', profilePath],
     VOICE_EDGE,
   );
   assert.equal(result.status, 0, `calibrate failed:\n${result.stdout}\n${result.stderr}`);
@@ -328,7 +374,7 @@ async function checkFallbackCutoff(): Promise<void> {
  * Python; after: ~15 s (the slowest single check).
  */
 test('offline voice checks that shell out to Python (run concurrently)', { concurrency: true }, async (parent) => {
-  const skip = !pythonAvailable && 'voice-pipecat venv not present';
+  const skip = !pythonUsable && 'voice-pipecat venv not present (或它缺 numpy / voice_edge)';
   await Promise.all([
     parent.test('front-end DSP unit tests pass (python, services/voice-edge/tests)', { skip }, checkPythonUnittest),
     parent.test('the calibrate CLI recommends exactly the parameters the front end applies (F8)', { skip }, checkCalibrateContract),
@@ -338,7 +384,7 @@ test('offline voice checks that shell out to Python (run concurrently)', { concu
 });
 
 async function runRunnerChecks(parent: TestContext): Promise<void> {
-  const skip = !pythonAvailable && 'voice-pipecat venv not present';
+  const skip = !pythonUsable && 'voice-pipecat venv not present (或它缺 numpy / voice_edge)';
   // Started together and awaited together on purpose: each check spawns the real runner, whose
   // cost is dominated by Python startup, so running them one after another would make the whole
   // file pay the sum instead of the maximum.

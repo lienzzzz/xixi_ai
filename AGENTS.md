@@ -48,6 +48,12 @@
 
 ## 4. 环境事实（2026-09-29 核对）
 
+> **2026-10-07 起有两台机器**：下面这张表是**原 Windows 开发机**（`E:\worker2`，历史事实，仍然有效）；
+> 仓库现在也在 **Linux / WSL2** 上跑（`/home/u24/projects/xixi_ai`）。Linux 侧的版本矩阵、
+> 建 venv 的命令、移植挖出的平台假设缺陷与「这台机器上验不了的四类事」见
+> [`docs/recon/linux-port-environment-2026-10-07.md`](docs/recon/linux-port-environment-2026-10-07.md)（**动手前先读**）。
+> 跨平台纪律见 §10。
+
 | 项 | 事实 |
 |---|---|
 | Node | v24.21.0，原生运行 `.ts`（类型擦除，无需编译）；`node:sqlite` 可用（SQLite 3.53.4，含 JSON1） |
@@ -461,3 +467,27 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    重派后接着干，而不是重来。**只有同一 provider 跨多个成员连续失败**才考虑换 provider；
    **若反复出现，用户侧动作**是在**启动 DSH 的那个终端**里导出 `HTTPS_PROXY`/`HTTP_PROXY` 再重启 DSH
    （DSH 只读环境变量，不读 Windows 系统代理/PAC）。
+
+## 10. 跨平台纪律（2026-10-07 起：仓库同时在 Windows 与 Linux 上跑）
+
+移植到 Linux 时，**没有一条测试为「Windows 专属假设」变红**——挖出来的五个缺陷全是
+「在原机器上永远看不见」的形态（详见 [`docs/recon/linux-port-environment-2026-10-07.md`](docs/recon/linux-port-environment-2026-10-07.md)）。
+下次再换机器/换平台时，按这四条自查：
+
+1. **判断「绝对路径」用 `node:path` 的 `isAbsolute` / `resolve`，不要手写启发式。**
+   反例：`file.includes(':') || file.startsWith('.')` —— 这是「Windows 盘符」的判据，
+   `/tmp/x.wav` 在它眼里是相对路径，于是被拼到仓库根后面，报一个**看起来像临时目录坏了**的 `ENOENT`。
+2. **解释器与工具路径要按布局探测，不要写死一个平台的形态。**
+   Windows 是 `.venvs/<name>/Scripts/python.exe`，POSIX 是 `.venvs/<name>/bin/python3`；
+   npm 的全局包 Windows 在 `<prefix>/node_modules/`，POSIX 在 `<prefix>/lib/node_modules/`。
+   **仓库里只能有一份解析实现**（今天是 `scripts/lib/harness.ts` 的 `resolvePython` /
+   `pythonCandidates` / `pythonCandidateHint`，以及 `apps/brain-dsh/src/transport.ts` 的
+   `resolveDshBinJs`，`scripts/install-dsh-profile.ts` 复用它）——写第二份拷贝就是下次漂移的起点。
+3. **测试不许依赖 gitignored 的运行产物，更不许因为缺它就静默 skip。**
+   `data/` 里的勘测图片与录音、`data/recon/ambient-5s.wav` 这类文件**只存在于跑过勘测的那台机器**上；
+   断言要么自己造夹具（用 Python 标准库写 WAV 是个好例子），要么把下界写成「有条件才要求」。
+   **静默 skip 比红更危险**：`npm test` 末行是绿的，而那几块根本没被测。
+4. **种子数据里写死绝对日期 + 判定读 `Date.now()` = 定时炸弹**（与 §9.25 ③④ 同源，形态是新的第三种）：
+   绿是因为「今天还没过期」，两天后自己变红。凡时间驱动的状态机（未完话题的
+   `followupWindowHours` 就是 48 小时），测试要么**注入时钟**（入口已有 `now` / `clock` 接缝），
+   要么把种子时间**相对当前时间**生成。**判据**：这条用例放到 30 天后跑还绿吗？

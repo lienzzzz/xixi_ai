@@ -23,7 +23,7 @@ import { MimoClient } from '@xixi/model-adapters';
 import { CONVERSATION_SCOPE, buildToolChain } from '@xixi/runtime';
 import { openXixiStore, type XixiConfig } from '@xixi/domain';
 
-import { REPO_ROOT, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
+import { REPO_ROOT, loadConfig, printEvidence, readDotEnv, resolvePython } from './lib/harness.ts';
 import { characterSimilarity } from './lib/similarity.ts';
 import { readWav, sliceWav } from './lib/wav.ts';
 
@@ -31,7 +31,7 @@ for (const [key, value] of Object.entries(readDotEnv())) {
   if (process.env[key] === undefined) process.env[key] = value;
 }
 
-const PYTHON = process.env.XIXI_PYTHON ?? join(REPO_ROOT, '.venvs', 'voice-pipecat', 'Scripts', 'python.exe');
+const PYTHON = resolvePython({ venvs: ['voice-pipecat'] });
 /** Acoustic capture is imperfect; this is a floor for "the pipeline works through the air". */
 const MIN_SIMILARITY = 0.5;
 

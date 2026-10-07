@@ -112,7 +112,7 @@ import {
 // transaction) instead of the Python child opening the store itself.
 import { ingestPerceptionLine } from '@xixi/runtime';
 
-import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
+import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, pythonCandidateHint, pythonCandidates, readDotEnv, resolvePython } from './lib/harness.ts';
 import { concatWav, readWav, readWavInfo } from './lib/wav.ts';
 // Pack Phase 8: the streaming speech pipeline (ClauseChunker → TTS queue → playback clock).
 // Shared with `scripts/voice-turn.ts` and asserted by `tests/unit/voice/voice-stream.test.ts`
@@ -131,11 +131,11 @@ export const DEFAULT_PORT = 8792;
 export const VOICE_DIR = join(REPO_ROOT, 'data', 'voice-web');
 export const CALIBRATION_FILE = join(REPO_ROOT, 'data', 'voice', 'frontend-profile.json');
 export const REPORT_DIR = join(REPO_ROOT, 'docs', 'recon');
-export const DEFAULT_PYTHON = process.env.XIXI_PYTHON ?? join(REPO_ROOT, '.venvs', 'voice-pipecat', 'Scripts', 'python.exe');
+export const DEFAULT_PYTHON = resolvePython({ venvs: ['voice-pipecat'] });
 /** The venv that has sounddevice/pycaw/cv2 (t1's recon venv). */
-export const PROBE_PYTHON = process.env.XIXI_PROBE_PYTHON ?? join(REPO_ROOT, '.venvs', 'field-probe', 'Scripts', 'python.exe');
+export const PROBE_PYTHON = resolvePython({ envVar: 'XIXI_PROBE_PYTHON', venvs: ['field-probe'] });
 /** The venv that has sounddevice + soundfile + soxr + soundcard. */
-export const AUDIO_PYTHON = process.env.XIXI_AUDIO_PYTHON ?? join(REPO_ROOT, '.venvs', 'voice-livekit', 'Scripts', 'python.exe');
+export const AUDIO_PYTHON = resolvePython({ envVar: 'XIXI_AUDIO_PYTHON', venvs: ['voice-livekit'] });
 
 // --------------------------------------------------------------------------------------
 // One tool chain for every entry point (pack Phase 2) — V0.3 P0-A moved it to the runtime
@@ -1985,6 +1985,16 @@ export interface FieldServerOptions {
   readonly vadOverride?: (wavPath: string) => Promise<VadResult>;
   /** Tool data sources (weather/news/reminders), injectable so an offline run stays offline. */
   readonly toolOverrides?: ToolChainOptions;
+  /**
+   * Test seam for the open-thread clock (the same shape `TopicEngine` already takes).
+   *
+   * The unfinished-topic state machine is time-driven: a thread expires `followupWindowHours`
+   * (config default 48 h) after it was spoken, so a test that seeds a fixed sentence and lets
+   * the drill run against the wall clock turns into a **time bomb** — it passes on the day it
+   * was written and fails two days later. Injecting the clock makes that gate deterministic.
+   * Only the open-thread paths read it; everything else keeps the real clock.
+   */
+  readonly now?: () => Date;
   readonly log?: (line: string) => void;
 }
 
@@ -2087,13 +2097,14 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
   if (proactiveSnapshot.source === 'console') {
     log(`[proactive] 已从审计记录恢复设置（${proactiveSnapshot.updatedAt ?? '?'}）：${proactiveSnapshot.settings.enabled ? '允许主动开口' : '已关闭'}`);
   }
+  const serverNow = options.now ?? ((): Date => new Date());
   /**
    * 话题引擎（pack Phase 3）：未完话题的提取与追问候选。
    *
    * 它读的是用户自己的轮次与话题日志，**不阻塞任何一次回复**：提取与收口都发生在考虑循环的
    * 下一次 tick（《方案》§11.1 的异步提取）。`config.open_threads` 段控制窗口与次数上限。
    */
-  const topicEngine = new TopicEngine({ store, config: config.openThreads, clock: () => new Date() });
+  const topicEngine = new TopicEngine({ store, config: config.openThreads, clock: serverNow });
   /**
    * 面板状态：**只读**（pack v03-preflight ②）。
    *
@@ -2155,7 +2166,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
      * 再取「现在该追问的」。两步都幂等，所以每个 tick 都跑一遍是安全的。
      */
     readOpenThreads: () => {
-      const at = new Date();
+      const at = serverNow();
       const reconciled = topicEngine.reconcile(at);
       if (reconciled.created.length > 0) {
         log(`[topic] 记下 ${reconciled.created.length} 件未完的事：${reconciled.created.map((thread) => thread.summary).join('｜')}`);
@@ -2780,7 +2791,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
           const drill = await proactiveDrill({
             store,
             settings: proactiveSnapshot.settings,
-            now: new Date(),
+            now: serverNow(),
             conversationState: engine.state,
             inFlightTurn: false,
             proactivity: effectiveProactivity(store.selfProfile()),
@@ -2792,7 +2803,7 @@ export async function createFieldServer(options: FieldServerOptions): Promise<Fi
           log(`[proactive] 演练 ${drill.trigger} → ${drill.reasonCode}（分数 ${drill.score}/${drill.threshold}${drill.speak ? `，分 ${drill.segments.length} 段` : ''}）`);
           // 写路径可以对齐：演练真的可能说出口，于是话题表要跟着日志走到 offered。
           // （读接口不行 —— preflight ②；见 `proactivePayload`。）
-          topicEngine.reconcile(new Date());
+          topicEngine.reconcile(serverNow());
           json(response, 200, { ok: true, drill, state: proactivePayload() });
           return;
         }
@@ -4501,9 +4512,10 @@ export function resolvePerceptionPython(log?: ((line: string) => void) | undefin
   const candidates: string[] = [];
   const fromEnv = process.env.XIXI_PERCEPTION_PYTHON;
   if (fromEnv !== undefined && fromEnv.length > 0) candidates.push(fromEnv);
-  for (const name of ['cv4', 'field-probe', 'voice-pipecat']) {
-    candidates.push(join(REPO_ROOT, '.venvs', name, 'Scripts', 'python.exe'));
-    candidates.push(join(REPO_ROOT, '.venvs', name, 'bin', 'python3'));
+  for (const name of ['cv4', 'field-probe', 'voice-pipecat'] as const) {
+    // POSIX layout first: on Linux `Scripts/python.exe` never exists, and trying it first
+    // only adds two doomed `existsSync` calls per venv (the order matters for the hint below).
+    candidates.push(...pythonCandidates(name));
   }
   candidates.push('python', 'python3');
   for (const candidate of candidates) {
@@ -4516,8 +4528,9 @@ export function resolvePerceptionPython(log?: ((line: string) => void) | undefin
     }
   }
   throw new Error(
-    '找不到带 OpenCV 的 Python（试过 XIXI_PERCEPTION_PYTHON、.venvs/cv4、.venvs/field-probe、.venvs/voice-pipecat、python）；' +
-      '建一个：py -3.12 -m venv .venvs/cv4 然后 .venvs/cv4/Scripts/python.exe -m pip install "opencv-python-headless<5" numpy',
+    `找不到带 OpenCV 的 Python（试过 ${pythonCandidateHint(['cv4', 'field-probe', 'voice-pipecat'])}）；` +
+      '建一个：python3 -m venv .venvs/cv4 然后 .venvs/cv4/bin/python3 -m pip install "opencv-python-headless<5" numpy' +
+      '（Windows 上是 py -3.12 -m venv .venvs/cv4 与 .venvs/cv4/Scripts/python.exe）',
   );
 }
 

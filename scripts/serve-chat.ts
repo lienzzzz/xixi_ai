@@ -18,7 +18,7 @@ import { ConversationEngine, TopicEngine } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
 import { openXixiStore, resolveCanonicalDataDir } from '@xixi/domain';
 
-import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv } from './lib/harness.ts';
+import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv, resolvePython } from './lib/harness.ts';
 import {
   RuntimeError,
   DEFAULT_LOOP_INTERVAL_MS,
@@ -78,7 +78,7 @@ const USE_DSH = args.includes('--dsh');
  * without spending a real call (the console tests drive this page end-to-end).
  */
 const USE_FAKE = args.includes('--fake');
-const PYTHON = process.env.XIXI_PYTHON ?? join(REPO_ROOT, '.venvs', 'voice-pipecat', 'Scripts', 'python.exe');
+const PYTHON = resolvePython({ venvs: ['voice-pipecat'] });
 const VOICE_DIR = join(REPO_ROOT, 'data', 'voice-web');
 
 const config = loadConfig();

@@ -78,7 +78,9 @@ function pythonCandidates(): string[] {
       return rank(left) - rank(right) || left.localeCompare(right);
     });
     for (const name of names) {
-      for (const suffix of ['Scripts/python.exe', 'bin/python3', 'bin/python']) {
+      // Existing interpreters first, then the rest: on POSIX `Scripts/python.exe` never exists,
+      // and `probe()` spends a real process spawn on every candidate it is handed.
+      for (const suffix of ['bin/python3', 'bin/python', 'Scripts/python.exe']) {
         candidates.push(join(venvs, name, ...suffix.split('/')));
       }
     }
@@ -253,8 +255,9 @@ test('the privacy boundary is enforced by the code, not only by the docs', () =>
       `新增文件：${added.join(', ')}`,
   );
   assert.ok(
-    dataImagesBefore.size >= 4,
-    `data/ 的既有图片集看起来不对（${dataImagesBefore.size} 个）：若确实被清理过，请更新这条下界的说明`,
+    dataImagesBefore.size >= 4 || dataImagesBefore.size === 0,
+    `data/ 的图片集既不空也不足 4 个（${dataImagesBefore.size} 个）：` +
+      '既不是全新检出（那时是 0），也不是留下过 T0 勘测资产的那台机器——请核对 data/ 是否被部分清理过',
   );
 });
 
@@ -266,6 +269,12 @@ test('the data/ watching rule detects a newly written image', () => {
   assert.deepEqual(newImageNames(baseline, ['camera-frame-DSHOW-0.png', 'fresh-capture.png']), ['fresh-capture.png']);
   // A moved file keeps its name, so moving the existing recon frames is not reported as new.
   assert.deepEqual(newImageNames(baseline, ['largest_selfie.jpg']), []);
-  // …and the real data/ directory today still holds the recon assets (the baseline is not empty).
-  assert.ok(imageNameSet(DATA_DIR).size >= 4, 'data/ 里应当仍有 T0 勘测留下的图片');
+  // …and if this checkout carries the T0 recon assets, `data/` still holds them (the baseline
+  // is then not empty). A fresh checkout has no `data/` at all until something writes it, and
+  // that must not fail the gate: the property this test exists for — that `newImageNames`
+  // really fires on a new name — is asserted unconditionally above.
+  const baselineSize = imageNameSet(DATA_DIR).size;
+  if (baselineSize > 0) {
+    assert.ok(baselineSize >= 4, `data/ 里应当仍有 T0 勘测留下的图片（实际只有 ${baselineSize} 个）`);
+  }
 });

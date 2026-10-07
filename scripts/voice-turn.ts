@@ -40,7 +40,7 @@
  */
 import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { FakeBrainAdapter, type TurnModelProvider } from '@xixi/brain-adapter';
 import { ConversationEngine } from '@xixi/conversation';
@@ -51,7 +51,7 @@ import { openXixiStore, resolveCanonicalDataDir } from '@xixi/domain';
 // share the runtime package's one now instead of the console script's.
 import { CONVERSATION_SCOPE, buildToolChain, createTurnExtraction } from '@xixi/runtime';
 
-import { REPO_ROOT, loadConfig, printEvidence, readDotEnv } from './lib/harness.ts';
+import { REPO_ROOT, loadConfig, printEvidence, readDotEnv, resolvePython } from './lib/harness.ts';
 import { concatWav, readWavInfo, readWav } from './lib/wav.ts';
 // Pack Phase 8: the streaming speech pipeline (ClauseChunker → TTS queue → playback clock).
 // The same class the console and the page use, so 「第一块立刻进 TTS 队列」 has one home.
@@ -70,7 +70,7 @@ for (const [key, value] of Object.entries(readDotEnv())) {
   if (process.env[key] === undefined) process.env[key] = value;
 }
 
-const PYTHON = process.env.XIXI_PYTHON ?? join(REPO_ROOT, '.venvs', 'voice-pipecat', 'Scripts', 'python.exe');
+const PYTHON = resolvePython({ venvs: ['voice-pipecat'] });
 const OUT_DIR = join(REPO_ROOT, 'data', 'voice');
 
 interface VoiceTurnResult {
@@ -215,7 +215,7 @@ for (let index = 0; index < args.length; index += 1) {
 }
 if (compareInputs.length > 0) {
   const comparisons = compareInputs.map((file) => {
-    const absolute = file.includes(':') || file.startsWith('.') ? file : join(REPO_ROOT, file);
+    const absolute = isAbsolute(file) ? file : resolve(REPO_ROOT, file);
     return compareBatch(parseBatchEvidence(readFileSync(absolute, 'utf8').replace(/^\uFEFF/, ''), file));
   });
   console.log(formatComparison(comparisons));
@@ -291,7 +291,7 @@ const replyBuffers: Buffer[] = [];
 let first = true;
 
 for (const wavPath of wavs) {
-  const absolute = wavPath.startsWith('.') || wavPath.includes(':') ? wavPath : join(REPO_ROOT, wavPath);
+  const absolute = isAbsolute(wavPath) ? wavPath : resolve(REPO_ROOT, wavPath);
   const info = readWavInfo(readWav(absolute));
 
   const vadStart = Date.now();

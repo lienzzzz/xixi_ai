@@ -66,6 +66,66 @@ export function loadConfig(): XixiConfig {
   return loadXixiConfig(configPath());
 }
 
+/** The three venvs the voice/perception scripts use, in the documented fallback order. */
+export type VenvName = 'voice-pipecat' | 'voice-livekit' | 'field-probe' | 'cv4';
+
+/**
+ * Where an interpreter for `venv` lives, most specific first.
+ *
+ * Windows layouts put it in `Scripts/python.exe`; POSIX ones in `bin/python3`. Both are
+ * always emitted because the candidate list doubles as a diagnostic hint: an error message
+ * that shows the paths actually tried is worth more than one that shows a single guess.
+ */
+export function pythonCandidates(venv: VenvName): string[] {
+  const root = join(REPO_ROOT, '.venvs', venv);
+  return [
+    join(root, 'Scripts', 'python.exe'),
+    join(root, 'bin', 'python3'),
+    join(root, 'bin', 'python'),
+  ];
+}
+
+/**
+ * Resolve an interpreter: explicit argument, then environment override, then the venvs that
+ * actually exist, then whatever `python` is on PATH.
+ *
+ * Returning the first *existing* candidate (rather than assuming one layout) is what lets the
+ * same scripts run on Windows and on POSIX. Note this only checks existence, not that the venv
+ * carries the right packages — a probe would cost a process spawn on every entry.
+ */
+export function resolvePython(options: {
+  /** Explicit path, e.g. a `--python` flag. Wins over everything else. */
+  readonly explicit?: string | null;
+  /** Environment variable to consult before the candidate list (`XIXI_PYTHON` by default). */
+  readonly envVar?: string;
+  readonly venvs: readonly VenvName[];
+}): string {
+  const explicit = options.explicit;
+  if (explicit !== undefined && explicit !== null && explicit.length > 0) return explicit;
+  const envValue = process.env[options.envVar ?? 'XIXI_PYTHON'];
+  if (envValue !== undefined && envValue.length > 0) return envValue;
+  for (const venv of options.venvs) {
+    for (const candidate of pythonCandidates(venv)) {
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return process.platform === 'win32' ? 'python' : 'python3';
+}
+
+/**
+ * Every interpreter the voice tooling would try, for "找不到 Python" error messages.
+ * Includes the environment override so the hint matches what was really consulted.
+ */
+export function pythonCandidateHint(venvs: readonly VenvName[]): string {
+  const hints: string[] = [];
+  for (const venv of venvs) {
+    for (const candidate of pythonCandidates(venv)) hints.push(candidate);
+  }
+  hints.push('XIXI_PYTHON（本机环境变量）');
+  hints.push(process.platform === 'win32' ? 'python' : 'python3');
+  return hints.join(' → ');
+}
+
 export function printEvidence(title: string, payload: unknown): void {
   console.log(`\n=== ${title} ===`);
   console.log(JSON.stringify(payload, null, 2));

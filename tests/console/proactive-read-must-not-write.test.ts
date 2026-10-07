@@ -27,6 +27,15 @@ import { createFakeProbeRunner, createFieldServer } from '../../scripts/field-te
 /** 时间词 + 意愿 + 动作齐备的一句话 —— `TopicEngine.reconcile` 会把它记成一条未完话题。 */
 const HOUSEHOLD_LINE = '明天下午我要去社区医院拿药。';
 const SPOKEN_AT = new Date(2026, 9, 2, 8, 0, 0);
+/**
+ * 面板时钟：**必须注入**，不能靠墙上时间。
+ *
+ * 追问窗口是 `followup_window_h`（出厂 48 小时）——`expireAt` = 「明天下午」（= 10-03 15:00）+ 48 小时。
+ * 如果让演练去读真时钟，这条用例就变成一个**定时炸弹**：写上它的当天是绿的，两天后
+ * `reconcile` 会先把话题判成 `exhausted`，于是第 4 条断言（应当是 `candidate`）永远红。
+ * 实测：2026-10-07 跑这条用例，三条断言里唯一红的就是它，`actual: 'exhausted'`。
+ */
+const SERVER_NOW = new Date(SPOKEN_AT.getTime() + 60 * 60 * 1000);
 
 const HTTP_TIMEOUT_MS = 30_000;
 
@@ -57,6 +66,8 @@ test('GET /api/field/proactive 不写库：刷新面板不会凭空生出一条�
     reportDir: join(root, 'recon'),
     autoPrune: false,
     probeRunner: createFakeProbeRunner(),
+    // 固定时钟：见 `SERVER_NOW` 的说明（否则这条用例会在两天后自行变红）。
+    now: () => SERVER_NOW,
     log: () => {},
   });
   /** 另开一个连接读库：断言的对象是磁盘上的事实，不是响应里的自述。 */

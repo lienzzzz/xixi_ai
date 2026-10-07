@@ -1,6 +1,7 @@
 # 接手交接书（Handoff）
 
-> 最后更新：2026-10-03（第五轮 `xixi-v02-round5` 收口中，见下面 §0；第四轮已收口）
+> 最后更新：2026-10-07（新增 §0.15 **双机环境：Linux（WSL2）移植**；其余内容仍是 2026-10-03 第五轮收口中的快照）
+> 上一版：2026-10-03（第五轮 `xixi-v02-round5` 收口中，见 §0；第四轮已收口）
 > 权威来源：`docs/progress.md`（结论与数字）、`docs/recon/*`（外部系统实测）、代码与测试
 > 若与代码不一致，以代码为准，并请立即修正本文件
 
@@ -71,6 +72,35 @@
     在两个文件顶层加 `"annotations": [{ "at": "2026-10-04", "by": "V0.3 t15（P2 收口）", "note": "skipped[0]（G03）的源理由「本仓库当前没有 open thread 存储」已在 V0.3 t19 更正：open_threads 表与 OpenThreadStore 自 pack Phase 3 起就存在；这条记录是当次运行时的判断，不改写。" }]`。
     改完跑一次 `node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v01-vanilla.json` 确认 exit 0。
 16. **`packages/plugins/mcp/index.ts` 的注释里没有 v1/v2 对比那两句**（t15 实测，2026-10-04）：t3 的回报与提交 `c8396e0` 的提交信息都写「依赖理由已写进 `packages/plugins/mcp/index.ts` 注释」，但该注释只覆盖**依赖面**（client/server/dev、lock 的 13 条、zod 的口径）；**「v2 取代 v1 单体包 `1.32.0`」与「否掉手写协议＝与真实 MCP 服务器互操作会变成与自造方言互操作」这两句全库零命中**（`git grep -n "1.32.0\|自造方言" -- packages docs`）。t15 已把这两句落到 [ADR-0020](adr/0020-provider-three-interfaces-and-mcp-deps.md) §5，**以后引用请引那份 ADR 或提交 `c8396e0`，不要再写「注释里有一段」**。
+
+### 0.15 双机环境：Linux（WSL2）移植（2026-10-07）
+
+**先说结论**：仓库现在**同时在 Windows 与 Linux 上跑**。检出在 `/home/u24/projects/xixi_ai`
+（Ubuntu 24.04.3 on WSL2，Node v24.14.1，`/usr/bin/python3.12` = 3.12.3）。
+**在这台机器上三门禁全绿**：`check:types` exit 0；`npm test` **720 项 pass 720 fail 0 skipped 0**；`check:docs` **110 份**三个 0。
+完整环境矩阵、两个 venv 的建法与三个装包坑见 [`recon/linux-port-environment-2026-10-07.md`](recon/linux-port-environment-2026-10-07.md)。
+
+**移植挖出的五个缺陷（都已修，全部是「在原 Windows 机器上永远看不见」的形态）**——细节与红证见
+[`progress.md` §10](progress.md) 与上面那份 recon 报告：
+
+1. `scripts/voice-turn.ts` 用「含冒号」判绝对路径 → POSIX 绝对路径被拼到仓库根后面（`ENOENT` 看起来像临时目录坏了）。
+2. 六个入口 + `tests/unit/voice/frontend.test.ts` 把解释器写死成 `Scripts/python.exe` → Linux 上 spawn 失败。
+   现在全仓只有一份解析器：`scripts/lib/harness.ts` 的 `resolvePython` / `pythonCandidates` / `pythonCandidateHint`。
+3. `apps/brain-dsh/src/transport.ts` 的 `resolveDshBinJs` 只认 Windows 的 npm 全局布局（POSIX 多一层 `lib/`）→
+   `install:profile` 直接抛。
+4. 两条感知用例要求 `data/` 里有 T0 勘测图片（gitignored → 干净检出必红）。
+5. `tests/console/proactive-read-must-not-write.test.ts` 是**定时炸弹**（种子日期写死 + 话题窗口 48 小时），
+   第 3 天起必然红；已加 `FieldServerOptions.now` 接缝。
+
+**两条最该记住的**：① **静默 skip 比红更危险**——`frontend.test.ts` 的 Windows 路径让 4 条 Python 用例被 skip，
+而 `npm test` 末行是绿的；改完后其中一条当场变红（读 gitignored 的 `data/recon/ambient-5s.wav`），
+已改成用例自己生成夹具。② **这台机器上验不了的四类事**（**不许写成已验**，原因见 recon §4）：
+**DSH 路径**（全局 DSH 是 `0.2.0-rc.2` 而插件 peer 钉 `0.1.7-rc.2`，bundle 被跳过；全局目录归 root、本机无 sudo）、
+**一切真实模型调用**（没有 `.env`）、**麦克风/扬声器/摄像头真机采集**（WSL2 不暴露设备）、
+**`field-test --self-test` 的 30 通过 / 2 失败**（两条都是 Windows 专属读数，环境缺失不是回归）。
+
+**下一轮接手时**：绝对路径用 `node:path`、路径按布局探测且全仓只留一份实现、测试不许依赖 gitignored 产物、
+时间驱动的断言要么注入时钟要么相对当前时间生成——这四条已写进 [`../AGENTS.md`](../AGENTS.md) §10。
 
 ---
 

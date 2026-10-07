@@ -2,7 +2,8 @@
 
 > 更新规则：每完成一个可独立理解的步骤就立刻追加/更新本文，写清「做了什么、验证结果、下一步、已知问题」。
 > 这台机器偶发蓝屏，**本文是崩溃后恢复工作的唯一依据**。
-> 最后更新：2026-10-04（V0.3 **P2 集成收口 t15**：交付、Gate 实测、两个场景、未达标项与四条下一阶段接线项进
+> 最后更新：2026-10-07（**双机环境：Linux（WSL2）移植**，见 §10——五个平台假设缺陷、静默 skip 变真跑、门禁 720/720/110，以及这台机器上验不了的四类事）。
+> 上一版：2026-10-04（V0.3 **P2 集成收口 t15**：交付、Gate 实测、两个场景、未达标项与四条下一阶段接线项进
 > [docs/progress-v03.md](progress-v03.md) 的 P2 段；本文新增 §9，并更正 §2.5 里 `BrainAdapter` 七个成员的旧口径）。
 > 上一版：2026-10-04（V0.3 P0 + P1 集成收口 t16：交付、Gate 实测与遗留进 §8 与 [docs/progress-v03.md](progress-v03.md)；
 > 另更正本文件里几条「只记录」的旧结论——它们已在 V0.3 P0-E2 清掉）。
@@ -826,3 +827,57 @@ Python 3.12 解释器绝对路径：`%LOCALAPPDATA%\Programs\Python\Python312\py
   ③ MCP 没有对外部/远程服务器验证过；④ 新闻真实来源属手动证据。
 - **下一阶段四条接线项**（P2 段 §5 点名）：入口改走 `buildPluginRuntime(...).start()`、提示词装配点接 `verifyOnAssemble`、
   入口把 `ToolApprovalManager` 接成 `approvalGate`、manifest 的 tool 级 approval 声明（下一轮小任务）。
+
+## 10. 双机环境：Linux（WSL2）移植与它挖出的平台假设缺陷（2026-10-07）
+
+**背景**：仓库此前只在 Windows 开发机（`E:\worker2`）上跑过；现在检出在
+`/home/u24/projects/xixi_ai`（Ubuntu 24.04.3 on WSL2）。装好环境后跑三门禁，
+**没有任何一条测试为「Windows 专属假设」变红**——挖出来的五个缺陷全是「在原机器上永远看不见」的形态。
+完整的环境矩阵、建 venv 的命令与三个装包坑见 [`recon/linux-port-environment-2026-10-07.md`](recon/linux-port-environment-2026-10-07.md)。
+
+**改了什么（五个缺陷 + 一条新断言）**：
+
+1. `scripts/voice-turn.ts` 用 `file.includes(':') || file.startsWith('.')` 判绝对路径 → POSIX 绝对路径
+   （`/tmp/…`）被拼到仓库根后面，报一个看起来像「临时目录没建好」的 `ENOENT`；改成 `isAbsolute` / `resolve`（两处）。
+2. 六个入口 + `tests/unit/voice/frontend.test.ts` 把解释器写死成 `.venvs/<name>/Scripts/python.exe`；
+   在 `scripts/lib/harness.ts` 加**唯一一份**解析器（`resolvePython` / `pythonCandidates` / `pythonCandidateHint`），
+   全部改调它（`XIXI_PYTHON` 等环境变量的优先级原样保留）。
+3. `apps/brain-dsh/src/transport.ts` 的 `resolveDshBinJs` 只认 Windows 的 npm 全局布局
+   （POSIX 多一层 `lib/`）；补第二个候选并把试过的路径写进错误信息，`scripts/install-dsh-profile.ts`
+   改为复用它（原先那份拷贝只认 Windows）。
+4. `tests/perception/camera-presence.test.ts` 两条用例要求 `data/` 里至少有 4 张 T0 勘测图片——
+   `data/` 是 gitignored，**任何干净检出都必红**；改成「本职断言无条件、对基线的下界改成有条件」。
+5. `tests/console/proactive-read-must-not-write.test.ts` 是**定时炸弹**：种子句写死 `2026-10-02`，
+   而话题的 `expireAt` = 「明天下午」+ `followupWindowHours`（出厂 48 小时）→ 第 3 天起必然红
+   （实测 `actual: 'exhausted'` / `expected: 'candidate'`）。给 `FieldServerOptions` 加 `now?: () => Date`
+   接缝（生产不传时行为一字不变），用例传 `SPOKEN_AT + 1 小时`。
+6. 新增断言：harness 入口点必须落在**两种 npm 全局布局之一**里（`tests/unit/transport.test.ts`）。
+
+**静默 skip 变真跑**：`frontend.test.ts` 的 Windows 路径让 **4 条 Python 用例被 skip**（末行仍是绿的）——
+这正是「测试写了就必须跑」最危险的失效方式。改完后其中一条**真的红了**：F8 那条读
+`data/recon/ambient-5s.wav`（又一个 gitignored 产物）；改成**用例自己用 Python 标准库生成** 3 秒环境噪声 WAV
+再喂给 `calibrate --wav`（被测契约是「校准 CLI 推荐的就是前端实际应用的」，需要的是**一段**录音）。
+skip 条件同时从「文件存在」收紧成「解释器能 `import numpy, voice_edge.frontend`」。
+
+**门禁实测（本机同一次运行）**：
+
+| | 移植前 | 移植后 |
+|---|---|---|
+| `check:types` | exit 0 | exit 0 |
+| `npm test` | **715 项：pass 710 / fail 1 / skipped 4** | **720 项：pass 720 / fail 0 / skipped 0**（`duration_ms` 16116.7） |
+| `check:docs` | 109 份，三个 0 | **110 份**，三个 0 |
+
+项数 715 → 720 = 4 条从 skip 变真跑 + 1 条新增（两种 npm 全局布局）。
+§3 那条新断言的红证：临时删掉 POSIX 候选后重跑 → `pass 4 / fail 2`（两条都是 `TRANSPORT_FAILED`），
+按副本还原后 sha256 与实验前一致（`f456f04236f1d77a…`）——**还原用 `%TEMP%` 副本，不用 `git checkout`**（§9.10 ⑤）。
+
+**这台机器上验不了的四类事**（细节与原因见 recon 报告 §4，**任何文档不许写成已验**）：
+① DSH 路径——全局 DSH 是 **0.2.0-rc.2**，而 `plugins/xixi-tools/package.json` 的 peerDependency 钉 **0.1.7-rc.2**，
+组合 profile 时该 bundle 被跳过，`npm run install:profile` 报 `composed profile does not contain "xixi-tools"`；
+全局安装目录归 root、本机无 sudo，换版本要用户自己来；② 一切真实模型调用（**没有 `.env` / `MIMO_API_KEY`**）；
+③ 麦克风 / 扬声器 / 摄像头真机采集（WSL2 默认不暴露音频与 `/dev/video*`）；
+④ `field-test --self-test` 的 30 通过 / 2 失败——两条都是 Windows 专属读数（`pycaw`），是环境缺失不是回归。
+
+**给下一轮的纪律**（已写进 [`AGENTS.md`](../AGENTS.md) §10）：绝对路径用 `node:path`；
+解释器/工具路径按布局探测且**全仓只留一份实现**；测试不许依赖 gitignored 产物、更不许因此静默 skip；
+种子数据写死绝对日期 + 判定读 `Date.now()` = 定时炸弹（判据：「这条用例放到 30 天后跑还绿吗？」）。
