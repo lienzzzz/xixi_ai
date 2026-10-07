@@ -22,8 +22,12 @@
  *
  * **接线状态（一句话口径，细节见 `PluginRuntimeMount`）：内核已交付且本装配点已接线——`start()` 跑完
  * 生命周期并挂载，插件工具对模型可见；但四个 live 入口（`scripts/chat.ts`、`scripts/serve-chat.ts`、
- * `scripts/field-test.ts`、`scripts/voice-turn.ts`）今天仍只调 `buildToolChain`，**入口尚未接线**；
- * 提示词侧的 `verifyOnAssemble` 也还没有调用点。这两条是下一阶段的显式接线项。**
+ * `scripts/field-test.ts`、`scripts/voice-turn.ts`）今天仍只调 `buildToolChain`，**入口尚未接线**。**
+ *
+ * 下一条线在 `./resident-runtime.ts`：`createResidentRuntime` 把本条的工具链、插件内核、审批宿主、
+ * durable 提醒与 `ConversationEngine` 组装成**一个对象**（V0.3 P2.5-A）。它是上面那条「入口接线」的
+ * 下一站；`verifyOnAssemble` 的调用点也在那里 —— 但那只对**经过该装配点**的提示词成立，今天**没有
+ * live 入口经过它**（那份文件顶部的接线状态块是本口径的唯一出处）。
  */
 import {
   createToolRegistry,

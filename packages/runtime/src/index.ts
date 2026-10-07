@@ -151,3 +151,21 @@ export {
   type ReminderTickReport,
   type ReminderTurnIdentity,
 } from './reminder-runtime.ts';
+
+// V0.3 P2.5-A：**唯一的常驻装配点**。上面这些零件（工具链、插件内核、审批宿主、durable 提醒、
+// 提取、引擎）在这里被组装成一个对象，live 入口只调一次取用。
+// **接线状态：四个 live 入口尚未接线**（它们仍然各自拼一套），提醒也还没有接进主动循环 ——
+// 这两句的完整口径与逐条说明在 `./resident-runtime.ts` 顶部的接线状态块里，别在别处另写一份。
+export {
+  createResidentRuntime,
+  type ResidentConversationOptions,
+  type ResidentMemoryOptions,
+  type ResidentModelContext,
+  type ResidentModelInput,
+  type ResidentPluginStartSummary,
+  type ResidentRuntimeOptions,
+  type ResidentRuntimeState,
+  type ResidentShutdownReport,
+  type ResidentStartReport,
+  type XixiResidentRuntime,
+} from './resident-runtime.ts';
