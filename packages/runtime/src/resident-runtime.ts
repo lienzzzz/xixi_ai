@@ -214,8 +214,12 @@ export interface XixiResidentRuntime {
   /**
    * Run the nine-step plugin lifecycle **and** mount what the plugins registered.
    *
-   * Loud on a second call: `start()` once is the contract, and a silent second start would hide a
-   * host bug behind 「状态看起来是对的」 (the plan's option B for the resident runtime).
+   * Loud on a second call — and loud after `stop()` too: `start()` once is the contract, and a silent
+   * second start would hide a host bug behind 「状态看起来是对的」 (the plan's option B for the resident
+   * runtime). The two refusals are distinct because they are different facts:
+   * `RESIDENT_RUNTIME_ALREADY_STARTED` (it did start before) and `RESIDENT_RUNTIME_ALREADY_STOPPED`
+   * (it never started, but `stop()` already disposed the chain — starting then would report
+   * `state: 'started'` while handing back an **empty** tool chain).
    */
   start(): Promise<ResidentStartReport>;
   /** Stop the plugins, release the chain, drain the extraction. Idempotent: the second call returns the same report. */
@@ -305,9 +309,21 @@ export function createResidentRuntime(options: ResidentRuntimeOptions): XixiResi
    * half up — the honest move is a new runtime, not a second `start()` on a partly-loaded one).
    */
   let startCalled = false;
+  /**
+   * Terminal once `stop()` is called — set **synchronously**, before `shutdown()`'s first `await`, so
+   * there is no window in which a `start()` can slip in behind a `stop()` that is already under way.
+   *
+   * Why this exists (P2.5-C round 3): `shutdown()` disposes the tool chain, built-ins included, and
+   * shuts the plugin kernel down. `startCalled` alone therefore did **not** close the door on the
+   * 「stop 了但没 start 过」 path: that runtime still passed the first guard, `plugins.start()` came
+   * back empty (the kernel is disposed; `loadAll` is a bring-up-what-you-can entry point), and the
+   * object reported `state: 'started'` with an **empty** chain — 「看起来起来了、其实什么都调不了」.
+   */
+  let closed = false;
   let stopPromise: Promise<ResidentShutdownReport> | undefined;
 
   async function shutdown(): Promise<ResidentShutdownReport> {
+    closed = true;
     // ① The engine's background work first: Tier-2 extraction is in flight, and 「数据丢失不能是无声的」
     //    (the same discipline every entry follows before closing the store).
     await extraction.drain();
@@ -348,6 +364,15 @@ export function createResidentRuntime(options: ResidentRuntimeOptions): XixiResi
           'RESIDENT_RUNTIME_ALREADY_STARTED',
           `这个常驻 runtime 已经启动过（当前状态 ${state}）：start() 只该调一次。`,
           '重复启动是宿主 bug，静默返回会让「插件到底起来了没有」看不出来；关停是终态，要重启就新建一个 runtime。',
+        );
+      }
+      if (closed) {
+        // 这条路径上它**没有**启动过，所以措辞不能是「已经启动过」（那是另一条路上的事实）。
+        throw new RuntimeError(
+          'RESIDENT_RUNTIME_ALREADY_STOPPED',
+          `这个常驻 runtime 已经关停（当前状态 ${state}）：关停是终态，start() 不会再把它拉起来，要重启就新建一个 runtime。`,
+          '它一次都没启动过，所以这不是「重复启动」；但关停已经 dispose 了工具链（内置工具也一起清掉）与插件层，' +
+            '再 start 一次只会得到一条空链 —— 那正是「状态看起来是 started、其实什么都调不了」。',
         );
       }
       startCalled = true;

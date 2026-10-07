@@ -217,6 +217,54 @@ test('start() 只认一次：重复启动报声明性错误，关停之后也不
   }
 });
 
+/**
+ * stop-before-start：一次都没 `start()` 过就先 `stop()`，之后 `start()` 必须**拒**。
+ *
+ * 缺陷本体（P2.5-C round 3，修复前实测）：这条路上 `startCalled` 还是 false，旧守卫放行 ——
+ * `plugins.start()` 返回空（插件内核已经 dispose，`loadAll` 是「能起来多少起来多少」的入口）、
+ * 挂载无事可做，于是对象报 `state: 'started'` 而链是**空的**（内置工具在 `stop()` 时就 dispose 了）。
+ * 「看起来起来了、其实什么都调不了」正是这条验收要消灭的静默状态。
+ *
+ * 判据是事实而不是状态字符串：对照组证明「正常启动后链非空」，实验组证明「关停之后 start 抛错、链
+ * 始终为空」。撤掉 `shutdown()` 里那个终态标记（或 `start()` 里那道守卫），实验组会拿到一条空链的
+ * `ResidentStartReport`，`assert.rejects` 立刻变红 —— 反事实在仓外副本里跑过（见回报）。
+ */
+test('stop() 之后再 start()：关停是终态（拒因是「已经关停」而不是「已经启动过」），链不会假装还在', async () => {
+  const control = rig(); // 对照组：没关停过，start() 之后链里必须有东西
+  const closed = rig(); // 实验组：一次都没 start 就先 stop()
+  try {
+    // 先把「正常路径上链非空」钉住：否则下面「链是空的」可能只是断言写错了。
+    const started = await control.runtime.start();
+    assert.ok(started.tools.length > 0, `正常启动后链上该有内置工具：${started.tools.join('、') || '无'}`);
+    assert.ok(control.runtime.toolChain.names().length > 0);
+    assert.notEqual(control.runtime.toolChain.definitionsForRound(CONVERSATION_SCOPE, 1), undefined);
+
+    // 实验组：从没启动过就先关停 —— 宿主启动失败时就是这么收尾的。
+    const shutdown = await closed.runtime.stop();
+    assert.equal(shutdown.state, 'stopped');
+    assert.deepEqual(closed.runtime.toolChain.names(), [], '关停把链清空（内置工具也一起）');
+
+    // 事实面：这条路上要的是**抛错**，而不是「拿到一条空链却报 started」。
+    await assert.rejects(
+      () => closed.runtime.start(),
+      (error: unknown) => {
+        assert.ok(error instanceof RuntimeError, '该抛 runtime 自己的错误类型');
+        assert.equal(error.code, 'RESIDENT_RUNTIME_ALREADY_STOPPED');
+        assert.match(error.message, /已经关停/);
+        assert.match(error.message, /新建一个 runtime/, '必须说明「要重启就新建一个 runtime」');
+        assert.doesNotMatch(error.message, /已经启动过/, '这条路上它确实没启动过，写成重复启动就是新的谎');
+        return true;
+      },
+    );
+    assert.equal(closed.runtime.state, 'stopped', '不许留下「state=started 而链是空的」这种静默状态');
+    assert.deepEqual(closed.runtime.toolChain.names(), []);
+    assert.equal(closed.runtime.toolChain.definitionsForRound(CONVERSATION_SCOPE, 1), undefined);
+  } finally {
+    dispose(control);
+    dispose(closed);
+  }
+});
+
 test('审批宿主就是这个 runtime 自己的那个：声明的 ASK 落进它的待批列表，点头后执行冻结的那次调用', async () => {
   const r = rig({ config: config("  tools:\n    approval:\n      ask: ['demo.echo']\n      ttl_seconds: 300\n") });
   try {
@@ -465,4 +513,8 @@ test('接线口径由调用图判定：给得出可复核命令，点名了入�
  *
  * 上面那条「插件层失败不穿透装配点」的用例已经把可达的那一半钉住。**哪天这两条防线真的有了可达的坏输入**
  * （上面任一条被改掉，`npm test` 会先红在那条用例上），就必须回来把对应的坏输入用例补上。
+ *
+ * 与上面两条不同，**第三道终态门是可测的**：`stop()` 之后 `start()`（哪怕一次都没 `start()` 过）必须抛
+ * `RESIDENT_RUNTIME_ALREADY_STOPPED` —— 就是上面那条 stop-before-start 用例；撤掉 `shutdown()` 里的终态
+ * 标记或 `start()` 里那道守卫，它都会变红（反事实在仓外副本里跑过）。
  */
