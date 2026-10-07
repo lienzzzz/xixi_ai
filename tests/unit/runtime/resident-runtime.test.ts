@@ -32,9 +32,9 @@ import { test } from 'node:test';
 
 import { FakeBrainAdapter, type AgentTool, type ScriptedToolRequest, type ToolExecutionContext, type ToolRegistry } from '@xixi/brain-adapter';
 import { ConversationEngine } from '@xixi/conversation';
-import { openXixiStore, parseXixiConfig, type XixiConfig, type XixiStore } from '@xixi/domain';
+import { ReminderStore, openXixiStore, parseXixiConfig, type XixiConfig, type XixiStore } from '@xixi/domain';
 import type { InlinePlugin } from '@xixi/plugins';
-import { CONVERSATION_SCOPE, RuntimeError, createResidentRuntime, type XixiResidentRuntime } from '@xixi/runtime';
+import { CONVERSATION_SCOPE, DurableReminderSink, RuntimeError, createResidentRuntime, type XixiResidentRuntime } from '@xixi/runtime';
 
 /** A fixed instant: 「明天八点」 is 2026-10-06 08:00 in Shanghai, and nothing here reads the wall clock. */
 const T0 = new Date('2026-10-05T09:00:00+08:00');
@@ -337,6 +337,64 @@ test('提醒落地：工具写进的是 durable sink，调度器在同一个库�
  * `reminders.waiting()` / `approvals.pending()` 会抛，而「关停报告必须给得出来」是装配点的承诺
  * （AGENTS §9.25⑤：每个守卫都要有一条坏输入用例，否则它只是纸面上的防线）。
  */
+test('提醒接缝是装配点交出的那一对：先跑到点再取候选；没真的说出口就不许前进（V0.3 P2.5-F）', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'xixi-resident-seams-'));
+  let nowAt = T0;
+  const store = openXixiStore({ dbPath: join(root, 'xixi.sqlite'), clock: () => nowAt });
+  const options = config();
+  store.seedSelfProfile(options.personality.base);
+  const runtime = createResidentRuntime({
+    config: options,
+    store,
+    now: () => nowAt,
+    conversation: { clock: () => nowAt, turnTimeoutMs: 5_000 },
+    model: ({ toolChain }) => new FakeBrainAdapter({ registry: toolChain, scope: CONVERSATION_SCOPE }),
+  });
+  try {
+    await runtime.start();
+
+    // 入口路径上的 sink 是 **durable 的那个**，不是工具自己的内存兜底。
+    assert.ok(runtime.reminderSink instanceof DurableReminderSink, '装配点必须提供 durable sink');
+    const reminderTool = runtime.toolChain.names().find((name) => name.includes('remind'));
+    assert.ok(reminderTool !== undefined, `链上该有内置提醒工具：${runtime.toolChain.names().join('、')}`);
+    const execution = await runtime.toolChain.execute(
+      { name: reminderTool, arguments: { what: '给儿子打电话', when: '明天八点' } },
+      { ...CONTEXT, now: nowAt },
+    );
+    assert.equal(execution.record.ok, true, JSON.stringify(execution.payload));
+    const reminderId = String(execution.payload['id']);
+    // 工具写进的是这个 runtime 的库：内存 sink 时代这张表会是空的。
+    assert.ok(new ReminderStore(store).get(reminderId) !== null, '提醒必须真的落库');
+
+    // 没到点：读接缝什么都不给，状态也不许被提前写成 due。
+    assert.deepEqual(runtime.reminderSeams.readDueReminders(), []);
+    assert.equal(new ReminderStore(store).get(reminderId)?.status, 'pending', '没到点不许动它');
+
+    // 到点：接缝**自己**跑「先跑到点、再取候选」（`markDue` + `candidateInputs`）。只做后半句的话，
+    // 这条提醒会永远停在 pending —— 上面那条断言与这里会一起红。
+    nowAt = new Date('2026-10-06T08:00:00+08:00');
+    const offered = runtime.reminderSeams.readDueReminders();
+    assert.deepEqual(offered.map((input) => input.reminderId), [reminderId], '到点就该被交出来');
+    assert.equal(new ReminderStore(store).get(reminderId)?.status, 'candidate');
+    assert.equal(offered[0]?.line, '该提醒你了：给儿子打电话');
+    // 反复读仍然给（candidate 不是一次性的：说出口或过期才会离开这个状态）。
+    assert.deepEqual(runtime.reminderSeams.readDueReminders().map((input) => input.reminderId), [reminderId]);
+
+    // 送达接缝只是记账：没人调它就一步都不许前进。
+    assert.equal(new ReminderStore(store).get(reminderId)?.deliveredAt, null, '没说出口就没有 delivered_at');
+    runtime.reminderSeams.onReminderDelivered(reminderId, new Date('2026-10-06T08:01:00+08:00'));
+    const delivered = new ReminderStore(store).get(reminderId);
+    assert.equal(delivered?.status, 'delivered');
+    assert.equal(Date.parse(String(delivered?.deliveredAt)), Date.parse('2026-10-06T08:01:00+08:00'));
+    // 与 `runtime.reminders` 是同一个调度器：状态从它那边读也是一样的（不是另一份账）。
+    assert.deepEqual(runtime.reminders.waiting(), [], '说过的提醒不再等谁点头');
+  } finally {
+    await runtime.stop().catch(() => {});
+    store.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
 test('库先关掉再 stop()：两个计数如实报 null 而不是抛（拿掉那道 try/catch 就会红）', async () => {
   const r = rig();
   try {
