@@ -439,14 +439,20 @@ export function createResidentRuntime(options: ResidentRuntimeOptions): XixiResi
 
   // The approval host first: `buildPluginRuntime` needs it as the registry's `approvalGate`, and it
   // needs the registry back afterwards (`useRegistry`) to execute the call a person confirmed.
+  //
+  // 闭环的边界（P2.5-G）：这一层只负责**把宿主接上** —— `ToolApprovalManager` 自己就
+  // `implements ToolApprovalGate`，所以这里不需要任何适配层。而「点头之后执行的是**当时冻结**的那组
+  // 参数」这条保证不在这一层：它在 `approve()`（用落库的 `frozenArgs` 重放）与 registry 的摘要比对里。
+  // 装配点不重新生成参数 —— 模型在「批准」这条路上没有第二次发言的机会。
   const approvals = new ToolApprovalManager({
     store,
     settings: approval,
     ...(now === undefined ? {} : { now }),
   });
 
-  // The durable reminder sink: the tool `xixi_set_reminder_stub` writes through this, in the same
-  // `reminders` table the scheduler walks. Built before the chain because the chain takes it.
+  // The durable reminder sink: the built-in write tool `xixi_set_reminder` (renamed in V0.3 P2.5-E)
+  // writes through this, in the same `reminders` table the scheduler walks. Built before the chain
+  // because the chain takes it.
   const reminderSink = new DurableReminderSink({
     store,
     timezone: config.identity.timezone,

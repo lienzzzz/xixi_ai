@@ -36,7 +36,7 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
 
-import { FakeBrainAdapter, type AgentTool, type ScriptedToolRequest, type ToolExecutionContext, type ToolRegistry } from '@xixi/brain-adapter';
+import { FakeBrainAdapter, type AgentTool, type ScriptedToolPlan, type ScriptedToolRequest, type ToolExecutionContext, type ToolRegistry } from '@xixi/brain-adapter';
 import { CORE_IDENTITY, HARD_POLICY, ConversationEngine, PromptAssembler, type AssembleInput, type AssembledPrompt } from '@xixi/conversation';
 import { ReminderStore, loadXixiConfig, openXixiStore, parseXixiConfig, type XixiConfig, type XixiStore } from '@xixi/domain';
 import { PluginBoundaryError, type InlinePlugin } from '@xixi/plugins';
@@ -45,6 +45,7 @@ import {
   CONVERSATION_SCOPE,
   DurableReminderSink,
   RuntimeError,
+  buildToolChain,
   createResidentRuntime,
   type PluginChainOptions,
   type ResidentConversationOptions,
@@ -142,6 +143,8 @@ function rig(
     readonly chain?: PluginChainOptions;
     readonly toolName?: string;
     readonly assembler?: ResidentConversationOptions['assembler'];
+    /** 换掉替身自己决定「这一轮要调什么工具」——审批闭环那两条要按轮次递**不同的参数**。 */
+    readonly toolPlan?: ScriptedToolPlan;
   } = {},
 ): Rig {
   const root = mkdtempSync(join(tmpdir(), 'xixi-resident-runtime-'));
@@ -164,7 +167,9 @@ function rig(
       const inner = new FakeBrainAdapter({
         registry: toolChain,
         scope: CONVERSATION_SCOPE,
-        toolPlan: (input, round): readonly ScriptedToolRequest[] => (round === 1 && input.text.includes('插件') ? [{ name: scripted }] : []),
+        toolPlan:
+          overrides.toolPlan ??
+          ((input, round): readonly ScriptedToolRequest[] => (round === 1 && input.text.includes('插件') ? [{ name: scripted }] : [])),
       });
       // 委托而不是 Proxy：`FakeBrainAdapter` 有私有字段，Proxy 包住之后 `describe()` 读 `#model` 会炸（实测）。
       return {
@@ -333,6 +338,135 @@ test('审批宿主就是这个 runtime 自己的那个：声明的 ASK 落进它
     assert.equal(decision.status, 'executed');
     assert.equal(echo.calls.count, 1);
     assert.deepEqual(runtime.approvals.pending(T0), [], '决定过的不再等谁点头');
+  } finally {
+    dispose(r);
+  }
+});
+
+/**
+ * 内置写工具的名字**从装配点自己造的表里读**，不写死字面量：T7 改过一次名，写死就会变成假红。
+ * `buildToolChain` 只造链、不碰库，所以这里读得到「出厂的链上有什么」。
+ */
+function builtinWriteTools(): string[] {
+  return buildToolChain(config())
+    .all()
+    .filter((tool) => tool.risk === 'write')
+    .map((tool) => tool.name);
+}
+
+/**
+ * 审批闭环（模型发起 → 待批 → 点头），用一条**真的会写业务数据**的工具走完整条路。
+ *
+ * 与前一条用例的分工：前一条证明「闸门接的是这个 runtime 的宿主」（`chain.execute` 直调，工具是只读的
+ * 探针）；这条证明**真实路径**上的三件事，全部以业务数据为准而不是以状态字符串为准：
+ *
+ *   1. 模型发起 → 落一条待批请求，**此时业务数据一行都没有写**（工具真的没跑）；
+ *   2. 模型后来又生成一组不同的参数 → 那只是**另一条**待批请求，不许顶替第一条；
+ *   3. 点头第一条 → 执行的是**当时冻结**的那一组参数（业务行是「给儿子打电话 / 明天八点」，
+ *      不是后来那组「买牛奶 / 后天九点」）。
+ *
+ * 冻结参数逐字段比对：待批行里的 `frozenArgs` 与模型当时发的那一组 deepEqual，落库的 `dueAt` 也与
+ * 它的 `when` 解析出的绝对时刻一致 —— 「批准之后模型重新生成第二组参数」在这条路上没有任何入口。
+ */
+test('审批闭环（模型发起 → 待批 → 点头）：写工具先落待批、业务数据一行不写；执行的是当时冻结的那组参数', async () => {
+  const [writeTool] = builtinWriteTools();
+  assert.ok(writeTool !== undefined, '出厂的链上该有一个写工具，否则这条用例什么也没证明');
+  const frozen = { what: '给儿子打电话', when: '明天八点' };
+  const regenerated = { what: '买牛奶', when: '后天九点' };
+  const r = rig({
+    config: config(`  tools:\n    approval:\n      ask: ['${writeTool}']\n      ttl_seconds: 300\n`),
+    toolPlan: (input, round): readonly ScriptedToolRequest[] => {
+      if (round !== 1) return [];
+      if (input.text.includes('儿子')) return [{ name: writeTool, arguments: frozen }];
+      if (input.text.includes('牛奶')) return [{ name: writeTool, arguments: regenerated }];
+      return [];
+    },
+  });
+  try {
+    const { runtime, store } = r;
+    await runtime.start();
+    const session = store.createSession();
+    /** 业务数据：那张表里现在有什么（工具真的干了活才会涨）。 */
+    const rows = (): string[] => runtime.reminders.store.list().map((reminder) => reminder.what);
+
+    // ① 模型发起 → 判定为需要确认 → 待批请求落库，业务数据一行都没有写。
+    await runtime.conversation.respond({ sessionId: session.sessionId, text: '提醒我给儿子打个电话', addressed: true });
+    const first = runtime.approvals.pending(T0);
+    assert.equal(first.length, 1, '模型发起之后该有**一条**待批请求（写工具不许直接跑）');
+    assert.equal(first[0]?.toolName, writeTool);
+    assert.deepEqual(first[0]?.frozenArgs, frozen, '请求时冻结的就是模型那一组参数，逐字段相同');
+    assert.deepEqual(rows(), [], '没点头之前，业务数据一行都不许写');
+
+    // 模型后来又生成了一组**不同**的参数：它只能变成另一条待批请求，不许顶替第一条、也不许直接执行。
+    await runtime.conversation.respond({ sessionId: session.sessionId, text: '提醒我买牛奶', addressed: true });
+    const both = runtime.approvals.pending(T0);
+    assert.equal(both.length, 2, '第二组参数是**另一条**待批请求');
+    assert.deepEqual(rows(), [], '两条都还只是待批');
+
+    // ② 点头第一条：执行的是当时冻结的那一组，不是模型后来生成的那一组。
+    const decision = await runtime.approvals.approve({ approvalId: first[0]!.approvalId, actorId: 'father', now: T0 });
+    assert.equal(decision.status, 'executed');
+    assert.deepEqual(rows(), ['给儿子打电话'], '点头之后业务数据才落库，而且只写冻结的那一条');
+    assert.equal(
+      runtime.reminders.store.list()[0]?.dueAt,
+      '2026-10-06T08:00:00.000+08:00',
+      'when 也是冻结参数解析出来的那个绝对时刻（不是第二组的后天九点）',
+    );
+    assert.deepEqual(runtime.approvals.pending(T0).map((row) => row.approvalId), [both[1]!.approvalId], '第二条还在等谁点头');
+    assert.deepEqual(rows(), ['给儿子打电话'], '第二条没点头，业务数据不许因为「已经批准过一条」而动');
+
+    // ③ 再点头第二条：两条各自执行各自冻结的那一组 —— 冻结是**逐条**的，不是「批过一次就放行同类」。
+    const second = await runtime.approvals.approve({ approvalId: both[1]!.approvalId, actorId: 'father', now: T0 });
+    assert.equal(second.status, 'executed');
+    assert.deepEqual(rows().sort(), ['买牛奶', '给儿子打电话'].sort());
+  } finally {
+    dispose(r);
+  }
+});
+
+/**
+ * 审批闭环（拒绝）：不执行、业务数据零行，决定**落库**可查；事后点头也不会补执行。
+ *
+ * 「落审计」按落库判：决定之后重新 `get()` 那一行（读的是库，不是内存对象），状态/人/时刻/原因码都在，
+ * `executedAt` 仍是 null。再调一次 `approve()` 只会照着现在的状态回答（外部动作只做一次）。
+ */
+test('审批闭环（拒绝）：不执行、业务数据零行，决定落库可查，事后点头也不补执行', async () => {
+  const [writeTool] = builtinWriteTools();
+  assert.ok(writeTool !== undefined, '出厂的链上该有一个写工具');
+  const r = rig({
+    config: config(`  tools:\n    approval:\n      ask: ['${writeTool}']\n      ttl_seconds: 300\n`),
+    toolPlan: (input, round): readonly ScriptedToolRequest[] =>
+      round === 1 && input.text.includes('儿子') ? [{ name: writeTool, arguments: { what: '给儿子打电话', when: '明天八点' } }] : [],
+  });
+  try {
+    const { runtime, store } = r;
+    await runtime.start();
+    const session = store.createSession();
+    await runtime.conversation.respond({ sessionId: session.sessionId, text: '提醒我给儿子打个电话', addressed: true });
+
+    const pending = runtime.approvals.pending(T0);
+    assert.equal(pending.length, 1);
+
+    const denial = runtime.approvals.deny({ approvalId: pending[0]!.approvalId, actorId: 'father', now: T0 });
+    assert.equal(denial.status, 'denied');
+    assert.equal(denial.reasonCode, 'user_denied');
+    assert.equal(denial.execution, null);
+    assert.deepEqual(runtime.reminders.store.list(), [], '拒绝 = 业务数据一行都不许写');
+
+    // 审计是落库的：直接读那一行。
+    const record = runtime.approvals.get(pending[0]!.approvalId);
+    assert.equal(record?.status, 'denied');
+    assert.equal(record?.decidedBy, 'father');
+    assert.equal(Date.parse(String(record?.decidedAt)), T0.getTime(), '决定时刻落库');
+    assert.equal(record?.reasonCode, 'user_denied');
+    assert.equal(record?.executedAt, null, '拒绝的绝不许执行');
+    assert.deepEqual(runtime.approvals.pending(T0), [], '决定过的不再等谁点头');
+
+    // 事后点头也不补执行：外部动作只做一次。
+    const late = await runtime.approvals.approve({ approvalId: pending[0]!.approvalId, actorId: 'father', now: T0 });
+    assert.equal(late.status, 'denied');
+    assert.equal(late.execution, null);
+    assert.deepEqual(runtime.reminders.store.list(), [], '补执行一次都不行');
   } finally {
     dispose(r);
   }
