@@ -6,7 +6,8 @@
 **不可替换**的是长期状态与行为策略（WorldState、Memory、FutureHook、SelfModel、RelationshipModel、
 RoutineModel、Proactive policy、Conversation state）。
 
-当前进度（2026-10-07：仓库现在同时在 **Windows 与 Linux/WSL2** 上跑，三门禁在这台 Linux 机器上全绿——`npm test` 720/720；
+当前进度（**2026-10-08**：V0.3 **P2.5** 收口，把 Agent 能力接进四个 live 入口——见下面「V0.3 P2.5」那段；
+2026-10-07：仓库现在同时在 **Windows 与 Linux/WSL2** 上跑，三门禁在这台 Linux 机器上全绿——`npm test` 项数以末行为准；
 移植细节与「这台机器上验不了的事」见 [`docs/recon/linux-port-environment-2026-10-07.md`](docs/recon/linux-port-environment-2026-10-07.md)。
 以下能力清单仍是 2026-10-03 第五轮收口的快照）：**M0 文本 Harness 已验收；噪声鲁棒语音前端、摄像头在场检测（M6）、
 现场测试控制台、主动开口（主动性 V2：硬底线 + 模型读空气）、多段回复与 pack Phase 8 的流式语音输出均已落地**；
@@ -18,6 +19,15 @@ RoutineModel、Proactive policy、Conversation state）。
 这是**目标不可达**，不是实现缺陷，见 [`docs/progress.md`](docs/progress.md) §2.20 ③）；
 **长期记忆与人格学习（M3/M4）已由 pack Phase 4 落地**（逐入口覆盖与权重口径见 [`docs/progress.md`](docs/progress.md) §2.19），
 唤醒词（M2）与完整 M5（事件回放）尚未开始。
+
+**V0.3 P2.5（2026-10-08）把上一轮交付的 Agent 能力接进了活的西西**：七个入口脚本——文字 CLI（`scripts/chat.ts`）、
+语音单轮（`scripts/voice-turn.ts`）、设备自检（`scripts/voice-device-check.ts`）、真人感评测（`scripts/eval-realism.ts`）、
+对话评测（`scripts/eval-conversation.ts`）、现场测试控制台（`scripts/field-test.ts`）、试用页（`scripts/serve-chat.ts`）——
+现在都经**同一个常驻装配点**
+[`packages/runtime/src/resident-runtime.ts`](packages/runtime/src/resident-runtime.ts) 的 `createResidentRuntime()`
+取工具链与引擎，插件工具（含 `news.*`）第一次真的出现在模型可见的工具列表里，审批闸门与 durable 提醒也由它接管。
+**仍然没接的**是「到点提醒由入口自己说出来」那一行与外部 MCP 服务器；逐条口径与可复核命令见
+[`docs/progress.md`](docs/progress.md) §12 与 [`docs/handoff.md`](docs/handoff.md) §0.2。
 
 > 完整设计与实施方案见 [`xixi_ai_companion_project_plan.md`](xixi_ai_companion_project_plan.md)；
 > 编码约定见 [`AGENTS.md`](AGENTS.md)；**接手顺序**见 [`docs/README.md`](docs/README.md)（文档地图）
@@ -103,9 +113,10 @@ npm run check:types && npm test && npm run check:docs
 | **流式语音输出（pack Phase 8）** | **接线成立 + B1 已修 + B2 是已知未覆盖缺陷**（**不得写成「流式逐块播放已验收」**）：模型 token 流 → `ClauseChunker` 按句读切块 → TTS 队列逐块合成 → 浏览器逐块播（`onClause` 接缝，两条页面共用 `scripts/field-test.ts` 的路径）。实测（8 批 n=32）：**首音目标 ≤1.5 s 未达标且本机不可达**——④ / 1500 ms 逐批 **[3.14, 7.33] 倍**、池化 3.73 倍、没有一批接近；④ 的下界由 ② 模型首 token（逐批 P50 903.5–8162.5 ms）与 ③ 首段合成（逐批 P50 1393–2582.5 ms）挡住。复算：`node scripts/voice-turn.ts --compare <产物…>`（不调 API）。口径与切块规则见 [`docs/design/voice.md`](docs/design/voice.md) §6 |
 | **有界的心情状态（第五轮 t4）** | 两个**有界**标量（valence / energy）+ 8 条封闭信号，由原始事件演化、按小时回落；注入提示词的是**散文**（数值只进 `sections[].debug`）；影响轻微（语气 ±6%、主动性软偏移 ±0.03）且**硬底线拿不到它**；可查看 / 可复位（复位留一行 `reset=true`）。独立复算：0 越界、语气 ∈[0.94,1.06]、软偏移 ∈[±0.03]、门禁同码、散文无数字与经历句式。见 [`docs/adr/0013`](docs/adr/0013-bounded-mood-state.md) |
 | **主动开口（ADR-0009 + ADR-0011）** | **两层**：硬底线（静默时段 / 6h 与当日**次数**额度 / DND / 隐私与同意 / 场景与音频路径）由程序判定，模型不能绕过；底线之上**由模型读空气决定说不说**，确定性社会预算只给候选与建议（`BELOW_RECOMMENDATION` 是建议不是否决）+ `proactive.decision` 审计 + 先记后播。**金额级费用上限尚未实现**（次数额度是当前的费用代理）。**口径已定＝显著降频**（不做「连续两次没回应后 = 0」的硬停，[`docs/adr/0011`](docs/adr/0011-proactive-decision-ownership.md) 决定 2 的补充）；多日验收 `node scripts/eval-proactive-timeline.ts`（三天、M1–M6 进退出码） |
-| **不编造可核查的事实** | 提示词 `HARD_POLICY` 的「可核查的具体事实」那条（关键词锚点，不再按编号引用）+ 引擎层闸门（无工具却出现具体数值就扣住并改说修复句）；台账核对「含具体值的轮次都伴随工具调用」 |
+| **不编造可核查的事实** | `HARD_POLICY` 的**第一条也是第一条被写下的边界**（关键词锚点，不再按编号引用）+ 引擎层闸门（无工具却出现具体数值就扣住并改说修复句）；台账核对「含具体值的轮次都伴随工具调用」 |
+| **写下来的事必须真的用工具写** | `HARD_POLICY` 的**第二条边界** `WRITE_OPERATION_RULE`（`packages/conversation/src/prompt.ts`，V0.3 P2-H 落进生产代码）：提醒 / 记一下 / 记住 / 记笔记这类**写操作**在数据上就是一次工具调用，光回一句「记下了」而没调工具就是一句可判定为假的话。措辞**不点工具名**（工具由工具表动态给出），只点名意图；与第一条同属硬边界，对主动开口同样有效 |
 | **制品清洗（`REPLY_HYGIENE`）** | 工具调用标记与外文推理在进 TTS / 日志 / 工作记忆前被程序剔除（`sanitizeSpokenReply`）；整轮只剩制品 → 沉默，并写原因码 **`ARTIFACT_ONLY_REPLY`**（与「模型自己选择沉默」`MODEL_SILENCE` 可区分）。`REPLY_HYGIENE` / `UNBACKED_FACT_CLAIM` 两类 `onNotice` 审计通知已被**试用页（`serve-chat.ts`）与现场测试控制台（`field-test.ts`）**订阅并在页面显示；文字 CLI（`chat.ts`）与语音轮次（`voice-turn.ts`）未订阅（逐入口清单见 `docs/progress.md` §4） |
-| **工具链覆盖（逐入口）** | `scripts/field-test.ts` 的 `buildToolChain()` 是唯一出口（注册表**现在是三个内置工具**：时间 / 天气 / 提醒——V0.3 P2-D 起新闻桩已删除，新闻改由 `packages/plugins/news/` 的三个插件工具提供；插件与 MCP 的工具在装配点上经 `mountPluginTools()` 复制进同一个注册表，权限、轮次上限与超时都不变；**四个 live 入口还没走 `buildPluginRuntime`**）。四个 live 入口——文字 CLI `scripts/chat.ts`、设备自检 `scripts/voice-device-check.ts`、真人感评测 `scripts/eval-realism.ts`、对话评测 `scripts/eval-conversation.ts`——已改用它（此前只有控制台走这条链）；离线自证是每个入口的 `--print-wiring`（打印 `{entry,language,maxToolRounds,tools,permissions}` 后退出，不调模型、不建库）。设备自检没有离线端到端证据（需真实 WAV + 硬件 + 真实 ASR），见 `docs/progress.md` §2.10 |
+| **工具链覆盖（逐入口）** | **唯一装配点是 `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime()`**（V0.3 P2.5-A）：入口取 `runtime.toolChain`，插件内核、MCP、news、审批宿主与 durable 提醒都由它一次装好（`buildToolChain` 只是它内部把配置摊平的一步，不再是入口的出口）。走它的是**七个入口脚本**——文字 CLI `scripts/chat.ts`、语音单轮 `scripts/voice-turn.ts`、设备自检 `scripts/voice-device-check.ts`、真人感评测 `scripts/eval-realism.ts`、对话评测 `scripts/eval-conversation.ts`、现场测试控制台 `scripts/field-test.ts`、试用页 `scripts/serve-chat.ts`；复核：`git grep -l 'createResidentRuntime(' -- scripts`（应命中这七个 + 验收脚本，`git grep -n 'buildToolChain(' -- scripts` 应为 **0 命中**）。插件工具经 `mountPluginTools()` 复制进同一个注册表，权限、轮次上限与超时都不变。离线自证是 `--print-wiring`（打印 `{entry,language,maxToolRounds,tools,permissions,plugins}` 后退出，不调模型、不建库）：四个支持该开关的入口实测**除 `entry` 外逐字段相同**，默认给出三个内置 + 三个 `news.*` 插件工具（`node scripts/chat.ts --print-wiring` 可直接看）。**设备自检没有离线端到端证据**（需真实 WAV + 硬件 + 真实 ASR），见 `docs/progress.md` §2.10 |
 | **「看一眼」（视觉）** | `UserTurnInput.images` → OpenAI 风格 `image_url`（data URL）；真机实测能描述画面内容；DSH 路径发不了图时**明确报错**而不是静默丢图 |
 | 质量过程 | `npm test` 全绿（**项数以末行为准**）；[`docs/review/`](docs/review/) 有评审报告（含复审与再复审），[`docs/verification/`](docs/verification/) 有独立验证报告，[`docs/benchmarks/`](docs/benchmarks/realism-metrics.md) 有可重跑的基准与前后对比 |
 
@@ -185,7 +196,7 @@ packages/conversation/    对话引擎：FSM、提示词组装、分段器（ADR
 packages/brain-adapter/   TurnModelProvider 三接口（+ Multimodal / StructuredInference 两个可选面）+ Mimo/Dsh/Fake 三套实现 + 工具注册表
 packages/model-adapters/  MiMo 直连适配器（含图像 image_url 构造）
 packages/plugins/         插件内核（manifest / 五能力 / 九步生命周期 / 四条「插件不能做」）；子路径 ./mcp（SDK v2 客户端适配器）与 ./news（真实 News 插件）
-packages/runtime/         生产装配（V0.3 P0-A）：工具链与 buildPluginRuntime、工具审批宿主、durable 提醒调度、常驻考虑循环、语音缝、感知入库
+packages/runtime/         生产装配（V0.3 P0-A/P2.5-A）：**常驻装配点 `createResidentRuntime`**（resident-runtime.ts：工具链、插件内核、审批宿主、durable 提醒、提示词权威、能力桥）、工具链与 buildPluginRuntime、工具审批宿主、durable 提醒调度、常驻考虑循环、语音缝、感知入库
 apps/brain-dsh/           DSH 侧接线：profile patch（MiMo 路由）与 CLI transport
 plugins/xixi-tools/       西西最小工具集（含 xixi_get_current_time / 天气等）
 services/voice-edge/      语音前端（Python）：去直流 + 高通 + 门限 + 校准 + 噪声夹具生成
@@ -211,8 +222,10 @@ docs/                     README（地图）、architecture、event-contracts、
 
 - **M2 唤醒词 / 完整 M5**（事件回放、候选生成器与常驻守护进程）均未开始，按 §45 顺序推进
   （**M4 记忆与 M3 的推断式人格学习已由 pack Phase 4 落地**，见 `docs/progress.md` §2.19）。
-- 没有 `tsc --noEmit` 类型检查门；类型错误只会在运行时暴露。
-- `tests/scenarios/` 有语料（`corpus.ts`）但没有 `*.test.ts`；`tests/replay/` 仍为空（§32/§22.3 属 M5）。
+- **类型检查门已就位**：`npm run check:types`（V0.3 P0-C 起，`tsconfig.base.json` + `tsconfig.json` 覆盖
+  packages/apps/scripts/services/tests），类型错误不再等到运行时才暴露。
+- `tests/scenarios/` 有语料（`corpus.ts`）但没有 `*.test.ts`；`tests/replay/` 自 V0.3 P0-D 起有**行为回放**
+  （`npm run test:replay`，本次实测 pass 16 / fail 0），不再是空的。
 - **真人实测项（只有本机能做）**：真人站在镜头前能否被检出（`--require-transition`）、真人对着麦克风说话的实际识别率。
 - 现场验收的**扬声器**项在修正口径后判 FAIL：能量比 2.41 dB < 10 dB，测的是「笔记本扬声器→笔记本麦克风」的**回采余量**，
   **不代表用户对麦克风说话能否被听到**（口径说明见 [`docs/recon/field-test-report-2026-09-30.md`](docs/recon/field-test-report-2026-09-30.md) 顶部）。

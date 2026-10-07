@@ -12,6 +12,26 @@
   另外提醒这条还有一个**可靠性未达标**：22 次真模型尝试里只有 6 次真的调用了工具（27%），其余 16 次里 4 次回复明说「记下了」而库里没有行。
   三条结论都在下面给命令与输出；未达标的地方按未达标写。
 
+> **⚠ 更正注（2026-10-08，V0.3 P2.5 落笔；本报告原文一字未改）**
+>
+> 本报告是 **2026-10-04** 那次独立复验的实测记录（取数修订号 `024cd43`），**每条结论都只对应那一天的状态**。
+> 此后有三件事变了，读本报告时按这里修正：
+>
+> 1. **上面「在四个 live 入口上都不成立」已由 V0.3 P2.5 关闭（2026-10-08）**：七个入口脚本都改走常驻装配点
+>    `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime()`，新闻工具真的进了模型可见清单
+>    （`node scripts/chat.ts --print-wiring` 今天在三个内置之外列出 `news.search` / `news.latest` / `news.for_interests`），
+>    提醒落的是 `DurableReminderSink`。复核：`git grep -l 'createResidentRuntime(' -- scripts`；
+>    反证 `git grep -n 'buildToolChain(' -- scripts` 应 **0 命中**。**仍未接**的是「到点提醒由入口自己说出来」
+>    那一行（`git grep -n 'reminderSeams' -- scripts` 零命中）——所以「她到点会开口」今天仍**只是接缝可用**。
+> 2. **「27%」是一次历史观测，不能当现状**：t27 用**同一份探针**重跑得改前 21/22（95.5%）、改后 22/22（100%），
+>    另一次改前单独复跑 14/17（82.4%）；「自称提醒、库里 0 行」的口吻样本改前 3 次、改后 0 次（样本太小，不据此宣称效果）。
+>    **故「27% 与 4 次假承诺」同日同口径不可复现，「提示词层是根因」这个判断不成立**——下面所有 27% 的读数
+>    请读作「2026-10-04 上午那一次观测」。逐条样本仍在 `.scratch/t14/remind-sample-*.json`。
+> 3. **§5 第 4 条那句「工具仍叫 `xixi_set_reminder_stub`」与 §5 第 1 条里「`verifyOnAssemble` 还没有调用点」
+>    都已经不是现状**：前者由 P2.5-E 改名为 `xixi_set_reminder`（文案「已经记下」，无兼容别名）；后者的调用点
+>    自 P2.5-A（`507f65d`）起就落在 `createResidentRuntime` 上（写这份报告时它确实还没有，所以原文是对的，
+>    只是今天过期了）。现状以 [`../progress.md`](../progress.md) §12 与 [`../progress-v03.md`](../progress-v03.md) 的 P2.5 段为准。
+
 ## 0. 怎么复跑
 
 探针是 `.scratch/t14/probe.mjs`（`*.mjs`，直接 `node` 跑；`.scratch/` 在 `.gitignore` 里，**按任务要求没有进仓库**）。
@@ -146,6 +166,9 @@ reminderEventsInLog:   seq 2 reminder_created(pending) → seq 5 reminder_due �
 `行明早八点提醒你打电话。这么晚了，早点睡吧。`、`成明天早上八点提醒你打电话。`——**她说了「记下了」，而库里没有行、也没有任何事件**。
 也就是说：不是「她不知道」，而是**在 27% 之外的 73% 里，用户会以为记下了，实际什么都不会发生**。
 
+> **加注（2026-10-08）**：这一整段（含 6/22 = 27%）是 **2026-10-04 上午的一次观测**，**同日同口径不可复现**——
+> 见本报告顶部的更正注第 2 条。**不要拿 27% 当现状**；要复核用更大样本或换场景/换时段。
+
 根因（读代码得到，不是猜）：
 - 提示词层的 `HARD_POLICY`（`packages/conversation/src/prompt.ts`，`git grep -n '工具' -- packages/conversation/src/prompt.ts`）
   要求「**可核查的具体事实**只能说工具查到的」——它约束的是「事实」（天气/新闻），**没有一句要求「提醒我……」这类写操作必须走工具**；
@@ -201,6 +224,12 @@ eventTypes: conversation.turn, conversation.decision, system.health
 
 判定：**❌ 入口层未达标**，根因一句话——**内核、MCP、news、审批、提醒的装配点都已交付，但四个 live 入口仍只调 `buildToolChain`**，
 `buildPluginRuntime` 与 `DurableReminderSink`/`ReminderScheduler` 没有接进入口。这属团队已登记的 Tier 2 接线项，本次复验只负责如实写出来。
+
+> **加注（2026-10-08）**：上面这个判定在**写它的那天成立**，但**已由 V0.3 P2.5 关闭**——七个入口现在都走
+> `createResidentRuntime()`（复核：`git grep -l 'createResidentRuntime(' -- scripts`；反证
+> `git grep -n 'buildToolChain(' -- scripts` 为 0 命中），提醒落 `DurableReminderSink`。
+> 上面那段代码侧的零命中读数**保留不改**（它是当天的证据）；今天仍然为真的是「**到点提醒由入口自己说出来**」
+> 这一条——`reminderSeams` 在 `scripts/` 下仍是零命中，见 [`../progress.md`](../progress.md) §12.3。
 
 ## 5. 边界与遗留（连同我实测到的那几条）
 

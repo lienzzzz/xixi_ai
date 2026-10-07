@@ -95,3 +95,15 @@ discover → validate → permission → load → activate(ctx) → register cap
      只作用于 `action` 能力，而 `action` 还没暴露成工具）——**下一轮的小任务**，本轮因它与 `packages/plugins`
      和 `packages/domain/src/config.ts` 都有交集、要再串一层依赖而没有排。
   完整清单与实测反证见 [`../progress-v03.md`](../progress-v03.md) 的 P2 段 §4/§5。
+
+> **加注（2026-10-08，V0.3 P2.5 落笔；本 ADR 原文一字未改）**：上面两处「未接线」的**现状变了**——
+> ① **入口已接线**：七个入口脚本都走 `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime()`
+> （它内部调 `buildPluginRuntime(...).start()`），所以「插件工具对模型可见」在真实入口里成立。
+> 复核：`git grep -l 'createResidentRuntime(' -- scripts`；反证 `git grep -n 'buildToolChain(' -- scripts` 为 **0 命中**
+> （`probe-tools.ts` 仍是诊断探针，故意不经装配点）。
+> ② 上面四条接线项里 **1–3 已落地**（入口走装配点；提示词装配点上有 `verifyOnAssemble` 的调用点；
+> `ToolApprovalManager` 由装配点接成 `approvalGate` 并经 `useRegistry()` 闭合）；**第 4 条（manifest 的 tool 级 approval
+> 声明）仍未做**。
+> ③ 同批登记的 `start()` 不幂等与「停用后 health 快照过期」已由 P2.5-I 修掉（响亮拒绝 `PluginAlreadyStartedError`；
+> 停用后读 `PluginInstance.online` 才知道是真在线）。
+> 本 ADR 的**边界设计与四条禁令一字未变**，变的只是「谁在调装配点」；现况见 [`../progress.md`](../progress.md) §12。

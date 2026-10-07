@@ -122,6 +122,9 @@ npm run chat -- --dsh    # 走 DSH Harness（慢，但会话在 DSH 里）
 # 验收与评测（会真实调用，按需运行）
 npm run verify:m0              # M0 验收：两进程重启恢复
 npm run verify:provider        # 一次调用核对 MiMo 路由与工具调用
+npm run verify:p2.5            # P2.5 真入口验收（V0.3 P2.5-K）：新闻 / 提醒跨重启 / 审批 / 关停四个场景
+                               #   node scripts/verify-p2.5.ts；--offline 零费用不联网（README 与文档里引它时
+                               #   写 npm run verify:p2.5 -- --offline）；--scenario=<news|reminder|approval|shutdown> 单跑
 npm run verify:structured-output  # 结构化输出契约 + 供应商缺陷金丝雀
 npm run eval:conversation:judge   # 语料驱动的对话评测（含评审模型），报告写入 docs/recon/
 node scripts/eval-realism.ts --corpus=all --repeat=3 --label v02   # 真人感指标（提问率主/辅口径、长度分布、

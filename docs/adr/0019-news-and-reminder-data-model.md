@@ -110,3 +110,17 @@ acknowledge(id, at)  delivered → acknowledged（谁听到了回答，谁调）
   （核对：`git grep -n '到点不会自动响' -- packages`）——在默认内存 sink 下这句是对的，接上 durable sink 之后必须**一起**改。
 - 新闻的真实来源属**手动证据**：默认门禁用离线桩（`networkCalls = 0`），真实 RSS / 公开 JSON API 只由手动复验跑过
   （t14 复验：2 次真实 HTTP、真实头条，事件日志里 `tool_name = "news.latest"`）。MCP 与新闻都还没有对**外部服务器**的验证。
+
+> **加注（2026-10-08，V0.3 P2.5 落笔；本 ADR 原文一字未改，上面每条都是当天的实测）**：上面四条里**三条已经变了**——
+> 1. **「入口没接 durable sink / scheduler」已不成立**：`createResidentRuntime()` 自己造 `DurableReminderSink` 与
+>    `ReminderScheduler`，四个 live 入口与控制台、试用页都拿它给的；提醒真的落 `reminders` 表、重启后仍在
+>    （复核：`git grep -l 'createResidentRuntime(' -- scripts`；以及 `npm run verify:p2.5 -- --scenario=reminder --offline`）。
+>    **仍未接的一环是另一件事**：到点由**主动循环**说出来要入口那一行 `...runtime.reminderSeams`
+>    （`git grep -n 'reminderSeams' -- scripts` 零命中）——所以「活的西西已经在说到点提醒」今天**不成立**。
+> 2. **「27% 未达标」已更正**：那是 2026-10-04 上午的一次观测、**同日同口径不可复现**（t27 用同一份探针重跑得
+>    改前 21/22、改后 22/22，另一次改前单独复跑 14/17），「提示词层是根因」这个判断**不成立**；
+>    P2-H 的 `WRITE_OPERATION_RULE` 确实落了生产代码，但**它的效果本次测不出来**。**不要拿 27% 当现状。**
+> 3. **「文案已过时」已修**：工具改名 `xixi_set_reminder`、返回文案「已经记下」，**没有兼容别名**（P2.5-E）。
+> 4. 第 4 条（真实来源属手动证据、MCP 未对外部服务器验证）**仍然成立**；另加一条：入口今天各自带一条 RSS 来源，
+>    「来源全部由配置说了算」还没做到（`git grep -n 'createRssNewsSource' -- scripts`）。
+> 本 ADR 的**数据模型本身（三工具、八字段、五态、时区语义）一字未变**；现况见 [`../progress.md`](../progress.md) §12。

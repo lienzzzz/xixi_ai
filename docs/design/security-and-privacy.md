@@ -1,6 +1,10 @@
 # 安全与隐私：§19 权限身份、§20 数据、§53 不可信内容、§41.7 审计
 
-> 最后更新：2026-10-04（V0.3 P2 收口：§2 的工具面改成「三个内置 + 插件工具经同一注册表」、补插件权限表与审批闸门；
+> 最后更新：2026-10-08（V0.3 **P2.5** 收口：§2 的工具面与审批闸门改成事实——四个 live 入口与控制台、试用页
+> 都经 `createResidentRuntime()` 取链（`buildToolChain` 不再是入口出口），插件工具（含 `news.*`）在入口里可见，
+> `ToolApprovalManager` 已接成 `approvalGate`；提醒工具改名 `xixi_set_reminder` 且入口已接 durable sink；
+> 另补 `HARD_POLICY` 的**第二条边界**「写操作必须走工具」）
+> 上一版：2026-10-04（V0.3 P2 收口：§2 的工具面改成「三个内置 + 插件工具经同一注册表」、补插件权限表与审批闸门；
 > 删掉已被 P2-D 移除的 `xixi_news_stub` 与「只写内存 sink」的旧口径）
 > 权威来源：`packages/contracts/src/envelope.ts` + `schemas/events/{conversation.turn,conversation.decision,presence.changed}.v1.json`、`packages/domain/src/{store,migrations/001_initial.sql,config}.ts`、`packages/brain-adapter/src/{tools,mimo,dsh,errors}.ts`、`packages/plugins/src/{manifest,context,capability-registry}.ts`、`packages/runtime/src/{tool-runtime,tool-approval}.ts`、`packages/model-adapters/src/{mimo,weather,errors}.ts`、`packages/conversation/src/engine.ts`、`apps/brain-dsh/profile/cordis.patch.yml`、`plugins/xixi-tools/index.js`、`services/perception-edge/**`、`scripts/verify-camera-presence.ts`、`scripts/lib/harness.ts`、`scripts/serve-chat.ts`、`tests/unit/core/brain-error-classification.test.ts`、`.gitignore`、`AGENTS.md` §1/§5、[progress.md](../progress.md) §2.2/§2.6/§2.10、[perception.md](perception.md)、方案 §19/§20/§41.7/§53
 > 若与代码不一致，以代码为准，并请立即修正本文件
@@ -30,23 +34,26 @@
 |---|---|---|
 | L0 内部只读 | 当前时间、WorldState、Memory search | 只有 `xixi_get_current_time`（`packages/brain-adapter/src/tools.ts` 注释标 L0；参数 `properties:{}` + `additionalProperties:false`）。**WorldState 投影已存在**（`world_state` 表，`002_world_state.sql`；由 `recordPresenceChanged` 与感知边维护）**但没有给模型读它的工具**；Memory search 未实现 |
 | L1 普通外部只读 | 天气、新闻、日历读取 | `xixi_get_weather`（内置，注释标 L1）与 **News 插件的三个工具**（`news.search` / `news.latest` / `news.for_interests`，`packages/plugins/news/`，manifest 显式声明 `network` 权限，返回的外部文本一律带 `untrusted` 标记与 `flags`；[ADR-0019](../adr/0019-news-and-reminder-data-model.md)）。**旧的 `xixi_news_stub` 已随 V0.3 P2-D 从注册路径里删除**；日历未实现 |
-| L2 低风险可逆 | 提醒、播放音乐、开灯 | `xixi_set_reminder_stub` 仍是**名字带 `_stub` 的内置写工具**：接了 `DurableReminderSink` 时落 `reminders` 表（迁移 008，五态 + 到点事件），**但四个 live 入口今天没有接它**，所以在入口里它只写进程内内存 sink、不落库、不触发外部动作（[ADR-0019](../adr/0019-news-and-reminder-data-model.md)）。播放音乐 / 开灯未实现 |
+| L2 低风险可逆 | 提醒、播放音乐、开灯 | `xixi_set_reminder`（**内置写工具**；V0.3 P2.5-E 从 `xixi_set_reminder_stub` 改名，**没有兼容别名**，返回文案是「已经记下」）——四个 live 入口经常驻装配点拿到的 sink 是 `DurableReminderSink`：落 `reminders` 表（迁移 008，五态 + 到点事件），重启后仍在（[ADR-0019](../adr/0019-news-and-reminder-data-model.md)）。**仍未接线的一环**：到点提醒要入口那一行 `...runtime.reminderSeams` 才会被主动循环说出来，见下面 §2 末与 [architecture.md](../architecture.md) §6.2。播放音乐 / 开灯未实现 |
 | L3 外部通信 / 隐私 | 发消息、上传图片、改日历 | 未实现 |
 | L4 高风险 | 门锁、支付、紧急呼叫 | **一律不做**（`AGENTS.md` 铁律 7；`tools.ts` 顶部注释：`No shell, no filesystem, no messaging, no high-risk actions exist yet`） |
 
 权限在**模型之外**校验，机制是三件事：
 
 1. 工具注册表唯一出口 `defaultTools()`（`packages/brain-adapter/src/tools.ts`，注释已改成 `The three Phase 2 built-ins`）；
-   **三个内置**：`xixi_get_current_time`（read）、`xixi_get_weather`（read）、`xixi_set_reminder_stub`（**write**）。
+   **三个内置**：`xixi_get_current_time`（read）、`xixi_get_weather`（read）、`xixi_set_reminder`（**write**）。
    插件与 MCP 的工具**不在内置里**：它们在装配点上经 `mountPluginTools()` **复制进同一个注册表**
    （核心已拥有的名字跳过、被策略拒绝的撤回），所以权限判定、轮次上限与超时对它们一字不变；
    插件自己的声明面是 manifest 的七权限（`network` / `storage` / `notify` / `context.read` / `topic.read` /
    `tool.register` / `sensor.events`）与五能力，配对关系见 [ADR-0017](../adr/0017-plugin-boundary-and-four-prohibitions.md)。
-   **四个 live 入口今天仍只调 `buildToolChain`，没有走 `buildPluginRuntime`**——即入口里看不到插件与 MCP 工具
-   （实测：`node scripts/chat.ts --print-wiring` 只列三个内置）。
+   **V0.3 P2.5 之后入口里看得到插件工具**：四个 live 入口与控制台、试用页经
+   `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime()` 取 `runtime.toolChain`
+   （`git grep -l 'createResidentRuntime(' -- scripts`；反证 `git grep -n 'buildToolChain(' -- scripts` 应为 **0 命中**），
+   而插件工具在 `start()` 里挂进同一个注册表 —— 实测：`node scripts/chat.ts --print-wiring` 在三个内置之外
+   列出 `news.search` / `news.latest` / `news.for_interests`。
    可见性由 `listForAgent(scope)` 过滤（V0.3 P2-B 起改成「**除 deny 之外都广告**」，否则 `ask` 的工具模型看不见、
    审批流程没有起点；判定顺序也改成「所有 deny 规则先于 ask」，见 [ADR-0018](../adr/0018-tool-approval-frozen-args.md)）；
-   控制台与三个 live 入口经 `scripts/field-test.ts` 的 `buildToolChain()` 共用同一构造点，离线自证见各自 `--print-wiring`；
+   离线自证见各入口的 `--print-wiring`（四个支持的入口除 `entry` 外逐字段相同）；
 2. `MimoBrainAdapter.#executeTool` 只在本注册表里查找，**未知工具名 = 拒绝**（回 `{error:'没有这个工具，请直接用已有信息回答'}` 并记 `ok:false, error:'UNKNOWN_TOOL'`），不会执行任何东西；
 3. 参数封闭：工具的 `parameters` 都写了 `additionalProperties: false`（时间工具是空 `properties`）。
 
@@ -57,8 +64,21 @@
 `tool_approvals`（pack §5 的七字段 + 冻结参数摘要 + 恢复用的 scope/timezone/source_event_id），
 人的点头由入口交给 `ToolApprovalManager`；执行前比对摘要，对不上就 `APPROVAL_MISMATCH` 且**工具零调用**；
 拒绝与到期都**不执行**、都落审计（`tool.approval.changed` 事件，`score`：人的决定 1、程序判定 0）。
-**入口未接线**：四个 live 入口今天没有把它接成 `approvalGate`，所以「部署里真的会拦下来」在入口层还不成立
-（[ADR-0018](../adr/0018-tool-approval-frozen-args.md)）。
+**入口已接线（V0.3 P2.5）**：审批宿主由常驻装配点构造并注入链——`createResidentRuntime()` 里
+`new ToolApprovalManager(...)` → 经 `approvalGate` 进 `buildPluginRuntime` → `approvals.useRegistry(toolChain)`
+闭合执行路径，所以四个 live 入口与控制台、试用页都过闸门（`git grep -n 'approvalGate' -- scripts` 仍是 0 命中，
+**这是对的**：接线发生在装配点内部，不在入口脚本里）。真实路径上的行为证据是
+`npm run verify:p2.5 -- --scenario=approval --offline`（待批时业务数据零行、第二组参数只多一条待批、点头后执行的是
+**当时冻结**的那组参数），用例在 `tests/unit/runtime/resident-runtime.test.ts`
+（[ADR-0018](../adr/0018-tool-approval-frozen-args.md)）。**注意「接线」与「部署里真的会弹待批」是两件事**：
+出厂配置里没有任何工具被声明成 `ask`（`config.tools.approval.ask` 是空表），接线保证的是「**声明了就拦得住**」。
+
+**写操作必须走工具（`HARD_POLICY` 的第二条边界，V0.3 P2-H 落进生产代码）**：安全边界这一层今天有**两条**——
+① 可核查的具体事实只能来自「当前对话里对方说的 / 工具真的查到的 / 系统给的可信记忆或世界状态」；
+② **写下来的事必须真的用工具写**（`WRITE_OPERATION_RULE`，`packages/conversation/src/prompt.ts`）：
+提醒 / 记一下 / 记住 / 记笔记这类写操作在数据上就是一次工具调用，**光回一句「记下了」而没调工具就是一句
+可判定为假的话**。措辞**不点工具名**（工具名随插件与 MCP 变），只点名意图；它同时是 `HARD_POLICY` 的一行，
+对普通回复与主动开口都生效。是否真的调用工具由程序侧解析并校验 `tool_calls`，不靠 `tool_choice`（见上一段）。
 
 Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/cordis.patch.yml`，由 `npm run install:profile` 复制进 `.dsh/`）：
 显式 `disabled: true` 关掉 `tool-bash`、`tool-pwsh`、`tool-fs`、`tool-fs-search`、各种 sandbox、`skill*`、`subagent*`、
@@ -66,8 +86,8 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
 同时 `includeHarnessIdentity: false` 并写入西西的 `personaPrefix`/`personaSuffix`。
 它只注册**两个**只读工具：`plugins/xixi-tools/index.js` 的 `xixi_get_current_time`（`parameters: {}`）与
 `xixi_get_weather`（`place` + `day`，`additionalProperties: false`；天气工具由 t5 补齐，此前 `--dsh` 路径问天气只能编造或回避）。
-**已知缺口（只记录、本轮不修）**：DSH 插件面仍只注册这两个，而直连路径的 `defaultTools()` 有四个（多出新闻桩与提醒桩）——
-两条路径的工具集合目前不一致，`plugins/xixi-tools/` 未同步。
+**已知缺口（仍未修）**：DSH 插件面只注册这两个只读工具，而直连路径的 `defaultTools()` 是**三个内置**
+（多出写工具 `xixi_set_reminder`）——两条路径的工具集合仍不一致，`plugins/xixi-tools/` 未同步。
 注意 DSH 的 `defineTool` 隐式参数根**不带** `additionalProperties: false`（实测 `@deepseek-ai/dsh-tools` 0.1.7-rc.2），
 所以天气工具的封闭性由工具体内的参数校验兜底，而不是靠注册表。
 
@@ -123,6 +143,20 @@ Harness 一侧的最小权限由 profile patch 执行（`apps/brain-dsh/profile/
 
 **历史事实（必须遵守）**：`MIMO_API_KEY` 曾在对话里明文出现，`AGENTS.md` §5 要求视为已泄露并在验证完成后到小米控制台**轮换**。
 本仓库文档、测试与源码中**没有**这个密钥的值。
+
+### 20.5 关系笔记的听众过滤（V0.3 P2.5-J）
+
+关系笔记是**推导出来的私密内容**（「我们怎么相处」），所以它进不进提示词要看**此刻谁在听**：
+
+| 听众模式 | 关系笔记 |
+|---|---|
+| `public`（有外人在场 / 电视 / 媒体） | **一条都不给**——不是「注入了再让模型别说」，而是在**选择阶段**就过滤掉，模型可见文本里不会出现 |
+| `private` / `family` | 照旧给 |
+| 没给听众 | 按保守默认档 `family`（与「拿不准谁在听」的既有做法一致） |
+
+判定集中在**一处**：`packages/context/src/relationship-context.ts` 的 `notesVisibleTo`
+（核对：`git grep -n 'notesVisibleTo' -- packages`）；`relationship_notes` 表**没有逐条可见性列**，所以能做的只有
+「按听众整批给或整批不给」，改这条口径只需要改那一个函数。与「未完话题在 public 下不给」是同一条保守做法。
 
 ## 4. §53 不可信内容与网络边界
 

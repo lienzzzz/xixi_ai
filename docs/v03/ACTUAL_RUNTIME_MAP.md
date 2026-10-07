@@ -1,6 +1,8 @@
 # V0.3 Phase 0：真实运行时地图（ACTUAL_RUNTIME_MAP）
 
-> 最后更新：2026-10-04（V0.3 **P2 收口 t15**：新增 §3b「P2 收口后的状态更新」——Provider 三接口、插件内核、MCP、审批、News、Reminder 逐条给现状与复核命令；
+> 最后更新：2026-10-08（V0.3 **P2.5 收口**：新增 §3c——只覆盖 §3b 里那三行「入口未接线」的现状与复核命令；
+> §1/§2 的 P0 基线与 §3b 的 P2 快照**原样保留**）
+> 上一版：2026-10-04（V0.3 **P2 收口 t15**：新增 §3b「P2 收口后的状态更新」——Provider 三接口、插件内核、MCP、审批、News、Reminder 逐条给现状与复核命令；
 > §1 的「四个内置」改成三个、§2 第 14 条的 MCP 口径改成「已交付但未接入任何 live 入口」。§1/§2 的历史基线保留不动）
 > 权威来源：**当前代码与测试**（`git grep` 实测）。pack 文档（`E:\xixi_v03_actual_code_pack\docs\*.md`）是设计意图，与本文冲突时以本文为准。
 > 基线修订号：`d3a89166cbbcc90077a799781175528415b8c906`（§2 的实测都在这个基线上做；**§1 / §3 已在 `59cd65a` 上按 P0 落地后的实况复核过**）。**基线之上另有一次提交 `4f3301f`（t2 修 `SpeechPipeline` B2），它只碰 `services/voice-edge/voice_edge/voice_stream.ts` 与 `tests/unit/voice/voice-stream.test.ts`，不改本文任何一行的定义处/调用点**——即表中关于「voice helpers 与 `SpeechPipeline` 在哪、被谁调」的结论在 `4f3301f` 上同样成立，但 **B2 缺陷本身已被修掉**（`00_CODE_AUDIT.md` §3.15 描述的旧行为不再是现状）。本文避免引用行号，就是为了让这类提交不影响可核对性。
@@ -175,6 +177,19 @@ pack 的审计基于 2026-10-03 上传的 zip 快照；下面是**同一个基�
 **不是**「某个入口已经这样跑」。入口接线四条清单见 progress-v03 的 P2 段 §5。
 
 ---
+
+## 3c. P2.5（Production Wiring）之后的现状（2026-10-08）——只覆盖 §3b 里那几行「未接线」
+
+§3b 是 **P2 收口时**的快照（原文保留）。P2.5 之后下面这三处变了，逐条给复核命令：
+
+| 面 | §3b 写的 | 今天的现状 | 复核 |
+|---|---|---|---|
+| 插件内核 / News | 「入口的工具链里没有 `news.*`」 | **已接线**：入口经 `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime()` 取链，插件工具在 `start()` 里挂进同一个注册表 | `git grep -l 'createResidentRuntime(' -- scripts`；`node scripts/chat.ts --print-wiring` |
+| 工具审批 | 「入口没接 `approvalGate`（`git grep approvalGate -- scripts` 零命中）」 | **已接线**：审批宿主由装配点构造并注入链，`useRegistry()` 闭合执行路径；**那条 `git grep` 仍然零命中，而这是对的**（接线在装配点内部） | `npm run verify:p2.5 -- --scenario=approval --offline` |
+| Reminder | 「入口没接 sink 与 scheduler（`git grep DurableReminderSink -- scripts` 零命中）」 | **sink 与 scheduler 已接线**（装配点给的）；**到点由主动循环说出来仍未接**——入口那一行 `...runtime.reminderSeams` 在 `scripts/` 下零命中 | `npm run verify:p2.5 -- --scenario=reminder --offline` |
+
+§3b 里 MCP 那一行仍成立（**没有任何入口配置过外部服务器**；今天的唯一入口是配置 `xixi.plugins.mcp.servers`，出厂空表）。
+P2.5 的完整交付、仍未接的三条与已知问题见 [`../progress.md`](../progress.md) §12。
 
 ## 4. 维护规则
 

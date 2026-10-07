@@ -1,6 +1,9 @@
 # 接手交接书（Handoff）
 
-> 最后更新：2026-10-07（新增 §0.15 **双机环境：Linux（WSL2）移植**；同日关闭 §0.15 第 ②① 类「DSH 路径」——
+> 最后更新：2026-10-08（新增 §0.2 **V0.3 P2.5 Production Wiring 收口**——四个 live 入口与控制台、试用页
+> 都经常驻装配点 `createResidentRuntime()` 取链，`news.*` 真的进了模型可见清单，审批与 durable 提醒由装配点接管；
+> 同节如实列出**仍未接线**的三条。§0.1 的「下一轮清单」第 1/3/5/10 条已按事实改口）
+> 上一版：2026-10-07（新增 §0.15 **双机环境：Linux（WSL2）移植**；同日关闭 §0.15 第 ②① 类「DSH 路径」——
 > 仓库已升到 `0.2.0-rc.2`，`verify:provider` 实测通过，见 `progress.md` §11；其余内容仍是 2026-10-03 第五轮收口中的快照）
 > 上一版：2026-10-03（第五轮 `xixi-v02-round5` 收口中，见 §0；第四轮已收口）
 > 权威来源：`docs/progress.md`（结论与数字）、`docs/recon/*`（外部系统实测）、代码与测试
@@ -13,13 +16,14 @@
 
 ## 0. 当前状态
 
-### 0.1 V0.3（2026-10-04 起，按 `E:\xixi_v03_actual_code_pack`）——**P0 / P1 / P2 已交付；P2 已收口，入口接线留到下一轮**
+### 0.1 V0.3（2026-10-04 起，按 `E:\xixi_v03_actual_code_pack`）——**P0 / P1 / P2 / P2.5 已交付；入口接线已还清（除三条，见 §0.2）**
 
 **P2 轮（`xixi-v03-p2`）收口（2026-10-04）**：七块交付（插件内核、MCP 适配器、工具审批、Provider 三接口拆分、
 真实 News、durable Reminder、P2-G 的宾语前置句修复）+ 四份 ADR（0017–0020）见
-[`progress-v03.md`](progress-v03.md) 的 P2 段；两个 pack 场景在**装配点**上成立（真模型 + 真库 + 事件日志），
-**四个 live 入口的接线仍未做**。下面第 1–14 条里：**第 11① 已由 t26 关闭、第 13 已由 t15 改掉**，
-其余（第 1–10、12、14）都是下一轮清单。门禁取数修订号 `024cd43`：`check:types` exit 0、`npm test` 717/717、`check:docs` 三个 0。
+[`progress-v03.md`](progress-v03.md) 的 P2 段；两个 pack 场景在**装配点**上成立（真模型 + 真库 + 事件日志）。
+**该段当时写下的「四个 live 入口的接线仍未做」已在 P2.5 还清**（见 §0.2；复核命令而不是名单）。
+下面第 1–14 条里：**第 11① 已由 t26 关闭、第 13 已由 t15 改掉、第 1/3/5/10 已由 P2.5 关闭**，
+其余（第 2、4、6–9、12、14②）都是下一轮清单。门禁取数修订号 `024cd43`：`check:types` exit 0、`npm test` 717/717、`check:docs` 三个 0。
 
 **范围**：本轮只做 pack 的 **Phase 0 + Phase 1**（pack 自己规定 P0/P1 必须先完成；P2–P7 另起轮次）。团队 `xixi-v03-p0p1`（7 名成员，契约在 `.agent-teams/xixi-v03-p0p1`）。
 
@@ -53,26 +57,79 @@
 - 另：**闸门本身目前是好的**（t14 的反事实只是临时把它改成恒真）。所以 `t20` 之后基线端到端探针**应当通过**；要验「覆盖缺口补上了」，正解是**对新用例做突变检验**（临时让 `renderGate` 恒真 → 断言**新用例**会红 → 按副本还原并报哈希），而不是期待基线探针变红。
 
 **P2 轮（`xixi-v03-p2`）留给下一轮的清单**（各任务收口时交回；编号是 P2 轮的，别与上面 P0/P1 轮的 t 编号混读）：
-1. **四条「未接线」**——**任何文档都不许把它们写成已接线**：① 四个 live 入口（`scripts/chat.ts`、`scripts/serve-chat.ts`、`scripts/field-test.ts`、`scripts/voice-turn.ts`）仍走 `buildToolChain`，下一步应改成 `buildPluginRuntime(...).start()`；② 提示词装配点（`packages/conversation` 的 `PromptAssembler`）**没有**调 `verifyOnAssemble`（t18 已在三处代码注释里写明未接线）；③ 四个入口**没有**把 `ToolApprovalManager` 接成 `approvalGate`（t4 报约三行）；④ 四个入口**没有**接 durable reminder 的 sink 与 scheduler（t8 的口径：今天可跑的证据是 `buildToolChain` → `registry.execute` → 真表 → 重启 → tick → 事件 → `ProactiveLoop` 说出口）。
-2. **manifest 的 tool 级 approval 声明**（今天只有 `config.tools.approval.ask` 在起作用，`packages/plugins/src/manifest.ts` 无 approval token）——captain 试排过本轮小任务，连撞两次依赖重叠，**明确留到下一轮**。
-3. **`PluginRuntimeMount.start()` 不幂等**（t19 的 O1）：第二次调用留下「插件 inactive 但工具仍在核心表里」的半坏状态，模型仍能调用一个已失活插件的工具；修法是 `started` 守卫或**响亮拒绝** + 用例。
+1. ~~**四条「未接线」**~~ → **已由 V0.3 P2.5 关闭（2026-10-08，逐条复核命令见 §0.2）**：① 四个 live 入口都改走常驻装配点 `createResidentRuntime()`（`git grep -l 'createResidentRuntime(' -- scripts` 命中七个入口 + 验收脚本；反证 `git grep -n 'buildToolChain(' -- scripts` **0 命中**）；② 提示词装配点上真的有 `verifyOnAssemble` 的调用点（`git grep -n 'verifyOnAssemble(' -- packages/runtime/src`），行为证据在 `tests/unit/runtime/resident-runtime.test.ts`；③ `ToolApprovalManager` 由装配点接成 `approvalGate` 并经 `useRegistry()` 闭合（注意 `git grep -n 'approvalGate' -- scripts` 仍是 0 命中，**这是对的**——接线在装配点内部）；④ durable 提醒的 sink 与 scheduler 由装配点给（`runtime.reminderSink` / `runtime.reminders`）。**仍未接的一条**是「到点由主动循环说出来」那一行，见 §0.2。
+2. **manifest 的 tool 级 approval 声明**（今天只有 `config.tools.approval.ask` 在起作用，`packages/plugins/src/manifest.ts` 无 approval token）——captain 试排过本轮小任务，连撞两次依赖重叠，**明确留到下一轮**（P2.5-G 只做到「声明 → 权限策略」与运行时闭环，没动 manifest）。
+3. ~~**`PluginRuntimeMount.start()` 不幂等**（t19 的 O1）~~ → **已由 P2.5-I（t4）修掉**：重复启动**响亮拒绝**（`PluginAlreadyStartedError` / `PLUGIN_ALREADY_STARTED`，在任何步骤之前拒绝、不重复激活），常驻运行时这一层还有第二道门（`RESIDENT_RUNTIME_ALREADY_STARTED`）；用例在 `tests/unit/plugins/lifecycle.test.ts`。**相邻的一处仍未修**：per-plugin `dispose()` 不是插件级终态（§0.2「已知问题」）。
 4. **热插拔后 `shutdown()` 的 `unmounted` 少报**（t19 的 O2；只是报告口径，结束态正确）。
-5. **`xixi_set_reminder_stub` 的文案与 `_stub` 命名已过时**（接上 durable sink 之后仍写着「到点不会自动响，需要人看一眼」）。
-6. **`ToolContext` 只带 `timezone` 与 `now`**：`owner` / `session_id` / `source_event_id` 由入口每轮前 `beginTurn()` 绑定（与 `ToolExecutionContext` 同一组值），彻底做法是把这三个字段转发进 `ToolContext`。
+5. ~~**`xixi_set_reminder_stub` 的文案与 `_stub` 命名已过时**~~ → **已由 P2.5-E（t7）改名**：今天是 `xixi_set_reminder`，返回文案「已经记下」，**没有兼容别名**（复核：`git grep -n 'xixi_set_reminder' -- packages/brain-adapter/src/tools.ts`）。
+6. **`ToolContext` 只带 `timezone` 与 `now`**：`owner` / `session_id` / `source_event_id` 由入口每轮前 `beginTurn()` 绑定（与 `ToolExecutionContext` 同一组值），彻底做法是把这三个字段转发进 `ToolContext`。**P2.5 的复核**：`scripts/` 下的 live 入口里**没有** `beginTurn` 的调用点（`git grep -n 'beginTurn' -- scripts` 只命中验收脚本 `scripts/verify-p2-5.ts`），所以活的入口写下的提醒 `owner` 会落到 sink 的兜底 `unknown`。
 7. **等分行的顺序会随机抖**（t7 实测）：`MemoryStore.recordSemantic` 的输入**没有 `updatedAt`**（落库时间一律由 store 的 `now` 给），并列时按 `candidate.id` 兜底、出厂 id 是 `sem_${randomUUID()}` → **顺序断言必须显式给 `memoryId`**；这与「计时断言先证明不抖」是同一类纪律，顺序断言也不许依赖未指定的并列裁决。
 8. **`plugins/xixi-tools/index.js` 仍 import `@deepseek-ai/dsh-tools`**：按铁律 9 的**字面**它在 `packages/brain-adapter` 之外，但性质是 **DSH 侧插件包本体**（manifest 的 peerDependency 就是 dsh-tools、靠 cordis patch 挂载、上游 `00_CODE_AUDIT` §6 已登记为 DSH 侧工具插件）——**收编进 brain-adapter 还是登记为显式例外，需要用户裁定**；captain 不擅自改铁律、也不擅自搬包。
 9. **`tests/console/unbacked-facts-console.test.ts:111` 的 `engine as unknown as ConversationEngine`** 是另一个（非 adapter 的）部分替身；收紧它需要在 `packages/runtime` 暴露 composer 接缝类型。
-10. **`manager.instance().health` 是「最后一次记录的报告」**（t21 复审的 O1，low 但会误导面板）：deactivate 之后它仍写「1 个 MCP 工具在线」，而同一次新鲜的 `plugin.module.health()` / `status()` 都说未连接；且 `checkHealth()` 只遍历 active 插件，**管理器的公开面没有一条路能把这份快照刷新**。要么让 `deactivate` 也记一条新鲜 health，要么在文档里写清「面板读它时必须同时读 state」。
+10. ~~**`manager.instance().health` 是「最后一次记录的报告」**（t21 复审的 O1）~~ → **已由 P2.5-I（t4）修掉**：`deactivate` / `dispose` / rollback 统一走 `#stopRunning`，能力与 health 报告一起丢，**不再伪造 offline**（也不在停用时再问一次钩子，那等于换个写法继续说谎）；新增派生字段 `PluginInstance.online`（`= state === 'active'`），调试面读 `state` / `online` / `health` 就能区分「活跃 + 健康」与「已停用」。**相邻的一处仍未修**：`checkHealth()` 复查失败会把 state 翻成 `failed` 而能力登记与模块还在（§0.2「已知问题」）。
 11. **两处「尚无独立评审」的登记**（t23 复审时按 §9.15/§9.25② 如实指出，别让它们随别的任务一起被当成已核）：① ~~**P2-G 的疑问句守卫与召回预算**~~ → **已由 t26 独立评审判 pass（2026-10-04）**，它自己的反事实证明 `lacksObject` 判据承重、两个报告哈希与仓库字节逐字一致；② **P2-F2（t17：铁律 9 越界清理 + 旧接口残留）**至今没有独立评审——它的判据是「用一次性对照脚本在 33 个 schema 上比对本地谓词与真实函数、0 处不一致」这类**自证**，比常规弱一档，下一轮若要动 `packages/brain-adapter` 的接缝，先补一次独立评审。
 12. **引用哈希要写清是哪个文件**（t23 的引用精度提醒）：t22 报的 `B0DD5C60529B5710…` 是 **`packages/runtime/src/tool-approval.ts`（实现文件）**的哈希，**测试文件** `tests/unit/core/tool-approval.test.ts` 的是 `0FDB1DE4…`——后续引用时写清文件，否则容易张冠李戴。
 13. ~~**4 处「当前态」文档仍写着已被删除的 `xixi_news_stub`**~~ → **已由 t15 改掉（2026-10-04）**：`docs/design/security-and-privacy.md` 的 L1 行与「三个内置」段、`docs/design/brain-and-models.md` 的工具表行、`docs/progress.md` 的 Phase 2 工具面段、`docs/v03/ACTUAL_RUNTIME_MAP.md` 的内置工具列。**其余命中按原样保留**（`AGENTS.md` 的历史教训、两张基线地图、三个「必须消失」的回归断言、生产代码里解释它为何被删的注释）——历史与证据不许改写，这正是「不要写全库 0 命中」这条新纪律的由来。
-14. **P2 gate 实测的「未达标」与一条被更正的历史结论（t14 + t27，2026-10-04）**：① **四个 live 入口未接线（现状、未达标）**——`node scripts/chat.ts --print-wiring` 只列三个内置、**没有 `news.*`**；真跑入口问新闻她只能调时间工具并回「我查不了」；入口里提醒工具真被调用过（`[tool] xixi_set_reminder_stub ok`）但直读那库是 `reminders: []`、`reminderEvents: 0`（内存 sink）。根因：`git grep buildPluginRuntime -- scripts` 只命中 `scripts/probe-tools.ts`，入口仍只调 `buildToolChain`（`DurableReminderSink|ReminderScheduler` 在 scripts 下零命中）。② ~~提醒的模型可靠性 6/22（27%）真调工具、4 次回复明说「记下了」而库里没有行，根因在提示词层~~ → **⚠ 已更正（t27 同日复测、captain 落笔）**：t27 同口径重跑 t14 探针得 **改前 21/22（95.5%）、改后 22/22（100%）**，另一次改前单独复跑 **14/17（82.4%）**；「自称提醒、库里 0 行」的口吻样本改前 3 次、改后 0 次（样本太小，**不据此宣称效果**）。**故「27% 与 4 次假承诺」是一次历史观测（2026-10-04 上午）、同日同口径无法复现，「提示词层是根因」这个判断不成立**——本条精确读法是「27% 是历史观测；**真正剩下的缺口是第 ① 项**；另有一个测不到的变量：模型/服务端行为随时间变化」。**下一轮若要复核，用更大样本或换场景/换时段，不要拿 27% 当现状。**（t27 同一轮把 `WRITE_OPERATION_RULE` 作为 `HARD_POLICY` 的一行落进生产代码——631 字/8 行、原有 800 字与 8 行上限不变、经 `PromptAssembler` 进 system 与 safety-policy 段、点名校验「光回一句记下了而没调工具就是假的」、不点工具名，并配 2 条离线默认门禁用例：删掉那一行 → pass 15 fail 2、从装配输出删掉 → pass 16 fail 1。**规则本身是明确性改进，但它的效果本次测不出来**。）③ **t27 交回的两处文档同步项**（它按 out of scope 未动 `docs/`）：(a) `docs/design/` 里描述硬边界内容处**仍只写「事实来源」一条**，而代码里已有第二条（写操作必须走工具）；(b) `docs/progress-v03.md` 的 P2 段与 `docs/verification/t14-p2-gate-independent-verification-2026-10-04.md` 里那句「27%」要按上面口径加注。逐条样本仍在 `.scratch/t14/remind-sample-*.json`；t14 的探针在 `.scratch/t14/`（gitignored）。
+14. **P2 gate 实测的「未达标」与一条被更正的历史结论（t14 + t27，2026-10-04）**：① ~~**四个 live 入口未接线（现状、未达标）**~~ → **已由 P2.5 关闭（2026-10-08）**；那条观测当时为真（`node scripts/chat.ts --print-wiring` 只列三个内置、**没有 `news.*`**；真跑入口问新闻只能回「我查不了」；提醒工具真被调用过但库里 `reminders: []`，因为是内存 sink）——**这半句现在只作为 2026-10-04 的历史读数保留**，现状见 §0.2 与 `git grep -l 'createResidentRuntime(' -- scripts`。② ~~提醒的模型可靠性 6/22（27%）真调工具、4 次回复明说「记下了」而库里没有行，根因在提示词层~~ → **⚠ 已更正（t27 同日复测、captain 落笔）**：t27 同口径重跑 t14 探针得 **改前 21/22（95.5%）、改后 22/22（100%）**，另一次改前单独复跑 **14/17（82.4%）**；「自称提醒、库里 0 行」的口吻样本改前 3 次、改后 0 次（样本太小，**不据此宣称效果**）。**故「27% 与 4 次假承诺」是一次历史观测（2026-10-04 上午）、同日同口径无法复现，「提示词层是根因」这个判断不成立**——本条精确读法是「27% 是历史观测；**真正剩下的缺口是第 ① 项**；另有一个测不到的变量：模型/服务端行为随时间变化」。**下一轮若要复核，用更大样本或换场景/换时段，不要拿 27% 当现状。**（t27 同一轮把 `WRITE_OPERATION_RULE` 作为 `HARD_POLICY` 的一行落进生产代码——631 字/8 行、原有 800 字与 8 行上限不变、经 `PromptAssembler` 进 system 与 safety-policy 段、点名校验「光回一句记下了而没调工具就是假的」、不点工具名，并配 2 条离线默认门禁用例：删掉那一行 → pass 15 fail 2、从装配输出删掉 → pass 16 fail 1。**规则本身是明确性改进，但它的效果本次测不出来**。）③ ~~**t27 交回的两处文档同步项**~~ → **两处都已由 P2.5 的文档收口任务（t14，2026-10-08）还清**：(a) `docs/design/` 描述硬边界的地方现在**两条都写**——第一条「可核查的事实只能来自三处（对话里说的 / 工具查到的 / 系统给的可信记忆或世界状态）」，第二条 `WRITE_OPERATION_RULE`「写下来的事必须真的用工具写」，落点见 [`design/conversation.md`](design/conversation.md) §3 与 [`design/security-and-privacy.md`](design/security-and-privacy.md) §2；(b) [`progress-v03.md`](progress-v03.md) 的 P2 段与 [`verification/t14-p2-gate-independent-verification-2026-10-04.md`](verification/t14-p2-gate-independent-verification-2026-10-04.md) 里的「27%」都已**加注**（**原文一字未改**，注里写明它是 2026-10-04 那次的历史观测、同日同口径不可复现、「提示词层是根因」已被推翻）。逐条样本仍在 `.scratch/t14/remind-sample-*.json`；t14 的探针在 `.scratch/t14/`（gitignored）。
 15. **G03 更正注还有两处没落（t15 交回，2026-10-04）**：`docs/benchmarks/realism-2026-10-01-v01-vanilla.md` 与 `…v02-wip.md` **已有**「源理由已在 V0.3 t19 更正」的旁注（t16 写），但两份**同名 `.json`** 里没有——它们的 G03 旧句在 `skipped[0].reason`。
     t15 没有改这两处，因为它的 inScope 不含 `docs/benchmarks/`（改了会在完成校验里被判 undeclared）。
     **要补时的最小改法**（`--replay` 只做 `JSON.parse(...) as RunResult`、不校验额外键，所以加一个顶层键是安全的、也不改写历史数据）：
     在两个文件顶层加 `"annotations": [{ "at": "2026-10-04", "by": "V0.3 t15（P2 收口）", "note": "skipped[0]（G03）的源理由「本仓库当前没有 open thread 存储」已在 V0.3 t19 更正：open_threads 表与 OpenThreadStore 自 pack Phase 3 起就存在；这条记录是当次运行时的判断，不改写。" }]`。
     改完跑一次 `node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v01-vanilla.json` 确认 exit 0。
 16. **`packages/plugins/mcp/index.ts` 的注释里没有 v1/v2 对比那两句**（t15 实测，2026-10-04）：t3 的回报与提交 `c8396e0` 的提交信息都写「依赖理由已写进 `packages/plugins/mcp/index.ts` 注释」，但该注释只覆盖**依赖面**（client/server/dev、lock 的 13 条、zod 的口径）；**「v2 取代 v1 单体包 `1.32.0`」与「否掉手写协议＝与真实 MCP 服务器互操作会变成与自造方言互操作」这两句全库零命中**（`git grep -n "1.32.0\|自造方言" -- packages docs`）。t15 已把这两句落到 [ADR-0020](adr/0020-provider-three-interfaces-and-mcp-deps.md) §5，**以后引用请引那份 ADR 或提交 `c8396e0`，不要再写「注释里有一段」**。
+
+### 0.2 V0.3 P2.5（`xixi-v03-p2.5-live-agent-wiring`，2026-10-08）——**常驻装配点与四个 live 入口接线**
+
+**一句话**：P2 把 Agent 能力做出来了，但入口没用上（当时的证据是「问新闻她只能回『我查不了』」）。P2.5 把这些能力
+接进**活的西西**：入口经**同一个常驻装配点**取工具链与引擎，插件工具（含 `news.*`）第一次真的进了模型可见的工具
+列表，审批闸门与 durable 提醒也由它接管。**判据用命令，不用名单**（名单会随代码过期）：
+
+```powershell
+git grep -l 'createResidentRuntime(' -- scripts   # 走常驻装配点的入口（七个入口脚本 + 验收脚本）
+git grep -n 'buildToolChain(' -- scripts          # 应为 0 命中：入口不再自己拼链
+node scripts/chat.ts --print-wiring               # 模型可见工具（离线、不调模型、不建库）
+npm run verify:p2.5 -- --offline                  # 四个真入口场景（零费用、不联网）
+```
+
+**装配点**：`packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime(options)` 返回
+`XixiResidentRuntime`——工具链、插件内核（MCP 与 news 从它进来）、审批宿主、durable 提醒 sink 与调度、
+回合后提取、过了提示词权威校验的 `ConversationEngine`，以及插件能力桥（`capabilities`）。四条不变式
+（用例：`node --test tests/unit/runtime/resident-runtime.test.ts`）：`start()` 只认一次
+（`RESIDENT_RUNTIME_ALREADY_STARTED`）；**关停是终态**（`stop()` 之后再 `start()` 抛
+`RESIDENT_RUNTIME_ALREADY_STOPPED`、`runtime.plugins.mount()` 抛 `RESIDENT_RUNTIME_CLOSED`）；`stop()` 幂等；
+`toolChain === plugins.registry`。**模型客户端不在这里造**——适配器由调用方直给，或给一个拿到链之后才造客户端的 builder。
+
+**这一轮的交付（逐条明细与命令见 [`progress.md`](progress.md) §12）**：① 七个入口脚本接线
+（文字 CLI / 语音单轮 / 设备自检 / 真人感评测 / 对话评测 / 现场测试控制台 / 试用页；P2.5-B/C）；② `news.*` 进模型可见工具链；③ durable 提醒接进装配点并交出 `reminderSeams`（P2.5-F）；
+④ 审批声明贯通权限策略、并在真实运行时闭环且尊重冻结参数（P2.5-G）；⑤ 配置真的能管插件/新闻/MCP（P2.5-H）；
+⑥ 两个内核修复——插件启动幂等（响亮拒绝）与停用后健康快照不再撒谎（P2.5-I）；⑦ 世界状态进提示词、
+关系笔记按听众过滤（P2.5-J）；⑧ 提示词权威在生产装配点上的行为证据（P2.5-D）。
+
+**仍未接线（不许写成活的，三条）**：
+1. **到点提醒由入口说出来**：`git grep -n 'reminderSeams' -- scripts` **零命中**，而 `new ProactiveLoop(` 有三处
+   （`scripts/field-test.ts`、`scripts/serve-chat.ts`、`scripts/eval-proactive-timeline.ts`）。所以「活的西西已经
+   在说到点提醒」**不成立**——成立的是「接缝可用 + 到点会被主动路径说出来」（验收脚本场景②就按那行接法驱动）。
+2. **活入口真在用插件话题**：`git grep -n 'readPluginTopics' -- scripts` **零命中**，三处 `new ProactiveLoop`
+   都不读插件话题（P2.5-C 只把 `capabilities` 与形状备好）。
+3. **外部 MCP 服务器**：没有任何入口配置过服务器（唯一入口是配置 `xixi.plugins.mcp.servers`，出厂为空表），
+   证据仍是 SDK v2 真 client + 真 server 走 `InMemoryTransport`。
+
+**已知问题（已知、未修，写明谁发现的）**：
+- **内核的 `#disposed` 只有一处守卫**（`loadPlugin` 查它，`loadInline` / `activate` 不查）→ `disposeAll()` 之后仍能把
+  插件**复活**（t16 的 F1 发现、t21 复核）。常驻运行时这一层已堵（关停后 `mount()` 抛 `RESIDENT_RUNTIME_CLOSED`），
+  **内核层未修**。
+- **`online` 的文档口径比代码强**：`checkHealth()` 复查失败会把 state 翻成 `failed`，而能力登记与模块还在——
+  按「先读 `online`」的面板会对一个仍在跑的插件显示「已停用」（t16 的 F2，`#push` 的既有行为）。
+- **提示词权威的机制缺口**：`authority.verify` 对 system 串只查 `startsWith(CORE_IDENTITY)` 与 `includes(HARD_POLICY)`
+  再逐段比对核心段正文，所以「保持两个核心段对象原样、只往 system 串尾部追加文本」它**不拒**
+  （t10 的探针实测 NO-THROW）。插件今天拿不到装配器，故属机制完备性问题，不是活的风险。
+- **per-plugin `dispose()` 不是插件级终态**（t4 披露、t16/t21 复核）。
+- `countIfReadable` 的「库已关」与「`stop()` 失败重试」两条防线**今天构造不出坏输入**（t18 登记）。
+
+**验收口径（P2.5-K）**：`npm run verify:p2.5` 四个场景——新闻（真模型时由它自己调 `news.latest`）、提醒跨重启
+（子进程写、父进程读、到点成候选并被说出口）、审批（待批时业务数据零行、点头执行冻结参数）、关停（链清空、
+连接关闭、待办仍在）。**如实标注的模拟部分**：场景 1 的 feed 是**本机 RSS 夹具**（实测 BBC 那条 feed 直连 20 秒、
+代理 25 秒都超时；换真 URL 只改一处），场景 2 的「到点」用**注入时钟**造——脚本自己会把这两点打印出来。
 
 ### 0.15 双机环境：Linux（WSL2）移植（2026-10-07）
 
@@ -256,7 +313,11 @@ T5-F2（low：agent-loop 的 now 是回合开始快照）与 T5-F4（low：两�
 **文档里不得笼统写「语音与文字共用同一条工具链」**，必须逐入口写明（t12 负责）。
 
 **t8 的非阻塞观察（归 t12 记录，不在本轮修）**：只读入口 `scripts/chat.ts` 与 `scripts/voice-turn.ts` **未接 `afterTurn`**
-（那两个入口本轮不写记忆与学习，与 T5-F1 同类：覆盖必须逐入口写明）；学习层漂移上限 ±0.30 使「话太多」到不了提示词低档
+（那两个入口本轮不写记忆与学习，与 T5-F1 同类：覆盖必须逐入口写明）
+
+> **加注（2026-10-08，V0.3 P2.5）**：上面这条**已经不成立**——`chat.ts` 与 `voice-turn.ts` 都改走常驻装配点，
+> `afterTurn` 由装配点接到共享提取器；行为证据在 `tests/console/entry-after-turn.test.ts`（三个真入口各写一遍自己的库）。
+> 上面那句是**那一轮的观察**，按 §9.21 保留。；学习层漂移上限 ±0.30 使「话太多」到不了提示词低档
 （§7.4 的设计取舍）；记忆的查看/编辑/删除目前只有领域 API、没有 UI；记忆写入**不新增事件类型**（记忆是推导，铁律 4，
 每行带 `source_event_id` 指回 `conversation.turn`）；`overrideSelfProfile` 仍是基础层语义（CLI 与评测用它是对的）。
 
@@ -342,6 +403,8 @@ npm run web                    # 试用对话页 http://127.0.0.1:8791，打字�
 
 ```powershell
 npm run verify:provider              # 1 次调用：DSH → MiMo → 工具调用 → 回答
+npm run verify:p2.5                  # 四个真入口场景（新闻 / 提醒跨重启 / 审批 / 关停）；有密钥时场景 1 真调一次模型
+npm run verify:p2.5 -- --offline     # 同上但零费用、不联网（**推荐先跑这一条**：它证明接线，不证明公网）
 npm run verify:structured-output     # 3~4 次调用：结构化输出契约 + 供应商缺陷金丝雀
 npm run eval:conversation:judge      # ~26 次调用：8 场景对话评测 + 评审模型，报告写进 docs/recon/
 npm run verify:m0                    # 2 次调用：两个独立进程的重启恢复
@@ -354,13 +417,13 @@ npm run voice:bargein                # 0 次调用：打断判定延迟（纯本
 
 | 能力 | 状态 | 自证方式 |
 |---|---|---|
-| 事件契约（`xixi.event.v1`，3 类事件） | ✅ 完成 | `npm test`（contracts 用例含 fail-closed 与漂移检查） |
+| 事件契约（`xixi.event.v1`；**事件类型条数不在此写死**——以 `packages/contracts/src/events.ts` 与 `packages/contracts/schemas/events/` 为准，`docs/design/domain-model.md` 有清点） | ✅ 完成 | `npm test`（contracts 用例含 fail-closed 与漂移检查） |
 | 领域持久化（事件日志/会话/人格基线/迁移） | ✅ 完成 | `npm test`（迁移幂等、篡改检测、人格只补缺） |
 | 对话层（FSM §12/§13 + Prompt §26 + 沉默 §55） | ✅ 完成（P1 改版：前缀＝身份与说话方式 + 安全段；历史只走 messages） | `npm test` + `npm run chat` |
 | 「真人感」指标与前后对比 | ✅ 有可重跑口径（三分指标 + 黄金对话语料） | `node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v01-vanilla.json`（改造前，不花钱）与同目录的 `-v02-wip.json`；完整对比见 [`benchmarks/realism-metrics.md`](benchmarks/realism-metrics.md) |
 | 制品清洗（工具标记 / 英文推理） | ✅ 程序层已落地（`REPLY_HYGIENE`；沉默原因码 `ARTIFACT_ONLY_REPLY`）；⚠️ 订阅覆盖不齐：试用页与控制台已订阅 `onNotice`，`chat.ts` / `voice-turn.ts` 未订阅 | `npm test`（`tests/unit/core/engine-reply-hygiene.test.ts`）；缺口见 `progress.md` §4 第 10 条 |
 | 人格可调并体现在行为 | ✅ 完成 | `eval:conversation:judge`（低/高话多组长度差 **2.57×**：22.3 字 vs 57.3 字，见 `docs/progress.md` §0） |
-| 内置工具（四个：时间 / 天气 / 新闻桩 / 提醒桩） | ✅ 完成；四个 live 入口共用同一条工具链 | `node scripts/probe-tools.ts`；逐入口自证 `node <入口> --print-wiring`（离线，不调模型） |
+| 工具与工具链（**三个内置**：时间 / 天气 / 提醒；新闻是插件工具 `news.*`） | ✅ 完成；**七个入口脚本经同一个常驻装配点 `createResidentRuntime()` 取链**（`git grep -n 'buildToolChain(' -- scripts` 应 0 命中） | `node scripts/probe-tools.ts`；逐入口自证 `node <入口> --print-wiring`（离线，不调模型、不建库；插件工具应出现在 `tools` 与 `plugins.mounted` 里）；端到端 `npm run verify:p2.5 -- --offline` |
 | 直连 MiMo 实时路径（流式 + 工具循环） | ✅ 完成 | `npm run chat` |
 | DSH Harness 路径（含 profile 与工具插件） | ✅ 完成（M0 验收） | `npm run verify:m0` / `npm run verify:provider` |
 | 语音输入（浏览器采集 → VAD → ASR → 对话 → TTS） | ✅ 完成 | 页面按住🎤；或 POST `/api/voice`。**多段语音全部使用**（不再只取第一段），整段录音不落盘（`docs/field-test-report` 见下） |
@@ -370,14 +433,14 @@ npm run voice:bargein                # 0 次调用：打断判定延迟（纯本
 | 真实麦克风/扬声器/摄像头验收 | ⚠️ 口径修正后扬声器判 FAIL（2026-09-30） | `node scripts/field-test.ts --acceptance`：麦克风/摄像头通过，**扬声器按「能量比」口径只比噪声底高 ~2.4 dB（<10 dB）→ FAIL**（旧报告按帧级分位写 12.97 dB PASS，是乐观上界）。见 [`recon/field-test-report-2026-09-30.md`](recon/field-test-report-2026-09-30.md) 顶部的「口径变更说明」；改善路径：音量 ≥50%、麦克风离扬声器 0.3–1 m、采集增益设 0 dB 后重跑 |
 | 扬声器真正静音的延迟（§33 P50<500ms） | ⛔ 未验收 | 需要设备 |
 | 唤醒词 / 搭话判定（§13 完整版） | ⛔ 未实现（M2） | — |
-| 长期记忆 / 纠正（§10，pack Phase 4） | ✅ 已落地；⚠️ 只有控制台与试用页写记忆/学习（`chat.ts` / `voice-turn.ts` 未接 `afterTurn`） | `npm test`（`tests/integration/memory-feedback.test.ts`）；逐入口与权重口径见 `progress.md` §2.19 |
+| 长期记忆 / 纠正（§10，pack Phase 4） | ✅ 已落地；**四个入口都写记忆/学习**（控制台、试用页、`chat.ts`、`voice-turn.ts` 都走常驻装配点，`afterTurn` 由装配点接到共享提取器——P2.5-C 之后不再有「语音说的不记得」这个缺口） | `npm test`（`tests/integration/memory-feedback.test.ts`、`tests/console/entry-after-turn.test.ts` 的三个真入口行为证据）；逐入口与权重口径见 `progress.md` §2.19 |
 | 主动开口（§15，主动性 V2） | ⚠️ 机制已落地；六条缺陷已修（第三轮 t1）、独立复验（t2）、评审 pass（t3）；**口径已定＝显著降频**（不做「= 0」硬停，[`adr/0011`](adr/0011-proactive-decision-ownership.md) 决定 2 的补充 + 第五轮 t1）；**但 pack 更严的「连续两次没回应后继续主动 = 0」仍不成立**（实测是显著降频，这是事实、不是待决问题） | 机制：硬底线（程序）+ 模型读空气（ADR-0011）——`npm test` 的门禁用例、`node scripts/eval-realism.ts` 的 G07/G12 用例可复跑。**达标口径**：generic 话题 **18.2%**（目标 ≤20%）、热聊接话 8 次。**多日验收**：`node scripts/eval-proactive-timeline.ts`（默认三天，判定 M1–M6 进退出码）。**判定与数字**：[`verification/t2-timeline-independent-verification-2026-10-01.md`](verification/t2-timeline-independent-verification-2026-10-01.md)（第三轮）、[`verification/t7-round5-independent-verification-2026-10-03.md`](verification/t7-round5-independent-verification-2026-10-03.md) §2.1（第五轮自驱三天：12/12/12 与 5/5/5、惩罚置 0 则 11/11/11 = **降 54.5%**）（**不得写成「Phase 5 全通过」**） |
 | 流式语音输出（pack Phase 8） | ⚠️ **接线成立 + B1 已修（`50a7c7f`）+ B2 是已知未覆盖缺陷**；**首音 P50 ≤1.5 秒这条目标未达标、且在本机栈下不可达**（不是实现缺陷）。**不得写成「流式逐块播放已验收」**（没有端到端听感实测） | 口径是**四段**：① 端点→ASR 出字、② ASR 出字→模型首 token、③ 首 token→首段可听、④ 端点→首段可听；**pack 的 1.5 秒指 ④（不是 ③）**。实测（8 批 n=32，含第五轮复验新跑 3 批）：逐批 ④/1500 = **[3.14, 7.33] 倍**、池化 ④ P50 5597.5 ms = **3.73 倍**、**31 个有效值无一 ≤1.5 秒**；同批对照方向**不一致**（3 快 5 慢，−16.1% 到 +27.3%，**不许写「多数为正」也不许给单批百分比**）。复算：`node scripts/voice-turn.ts --compare <产物…>`（不调 API）。口径与切块规则见 [`design/voice.md`](design/voice.md) §6 |
 | 有界的心情状态（第五轮 t4） | ✅ 已落地（短期的情绪，不是人格）；**四条边界都有独立复算**：上下界 0 越界、语气 ∈[0.94,1.06]、主动性软偏移 ∈[±0.03]、硬门禁同码、散文无数字与经历句式。⚠️ 两条已知问题留待下一轮（见 §0 与 `progress.md` §4） | 口径与证法见 [`adr/0013`](adr/0013-bounded-mood-state.md)；复算与命令见 [`verification/t7-round5-independent-verification-2026-10-03.md`](verification/t7-round5-independent-verification-2026-10-03.md) §2.4 |
 | 摄像头在场检测（§M6） | ✅ 最小可用（真人实测未做） | `npm run test:perception`（离线，含转发 Python 回归；项数看末行）；真机自检 `node scripts/verify-camera-presence.ts --seconds 15`；接口见 [`design/perception.md`](design/perception.md) §8.3（真人站镜头前那一步未完成） |
 | 人格学习（§7.4，pack Phase 4） | ✅ 两条路都在跑：显式纠正（权重 1.0）+ 白名单推断码（权重 0.4，只乘一次）；⛔ 读模型自由文本做人格学习仍不做（铁律 5） | `npm test`（`tests/integration/memory-feedback.test.ts`、`tests/unit/feedback-interpreter.test.ts`）；管理员的 `overrideSelfProfile` 仍在 |
-| 类型检查（`tsc --noEmit`） | ⛔ 未接入 | Node 直接跑 `.ts`，类型错误只在运行时暴露 |
-| 事件回放（§22.3） | ⛔ 未实现（M5） | `tests/replay/` 为空 |
+| 类型检查（`tsc --noEmit`） | ✅ 已接入（V0.3 P0-C；覆盖 packages/apps/scripts/services/tests，零 `ts-ignore`） | `npm run check:types`（exit 0 才算过；见 `AGENTS.md` §7 的纪律） |
+| 事件回放（§22.3） | ✅ 已落地（V0.3 P0-D）：注入 Clock 的行为回放，三条基线 | `npm run test:replay`（实测 pass 16 / fail 0） |
 
 ## 4. 必须先知道的坑（都是踩过的）
 

@@ -1,6 +1,8 @@
 # 西西 V0.3 阶段进度（progress-v03）
 
-最后更新：2026-10-04
+最后更新：2026-10-08（新增 **P2.5 Production Wiring** 段——常驻装配点与七个入口接线、`news.*` 进模型可见链、
+审批与 durable 提醒由装配点接管、配置管插件、两个内核修复；P2 段的结论按 §9.21 **只加注不改写**）
+上一版：2026-10-04（P2 收口：交付表、四条 gate、两个场景、未达标四条与下一阶段六条遗留）
 
 这份文件是 V0.3 pack（`E:\xixi_v03_actual_code_pack\docs\08_PHASES_AND_ACCEPTANCE.md`）要求的
 **每阶段进度**：每个 Phase 收尾时由**独立复验任务**在这里追加一节，只写「交付了什么、凭什么说它是真的、
@@ -30,13 +32,14 @@
 | P0-E 已知缺陷 | B2（`4f3301f`）+ preflight 九项（`e0ce503`） | B2 先写回归测试再修（旧实现下先红）；九项各有一条会红的证据 | 已由 t3/t2 逐项回归；剩两条 low 见 P0 遗留第 5 条（现已补） |
 | P1-a 上下文与检索 | `packages/context/*` + engine/prompt 接线（`d168af7`） | 检索进 `prompt.user`（`- [较确定] 我很喜欢茉莉花茶`）；prompt 审计无 UUID / 内部 id / 长数字 / 调试字段 | 曾不过 → t22 修复 / t23 复审 pass（见 P1 §3） |
 | P1-b 关系/话题/纠正/afterTurn | 迁移 006 + `MemoryStore` 状态 API + `MemoryCorrectionResolver` + `createTurnExtraction`（`7331ae`→`733b1ae`） | 纠正后旧行 `superseded`（带 `supersededBy`）、新行 `active`、旧事实不进 prompt；三入口各有真子进程/真 HTTP 证据 | 疑问句被写成偏好事实（P1 遗留 N3，t22 修复 / t23 复审） |
-| P2-A 插件内核 | `packages/plugins/src/*` + `packages/runtime` 的 `buildPluginRuntime`（`060f1fb` + 修复轮 `9f226b6`） | 九步生命周期 + 五能力 + 四条「插件不能做」各有强制点；`ToolRegistry` 升级不推翻；`node --test` 的 plugins 套件全绿（见 P2 §2 的 131 项细分） | **入口未接线**（P2 §5 四条之一）；`start()` 不幂等、health 快照过期 |
+| P2-A 插件内核 | `packages/plugins/src/*` + `packages/runtime` 的 `buildPluginRuntime`（`060f1fb` + 修复轮 `9f226b6`） | 九步生命周期 + 五能力 + 四条「插件不能做」各有强制点；`ToolRegistry` 升级不推翻；`node --test` 的 plugins 套件全绿（见 P2 §2 的 131 项细分） | ~~**入口未接线**~~ → **已由 P2.5 关闭**；~~`start()` 不幂等、health 快照过期~~ → 已由 P2.5-I 修掉（见 P2.5 段） |
 | P2-C MCP adapter | `packages/plugins/mcp/*`（`c8396e0` + 修复轮 `d407eac`） | SDK v2 真 client+server 走 `InMemoryTransport`；命名空间 `mcp.weather.forecast`；空转零调用（不做高频总线） | 没有对外部/远程服务器的验证；入口没配任何服务器（P2 §4.3） |
-| P2-B 工具审批 | 迁移 007 + `packages/domain/src/approvals.ts` + `packages/runtime/src/tool-approval.ts`（`d64066b` + 修复轮 `f57282d`、`8dfc0bd`） | 冻结参数摘要对不上就 `APPROVAL_MISMATCH` 且零调用；拒绝/到期都不执行且都落审计 | 入口没接 `approvalGate`；manifest 的 tool 级 approval 未实现（P2 §5） |
+| P2-B 工具审批 | 迁移 007 + `packages/domain/src/approvals.ts` + `packages/runtime/src/tool-approval.ts`（`d64066b` + 修复轮 `f57282d`、`8dfc0bd`） | 冻结参数摘要对不上就 `APPROVAL_MISMATCH` 且零调用；拒绝/到期都不执行且都落审计 | ~~入口没接 `approvalGate`~~ → **已由 P2.5 关闭**（接线在装配点内部，所以 `approvalGate` 在 `scripts` 下仍是 0 命中——那是对的）；manifest 的 tool 级 approval **仍未实现**（P2 §5） |
 | P2-F 接口收缩 | `packages/brain-adapter/src/types.ts` 三接口 + manifest 补 `@xixi/model-adapters`（`19b54b9` + `f2f3af1`） | 四能力从接口与实现一并退役；`packages/brain-adapter` 里 `@deepseek-ai/dsh` 零命中 | 两条接缝（`supportsImages` / `inferJson`）在生产侧**没有消费者** |
-| P2-D 真实 News | `packages/plugins/news/**`（`3ada7cd`） | 三个工具 + `news.topics`；真实 RSS 与公开 JSON API 手动复验（事件日志 `tool_name="news.latest"`）；默认门禁用离线桩 | 入口未接线（P2 §4.1）；真实来源属手动证据 |
-| P2-E durable Reminder | 迁移 008 + `packages/domain/src/reminders.ts` + `packages/runtime/src/reminder-runtime.ts`（`3bd7d3e` + `5336b13`） | 自然语言解析成绝对时刻 + 时区（跨日/跨时区边界有用例）；新进程读得到 `pending`，到点 `pending→due→candidate` 三条事件 | 入口未接 durable sink/scheduler（P2 §4.2）；模型只有 27% 会真的调这个工具（P2 §4.2） |
+| P2-D 真实 News | `packages/plugins/news/**`（`3ada7cd`） | 三个工具 + `news.topics`；真实 RSS 与公开 JSON API 手动复验（事件日志 `tool_name="news.latest"`）；默认门禁用离线桩 | ~~入口未接线~~ → **已由 P2.5 关闭**（`news.*` 在入口的模型可见清单里）；真实来源属手动证据；**来源仍由入口各自带一条 RSS**（「全部由配置说了算」属另一条任务，见 P2.5 段 §3） |
+| P2-E durable Reminder | 迁移 008 + `packages/domain/src/reminders.ts` + `packages/runtime/src/reminder-runtime.ts`（`3bd7d3e` + `5336b13`） | 自然语言解析成绝对时刻 + 时区（跨日/跨时区边界有用例）；新进程读得到 `pending`，到点 `pending→due→candidate` 三条事件 | durable sink/scheduler **已由 P2.5 接进装配点**；~~模型只有 27% 会真的调这个工具~~ → **已更正**：那是 2026-10-04 的一次历史观测、同日同口径不可复现（见 P2 段 §4.2 的加注）；**到点由入口说出来仍未接**（`reminderSeams` 在 `scripts` 下 0 命中） |
 | P2-G 上一轮遗留 | `packages/conversation/src/extractor.ts` 的 `lacksObject`（`d573437`） | 「铁观音我平时喜欢」三句从 3 条截断记忆变 0 条、正常句照旧 | 词表之外的宾语前置句仍照写 |
+| P2.5 Production Wiring | `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime` + 七个入口 + `scripts/verify-p2-5.ts`（见 P2.5 段） | 入口接线、`news.*` 进模型可见链、审批闭环（执行**冻结**参数）、durable 提醒接缝、配置真的管插件/新闻/MCP、两个内核修复；`npm run verify:p2.5 -- --offline` 四场景 exit 0 | **仍未接三条**：入口那一行 `reminderSeams`、活入口读插件话题、外部 MCP 服务器（P2.5 段 §3） |
 
 
 > 交付号取自 `git log`；**成员只报基线、不提交代码**，交付号由 captain 提交后回填（AGENTS §9.20）。
@@ -345,6 +348,9 @@ C:\Users\zz\AppData\Local\Temp\t11-store\xixi.sqlite
 
 ## P2 — Agent/Plugin Completion（两个场景在交付件上成立、四条 gate 全绿；**入口层未接线；提醒的模型可靠性未达标**）
 
+> **2026-10-08 加注（V0.3 P2.5）**：标题里那两句是 **P2 收口当时的结论，保留不改**——它们分别已由 **P2.5**
+> （入口接线）与 **t27**（27% 那条的更正）作废，段内逐处有加注；P2.5 的交付与仍然没接的三条见**本文件末的 P2.5 段**。
+
 **复验基线 `4eb42ec`（认领时 HEAD）；门禁与两个场景的最终取数修订号 `024cd43`（工作区干净）**。
 独立复验报告：[`verification/t14-p2-gate-independent-verification-2026-10-04.md`](verification/t14-p2-gate-independent-verification-2026-10-04.md)（含逐条命令与输出）。
 探针在 `.scratch/t14/`（`.gitignore` 已忽略，按任务要求**不进仓库**；报告 §0 给了可重建的清单）。本节只写我自己跑出来的东西。
@@ -400,6 +406,9 @@ C:\Users\zz\AppData\Local\Temp\t11-store\xixi.sqlite
    - 提醒：入口里工具**真的被调用了**（`[tool] xixi_set_reminder_stub ok`），但直读那个库是 `reminders: []`、`reminderEvents: 0`
      ——入口的 sink 还是内存版；`git grep -n 'DurableReminderSink\|ReminderScheduler' -- scripts` 零命中。
    - 根因一句话：内核/MCP/news/审批/提醒的**装配点**都已交付，但**入口仍只调 `buildToolChain`**。
+     **⚠ 2026-10-08 更正（就地，原文上一行不改）**：这句**已经不成立**——七个入口脚本都走
+     `createResidentRuntime()`，`git grep -n 'buildToolChain(' -- scripts` 今天 **0 命中**。当前口径见本文件末的 P2.5 段。
+     （上面两条读数本身是当天的实测，按 §9.21 保留。）
 2. **提醒的可靠性未达标（连装配点也算上）**：同一句话、同一条交付链、真模型 **22 次保存了逐条记录的尝试里只有 6 次真的调用了工具（27%）**；
    其余 16 次里 **4 次回复明说「记下了」而库里没有行、没有任何事件**。根因在提示词/行为层（`HARD_POLICY` 只要求「可核查的**事实**」走工具，
    没有一句要求「提醒我……」这类**写操作**必须走工具），不是持久化实现的缺陷：工具一旦被调用，第 3 节的三步每次都成立。
@@ -407,9 +416,22 @@ C:\Users\zz\AppData\Local\Temp\t11-store\xixi.sqlite
    已有证据是 SDK v2 的真 client + 真 server 走 `InMemoryTransport`。DoD 第 6 条按「SDK 客户端路径成立、外部服务器未验证」写。
 4. **新闻真实来源属手动证据**：默认门禁用的是离线桩来源（`networkCalls=0`），真实 RSS/HN 只在本节的手动复验里跑过（AGENTS §2 的口径，不是缺陷）。
 
+> **2026-10-08 加注（V0.3 P2.5）**：上面四条是 **P2 收口当时的读数，原文与其中每个数字都保留**。
+> 第 1 条**已由 P2.5 还清**——四个 live 入口与控制台、试用页都走常驻装配点 `createResidentRuntime()`
+> （`git grep -l 'createResidentRuntime(' -- scripts` 命中七个入口 + 验收脚本；反证
+> `git grep -n 'buildToolChain(' -- scripts` **0 命中**），`node scripts/chat.ts --print-wiring` 今天在三个内置之外
+> 列出 `news.search` / `news.latest` / `news.for_interests`。
+> 第 2 条**已被更正**：那是 2026-10-04 上午的一次观测、**同日同口径不可复现**（t27 用同一份探针重跑得
+> 改前 21/22、改后 22/22，另一次改前单独复跑 14/17），「提示词层是根因」这个判断**不成立**——
+> **不要拿 27% 当现状**。第 3、4 条仍然成立。P2.5 的交付、四条真入口验收与**仍未接的三条**见本文件末的 P2.5 段。
+
 ### 5. 边界与遗留（下一轮清单）
 
 **P2 的「下一阶段接线项」四条**（缺一条都会让下一个任务以为它已经在守；四条今天**都不成立**）：
+
+> **⚠ 2026-10-08 更正（就地，下面四条原文不改）**：**第 1–3 条已经落地**（入口走 `createResidentRuntime()`，
+> 它内部调 `buildPluginRuntime(...).start()`；提示词装配点上有 `verifyOnAssemble` 的调用点；`ToolApprovalManager`
+> 由装配点接成 `approvalGate`）。**第 4 条仍未做**。逐条判据见本文件末的 P2.5 段。
 
 1. **四个 live 入口仍走 `buildToolChain`**：`scripts/chat.ts`、`scripts/serve-chat.ts`、`scripts/field-test.ts`、
    `scripts/voice-turn.ts` 下一步应改成 `buildPluginRuntime(config, { news, mcpServers, reminderSink }).start()`
@@ -422,16 +444,19 @@ C:\Users\zz\AppData\Local\Temp\t11-store\xixi.sqlite
    这是**下一轮的一个小任务**：它与 `packages/plugins` 和 `packages/domain/src/config.ts` 都有交集，
    本轮排它会再串一层依赖，故明确不排。
 
+> **2026-10-08 加注（V0.3 P2.5）**：上面第 1–3 条**已落地**——今天入口走的是
+> `createResidentRuntime()`（它内部用 `buildPluginRuntime(...).start()`），提示词装配点上真的有
+> `verifyOnAssemble` 的调用点（`git grep -n 'verifyOnAssemble(' -- packages/runtime/src`），
+> `ToolApprovalManager` 由装配点接成 `approvalGate` 并经 `useRegistry()` 闭合执行路径；
+> 「装配点在跑、入口不在跑」这句话**对这几个入口已经不再成立**。**第 4 条（manifest 的 tool 级 approval 声明）
+> 仍未做**。P2.5 段还列出**三条仍未接线**（入口那一行 `reminderSeams`、活入口读插件话题、外部 MCP 服务器）。
+
 其余边界与遗留：
 
-- **今天可跑的证据链是「装配点 → `registry.execute` → 真表 → 重启 → tick → 事件」，不是「某个入口已经这样跑」。任何文档都不许写成后者。**
-- **提醒工具的名字与文案已过时**：仍叫 `xixi_set_reminder_stub`，返回文案仍写「到点不会自动响，需要人看一眼」（`git grep -n '到点不会自动响' -- packages`），
-  接上 durable sink 之后与事实相反；下一轮改 brain-adapter 时要连描述一起改。
-- **提醒的提示词缺口**（第 4.2 条）：写操作要「先记再答应」，并补一条**离线**的默认门禁用例（今天门禁覆盖工具本身，不覆盖模型是否会选它）。
-- **团队已登记、本次未重复测量的遗留**（只登记）：`PluginRuntimeMount.start()` 不幂等（t19 的 O1）；
-  `manager.instance().health` 是过期快照（handoff 的下一轮清单第 10 条登记）；
-  P2-F 的 `supportsImages` / `inferJson` 两条接缝在生产侧没有消费者（t16 的 F4，见 ADR-0020 §3）；
-  `plugins/xixi-tools/index.js` 仍 import `@deepseek-ai/dsh-tools`，这条铁律 9 的口径需要用户裁定（t17 交回 captain）。
+- ~~**今天可跑的证据链是「装配点 → `registry.execute` → 真表 → 重启 → tick → 事件」，不是「某个入口已经这样跑」。任何文档都不许写成后者。**~~ → **2026-10-08 起这句对七个入口已不成立**：入口真的走装配点了（`npm run verify:p2.5` 就是按入口跑的证据）。但**「到点提醒由入口说出来」仍不成立**——那一行 `...runtime.reminderSeams` 今天在 `scripts/` 下零命中（见 P2.5 段 §3）。
+- ~~**提醒工具的名字与文案已过时**~~ → **已由 P2.5-E（t7）改名**：今天是 `xixi_set_reminder`，返回文案「已经记下」，**没有兼容别名**（复核：`git grep -n 'xixi_set_reminder' -- packages/brain-adapter/src/tools.ts`）。
+- ~~**提醒的提示词缺口**（第 4.2 条）：写操作要「先记再答应」~~ → **已由 P2-H（t27）落进生产代码**：`WRITE_OPERATION_RULE` 成为 `HARD_POLICY` 的一行并配离线门禁用例。**但它的效果本次测不出来**，而第 4.2 条那条 27% 已更正为「一次不可复现的历史观测」。
+- **团队已登记、本次未重复测量的遗留**（只登记）：`PluginRuntimeMount.start()` 不幂等（t19 的 O1）→ **已由 P2.5-I 修掉**；`manager.instance().health` 是过期快照（handoff 的下一轮清单第 10 条登记）→ **已由 P2.5-I 修掉**；P2-F 的 `supportsImages` / `inferJson` 两条接缝在生产侧没有消费者（t16 的 F4，见 ADR-0020 §3）；`plugins/xixi-tools/index.js` 仍 import `@deepseek-ai/dsh-tools`，这条铁律 9 的口径需要用户裁定（t17 交回 captain）。
 - **没有独立复验的部分**：MCP 的命名空间/降级/重连细节与插件内核四条「不能做」的强制点，我这次只跑了细分门禁（131 项全绿），
   细节结论仍以 t19/t21 的评审为准。
 
@@ -443,3 +468,66 @@ C:\Users\zz\AppData\Local\Temp\t11-store\xixi.sqlite
 | [ADR-0018](adr/0018-tool-approval-frozen-args.md) | 工具审批模型：七字段 + 四程序事实、摘要化冻结参数、五态与原因码、**恢复语义**（`approve()` 自带到期闸门）、拒绝与到期都落审计 | P2-B；§5 第 3、4 条 |
 | [ADR-0019](adr/0019-news-and-reminder-data-model.md) | 新闻与提醒的数据模型：三个工具 + 四条主动判据 + 账本；八字段表 + 五态 + **时区语义**（按请求时区的当地日历、换时区必须换绝对时刻）+「到点成事件」的口径 | P2-D/P2-E；§3 场景②与 §4.2/§4.4 |
 | [ADR-0020](adr/0020-provider-three-interfaces-and-mcp-deps.md) | Provider 三接口拆分、四能力退役与真实归属、**两条接缝没有消费者**、MCP 的依赖理由与版本选择 | P2-F/P2-C；§5 的遗留与 `docs/design/brain-and-models.md` 的同步依据 |
+
+---
+
+## P2.5 — Production Wiring（2026-10-08；**入口层已接线，三条仍未接**）
+
+**为什么有这一段**：P2 的交付在**装配点**上成立，但真实入口还是旧运行时（当时的证据是「入口里问新闻，
+她只能回『我查不了』」）。P2.5 把装配收成**一个常驻装配点**并把入口接上去。详细的交付表、仍没接的条目与
+已知问题在 [`progress.md`](progress.md) **§12**；这里只放按 Phase 索引必须留的最小事实与判据。
+
+### 1. 交付（字母是 P2.5 的分块号）
+
+| 块 | 交付物 | 一句话 |
+|---|---|---|
+| A | `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime(options)` / `XixiResidentRuntime` | 工具链、插件内核、审批宿主、durable 提醒 sink 与调度、回合后提取、过了提示词权威校验的引擎、插件能力桥，一次装好；模型客户端不在这里造 |
+| B | `scripts/field-test.ts`、`scripts/serve-chat.ts` | 控制台与试用页改走装配点；收尾先停运行时再关库 |
+| C | `scripts/chat.ts`、`voice-turn.ts`、`voice-device-check.ts`、`eval-realism.ts`、`eval-conversation.ts`；`packages/runtime/src/capability-bridge.ts` | 七个入口接线；`news.*` 进模型可见工具链；插件 `topic_source` 桥进主动候选 |
+| D | `tests/unit/runtime/resident-runtime.test.ts` | 提示词权威在**生产点**上的行为证据（毒化装配器 → 被拒 + 模型零调用） |
+| E | `packages/brain-adapter/src/tools.ts` 等 | 提醒工具改名 `xixi_set_reminder`，文案「已经记下」，无兼容别名 |
+| F | `resident-runtime.ts` 的 `reminderSeams` | durable 提醒接进装配点：读接缝先 `markDue()` 再 `candidateInputs()`；两条接缝必须成对 |
+| G | `tool-runtime.ts`、`resident-runtime.ts` | 审批声明 → 权限策略补不变量；审批在真实运行时闭环且执行**冻结**参数 |
+| H | `packages/domain/src/plugin-settings.ts`、`config/xixi.example.yaml` | `xixi.plugins` 严格解析并真的驱动装配（directories / news / mcp）；出厂 `news.enabled: false` 是有意的 |
+| I | `packages/plugins/src/{manager,errors,index}.ts` | 启动幂等改成**响亮拒绝**；停用后 health 不再撒谎，新增 `PluginInstance.online` |
+| J | `packages/conversation/src/{engine,prompt}.ts`、`packages/context/src/*` | 世界状态（含在场）进提示词、`worldStateLite` 降级为回退；关系笔记按听众过滤（`public` 一条不给） |
+| K | `scripts/verify-p2-5.ts` + `npm run verify:p2.5` | 四条**真入口**端到端证据，一条命令可重跑 |
+
+**装配点的四条不变式**（用例 `tests/unit/runtime/resident-runtime.test.ts`）：`start()` 只认一次
+（`RESIDENT_RUNTIME_ALREADY_STARTED`）；关停是终态（再 `start()` 抛 `RESIDENT_RUNTIME_ALREADY_STOPPED`，
+`mount()` 抛 `RESIDENT_RUNTIME_CLOSED`）；`stop()` 幂等；`toolChain === plugins.registry`。
+
+**K 的验收探针还抓到一条真缺陷并已修**：关停路径原本跳过第 8 步 `deactivate`（只跑 `dispose`），与九步生命周期
+契约不符——只在 `deactivate` 里做清理的插件那个钩子永远不会跑；现在钩子序列如实是 `activate → deactivate → dispose`。
+
+### 2. 这一段的判据（命令优先，不写名单）
+
+```powershell
+git grep -l 'createResidentRuntime(' -- scripts   # 七个入口脚本 + 验收脚本
+git grep -n 'buildToolChain(' -- scripts          # 应为 0 命中
+node scripts/chat.ts --print-wiring               # 插件工具（含 news.*）真的在模型可见清单里
+npm run verify:p2.5 -- --offline                  # 四个真入口场景，exit 0，零费用不联网
+```
+
+### 3. 仍未接线（**不许写成活的**）
+
+1. **到点提醒由入口说出来**：`git grep -n 'reminderSeams' -- scripts` **零命中**，`new ProactiveLoop(` 有三处
+   （`scripts/field-test.ts`、`scripts/serve-chat.ts`、`scripts/eval-proactive-timeline.ts`）。成立的是
+   「接缝可用 + 到点会被主动路径说出来」（验收脚本按那一行接法驱动），**不是**「活的西西已经在说提醒」。
+2. **活入口真在用插件话题**：`git grep -n 'readPluginTopics' -- scripts` **零命中**。
+3. **外部 MCP 服务器**：没有任何入口配置过（唯一入口是配置 `xixi.plugins.mcp.servers`，出厂空表）；
+   证据仍是 SDK v2 真 client + 真 server 走 `InMemoryTransport`。
+4. **新闻来源全部由配置说了算**：入口各自带一条 RSS（`git grep -n 'createRssNewsSource' -- scripts`）；
+   翻 `plugins.news.enabled` 会改所有入口的工具来源并打红控制台用例，属另一条任务。
+5. **`beginTurn` 在 live 入口零命中**：活入口写下的提醒 `owner` 落 sink 兜底 `unknown`。
+
+### 4. 四条 gate（P2.5 收口）
+
+`check:types` exit 0；`npm test` 全绿（**项数以末行为准**，别引用别处的数字）；`check:docs` 三个 0 且 exit 0；
+`npm run verify:p2.5 -- --offline` 四场景 exit 0。**多日时间线不回退**由 P2 段的读数继续引用（P2.5 未改主动判据）。
+
+### 5. 本轮一并还清的两笔文档旧账
+
+① 硬边界现在写全两条（`WRITE_OPERATION_RULE` 补进 `docs/design/conversation.md` 与
+`docs/design/security-and-privacy.md`）；② 本文 P2 段与 `docs/verification/t14-p2-gate-independent-verification-2026-10-04.md`
+里那句「27%」都已**加注**（原文一字未改）。

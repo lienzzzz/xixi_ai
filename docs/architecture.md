@@ -1,6 +1,9 @@
 # 架构（当前实现）
 
-> 最后更新：2026-10-04（V0.3 P2 收口：插件内核与 MCP 适配器、工具审批、真实 News、durable Reminder、Provider 三接口拆分；
+> 最后更新：2026-10-08（V0.3 **P2.5 Production Wiring** 收口：§6.2 的「入口接线状态」逐行改成事实——
+> 四个 live 入口与控制台、试用页经 `createResidentRuntime()` 取链，`news.*` 真的进了模型可见的工具列表，
+> 审批与 durable 提醒由同一个装配点接管；**仍未接线的两处**（入口那一行 `reminderSeams`、外部 MCP 服务器）按未接线写）
+> 上一版：2026-10-04（V0.3 P2 收口：插件内核与 MCP 适配器、工具审批、真实 News、durable Reminder、Provider 三接口拆分；
 > 本节新增 §6.2 把「内核已交付」与「入口未接线」分开写）
 > 权威来源：`packages/**`、`apps/brain-dsh/**`、`services/{voice-edge,perception-edge}/**`、`scripts/**`、`tests/**`；`docs/progress.md`（结论与数字）、`docs/progress-v03.md`（各 Phase 的交付与遗留）、`docs/recon/*`（外部系统实测）、`docs/adr/*`（**不写死区间**：以 `ls docs/adr` 的实际内容为准）
 > 若与代码不一致，以代码为准，并请立即修正本文件
@@ -301,23 +304,42 @@ scripts/*              入口与 UI（chat / serve-chat / field-test / voice-tur
    Node 侧 `ingestPerceptionLine` 校验 → `XixiStore.appendPresenceEvent`（事件 + `world_state` 投影
    **同一事务**）→ 下一次考虑循环读到 `presence.home`。单写者：Python 与 Node 不再各写一个库。
 
-### 6.2 V0.3 P2（Agent/Plugin Completion）新增的装配面与**接线状态**
+### 6.2 V0.3 P2 / P2.5 新增的装配面与**接线状态**
 
 **「内核已交付」与「入口已接线」必须分开写**——这是本节存在的理由（`check:docs` 看不见语义漂移，
-t14 复验实测过：入口里问「今天有什么新闻？」根本没有新闻工具可选）。
+t14 复验实测过：入口里问「今天有什么新闻？」根本没有新闻工具可选）。**V0.3 P2.5（Production Wiring）之后
+大部分已接线，逐行按事实写；写着「仍未接线」的行就是今天真的还没接**。唯一出处是
+[`../packages/runtime/src/resident-runtime.ts`](../packages/runtime/src/resident-runtime.ts) 顶部的接线状态块
+（它给的是**复核命令**，不是会过期的名单）——本节与它冲突时以它为准。
 
-| 面 | 交付物（定义处） | 已交付到什么程度 | 入口接线状态 |
+| 面 | 交付物（定义处） | 已交付到什么程度 | 入口接线状态（P2.5 后） |
 |---|---|---|---|
-| 插件内核 | `packages/plugins/src/*`（manifest / CapabilityRegistry / PluginManager 九步） | 内核完整 + `buildPluginRuntime().start()` 跑生命周期的同时把插件工具挂进模型可见的工具链 | **未接线**：四个 live 入口仍只调 `buildToolChain` |
-| MCP 适配器 | `packages/plugins/mcp/*`（SDK v2，子路径导出） | discover → normalize → 命名空间 `mcp.<server>.<tool>` → `ToolRegistry`；连不上与空列表都不崩、可重连；不做高频总线 | **未接线**：`git grep -n 'mcpServers' -- scripts` 零命中，**没有任何入口配置过 MCP 服务器**；证据是 SDK v2 真 client + 真 server 走 `InMemoryTransport` |
-| 工具审批 | 迁移 007 + `packages/domain/src/approvals.ts` + `packages/runtime/src/tool-approval.ts` | 待批落库 + 冻结参数摘要 + 点头后执行冻结调用 + 拒绝/到期落审计（[ADR-0018](adr/0018-tool-approval-frozen-args.md)） | **未接线**：入口没有把 `ToolApprovalManager` 接成 `approvalGate`；manifest 的 tool 级 approval 声明也未实现 |
-| 真实 News | `packages/plugins/news/*` | 三个工具 + `news.topics`；RSS / 公开 JSON API / web search / 离线桩四种来源（[ADR-0019](adr/0019-news-and-reminder-data-model.md)） | **未接线**：入口的工具链里没有 `news.*` |
-| durable Reminder | 迁移 008 + `packages/domain/src/reminders.ts` + `packages/runtime/src/reminder-runtime.ts` | 八字段表 + 五态 + 自然语言解析成绝对时刻与时区 + 到点写 `reminder.changed`（[ADR-0019](adr/0019-news-and-reminder-data-model.md)） | **未接线**：入口没有接 `DurableReminderSink` 与 `ReminderScheduler`（工具被调用时落的是内存 sink） |
+| 插件内核 | `packages/plugins/src/*`（manifest / CapabilityRegistry / PluginManager 九步） | 内核完整 + `buildPluginRuntime().start()` 跑生命周期的同时把插件工具挂进模型可见的工具链 | **已接线**（P2.5-A/B/C）：四个 live 入口与控制台、试用页都经 `createResidentRuntime()` 取链（`runtime.toolChain === runtime.plugins.registry`）。复核：`git grep -l 'createResidentRuntime(' -- scripts`；反证 `git grep -n 'buildToolChain(' -- scripts` 应 **0 命中** |
+| MCP 适配器 | `packages/plugins/mcp/*`（SDK v2，子路径导出） | discover → normalize → 命名空间 `mcp.<server>.<tool>` → `ToolRegistry`；连不上与空列表都不崩、可重连；不做高频总线 | **内核已接线、服务器仍没人配**：唯一入口是配置的 `xixi.plugins.mcp.servers`（`mcpServerSpecs()` 把「命令或地址」翻成开连接函数），出厂是空表 → 「部署里真的连过外部 MCP 服务器」**不成立**；已有证据仍是 SDK v2 真 client + 真 server 走 `InMemoryTransport` |
+| 工具审批 | 迁移 007 + `packages/domain/src/approvals.ts` + `packages/runtime/src/tool-approval.ts` | 待批落库 + 冻结参数摘要 + 点头后执行冻结调用 + 拒绝/到期落审计（[ADR-0018](adr/0018-tool-approval-frozen-args.md)） | **已接线**（P2.5-A/G）：`ToolApprovalManager` 由装配点构造、经 `approvalGate` 注入链、`useRegistry()` 闭合执行路径；行为证据 `npm run verify:p2.5 -- --scenario=approval --offline`（待批时业务数据零行、点头后执行的是**当时冻结**的参数）。manifest 的 tool 级 approval 声明**仍未实现** |
+| 真实 News | `packages/plugins/news/*` | 三个工具 + `news.topics`；RSS / 公开 JSON API / web search / 离线桩四种来源（[ADR-0019](adr/0019-news-and-reminder-data-model.md)） | **已接线**（P2.5-C）：`node scripts/chat.ts --print-wiring` 实测在三个内置之外列出 `news.search` / `news.latest` / `news.for_interests`。**仍未接的一环**：来源由入口脚本各自带一条 RSS（`git grep -n 'createRssNewsSource' -- scripts`），还没改成全部由 `xixi.plugins.news` 说了算 |
+| durable Reminder | 迁移 008 + `packages/domain/src/reminders.ts` + `packages/runtime/src/reminder-runtime.ts` | 八字段表 + 五态 + 自然语言解析成绝对时刻与时区 + 到点写 `reminder.changed`（[ADR-0019](adr/0019-news-and-reminder-data-model.md)） | **接缝已接线、入口那一行还没写**：sink / scheduler 由装配点给，到点经 `runtime.reminderSeams` 交给主动循环；但 `git grep -n 'reminderSeams' -- scripts` **零命中** → 「活的西西已经在说到点提醒」**不成立**。成立的是「接缝可用 + 到点会被主动路径说出来」（`npm run verify:p2.5 -- --scenario=reminder --offline`） |
 
-**一条可跑的证据链（不是「某个入口已经这样跑」）**：
-`buildPluginRuntime(config, { news, mcpServers, reminderSink })` → `start()` → `definitionsForRound` 里看得到插件工具
-→ `registry.execute` → 真表 → **新进程**读得到 → `ReminderScheduler.tick()` → `reminder.changed` 事件 → 主动路径读 `candidateInputs()`。
-四个 live 入口的接线是**下一阶段第一件事**，完整四条清单见 [`progress-v03.md`](progress-v03.md) 的 P2 段 §5。
+**常驻装配点（P2.5-A）**：`createResidentRuntime(options)` 返回 `XixiResidentRuntime`。入口只做三件事——
+`start()` 一次、经 `runtime.conversation` 说话、结束 `stop()` 一次。四条不变式各有用例
+（`node --test tests/unit/runtime/resident-runtime.test.ts`）：① `start()` 只认一次，第二次抛
+`RESIDENT_RUNTIME_ALREADY_STARTED`；② **关停是终态**——`stop()` 之后再 `start()` 抛
+`RESIDENT_RUNTIME_ALREADY_STOPPED`，`runtime.plugins.mount()` 抛 `RESIDENT_RUNTIME_CLOSED`；
+③ `stop()` 幂等；④ `toolChain === plugins.registry`（模型看到的与内核装的是同一个注册表）。
+复核命令：`git grep -n 'RESIDENT_RUNTIME_ALREADY_STARTED\|RESIDENT_RUNTIME_ALREADY_STOPPED\|RESIDENT_RUNTIME_CLOSED' -- packages/runtime/src`。
+
+**配置真的能管插件（P2.5-H）**：`xixi.plugins` 段由 `parsePluginSettings`（`packages/domain/src/plugin-settings.ts`）
+**严格**解析 `enabled` / `directories` / `news` / `mcp.servers`——写错的键名、拼错的 transport、越界的值都在
+**加载配置时**带路径报错，不静默忽略；而且**每个键都有读取方**（没有「解析了却没人用」的键：`enabled` 是总开关，
+`directories` 给内核的插件来源，`news` 与 `mcp.servers` 在装配点被消费）。合并规则是「配置声明了这一层就由配置说了算，没写就照旧」：
+出厂 `news.enabled: false` 的意思是**「这份配置不接管新闻来源」，不是「新闻关掉」**——所以四个入口脚本今天仍是
+各自带一份 RSS（它们的 `--print-wiring` 里因此有 `news.*`），控制台与试用页不带（仍是三个内置）。
+把它翻成 `true` 会让**所有**入口改用配置来源，也会打红控制台的用例，属另一条任务（见下面「仍未接线」）。
+
+**一条可跑的证据链（P2.5-K，四个真入口场景）**：`npm run verify:p2.5`（有密钥时场景 1 真调一次模型）或
+`npm run verify:p2.5 -- --offline`（零费用、不联网）——新闻进链并被真的调用、提醒跨重启由接缝变成候选、
+审批拒绝/点头按冻结参数执行、控制台 `close()` 之后链被清空。**口径**：场景 1 的 feed 是**本机 RSS 夹具**、
+场景 2 的「到点」用**注入时钟**造，脚本自己会把这两点打印出来，不要读成「公网可达」或「等了一天」。
 
 ## 7. 明确**未实现**的部分，以及将来插在哪里
 

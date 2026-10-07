@@ -1,6 +1,10 @@
 # 西西项目文档地图
 
-> 最后更新：2026-10-07（新增 [`recon/linux-port-environment-2026-10-07.md`](recon/linux-port-environment-2026-10-07.md)：
+> 最后更新：2026-10-08（V0.3 **P2.5 Production Wiring 收口**：四个 live 入口与控制台、试用页都经常驻装配点
+> `createResidentRuntime()` 取链，`news.*` 真的进模型可见工具链表，审批与 durable 提醒由装配点接管；
+> **仍未接的三条**写在 [`handoff.md`](handoff.md) §0.2 与 [`progress.md`](progress.md) §12.3。
+> 同时按 §9.21 给历史记录加注：P2 段的「入口未接线」与那句「27%」都**只加注不改写**）
+> 上一版：2026-10-07（新增 [`recon/linux-port-environment-2026-10-07.md`](recon/linux-port-environment-2026-10-07.md)：
 > 仓库现在也在 **Linux（WSL2）** 上跑——本机版本矩阵、两个 venv 的建法、移植挖出的五个平台假设缺陷、
 > 以及**这台机器上验不了的四类事**；Windows 侧的环境事实见 [`recon/field-test-environment-2026-09-30.md`](recon/field-test-environment-2026-09-30.md)。
 > 此前更新：2026-10-04（V0.3 **P2 收口 t15**））
@@ -123,7 +127,7 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | [`adr/0018`](adr/0018-tool-approval-frozen-args.md) | 工具审批模型：七字段 + 摘要化冻结参数、五态与原因码、**恢复语义**（`approve()` 自带到期闸门）、拒绝与到期都落审计；`listForAgent` 改成「除 deny 之外都广告」的配套语义 |
 | [`adr/0019`](adr/0019-news-and-reminder-data-model.md) | 新闻与提醒的数据模型：三工具 + 四条主动判据 + 账本；八字段表 + 五态 + **时区语义**（按请求时区的当地日历，换时区必须换绝对时刻）+「到点成事件」的口径 |
 | [`adr/0020`](adr/0020-provider-three-interfaces-and-mcp-deps.md) | Provider 三接口拆分与四能力退役（含真实归属）、**两条接缝在生产侧没有消费者**、MCP 的依赖理由与 v1→v2 的选择 |
-| [`verification/t14-p2-gate-independent-verification-2026-10-04.md`](verification/t14-p2-gate-independent-verification-2026-10-04.md) | **Phase 2（P2 gate）的独立复验**：两个场景用真模型 + 真文件库跑通并留档；四个 live 入口未接线与提醒的 27% 可靠性**按未达标写**；四条 gate 的实测数字 |
+| [`verification/t14-p2-gate-independent-verification-2026-10-04.md`](verification/t14-p2-gate-independent-verification-2026-10-04.md) | **Phase 2（P2 gate）的独立复验**：两个场景用真模型 + 真文件库跑通并留档；四个 live 入口未接线与提醒的 27% 可靠性**按未达标写**；四条 gate 的实测数字。**⚠ 两项都已过期**：入口接线由 V0.3 P2.5 关闭，「27%」由 t27 更正为**一次不可复现的历史观测**——都在文首的更正注里写明，原文一字未改 |
 | [`verification/t15-p1-independent-verification-2026-10-04.md`](verification/t15-p1-independent-verification-2026-10-04.md)（附可重跑探针 `t15-probe.mjs`） | **Phase 1 的独立复验**：四条技术验收自己复算（文件库 + 每步新进程）、两个场景真模型实跑、**pack 旗舰场景按原句未达标的三条写在最前面**（不替实现者圆场） |
 | [`v03/ACTUAL_RUNTIME_MAP.md`](v03/ACTUAL_RUNTIME_MAP.md) | **V0.3 Phase 0 的运行时地图**：pack 点名的十个概念（`buildToolChain` / `ProactiveLoop` / `createModelComposer` / `createModelDecider` / voice helpers / Memory extractor / 各入口 DB / perception DB / prompt builder / DSH 与直连）各自的定义处、调用点、目标包与迁移步；每行附一条可复跑的 `git grep`。另含对 pack 审计报告 `00_CODE_AUDIT.md` 的逐项复核（15 条：一致 / 偏差，附证据） |
 | [`recon/linux-port-environment-2026-10-07.md`](recon/linux-port-environment-2026-10-07.md) | **Linux（WSL2）移植的环境勘测**：本机版本矩阵、两个 venv 的建法与三个装包坑、移植在代码里挖出的**五个平台假设缺陷**（含一条定时炸弹用例与 4 条被静默 skip 的用例）、这台机器上**验不了**的四类事（DSH 版本不匹配 / 无密钥 / 无音频与摄像头设备 / 自检两项 Windows 专属），以及移植前后的门禁实测对照 |
@@ -150,6 +154,8 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 
 | 如果你改了… | 必须同步更新 |
 |---|---|
+| `packages/runtime/src/resident-runtime.ts`（常驻装配点：工具链/插件内核/审批宿主/durable 提醒/提示词权威/能力桥，或它的接线状态块） | 该文件**顶部的接线状态块是唯一出处**；同步 [`architecture.md`](architecture.md) §6.2 的接线状态表、[`design/security-and-privacy.md`](design/security-and-privacy.md) §2、[`design/brain-and-models.md`](design/brain-and-models.md) §3（工具与逐入口覆盖）、[`design/conversation.md`](design/conversation.md) §5 的「主动开口」行（提醒与插件话题两个接缝）、[`design/domain-model.md`](design/domain-model.md) 的表结构注（若涉及数据）、[`testing.md`](testing.md) 的 `--print-wiring` / `verify:p2.5` 行、[`handoff.md`](handoff.md) §0.2、[`progress.md`](progress.md) §12；**只写命令与判据，不复述会过期的入口名单** |
+| `scripts/verify-p2-5.ts`（真入口验收的四个场景） | [`testing.md`](testing.md) 的 `verify:p2.5` 行、[`handoff.md`](handoff.md) §0.2、[`progress.md`](progress.md) §12.2、`AGENTS.md` §7；口径（哪些是夹具、哪些是注入时钟）必须跟它一起改 |
 | `packages/contracts/schemas/**`（事件类型/payload/版本） | [`event-contracts.md`](event-contracts.md)、`design/domain-model.md`、`tests/unit/contracts.test.ts` 的漂移断言 |
 | `packages/domain/src/migrations/*.sql` | `design/domain-model.md` 的表结构小节、`progress.md` |
 | `packages/domain/src/personality.ts`（属性集合） | `design/domain-model.md`、`config/xixi.example.yaml`、`design/conversation.md` 的指令映射 |

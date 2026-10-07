@@ -94,5 +94,14 @@ tools.approval.ttl_seconds                （默认见 DEFAULT_TOOL_APPROVAL_SET
 - **manifest 的 tool 级 approval 声明未实现**：今天只有 `config.tools.approval.ask` 在起作用；
   `ActionHandler.approval` 只作用于 `action` 能力，而 `action` 还没有暴露成工具。这是**下一轮的小任务**
   （它与 `packages/plugins` 和 `packages/domain/src/config.ts` 都有交集，故本轮不排）。
+
+> **加注（2026-10-08，V0.3 P2.5 落笔；本 ADR 原文一字未改）**：上面那条「未接线」**已经不成立**——
+> `createResidentRuntime()`（`packages/runtime/src/resident-runtime.ts`）自己构造 `ToolApprovalManager`、
+> 经 `approvalGate` 注入链、并用 `useRegistry(toolChain)` 闭合执行路径，所以四个 live 入口与控制台、试用页
+> **都过闸门**。注意 `git grep -n 'approvalGate' -- scripts` 仍是 0 命中——**那是对的**，接线在装配点内部，
+> 不在入口脚本里。真实路径上的行为证据：`npm run verify:p2.5 -- --scenario=approval --offline`
+> （待批时业务数据零行、第二组参数只多一条待批、点头后执行的是**当时冻结**的参数）与
+> `tests/unit/runtime/resident-runtime.test.ts`。**manifest 的 tool 级 approval 声明仍未做**（上面那一条继续有效）。
+> 本 ADR 的**模型本身（七字段、冻结参数、五态、恢复语义）一字未变**。
 - 拒绝是**成本为零**的一条路（不执行 + 落审计），到期同理；两者的分数都是 0，所以事后统计「她问了几次、
   人答应了几次」不会把程序判定混进人的决定里。

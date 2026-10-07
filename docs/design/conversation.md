@@ -1,6 +1,8 @@
 # 对话层：FSM、提示词组装与沉默
 
-> 最后更新：2026-10-04（V0.3 P2 收口：§15 的「模型侧候选评估」改为「已随 P2-F 退役」，并补候选来源里的**到点提醒**；
+> 最后更新：2026-10-08（V0.3 **P2.5** 收口：§2/§3 补 `HARD_POLICY` 的**第二条边界**「写下来的事必须真的用工具写」
+> （`WRITE_OPERATION_RULE`，P2-H 落进生产代码）、去掉写死的边界条数；§3 的「不许编造」那节仍是第一条边界的详解）
+> 上一版：2026-10-04（V0.3 P2 收口：§15 的「模型侧候选评估」改为「已随 P2-F 退役」，并补候选来源里的**到点提醒**；
 > 见 [ADR-0019](../adr/0019-news-and-reminder-data-model.md) 与 [ADR-0020](../adr/0020-provider-three-interfaces-and-mcp-deps.md)）
 > 权威来源：`packages/conversation/src/{fsm,prompt,engine,personality,segments,proactive}.ts`、`packages/brain-adapter/src/{types,tools,mimo}.ts`、`packages/contracts/schemas/events/conversation.decision.v1.json`、`packages/domain/src/store.ts`
 > 若与代码不一致，以代码为准，并请立即修正本文件
@@ -158,7 +160,7 @@ lingerMs(实际) = tolerance 未接线 ? lingerMs(配置)
 ```text
 CORE_IDENTITY（散文：她是谁、怎么说话；**0 条编号、0 个项目符号**）
 你的名字是「<identity.name>」。
-HARD_POLICY（压缩安全段：6 条边界，同样不用编号，靠关键词锚点把关）
+HARD_POLICY（压缩安全段：**不数条数**、不用编号，靠关键词锚点把关）
 你现在按这些话来说（运行时给的说话方式，不要复述给用户）：
 - <人格 → **词描述**（低 / 中 / 高各一句，见 §3）>
 ```
@@ -261,6 +263,24 @@ P1 把这段的**形式**从编号清单改成一段紧凑的散文（首行写�
 | `ConversationEngine.screenUnbackedFacts(text, toolName)` | 本轮 `toolName !== null`（真的调用过工具）→ 原样放行；否则命中就返回 `{ok:false, text: UNBACKED_FACT_REPLY}`。主动开口的投递接缝直接用这个方法，两条路径不会出现两套判据。 |
 | `ConversationEngine.respond()` | 把含该值的文本**扣住**（流式路径也不再交给 `onTextChunk`，所以不会进 TTS）、那句**原文**不写进 `conversation.turn`——写进去的是**修复句**（这一轮照样有一条 assistant 记录），也不把编造的数值带进工作记忆；同时给调用方一条 `onNotice({code:'UNBACKED_FACT_CLAIM', detail:'未调用工具却给出可核查事实：…'})` 供审计。同一轮里真有 `tool` chunk → 句子照说。 |
 | 主动开口（`scripts/field-test.ts` 的 `createModelComposer`） | 未核实就把内容**换成该触发源的固定短句**（固定句本身没有数值），note 写明丢掉了什么；`toolName` 随内容带进投递接缝，写进 assistant 轮的 `tool_name`——所以「说了具体数值就必须有一次工具调用」能在**事件日志**里核对，而不只是在控制台自己的报告里。 |
+
+### 写下来的事必须真的用工具写（P2-H，`HARD_POLICY` 的**第二条**边界）
+
+安全边界这一层今天有**两条**。第一条是上面那节「不许编造可核查的具体事实」（约束**读**：可核查的事实只能来自
+三处，要说就先调用工具去查）；第二条约束**写**：提醒 / 记一下 / 记住 / 记笔记这类要求必须真的调用对应工具写下来，
+光回一句「记下了」而没调工具就是一句**可判定为假**的话。为什么它属于硬边界而不是「说话方式」：这类操作在数据上
+就是一次工具调用，**没有那一次调用，库里就没有任何东西**。
+
+- 常量是 `WRITE_OPERATION_RULE`（`packages/conversation/src/prompt.ts`，V0.3 P2-H 落进生产代码）。
+  它是 `HARD_POLICY` 的**一行**（不是另起一段），所以普通回复与主动开口共用同一份；它与第一条同属
+  `tests/unit/prompt.test.ts` 用关键词锚点钉住的那段文本。
+- 措辞**不点工具名**：工具由工具表动态给出，名字会随插件与 MCP 变（P2.5 之后 `news.*` 就是插件工具），
+  规则只点名**意图**（提醒我 / 记一下 / 记住 / 记笔记）。
+- **它只到提示词层**——没有配套的程序层闸门：要判定「这一轮本该有写工具调用」得先有一个「用户要写什么」的
+  分类器，今天没有。别把这一条读成「已经拦得住」。
+- 复核：`git grep -n 'WRITE_OPERATION_RULE' -- packages`。**效果本次测不出来**：它是一次明确性改进，
+  不是「可靠性提升到某个百分比」——历史那条 27% 的观测与它的更正见
+  [`progress-v03.md`](../progress-v03.md) 的 P2 段与 [`../verification/t14-p2-gate-independent-verification-2026-10-04.md`](../verification/t14-p2-gate-independent-verification-2026-10-04.md) 顶部的更正注。
 
 **第二条程序层闸门：制品清洗（t7，2026-10-01）**。真机语音路径上听到过两种「不是她说的话」的内容：
 整段就是 `<tool_call>…` 标记、以及整段是**英文自我推理**（V0.1 基线 §4 记录）。铁律 1 说这条边界归程序，
@@ -424,7 +444,7 @@ decision 只回答「为什么」。铁律 5 只允许 `reason_code` 与分值�
 | 能力 | 现状 |
 |---|---|
 | 唤醒词与搭话判定（§13 完整版） | §13 的 **POC 判定规则已实现**（`shouldAcceptTurn`，见 §1）；**唤醒词检测本身无代码**——`addressed` 由 UI 按钮/语料给出（M2） |
-| 主动开口（§15） | **两层，自 2026-10-01 起（[ADR-0011](../adr/0011-proactive-decision-ownership.md)）**：① **硬底线由程序判定，模型不能加宽**——静默时段 / 当日与 6 小时**次数**额度（次数是当前唯一的费用代理；**金额级费用上限尚未实现**）/ DND / 隐私与同意 / 场景与音频路径 / 同一候选重复 / 触发源关闭；② 底线之上**由模型读空气决定说不说**，确定性那一半只**提议**：社会预算分（话题质量分 / 相关性 / 新鲜度 / 读空气 / 互动度 / 基础主动性 − 打扰代价（冷却）/ 话题重复惩罚 / 未回应惩罚）+ 一个 `recommendation`（`speak` / `hold`）。**冷却、话题重复、未回应都是「打分」而不是一票否决**：强候选可以紧接着弱候选过线，热聊中的接话不受冷却限制（pack §14.3）。每次判定落一条 `proactive.decision`（`speak` / `reason_code` / 分数 / 阈值 / 每个信号 / `primary_signal` / 程序渲染的中文 `basis` / `decided_by`；模型拒绝时只从固定白名单取一个 code），**不存模型推理**（铁律 5）；投递「先记后播」，崩溃不重发。候选生成与两个**按需**调用方（控制台演练、常驻考虑循环 `ProactiveLoop`——控制台与试用页各一个实例，默认关闭）已落地；**仍缺**：无人值守的常驻守护进程（页面进程一退就停）。**模型侧候选评估已不算缺口**：`evaluateProactiveCandidate` 在 V0.3 P2-F 从适配器接口与三个实现里退役，真实归属是确定性的 `ProactiveEngine` / `evaluateProactiveGates`（[ADR-0020](../adr/0020-provider-three-interfaces-and-mcp-deps.md)）；「读空气」发生在调用方的模型路径上。候选来源另加一类**到点的提醒**（V0.3 P2-E，`ReminderScheduler.candidateInputs()`，[ADR-0019](../adr/0019-news-and-reminder-data-model.md)）。核对：`git grep -n "\.consider(" -- scripts packages`、`git grep -n "new ProactiveLoop" -- scripts` |
+| 主动开口（§15） | **两层，自 2026-10-01 起（[ADR-0011](../adr/0011-proactive-decision-ownership.md)）**：① **硬底线由程序判定，模型不能加宽**——静默时段 / 当日与 6 小时**次数**额度（次数是当前唯一的费用代理；**金额级费用上限尚未实现**）/ DND / 隐私与同意 / 场景与音频路径 / 同一候选重复 / 触发源关闭；② 底线之上**由模型读空气决定说不说**，确定性那一半只**提议**：社会预算分（话题质量分 / 相关性 / 新鲜度 / 读空气 / 互动度 / 基础主动性 − 打扰代价（冷却）/ 话题重复惩罚 / 未回应惩罚）+ 一个 `recommendation`（`speak` / `hold`）。**冷却、话题重复、未回应都是「打分」而不是一票否决**：强候选可以紧接着弱候选过线，热聊中的接话不受冷却限制（pack §14.3）。每次判定落一条 `proactive.decision`（`speak` / `reason_code` / 分数 / 阈值 / 每个信号 / `primary_signal` / 程序渲染的中文 `basis` / `decided_by`；模型拒绝时只从固定白名单取一个 code），**不存模型推理**（铁律 5）；投递「先记后播」，崩溃不重发。候选生成与两个**按需**调用方（控制台演练、常驻考虑循环 `ProactiveLoop`——控制台与试用页各一个实例，默认关闭）已落地；**仍缺**：无人值守的常驻守护进程（页面进程一退就停）。**模型侧候选评估已不算缺口**：`evaluateProactiveCandidate` 在 V0.3 P2-F 从适配器接口与三个实现里退役，真实归属是确定性的 `ProactiveEngine` / `evaluateProactiveGates`（[ADR-0020](../adr/0020-provider-three-interfaces-and-mcp-deps.md)）；「读空气」发生在调用方的模型路径上。候选来源另加一类**到点的提醒**（V0.3 P2-E，`ReminderScheduler.candidateInputs()`，[ADR-0019](../adr/0019-news-and-reminder-data-model.md)）；**注意接缝与接线是两件事**（V0.3 P2.5）：接缝已经在常驻装配点上（`runtime.reminderSeams`、`runtime.capabilities` 的插件话题），但**入口还没有写那一行**——`git grep -n 'reminderSeams' -- scripts` 与 `git grep -n 'readPluginTopics' -- scripts` 都零命中，所以「活的西西已经在说提醒 / 已经在用新闻话题」今天**不成立**。核对：`git grep -n "\.consider(" -- scripts packages`、`git grep -n "new ProactiveLoop" -- scripts` |
 | 多段回复（一轮说 1~8 段） | **引擎侧已落地（t41）**：`packages/conversation/src/segments.ts` 的确定性分段器 + `RespondHooks.onSegment` 逐段播放 + §5 的 ⑨′ 步，`config` 的 `reply` 段已被读取；契约与可测条款见 §7 与 [ADR-0010](../adr/0010-multi-segment-replies.md)（**上限 3 → 8、容量 180 → 480 字**，见其修订记录）。**已接的**：`scripts/chat.ts`（订正 2026-09-30）传 `onSegment`，终端里逐段打印、段间真等 `gapMs`；**语音出口自第五轮起走另一条路**——按句读**流式切块并逐块合成**（`onClause` 接缝，见 [`design/voice.md`](voice.md) §6 与 `progress.md` §2.20 ③），**不是**「等整段合成完再一次播」。**未接的**：`scripts/voice-turn.ts` 是**测量入口**，它仍用整段 `synthesize(turn.text)` 作对照列（`--legacy-tts`）。核对：`git grep -n "onSegment" -- scripts packages`、`git grep -n "onClause" -- scripts` |
 | 未完话题的收口判据（§10，第五轮 t2 升级） | **已落地**：被主动问过的那件事，只有回答里**提到那件事的对象词**（话题里没有对象词时用有辨识度的动作词）才算回答；对不上的轮次进 `ReconcileResult.ignored`（**不写事件、不改状态**，话题留在 `offered`，窗口内还能再问一次）。判据的单位是**词 / 对象**而不是字——第四轮的字级判据会被「共享一个内容字」的无关句误收口（13 句探针里两个靶子各 1/13），**第五轮升级后实测 0/91**、真答案召回 **15/15**（把升级前的引擎换回来跑同一路径 = **9/91**，见 `progress.md` §2.20 ②）。判据、词表边界与取舍见 [ADR-0012](../adr/0012-open-thread-closure-criterion.md)。核对：`git grep -n "isAnswerAboutThread" -- packages`、`node --test tests/unit/core/topic-engine.test.ts` |
 | 制品清洗（工具标记 / 英文推理） | **程序层已落地（t7）**：`sanitizeSpokenReply()` 在进 TTS / 日志 / 工作记忆前剔除 `<tool_call>…` 与外文自我推理，整轮只剩制品 → 沉默（原因码 `ARTIFACT_ONLY_REPLY`，与 `MODEL_SILENCE` 可区分）；剔除量 > 0 时发 `REPLY_HYGIENE` 通知（见 §3 的第二条闸门）。**订阅覆盖（逐入口）**：试用页与控制台已订阅 `onNotice` 并显示沉默原因；文字 CLI 与语音轮次未订阅（见 `docs/progress.md` §4） |

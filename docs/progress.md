@@ -2,7 +2,11 @@
 
 > 更新规则：每完成一个可独立理解的步骤就立刻追加/更新本文，写清「做了什么、验证结果、下一步、已知问题」。
 > 这台机器偶发蓝屏，**本文是崩溃后恢复工作的唯一依据**。
-> 最后更新：2026-10-07（§11 **DSH 版本适配 0.1.7-rc.2 → 0.2.0-rc.2**：`verify:provider` 已修复并实测通过；
+> 最后更新：2026-10-08（**§12 V0.3 P2.5 Production Wiring 收口**：常驻装配点 `createResidentRuntime()` 与
+> 七个入口接线、`news.*` 第一次进模型可见工具链、审批与 durable 提醒由装配点接管、配置真的管插件、两个内核修复；
+> **仍然没接的三条与五条已知问题同样写在 §12**；另还清两笔文档旧账——硬边界补第二条、历史那条 27% 加注，见 §12.5。
+> 同日 §9 的「未达标项」与「下一阶段四条接线项」按事实加注，原文保留）
+> 上一版：2026-10-07（§11 **DSH 版本适配 0.1.7-rc.2 → 0.2.0-rc.2**：`verify:provider` 已修复并实测通过；
 > 同日另有 §10 **双机环境：Linux（WSL2）移植**——五个平台假设缺陷、静默 skip 变真跑、门禁 720/720/110，
 > 以及这台机器上验不了的四类事，其中 ① DSH 路径已由 §11 关闭）。
 > 上一版：2026-10-04（V0.3 **P2 集成收口 t15**：交付、Gate 实测、两个场景、未达标项与四条下一阶段接线项进
@@ -33,7 +37,8 @@
 | **多段回复** | `reply.max_segments=8 / segment_max_chars=60 / gap_ms=450`（**块长 60、容量 8×60=480 字**）；容量内每段 ≤60，`>8` 组时尾段合并 + `mergedOverflow`（该段可超 60）；字符零丢失；状态机一轮只推进一次 | ✅（终端已接分段播放） |
 | **「真人感」（P1，2026-10-01）** | 稳定前缀 = **身份与说话方式**（散文、0 编号）+ 紧凑安全段；容量 180→480 字；工具标记/英文推理在程序层剔除。同语料同口径：提问率主口径 45.8%→46.0%（各 n=1 次运行；三次重复均值 46.2% vs 46.0%）、单段最长 341→170 字、20 轮复述 0（详见 §2.18） | ✅（**提问率仍贴 30–50% 上沿**，见 §4） |
 | **pack Phase 2/3/4 接线 + 第四轮收尾** | **Phase 2**：工具链逐入口覆盖（四个 live 入口共用 `buildToolChain`，`--print-wiring` 离线自证）、语言取自部署配置；**Phase 3**：未完话题收口判据（第四轮是**内容字**级；**第五轮已升级到词 / 对象级**，见下面一行与 §2.20）；**Phase 4**：长期记忆 + 三层自我画像 + 推断学习真的接线（权重只乘一次：名义 −0.05 → 落库 −0.02）、提取队列退出兜底（只覆盖正常退出）。数字、边界与已知残余见 **§2.19** | ✅（已知缺口见 §4） |
-| **V0.3 P2：插件 / MCP / 审批 / News / Reminder / Provider 收缩** | 七块交付见 **§9** 与 [progress-v03](progress-v03.md) 的 P2 段；两个 pack 场景在**装配点**上成立（真模型 + 真库，事件日志可查） | ⚠️ **部分未达标**：四个 live 入口未接线（新闻工具不在入口、提醒走内存 sink）、提醒的模型可靠性 22 次里 6 次真调工具（27%）、MCP 未对外部服务器验证 |
+| **V0.3 P2：插件 / MCP / 审批 / News / Reminder / Provider 收缩** | 七块交付见 **§9** 与 [progress-v03](progress-v03.md) 的 P2 段；两个 pack 场景在**装配点**上成立（真模型 + 真库，事件日志可查） | **P2 当时部分未达标**（这是历史读数，别当现状）：四个 live 入口未接线、提醒的模型可靠性 22 次里 6 次真调工具（27%）、MCP 未对外部服务器验证。**前两条已分别由 P2.5 与 t27 更正**——见 §12 与 §9 的加注 |
+| **V0.3 P2.5：Production Wiring（2026-10-08）** | 常驻装配点 `createResidentRuntime()` + 七个入口接线 + `news.*` 进模型可见工具链 + 审批/durable 提醒由装配点接管 + 配置管插件 + 两个内核修复；明细见 **§12** | ✅ **入口层已达标**（`npm run verify:p2.5 -- --offline` 四场景 exit 0）。**仍未接线三条**：入口那一行 `reminderSeams`、活入口读插件话题、外部 MCP 服务器。历史那条 27% 已加注为「一次不可复现的观测」 |
 | **第五轮（主动性口径 / 话题判据 / 流式语音 / 有界心情）** | ① 主动性**口径已定＝显著降频**（不做「= 0」硬停；`node scripts/eval-proactive-timeline.ts` 多日 M1–M6 全过）；② 收口判据升级到**词 / 对象**（13 句无关 × 7 话题 = **0/91**、真答案 **15/15**、反事实换回旧引擎 = **9/91**）；③ 流式语音**接线成立 + B1 已修 + B2 是已知未覆盖缺陷**，**首音 ≤1.5 秒未达标且本机不可达**（8 批 n=32，④/1500 = [3.14, 7.33] 倍、池化 3.73 倍）；④ 有界心情（0 越界、语气 ±6%、软偏移 ±0.03、硬门禁同码）。**每条的数字、口径与复跑命令见 §2.20** | ✅（③ 未达标，见 §2.20） |
 | **现场测试控制台（一条命令）** | `npm run field-test` → http://127.0.0.1:8792；三栏界面 + 一键启用 + 设备自检引导 | ✅ |
 | 真实麦克风 / 扬声器（人耳） | 回环「回采余量」实测能量比 **2.41 dB < 10 dB** → 判 FAIL；**这不代表用户对麦克风说话能否被听到**（见 §0 用户须知与 §2.14） | ⚠️ 需人耳确认 |
@@ -459,6 +464,11 @@ node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v02-wip
 **设备自检没有离线端到端证据**（要真实 WAV + 硬件 + 真实 ASR）：它的证据是上面这行 + 与适配器共用一个 `deviceToolChain` 调用点。
 `--fake` 现在注入内存天气源，所以「完全离线」的承诺在接入工具后仍成立。
 
+> **V0.3 P2.5 注（2026-10-08）**：上面这一段是**第四轮当时的读数，保留不改**。入口与工具集今天都变了：
+> 唯一装配点是 `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime()`，入口取 `runtime.toolChain`，
+> 插件工具（含 `news.*`）真的在入口的模型可见清单里（`git grep -n 'buildToolChain(' -- scripts` 应 0 命中）。
+> 逐条明细见本文 **§12**。
+
 **语言接线的口径（§9.13 更正，别再写成「堵住了一条会泄漏的通道」）**：`MimoBrainAdapter` 的 `language` 取自 `config.identity.language`，
 **省略时构造回落 `zh-CN`**（`options.language ?? 'zh-CN'`）——中文清洗规则对每个部署照常生效，省略不是直通。
 这条接线的价值是**让过滤器跟随部署语言**：非中文部署不再被中文规则改写（zh-CN 那侧不传选项也过，真正承重的是 en-US 那侧）。
@@ -485,6 +495,10 @@ node scripts/eval-realism.ts --replay docs/benchmarks/realism-2026-10-01-v02-wip
 **Phase 4 —— 逐入口覆盖与局限（第三轮 t9 评审 F4 要求的落档）**：
 ① **哪些入口写记忆/学习**：现场测试控制台（`scripts/field-test.ts`）与试用页（`scripts/serve-chat.ts`）；
 `scripts/chat.ts` 与 `scripts/voice-turn.ts` **未接 `afterTurn`**（那两个入口不写记忆、不学习，本轮只给它们接了工具链与语言）。
+
+> **2026-10-08 加注（V0.3 P2.5-C）**：上面这条是**第三轮当时的覆盖情况**，原文保留；**今天不成立**——
+> `chat.ts` 与 `voice-turn.ts` 都走常驻装配点 `createResidentRuntime()`，`afterTurn` 由装配点接到共享提取器，
+> 四个入口都写记忆/学习。行为证据（各入口读自己写下的库）：`tests/console/entry-after-turn.test.ts`。
 ② **推断分支已接线**（第四轮 t4，此前是死代码）：`ConversationEngine` 每轮从同会话的 `proactive.decision.model_reason_code` 取
 「他上一条轮次之后、这一条轮次之前」**最新一条带码**的读法，取不到就 `null`（宁可不学，也不瞎归因）；
 只在白名单且偏移表里有定义的码才学（`good_moment` 取到也不学）。**权重只乘一次**：解释器给名义值、`SelfModel.learn` 按
@@ -830,8 +844,18 @@ Python 3.12 解释器绝对路径：`%LOCALAPPDATA%\Programs\Python\Python312\py
   （问新闻她只能回「我查不了」），提醒走的是内存 sink（工具真的被调了但库里 `reminders` 为空）；
   ② 提醒的模型可靠性 **22 次尝试只有 6 次真调工具（27%）**，其余里 4 次回复明说「记下了」而库里没有行；
   ③ MCP 没有对外部/远程服务器验证过；④ 新闻真实来源属手动证据。
+
+  > **2026-10-08 加注（V0.3 P2.5）**：上面四条是 **P2 收口当时的读数，原文保留**。第 ① 条**已由 P2.5 还清**
+  > （入口改走 `createResidentRuntime()`、`news.*` 在入口的工具链里、提醒落 durable 表）；第 ② 条**已被 t27 更正**——
+  > 「27% 与 4 次假承诺」是一次历史观测（2026-10-04 上午）、**同日同口径不可复现**（t27 同口径重跑得改前 21/22、
+  > 改后 22/22，另一次改前单独复跑 14/17），「提示词层是根因」这个判断**不成立**，**不要拿 27% 当现状**；
+  > ③④ 仍然成立。现状见本文 §12。
 - **下一阶段四条接线项**（P2 段 §5 点名）：入口改走 `buildPluginRuntime(...).start()`、提示词装配点接 `verifyOnAssemble`、
   入口把 `ToolApprovalManager` 接成 `approvalGate`、manifest 的 tool 级 approval 声明（下一轮小任务）。
+
+  > **2026-10-08 加注（V0.3 P2.5）**：前三条**已落地**（入口走的是 `createResidentRuntime()`，它内部用
+  > `buildPluginRuntime(...).start()`；提示词装配点上真的有 `verifyOnAssemble` 的调用点；`ToolApprovalManager`
+  > 由装配点接成 `approvalGate`）。**第 4 条（manifest 的 tool 级 approval 声明）仍未做**。
 
 ## 10. 双机环境：Linux（WSL2）移植与它挖出的平台假设缺陷（2026-10-07）
 
@@ -952,3 +976,97 @@ command-compact (@deepseek-ai/dsh-command-compact): pending (waiting for service
 一类内置插件提供，而 `xixi` profile 的 bundle 列表只有 `dsh-base` + `dsh-headless` + 工具插件，
 没有 shell 那一条。**影响面**：permission-presets 与 command-compact 未激活；本次验收路径用不到这两条，
 但它们不是「已解决」。另有 `all_proxy names a SOCKS proxy` 一条，是本机代理环境变量带来的噪音，与仓库无关。
+
+## 12. V0.3 P2.5：Production Wiring 收口（2026-10-08）——把 Agent 能力接进活的西西
+
+**这一轮要解决的问题**：P2 把插件内核、MCP 适配器、news 插件、工具审批、durable 提醒、提示词权威都做出来了，
+但它们的**装配点分别在不同的地方**（多数在测试里），所以真实入口还是旧运行时——当时的证据是「入口里问新闻，
+她只能回『我查不了』」。P2.5 把装配收成**一个常驻装配点**，再把七个入口接上去。
+
+**判据用命令，不用名单**（名单会随代码过期；这一段就是唯一出处的复核方式）：
+
+```powershell
+git grep -l 'createResidentRuntime(' -- scripts   # 走常驻装配点的：七个入口脚本 + 验收脚本
+git grep -n 'buildToolChain(' -- scripts          # 应为 0 命中：入口不再自己拼链
+node scripts/chat.ts --print-wiring               # 模型可见的工具与权限（离线、不调模型、不建库）
+npm run verify:p2.5 -- --offline                  # 四个真入口场景（零费用、不联网）
+```
+
+### 12.1 交付（字母是 P2.5 的分块号；括号里是本轮的任务号）
+
+| 块 | 交付物 | 一句话说明 |
+|---|---|---|
+| P2.5-A（t1） | `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime(options)` / `XixiResidentRuntime` | 工具链、插件内核、审批宿主、durable 提醒 sink 与调度、回合后提取、过了提示词权威校验的引擎、插件能力桥，一次装好。**模型客户端不在这里造**（适配器由调用方直给或给一个拿到链后再造的 builder） |
+| P2.5-B（t2） | `scripts/field-test.ts`、`scripts/serve-chat.ts` | 现场测试控制台与试用页改走装配点；`close()` 先停运行时再关库；新增 `FieldServerHandle.runtime`、`createTrialRuntime(options)` |
+| P2.5-C（t3） | `scripts/chat.ts`、`scripts/voice-turn.ts`、`scripts/voice-device-check.ts`、`scripts/eval-realism.ts`、`scripts/eval-conversation.ts` | 四个 live 入口 + 三个附带入口改走装配点；`news.*` 第一次进模型可见工具链；`--print-wiring` 保持离线（`:memory:` 库、fetch 一用即抛、替身模型） |
+| P2.5-C（t5） | `packages/runtime/src/capability-bridge.ts`、`proactive-runtime.ts` | 插件 `topic_source` 桥进主动候选（`runtime.capabilities`）；**入口那一行 `readPluginTopics` 仍未写**（见 12.3） |
+| P2.5-D（t10） | `tests/unit/runtime/resident-runtime.test.ts` | 提示词权威的**生产点行为证据**：毒化装配器 → 被拒（`boundary=core-system-prompt`）且模型零调用。**接线本身自 P2.5-A 就在**（`git grep -n 'verifyOnAssemble(' -- packages/runtime/src`） |
+| P2.5-E（t7） | `packages/brain-adapter/src/tools.ts` 等 | 提醒工具改名 `xixi_set_reminder_stub` → `xixi_set_reminder`，返回文案改「已经记下」，**没有兼容别名** |
+| P2.5-F（t8） | `resident-runtime.ts` 的 `reminderSeams` | durable 提醒接进装配点；读接缝先 `markDue()` 再 `candidateInputs()`（只做后半句会让没 tick 过的提醒永远停在 `pending`）；两条接缝**必须成对** |
+| P2.5-G（t11/t12） | `packages/runtime/src/tool-runtime.ts`、`resident-runtime.ts` | 声明 → 权限策略那一条链补齐不变量（名字归一化、TTL 夹紧），审批在真实运行时闭环且**执行的是冻结参数** |
+| P2.5-H（t9） | `packages/domain/src/plugin-settings.ts`、`resident-runtime.ts`、`config/xixi.example.yaml` | `xixi.plugins` 严格解析并真的驱动装配（directories / news / mcp）；写错的键名、拼错的 transport 在**加载配置时**带路径报错。出厂 `news.enabled: false` 是有意的 |
+| P2.5-I（t4） | `packages/plugins/src/{manager,errors,index}.ts` | 插件启动幂等改成**响亮拒绝**（`PluginAlreadyStartedError`）；`deactivate` / `dispose` / rollback 一起丢掉 health，新增派生字段 `PluginInstance.online` |
+| P2.5-J（t6） | `packages/conversation/src/{engine,prompt}.ts`、`packages/context/src/{context-builder,relationship-context}.ts` | `ContextBuilder.render().worldLines`（含在场）进提示词，`worldStateLite` 降级为「关掉上下文层时的回退」（两路互斥）；关系笔记按听众模式过滤，`public` 一条不给 |
+| P2.5-K（t13） | `scripts/verify-p2-5.ts` + `npm run verify:p2.5` | 四条**真入口**端到端证据，一条命令可重跑 |
+
+**装配点的四条不变式**（用例：`node --test tests/unit/runtime/resident-runtime.test.ts`）：
+① `start()` 只认一次，第二次抛 `RESIDENT_RUNTIME_ALREADY_STARTED`；② **关停是终态**——`stop()` 之后再 `start()`
+抛 `RESIDENT_RUNTIME_ALREADY_STOPPED`，`runtime.plugins.mount()` 抛 `RESIDENT_RUNTIME_CLOSED`；③ `stop()` 幂等；
+④ `toolChain === plugins.registry`（模型看到的与内核装的是同一个注册表）。
+
+**顺带修掉的一条**（P2.5-K 的真入口验收探针抓到）：关停路径原本**跳过第 8 步 `deactivate`**（只跑 `dispose`），
+与 `manager.ts` 顶部那条九步契约不符——只在 `deactivate` 里做清理的插件（例如 `xixi.news` 的 `live.length = 0`）
+那个钩子永远不会跑。现在 `dispose()` 先 `deactivate` 再 `dispose`，验收探针记录的钩子序列如实是
+`activate → deactivate → dispose`。
+
+### 12.2 验收（可重跑）
+
+- `npm run verify:p2.5`（有密钥时场景 1 真调一次模型）或 `npm run verify:p2.5 -- --offline`（零费用、不联网）：
+  四个场景 exit 0 —— ① 入口问新闻（真模型时由它自己调 `news.latest`，结果回到回答里）；② 提醒跨重启
+  （子进程写 → 父进程用**另一个进程**读回 → 到点由读接缝变成候选 → 主动路径说出口 → 落 `delivered`）；
+  ③ 审批（待批时业务数据零行、第二组参数只多一条待批、点头后执行的是**当时冻结**的参数）；④ 关停
+  （链清空、探针连接标记关闭、`dispose` 钩子跑过、读接缝抛「store is closed」、待办仍在库里）。
+- **如实标注的模拟部分**：场景 1 的 feed 是**本机 RSS 夹具**（实测 BBC 那条 feed 直连 20 秒、代理 25 秒都超时；
+  换真 URL 只改一处），场景 2 的「到点」用**注入时钟**造（入口工厂不接受 `now`，而验收要的是「到点」而不是「等一天」）。
+  脚本自己会把这两点打印出来，别读成「公网可达」或「等了一整天」。
+- 离线的逐入口自证：`node <入口> --print-wiring`（chat / voice-device-check / eval-realism / eval-conversation），
+  实测四行**除 `entry` 外逐字段相同**，并且与装配点给出的**同一条链**（用例 `tests/console/live-entry-tool-chain.test.ts`）。
+- **本文写完后复跑过**（同样是可重跑的，不是转述）：`npm run verify:p2.5` 与 `npm run verify:p2.5 -- --offline`
+  都是 exit 0；live 那一次输出的关停场景记 `deactivateRan: true`——正是下面那条「跳过第 8 步」修复的观察点。
+
+### 12.3 仍未接线（**不许写成活的**）
+
+1. **到点提醒由入口说出来**：`git grep -n 'reminderSeams' -- scripts` **零命中**，而 `new ProactiveLoop(` 有三处
+   （`scripts/field-test.ts`、`scripts/serve-chat.ts`、`scripts/eval-proactive-timeline.ts`）。所以「活的西西已经
+   在说到点提醒」**不成立**；成立的是「接缝可用 + 到点会被主动路径说出来」（验收脚本按那一行接法驱动）。
+2. **活入口真在用插件话题**：`git grep -n 'readPluginTopics' -- scripts` **零命中**。
+3. **外部 MCP 服务器**：没有任何入口配置过服务器（唯一入口是配置 `xixi.plugins.mcp.servers`，出厂为空表），
+   证据仍是 SDK v2 真 client + 真 server 走 `InMemoryTransport`。
+4. **新闻来源全部由配置说了算**：入口脚本今天各自带一条 RSS 来源（`git grep -n 'createRssNewsSource' -- scripts`），
+   要让「来源全部来自配置」成立得先把入口那份显式来源删掉、再把 `plugins.news.enabled` 翻成 `true`——那是
+   **另一条任务**（翻开关会让所有入口改用配置来源，也会打红控制台用例）。
+5. **`beginTurn` 在 live 入口零命中**（`git grep -n 'beginTurn' -- scripts` 只命中验收脚本）：活入口写下的提醒
+   `owner` 会落到 sink 的兜底 `unknown`。
+
+### 12.4 已知问题（已知、未修；写明谁发现的）
+
+- **内核的 `#disposed` 只有一处守卫**（`loadPlugin` 查它，`loadInline` / `activate` 不查）→ `disposeAll()` 之后
+  仍能把插件**复活**（t16 的 F1 发现、t21 复核）。常驻运行时这一层已堵（关停后 `mount()` 抛
+  `RESIDENT_RUNTIME_CLOSED`），**内核层未修**。
+- **`online` 的文档口径比代码强**：`checkHealth()` 复查失败会把 state 翻成 `failed`，而能力登记与模块还在——
+  按「先读 `online`」的面板会对仍在跑的插件显示「已停用」（t16 的 F2，`#push` 的既有行为）。
+- **提示词权威的机制缺口**：`authority.verify` 对 system 串只查 `startsWith(CORE_IDENTITY)` 与 `includes(HARD_POLICY)`
+  再逐段比对核心段正文，所以「保持两个核心段对象原样、只往 system 串尾部追加文本」它**不拒**（t10 的探针实测
+  NO-THROW）。插件今天拿不到装配器，故属**机制完备性**问题，不是活的风险。
+- **per-plugin `dispose()` 不是插件级终态**（t4 披露、t16/t21 复核）。
+- `countIfReadable` 的「库已关」与「`stop()` 失败重试」两条防线**今天构造不出坏输入**（t18 登记）。
+- **manifest 的 tool 级 approval 声明未实现**（P2 就登记、P2.5 未动）：今天起作用的是 `config.tools.approval.ask`。
+
+### 12.5 本轮还清的两笔文档旧账
+
+1. **硬边界现在写全两条**：`docs/design/conversation.md` §3 与 `docs/design/security-and-privacy.md` §2
+   都补上了 `HARD_POLICY` 的**第二条**边界 `WRITE_OPERATION_RULE`（写下来的事必须真的用工具写）——
+   在此之前设计文档只写了「事实来源」那一条。
+2. **那条「27%」按更正后的口径加注**（原文一字未改）：`docs/progress-v03.md` 的 P2 段与
+   `docs/verification/t14-p2-gate-independent-verification-2026-10-04.md` 都已加注——它是 2026-10-04 的
+   一次历史观测、同日同口径不可复现，「提示词层是根因」这个判断不成立，**不要拿它当现状**。

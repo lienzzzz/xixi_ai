@@ -1,6 +1,7 @@
 # 领域模型：事件、持久化与人格
 
-> 最后更新：2026-10-04（V0.3 P2 收口：事件类型 6 → **8** 类（`tool.approval.changed` / `reminder.changed`）、
+> 最后更新：2026-10-08（V0.3 **P2.5** 收口：§5.5 的 `relationship_notes` 行补「进提示词前按听众模式整批过滤」的口径）
+> 上一版：2026-10-04（V0.3 P2 收口：事件类型 6 → **8** 类（`tool.approval.changed` / `reminder.changed`）、
 > §5.5 补迁移 007 的 `tool_approvals` 与 008 的 `reminders`、006 只加列不建表）
 > 权威来源：`packages/contracts/src/*.ts`、`packages/contracts/schemas/**`、`packages/domain/src/{store,migrations,personality,config,clock}.ts`、`packages/domain/src/migrations/001_initial.sql`
 > 若与代码不一致，以代码为准，并请立即修正本文件
@@ -175,7 +176,7 @@ evt_<uuid>   事件       corr_<uuid>  关联     sess_<uuid>  西西会话
 | `open_threads` | 003 | 未完话题的状态机 + **可重建投影**（pack Phase 3） | `thread_id` PK、`summary`、`subject`、`status`（六个状态）、`created_at`、`updated_at`、`follow_after`、`expire_at`、`follow_up_hint`、`importance`、`attempts`、`last_offered_at`、`source_event_id`、`note`；索引 `(status, follow_after)`、`updated_at` |
 | `episodic_memory` | 004 | 发生过的事（明确的纠正、记下来的一件事） | `memory_id` PK、`occurred_at`、`summary`、`kind`、`source_type`、`source_event_id`、`session_id`、`importance`、`confidence`；索引 `occurred_at`、`(kind, occurred_at)` |
 | `semantic_memory` | 004 | 稳定的事实与偏好 | `memory_id` PK、`property`、`statement`、`source_type`、`source_event_id`、`confidence`；索引 `property` |
-| `relationship_notes` | 004 | 我们怎么相处 | `note_id` PK、`aspect`、`note`、`source_type`、`source_event_id`、`confidence`；索引 `aspect` |
+| `relationship_notes` | 004 | 我们怎么相处 | `note_id` PK、`aspect`、`note`、`source_type`、`source_event_id`、`confidence`；索引 `aspect`。**表里没有逐条可见性列**，所以进提示词前只能**按听众模式整批**过滤（V0.3 P2.5-J）：`public`（有外人在场 / 电视 / 媒体）**一条都不给**，`private` / `family` 照旧，没给听众时按保守默认档 `family`；判定集中在 `packages/context/src/relationship-context.ts` 的 `notesVisibleTo` 一处，过滤发生在**选择阶段**（不是先注入再让模型别说） |
 | `self_profile_learned` | 004 | 学习到的**累计偏移**（与 `self_profile` 基线分开） | `property` PK、`delta`、`source_type`（`learned:…`）、`evidence`、`confidence`、`updated_at` |
 | `session_overrides` | 004 | **只对 `valid_day` 这一本地自然日生效**的覆盖（次日自动失效） | `override_id` PK、`session_id`、`property`、`delta`、`reason`、`source_type`、`valid_day`；索引 `(valid_day, property)` |
 | `mood_state` | 005 | **当前心情（一行）**——有界、会回落、由事件演化（第五轮） | `key` PK（`'mood.now'`）、`schema_version`、`valence` / `energy`（都落 `[0,1]`）、`evidence_json`（每个信号出现过几次）、`last_beat_at`、`cursor_json`（已吸收到哪条 `events.sequence`）、`source` / `summary` / `updated_at` |

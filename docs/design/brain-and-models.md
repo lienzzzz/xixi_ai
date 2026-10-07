@@ -1,6 +1,9 @@
 # 大脑与模型：`TurnModelProvider` 三接口、MiMo 直连、DSH Harness
 
-> 最后更新：2026-10-04（V0.3 P2-F/P2 收口：§2 从七成员 `BrainAdapter` 改成三个接口，四个能力退役并注明归属；
+> 最后更新：2026-10-08（V0.3 **P2.5** 收口：§3 的「逐入口覆盖」改成事实——唯一装配点是
+> `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime()`，插件工具（含 `news.*`）真的进了
+> 入口的模型可见清单；提醒工具改名 `xixi_set_reminder` 且不再退回内存 sink）
+> 上一版：2026-10-04（V0.3 P2-F/P2 收口：§2 从七成员 `BrainAdapter` 改成三个接口，四个能力退役并注明归属；
 > 新增「两条接缝在生产侧没有消费者」的口径，见 [ADR-0020](../adr/0020-provider-three-interfaces-and-mcp-deps.md)）
 > 权威来源：`packages/brain-adapter/src/{types,mimo,dsh,tools,errors,scripted,fake}.ts`、`packages/model-adapters/src/{mimo,weather,errors}.ts`、`apps/brain-dsh/src/transport.ts`、`apps/brain-dsh/profile/cordis.patch.yml`、`plugins/xixi-tools/index.js`、`scripts/verify-structured-output.ts`、[recon/mimo-api-probe-2026-09-29.md](../recon/mimo-api-probe-2026-09-29.md)、ADR-0002/0005/0008/0020、[progress.md](../progress.md) §2.3/§2.6/§2.10/§2.11
 > 若与代码不一致，以代码为准，并请立即修正本文件
@@ -138,16 +141,19 @@ resume 的两个硬约束（相同 cwd、相同 profile）在 `CliDshTransport` 
 
 - `XixiTool`：`name` / `description` / `parameters`（JSON Schema，原样交给 provider）/ `execute(args, {timezone, now})`。
 - `ToolCallRecord`：`{name, args, ok, result, error}`，通过 `onToolCall` 回调给上层写审计。
-- 注册表只有一处出口：`defaultTools({defaultPlace, now, …})` = **Phase 2 的三个内置工具**（`packages/brain-adapter/src/tools.ts` 的注释：`The three Phase 2 built-ins. New tools join here and nowhere else.`）：
-  时间 / 天气 / 新闻桩 / 提醒桩；可见性再由 `listForAgent(scope)` 按 scope 过滤（不是「注册了就人人可见」）。
-- **逐入口覆盖（2026-10-01 第四轮 t2 实测，别写成「语音与文字共用同一条工具链」这种笼统话）**：
-  `scripts/field-test.ts` 的 `buildToolChain(config, options)` 是四个 live 入口共用的构造点——
-  文字 CLI `scripts/chat.ts`、设备自检 `scripts/voice-device-check.ts`、真人感评测 `scripts/eval-realism.ts`、
-  对话评测 `scripts/eval-conversation.ts`；控制台（`field-test.ts`）与试用页/语音（`serve-chat.ts` / `voice-turn.ts`）本来就走这条链。
-  离线自证：每个入口跑 `--print-wiring` 打印 `{entry,language,maxToolRounds,tools,permissions}` 后退出（不调模型、不建库），
-  实测四入口逐字相同：`language` 取自部署配置、`maxToolRounds: 4`、**三个内置工具**、三个 `allow`
-   （V0.3 P2-D 删掉 `xixi_news_stub` 之后的新期望；**插件与 MCP 的工具不在入口的这份清单里**——
-   入口还没走 `buildPluginRuntime`，见 §8 与 [ADR-0017](../adr/0017-plugin-boundary-and-four-prohibitions.md)）。
+- 注册表只有一处出口：`defaultTools({defaultPlace, now, …})` = **三个内置工具**（`packages/brain-adapter/src/tools.ts` 的注释：`The three Phase 2 built-ins. New tools join here and nowhere else.`）：
+  时间 / 天气 / 提醒；可见性再由 `listForAgent(scope)` 按 scope 过滤（不是「注册了就人人可见」）。
+- **逐入口覆盖（口径已随 V0.3 P2.5 更新，别写成「语音与文字共用同一条工具链」这种笼统话）**：
+  唯一装配点是 `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime()`——入口取
+  `runtime.toolChain`（`=== runtime.plugins.registry`），插件内核与它带来的 MCP / news 工具由同一次 `start()` 装好。
+  走它的有**七个入口脚本**：文字 CLI `scripts/chat.ts`、语音单轮 `scripts/voice-turn.ts`、设备自检
+  `scripts/voice-device-check.ts`、真人感评测 `scripts/eval-realism.ts`、对话评测 `scripts/eval-conversation.ts`、
+  现场测试控制台 `scripts/field-test.ts`、试用页 `scripts/serve-chat.ts`。
+  复核：`git grep -l 'createResidentRuntime(' -- scripts`（七个入口 + 验收脚本）；
+  反证 `git grep -n 'buildToolChain(' -- scripts` 应 **0 命中**（`buildToolChain` 只是装配点内部的一步）。
+  离线自证：支持该开关的入口跑 `--print-wiring` 打印 `{entry,language,maxToolRounds,tools,permissions,plugins}`
+  后退出（不调模型、不建库），实测四入口**除 `entry` 外逐字段相同**；工具清单**以实跑为准**
+  （默认含三个内置与三个 `news.*` 插件工具，见下面工具表）。
   **设备自检没有离线端到端证据**（要真实 WAV + 硬件 + 真实 ASR），它的证据是 `--print-wiring` 与适配器共用一个 `deviceToolChain` 调用点。
 
 | 工具 | 权限 | 参数 | 行为 |
@@ -155,13 +161,14 @@ resume 的两个硬约束（相同 cwd、相同 profile）在 `CliDshTransport` 
 | `xixi_get_current_time` | L0（内部只读，`risk: read`） | `{type:'object', properties:{}, additionalProperties:false}` | 返回 `iso` / `localDate` / `weekday`（`Asia/Shanghai`，代码内固定时区） |
 | `xixi_get_weather` | L1（外部只读，`risk: read`） | `place`(string)、`day`(enum `today`/`tomorrow`/`day_after_tomorrow`)、**`additionalProperties:false`** | `place` 省略时用 `defaultPlace`；`day` 默认 `tomorrow`；返回 `place`/`day`/`date`/`summary`/`temperatureMaxC`/`temperatureMinC`/`precipitationChance`/`advice`/`daysUntil`/`requestedAt`/`timezone` |
 | `news.search` / `news.latest` / `news.for_interests` | 插件工具（`network` 权限，manifest 声明） | 见 `packages/plugins/news/tools.ts` | V0.3 P2-D 起新闻是**插件**，不再是内置：返回的外部文本一律带 `untrusted` 与 `flags`，拿不到来源时在 `problems` 里说原因（不编） |
-| `xixi_set_reminder_stub` | **`risk: write`** | 见 `tools.ts` | 名字与文案仍是 `_stub`（已过时，下一轮改）：接 `DurableReminderSink` 时落 `reminders` 表并到点写事件，**但四个 live 入口没接**，入口里它只写内存 sink、不落库、不触发外部动作（[ADR-0019](../adr/0019-news-and-reminder-data-model.md)） |
+| `xixi_set_reminder` | **`risk: write`** | `what`(string)、`when`(string，自然语言) | 名字与文案已随 V0.3 P2.5-E 改好（`_stub` 与「到点不会自动响」都不在了，**没有兼容别名**）：入口经常驻装配点拿到的 sink 是 `DurableReminderSink`，落 `reminders` 表并到点写事件，返回文案「已经记下」（[ADR-0019](../adr/0019-news-and-reminder-data-model.md)）。**仍未接的一环**：到点由主动循环说出来，要入口那一行 `...runtime.reminderSeams`（今天 `scripts/` 下零命中，见 [architecture.md](../architecture.md) §6.2） |
 
 - 天气来源是 **Open-Meteo，无需密钥**（`packages/model-adapters/src/weather.ts`）：geocoding + forecast 两个端点，
   超时 15s，WMO 天气码译成中文口语（`describeWeatherCode`），**30 分钟缓存**（`report(place, cacheMs = 30 * 60_000)`，按 trim 后的地名键控）。
   未知地名是 `ModelError('BAD_REQUEST')`，不是崩溃。
 - `place` 配置来自 `config.identity.place`（可选字段，`packages/domain/src/config.ts`）；
-  四个 live 入口与控制台都经 `scripts/field-test.ts` 的 `buildToolChain(config)` 构造注册表（`defaultPlace` 取自同一配置）。
+  七个入口脚本与控制台都经常驻装配点 `createResidentRuntime()` 构造注册表（`defaultPlace` 取自同一配置，
+  摊平配置那一步仍是 `buildToolChain`，但调用方在装配点内部）。
 - **语言接线（第四轮 t2 + §9.13 更正；不要写成「堵住了一条会泄漏的通道」）**：`MimoBrainAdapter` 的 `language` 来自部署配置
   `config.identity.language`（四个 live 入口都传了它）；**省略时构造回落到 `zh-CN`**（`options.language ?? 'zh-CN'`），
   中文清洗规则对每个部署照常生效——**省略不是直通**。这条接线的真实价值是**让过滤器跟随部署语言**：

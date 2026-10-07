@@ -1,6 +1,8 @@
 # 测试
 
-> 最后更新：2026-10-04（V0.3 P2 收口：§1 集成层与 §2 新增 P2 的测试面，把「`tests/replay/` 仍为空」这条过期陈述改掉）
+> 最后更新：2026-10-08（V0.3 **P2.5** 收口：`--print-wiring` 行改成事实（插件工具真的在入口清单里）、
+> 新增 `npm run verify:p2.5` 真入口验收行）
+> 上一版：2026-10-04（V0.3 P2 收口：§1 集成层与 §2 新增 P2 的测试面，把「`tests/replay/` 仍为空」这条过期陈述改掉）
 > 权威来源：`tests/**`、`scripts/**`、`package.json` 的脚本；与代码不一致时以代码为准并立即修正本文
 > 当前状态：`npm test` → **全绿**（**项数与文件数以实跑为准**；最近一次实测点是 V0.3 P2 收口的 **717 项、pass 717 / fail 0**，
 > 取数修订号与命令见 [`progress-v03.md`](progress-v03.md) 的 P2 段；更早的 2026-09-30 实测点是 223 项、29 个 `*.test.ts`），**不发起任何网络请求**。
@@ -316,8 +318,9 @@ manual audio hardware tests 三档；`AGENTS.md` 第 2 节也要求「联网验�
 | `npm run voice:turn -- --wav a.wav --wav b.wav` | ASR+N 轮对话+TTS | 语音闭环，只上传 VAD 检测到的语音段 |
 | `npm run voice:bargein` | 0 | 打断判定延迟；写出被截断的播放音频作为证据 |
 | `npm run verify:structured-output` | 3~4 次 | 结构化输出契约 + MiMo 缺陷金丝雀 |
-| `npm run chat` / `--fake` / `--dsh` / `--print-wiring` | 每次一轮 | 交互式验证；`--fake` 完全离线（注入内存天气源）；`--print-wiring` **0 成本**：打印 `{entry,language,maxToolRounds,tools,permissions}` 后退出 |
-| 四个 live 入口的 `--print-wiring` | **0**（离线：不调模型、不建库） | **工具链覆盖的离线自证**（第四轮 t2）：`scripts/chat.ts` / `voice-device-check.ts` / `eval-realism.ts` / `eval-conversation.ts` 各打印一行，实测四行逐字相同（`language` 取自部署配置、`maxToolRounds: 4`、**三个内置工具**、三个 `allow`——P2-D 删掉新闻桩之前是四个；**不含插件/MCP 工具**，因为入口还没走 `buildPluginRuntime`），并与 `scripts/field-test.ts` 的 `buildToolChain(loadConfig())` 逐字段相等（离线用例 `tests/console/live-entry-tool-chain.test.ts`）。**设备自检没有离线端到端证据**（要真实 WAV + 硬件 + 真实 ASR），它的证据就是这一行 + 与适配器共用一个 `deviceToolChain` 调用点 |
+| `npm run chat` / `--fake` / `--dsh` / `--print-wiring` | 每次一轮 | 交互式验证；`--fake` 完全离线（注入内存天气源）；`--print-wiring` **0 成本**：打印 `{entry,language,maxToolRounds,tools,permissions,plugins}` 后退出 |
+| 四个 live 入口的 `--print-wiring` | **0**（离线：不调模型、不建库） | **工具链覆盖的离线自证**：`scripts/chat.ts` / `voice-device-check.ts` / `eval-realism.ts` / `eval-conversation.ts` 各打印一行，实测**除 `entry` 外逐字段相同**（`language` 取自部署配置、`maxToolRounds: 4`、工具清单**以实跑为准**——默认含三个内置与三个 `news.*` 插件工具，V0.3 P2.5-C 起插件工具真的在入口的清单里；`plugins` 段给出 `start()` 自己的挂载记录），并与常驻装配点 `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime()` 给出的同一条链逐字段相等（离线用例 `tests/console/live-entry-tool-chain.test.ts`）。**设备自检没有离线端到端证据**（要真实 WAV + 硬件 + 真实 ASR），它的证据就是这一行 + 与适配器共用一个 `deviceToolChain` 调用点 |
+| `npm run verify:p2.5`（`node scripts/verify-p2.5.ts`） | **0** 加 `--offline`（零费用、不联网）；不带时为**一次真实 MiMo 调用** | **P2.5 的真入口验收**（四个场景）：① 文字入口问新闻（真模型时由它自己调 `news.latest`，工具结果回到回答）；② 提醒跨重启（子进程写、父进程读、到点由 `runtime.reminderSeams` 变成候选并由主动路径说出来）；③ 审批（待批时业务数据零行、点头后执行**当时冻结**的参数）；④ 控制台 `close()` 之后链被清空、连接关掉、待办仍在库里。**口径**：场景 1 的 feed 是**本机 RSS 夹具**、场景 2 的「到点」用**注入时钟**造，脚本自己会打印这两点；`--scenario=<news\|reminder\|approval\|shutdown>` 单跑 |
 | `npm run web` / `npm run web -- --dsh` | 每次一轮 | 浏览器试用页（http://127.0.0.1:8791）；`--dsh` 切到 Harness 路径 |
 | `POST /api/voice`（试用页的🎤） | ASR + 一轮 | 浏览器采集 → VAD 只取语音段 → ASR → 对话 → TTS；无语音时返回 `NO_SPEECH_DETECTED` 而不是假装听懂 |
 | `scripts/voice-device-check.ts` | ASR + 一轮 | 设备验收：对回环录音跑全链路并与原文比对字符级相似度（≥0.5 判 PASS） |
