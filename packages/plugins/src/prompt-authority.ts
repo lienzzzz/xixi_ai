@@ -199,11 +199,18 @@ export interface VerifyOnAssembleOptions {
  * const assembler = verifyOnAssemble(new PromptAssembler());
  * ```
  *
- * **接线状态（诚实记录，AGENTS §9.24）：这个包装器本身有用例，但它的调用点还没接。** 真实装配点是
- * `packages/conversation` 的 `PromptAssembler`，那一层不在本任务（t18）的 inScope 里；今天的现状是
- * 「插件贡献只能以 context_provider 的素材行进来、其文本在加载期过滤」，权威校验尚未进入提示词装配
- * 路径。把调用点接上，是下一阶段的显式前置项（与「在 live 入口装配插件内核」同一批），这条状态同时
- * 写在 `packages/runtime/src/tool-runtime.ts` 的接线状态块里。
+ * **接线状态（诚实记录，AGENTS §9.24）：这个包装器有用例，而且它的调用点**已经接在生产装配点上**。**
+ * 调用点是 `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime`（V0.3 P2.5-A，`507f65d`）：
+ * `const assembler = verifyOnAssemble(options.conversation?.assembler ?? new PromptAssembler(), {…})`，随后
+ * 这个被包装过的装配器交给 `ConversationEngine`；`scripts/` 下的入口都经
+ * `createResidentRuntime` 取引擎，所以真实入口的提示词装配都路过这道校验。
+ * 复核命令：`git grep -n 'verifyOnAssemble(' -- packages/runtime/src`。
+ *
+ * 这条状态**以前写反过**（「调用点还没接」自 P2.5-A 起就是假的，直到 P2.5-D 的行为证据落地时才被
+ * 一次核查抓出来）—— 所以这里只写能重跑的判据，不写会过期的断言。行为证据在
+ * `tests/unit/runtime/resident-runtime.test.ts`（毒化装配器 → 被拒 + `modelCalls` 为 0）。
+ *
+ * 本文件只负责**机制**：什么算被改过的提示词、拒绝时抛什么。它不判断「谁在调」——那是上面那条命令的事。
  */
 export function verifyOnAssemble<Input, Output extends VerifiablePrompt>(
   assembler: PromptAssemblerLike<Input, Output>,

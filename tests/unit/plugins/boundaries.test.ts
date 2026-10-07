@@ -216,9 +216,13 @@ test('② 改核心系统提示词（反事实：verify 不再逐字节核对核
 });
 
 test('② 装配点包装器 verifyOnAssemble：正常提示词放行、被改过的提示词当场被拦（反事实会红）', () => {
-  // 这个包装器就是「在插件贡献进入 prompt 的那个装配点调 verify」的机制；**它的调用点还没接**
-  // （真实装配点在 packages/conversation 的 PromptAssembler，不在本任务 inScope）——这条用例证明的
-  // 是机制本身可用，不是提示词管线已经在守。
+  // 这个包装器就是「在插件贡献进入 prompt 的那个装配点调 verify」的机制。**调用点已经接在
+  // packages/runtime/src/resident-runtime.ts 的 createResidentRuntime 上**（V0.3 P2.5-A，507f65d；
+  // 复核：git grep -n 'verifyOnAssemble(' -- packages/runtime/src）。这条用例证明的是**机制**本身可用；
+  // 「生产装配点上真的拦得住」的行为证据在 tests/unit/runtime/resident-runtime.test.ts（毒化装配器 →
+  // 被拒且 modelCalls 为 0）。
+  //
+  // 这条注释以前写着「它的调用点还没接」——那句自 P2.5-A 起就是假的，P2.5-D 一次核查才抓出来。
   const assembler = verifyOnAssemble(new PromptAssembler());
   const input = {
     identityName: '西西',
