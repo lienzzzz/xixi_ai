@@ -13,8 +13,9 @@ import {
   toolArgumentsDigest,
   type AgentTool,
 } from '@xixi/brain-adapter';
-import { ToolApprovalStore, openXixiStore, parseToolApprovalSettings, type XixiStore } from '@xixi/domain';
-import { ToolApprovalManager, buildToolChain } from '@xixi/runtime';
+import { ToolApprovalStore, openXixiStore, parseToolApprovalSettings, parseXixiConfig, type XixiConfig, type XixiStore } from '@xixi/domain';
+import { ToolApprovalManager, buildPluginRuntime, buildToolChain, resolveToolApprovalSettings } from '@xixi/runtime';
+import type { InlinePlugin } from '@xixi/plugins';
 
 /**
  * V0.3 P2-B — 工具审批（pack `docs/03_AGENT_PLUGIN.md` §5）。
@@ -432,4 +433,224 @@ test('nothing asks for approval unless a deployment declares it', async () => {
   const decision = declared.check(TOOL, 'conversation');
   assert.equal(decision.verdict, 'ask');
   assert.match(decision.reason, /同意/);
+});
+
+/**
+ * V0.3 P2.5-B — 审批**声明**这一层：声明 → 模型可见工具链的权限策略（pack §5）。
+ *
+ * 上面那一组钉的是「冻结」（流程里的事）；这一组钉的是「判定从哪来」：
+ *
+ *   1. 三档优先级（显式声明 > 配置 > 出厂空表）各有一条**可观察的权限判定**，而不只是断言解析
+ *      函数返回了什么 —— 判定发生在装配点建出来的那条链上（这才是四个入口共用的东西）；
+ *   2. 「没声明就不问」是一条**全表**性质：没声明时注册表里没有任何工具被判成 ask，写工具也不例外
+ *      （不做「看起来危险就先问一句」的推断）；
+ *   3. 同一份声明对**内置工具与插件工具一视同仁**：两者都被判成需要确认，而且 ask 仍然对模型可见
+ *      （ask ≠ deny，否则那条审批流程从真实的一轮里根本走不到）；
+ *   4. 越界的声明不会被静默接受：有效期按既有上限夹紧，名字按同一套规则归一化。
+ *
+ * 全程离线：inline 插件源、真配置解析、临时目录里的库，没有网络、没有模型、没有密钥。
+ */
+
+const OTHER_TOOL = 'xixi_pay_probe_approval_second';
+const PLUGIN_WRITE = 'demo.writer';
+
+/** 部署改的就是这段 YAML（`config/xixi.yaml` 的 `tools` 段），所以这里走真的配置解析路径。 */
+const BASE_YAML = `
+xixi:
+  identity:
+    name: 西西
+    language: zh-CN
+    timezone: Asia/Shanghai
+    place: 成都
+  models:
+    llm: { provider: mimo, model: mimo-v2.6-flash, thinking_realtime: false }
+    asr: { provider: mimo, model: asr-1 }
+    tts: { provider: mimo, model: tts-1 }
+  personality:
+    base: {}
+  proactive: {}
+  memory: {}
+  privacy: {}
+  features: {}
+`;
+
+function configWithAsk(ask: readonly string[] = [], ttlSeconds?: number): XixiConfig {
+  const list = ask.map((name) => JSON.stringify(name)).join(', ');
+  const approval = [`      ask: [${list}]`, ...(ttlSeconds === undefined ? [] : [`      ttl_seconds: ${ttlSeconds}`])].join('\n');
+  return parseXixiConfig(`${BASE_YAML}  tools:\n    approval:\n${approval}\n`);
+}
+
+const QUIET_CONFIG = configWithAsk([]);
+
+/** 一个贡献写工具的插件：和内置工具走同一条注册与判定路径，没有任何特权。 */
+function writePlugin(id: string, toolName: string): InlinePlugin {
+  const tool: AgentTool = {
+    name: toolName,
+    description: `${toolName} 的用例工具（写）`,
+    parameters: { type: 'object', properties: { what: { type: 'string' } }, additionalProperties: false },
+    risk: 'write',
+    scopes: ['conversation'],
+    async execute() {
+      return { ok: true };
+    },
+  };
+  return {
+    manifest: { schemaVersion: 1, id, name: id, version: '0.1.0', permissions: ['tool.register'], capabilities: ['tool'] },
+    module: { activate: () => ({ tools: [{ tool }] }) },
+  };
+}
+
+/**
+ * 内置工具里的写工具名**从装配点自己造的表里读**，不写死字面量：改名（T7 那类）不该让这组用例
+ * 变成假红，也不该让它们变成什么都不证明的绿 —— 名字取自「今天的链里到底有什么」。
+ */
+function builtinWriteTools(): string[] {
+  return buildToolChain(QUIET_CONFIG)
+    .all()
+    .filter((tool) => tool.risk === 'write')
+    .map((tool) => tool.name);
+}
+
+test('declaration priority: explicit beats config, config beats the factory empty table', () => {
+  // 第三档：配置里没有这一段 = 出厂空表（`tools` 段缺省）。
+  const factory = buildToolChain(QUIET_CONFIG);
+  factory.register(probeTool({ name: TOOL }));
+  assert.equal(factory.check(TOOL, 'conversation').verdict, 'allow', '没声明就没有 ask');
+
+  // 第二档：配置里声明了 —— 声明真的进了模型可见工具链的权限策略。
+  const fromConfig = buildToolChain(configWithAsk([TOOL]));
+  fromConfig.register(probeTool({ name: TOOL }));
+  assert.equal(fromConfig.check(TOOL, 'conversation').verdict, 'ask');
+
+  // 第一档：入口显式给了一份，配置就不再参与（换一个名字，配置里那个回到 allow）。
+  const explicit = buildToolChain(configWithAsk([TOOL]), { approval: { ask: [OTHER_TOOL], ttlSeconds: 60 } });
+  explicit.register(probeTool({ name: TOOL }));
+  explicit.register(probeTool({ name: OTHER_TOOL }));
+  assert.equal(explicit.check(OTHER_TOOL, 'conversation').verdict, 'ask');
+  assert.equal(explicit.check(TOOL, 'conversation').verdict, 'allow', '显式声明不与配置合并');
+
+  // 显式一份**空表**是「这个入口不要任何审批」，不会被配置补回来（`??` 的语义）。
+  const muted = buildToolChain(configWithAsk([TOOL]), { approval: { ask: [], ttlSeconds: 60 } });
+  muted.register(probeTool({ name: TOOL }));
+  assert.equal(muted.check(TOOL, 'conversation').verdict, 'allow', '空表 ≠ 没给');
+
+  // 比声明更强的只有显式**策略对象**：给了它，声明不再参与（文档写明的最高一档）。
+  const byPolicy = buildToolChain(configWithAsk([TOOL]), {
+    permission: new ToolPermission({ role: 'resident', askTools: [OTHER_TOOL] }),
+  });
+  byPolicy.register(probeTool({ name: TOOL }));
+  byPolicy.register(probeTool({ name: OTHER_TOOL }));
+  assert.equal(byPolicy.check(OTHER_TOOL, 'conversation').verdict, 'ask');
+  assert.equal(byPolicy.check(TOOL, 'conversation').verdict, 'allow');
+});
+
+test('undeclared means never asked: a write risk alone never triggers ASK, built-in or plugin', async () => {
+  const mount = buildPluginRuntime(QUIET_CONFIG, { inline: [writePlugin('xixi.writer', PLUGIN_WRITE)] });
+  await mount.start();
+
+  // 反空断言：链上真的有东西可判（内置的写工具 + 刚挂上来的插件写工具）。
+  const registered = mount.registry.all();
+  const writes = registered.filter((tool) => tool.risk === 'write');
+  assert.ok(writes.length >= 2, `内置与插件应各有一个写工具：${registered.map((tool) => `${tool.name}/${tool.risk}`).join('、')}`);
+  assert.ok(mount.notes.mounted.includes(PLUGIN_WRITE), `插件写工具确实挂进了这条链：${mount.notes.mounted.join('、')}`);
+
+  // 全表性质：一个 ask 都没有（写工具也不问）。
+  const asked = registered.filter((tool) => mount.registry.check(tool.name, 'conversation').verdict === 'ask');
+  assert.deepEqual(asked.map((tool) => tool.name), [], '没声明就不该有 ask');
+  for (const tool of writes) {
+    assert.equal(mount.registry.check(tool.name, 'conversation').verdict, 'allow', `${tool.name} 是写工具，但没声明就不问`);
+  }
+  await mount.shutdown();
+});
+
+test('one declaration, one policy: built-in and plugin write tools are judged alike, and ask stays visible', async () => {
+  const builtinWrites = builtinWriteTools();
+  assert.ok(builtinWrites.length >= 1, '出厂内置里至少要有一个写工具，否则这条用例什么也没证明');
+
+  const mount = buildPluginRuntime(configWithAsk([...builtinWrites, PLUGIN_WRITE]), {
+    inline: [writePlugin('xixi.writer', PLUGIN_WRITE)],
+  });
+  await mount.start();
+
+  for (const name of [...builtinWrites, PLUGIN_WRITE]) {
+    assert.equal(mount.registry.check(name, 'conversation').verdict, 'ask', `${name} 被声明了就该被判成需要确认`);
+  }
+
+  // ask 仍然被广告给模型（ask ≠ deny）：否则「模型发起 → 权限 ASK → 持久化」这条流程从真实一轮里
+  // 根本走不到 —— 模型看不到的工具，是不会去调用的。
+  const offered = (mount.registry.definitionsForRound('conversation', 1) ?? []).map((definition) => definition.name);
+  for (const name of [...builtinWrites, PLUGIN_WRITE]) {
+    assert.ok(offered.includes(name), `${name} 该仍然对模型可见：${offered.join('、')}`);
+  }
+  await mount.shutdown();
+});
+
+test('an out-of-range TTL is clamped by the existing ceiling, never silently accepted', async () => {
+  const config = configWithAsk([TOOL]);
+  const bad = 999_999; // 越界：既有上限是 24 小时（与配置那条路共用同一个上限）。
+  const configPathCeiling = parseToolApprovalSettings({ approval: { ttl_seconds: bad } }).ttlSeconds;
+  assert.ok(configPathCeiling <= 24 * 60 * 60, `既有上限不该超过一天：${configPathCeiling}`);
+
+  const clamped = resolveToolApprovalSettings(config, { ask: [TOOL], ttlSeconds: bad });
+  assert.equal(clamped.ttlSeconds, configPathCeiling, '显式来源与配置来源共用同一个上限');
+  assert.ok(clamped.ttlSeconds < bad, '越界值不许原样通过');
+
+  // 不可用的值退回出厂默认（不是 NaN / Infinity / 负数落进到期计算）。
+  const fallback = parseToolApprovalSettings({}).ttlSeconds;
+  for (const unusable of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(resolveToolApprovalSettings(config, { ask: [TOOL], ttlSeconds: unusable }).ttlSeconds, fallback, `${unusable} 该退回默认`);
+  }
+  // 夹紧不是「一律改成默认」：合法区间内的值原样保留。
+  assert.equal(resolveToolApprovalSettings(config, { ask: [TOOL], ttlSeconds: 60 }).ttlSeconds, 60);
+
+  // 可观察后果：夹紧发生在算 `expires_at` 之前 —— 宿主拿到的是有界的那一个，落库的到期时间可解析、
+  // 且不超过一个上限。这就是「不许静默接受」在数据上的样子（`ttlSeconds: Infinity` 会写到不可解析的
+  // 到期时间，而这一行是重启后恢复待批请求的唯一依据）。
+  const dir = tempDir();
+  const clock = () => REQUESTED_AT;
+  const store = openStore(dir, clock);
+  try {
+    const settings = resolveToolApprovalSettings(config, { ask: [TOOL], ttlSeconds: Number.POSITIVE_INFINITY });
+    const manager = new ToolApprovalManager({ store, settings, now: clock });
+    const registry = new ToolRegistry({
+      permission: new ToolPermission({ role: 'resident', askTools: [...settings.ask] }),
+      approval: manager,
+    });
+    registry.register(probeTool({ name: TOOL }));
+    manager.useRegistry(registry);
+
+    assert.equal(manager.ttlSeconds, fallback, '宿主拿到的也是归一化之后的那一份');
+    const asked = await registry.execute(
+      { name: TOOL, arguments: { amount: 1 } },
+      { scope: 'conversation', timezone: 'Asia/Shanghai', now: REQUESTED_AT, sessionId: 'sess_ttl', actorId: 'father' },
+    );
+    const stored = new ToolApprovalStore(store).get(String(asked.payload['approvalId']));
+    assert.ok(stored !== null);
+    const expiry = Date.parse(stored.expiresAt);
+    assert.ok(Number.isFinite(expiry), `到期时间必须可解析：${stored.expiresAt}`);
+    assert.ok(expiry - REQUESTED_AT.getTime() <= 24 * 60 * 60 * 1000, `到期时间不许越过上限：${stored.expiresAt}`);
+  } finally {
+    store.close();
+  }
+});
+
+test('a declared name is normalised first, so a sloppy declaration really takes effect', () => {
+  // 归一化：去空白、丢空串、去重。两条来源同一套规则。
+  assert.deepEqual(resolveToolApprovalSettings(configWithAsk([]), { ask: [` ${TOOL} `, TOOL, ''], ttlSeconds: 300 }), {
+    ask: [TOOL],
+    ttlSeconds: 300,
+  });
+  assert.deepEqual(parseToolApprovalSettings({ approval: { ask: [` ${TOOL} `] } }).ask, [TOOL], '配置那条路本来就是归一化的');
+
+  const chain = buildToolChain(configWithAsk([]), { approval: { ask: [` ${TOOL} `], ttlSeconds: 300 } });
+  chain.register(probeTool({ name: TOOL }));
+  assert.equal(chain.check(TOOL, 'conversation').verdict, 'ask', '带空白的声明要真的命中工具名');
+
+  // 反事实：不归一化时，带空白的名字与工具名不相等 —— 那种声明「看起来生效、实际永远匹配不上」。
+  // 这条不是装饰，它说明上面那条断言真的在考归一化（把归一化拿掉，这里仍然绿、上面变红）。
+  const raw = buildToolChain(configWithAsk([]), {
+    permission: new ToolPermission({ role: 'resident', askTools: [` ${TOOL} `] }),
+  });
+  raw.register(probeTool({ name: TOOL }));
+  assert.equal(raw.check(TOOL, 'conversation').verdict, 'allow');
 });

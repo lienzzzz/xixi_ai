@@ -24,6 +24,12 @@
  * 生命周期并挂载，插件工具对模型可见；但四个 live 入口（`scripts/chat.ts`、`scripts/serve-chat.ts`、
  * `scripts/field-test.ts`、`scripts/voice-turn.ts`）今天仍只调 `buildToolChain`，**入口尚未接线**。**
  *
+ * **审批声明这一层（V0.3 P2.5-B）**：`buildToolChain` / `buildPluginRuntime` 构造的**权限策略**直接来自
+ * 声明面（`resolveToolApprovalSettings` → `ToolPermission.askTools`），所以「哪些工具要先问一句」在这一层
+ * 就已经是模型可见工具链的判定结果（`ask` 仍然被广告给模型，只有 `deny` 不可见）。持久化宿主
+ * （`ToolApprovalManager`）由 `createResidentRuntime` 构造并经 `approvalGate` 注入；**入口是否真的经过它，
+ * 取决于入口是否走 `createResidentRuntime`** —— 那是上面那条「入口尚未接线」里的同一件事。
+ *
  * 下一条线在 `./resident-runtime.ts`：`createResidentRuntime` 把本条的工具链、插件内核、审批宿主、
  * durable 提醒与 `ConversationEngine` 组装成**一个对象**（V0.3 P2.5-A）。它是上面那条「入口接线」的
  * 下一站；`verifyOnAssemble` 的调用点也在那里 —— 但那只对**经过该装配点**的提示词成立，今天**没有
@@ -80,6 +86,8 @@ export interface ToolChainOptions {
   /**
    * 工具审批的声明面（pack §5）。不给就读 `config.tools`（`tools.approval.ask` / `ttl_seconds`）。
    * **两边都没有 = 没有任何工具需要 ASK**：审批要先声明，不是「默认先问一句」。
+   * 两边的内容都由 `resolveToolApprovalSettings` 按同一套不变量归一化（名字去空白/去重，
+   * 有效期夹在既有上限内），所以「从配置来的」与「入口直接给的」声明走的是同一套规则。
    */
   readonly approval?: ToolApprovalSettings;
   /**
@@ -94,12 +102,29 @@ export interface ToolChainOptions {
  *
  * 单独导出是为了让「声明从哪来」这件事只有一个答案：`buildToolChain` 与
  * `buildPluginRuntime` 走同一个函数，入口构造 `ToolApprovalManager` 时也用它。
+ *
+ * **优先级只决定「用哪一份声明」，不决定「这份声明是否合法」（V0.3 P2.5-B）。** 胜出的那一份
+ * 会再过一遍 `parseToolApprovalSettings` —— 与配置那条路**同一个函数、同一套上限**，所以两条
+ * 来源不可能各自漂移：
+ *
+ *  * 名字：去空白、丢空串、去重。声明成 `' xixi_x '` 会**真的**命中工具名 `xixi_x`，而不是
+ *    安静地永远匹配不上（一个看起来生效、实际不生效的声明比一个报错更难查）；
+ *  * 有效期：越过既有上限（24 小时）的**取上限**，不可用的（非有限数、小于 1 秒）退回出厂默认
+ *    —— 越界值不会被当成合法值悄悄放行。这条路径是入口构造 `ToolApprovalManager` 时用的
+ *    （`packages/runtime/src/resident-runtime.ts`），所以夹紧发生在**算 `expires_at` 之前**：
+ *    否则一个 `ttlSeconds: Infinity` 会一路变成一行不可解析的到期时间。
+ *
+ * 显式传入一份**空表**是「这个入口不要任何审批」，不会被配置里的声明补回来（`??` 的语义）。
  */
 export function resolveToolApprovalSettings(
   config: XixiConfig,
   override?: ToolApprovalSettings | undefined,
 ): ToolApprovalSettings {
-  return override ?? parseToolApprovalSettings(config.tools);
+  const declared = override ?? parseToolApprovalSettings(config.tools);
+  // Round-trip through the config parser so *both* sources obey one set of invariants: the parser is
+  // the single place that owns the ask-list normalisation and the TTL ceiling, so neither path can
+  // drift from the other. Idempotent for the config path (its output is already normalised).
+  return parseToolApprovalSettings({ approval: { ask: declared.ask, ttl_seconds: declared.ttlSeconds } });
 }
 
 /**
