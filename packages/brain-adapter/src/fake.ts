@@ -50,7 +50,7 @@ export function scriptedToolPlan(input: UserTurnInput, round: number): readonly 
   const text = input.text;
   if (REMINDER_WORDS.test(text)) {
     const what = text.replace(/^(西西[，,]?)?(帮我)?(提醒我|提醒一下|别忘了|记一下)/, '').trim();
-    return [{ name: 'xixi_set_reminder_stub', arguments: { what: what.length > 0 ? what : text } }];
+    return [{ name: 'xixi_set_reminder', arguments: { what: what.length > 0 ? what : text } }];
   }
   if (WEATHER_WORDS.test(text)) return [{ name: 'xixi_get_weather' }];
   if (NEWS_WORDS.test(text)) return [{ name: 'news.latest' }];
@@ -169,7 +169,7 @@ export function sayToolResult(name: string, payload: Record<string, unknown>): s
       const problems = Array.isArray(payload.problems) ? payload.problems.filter((entry) => typeof entry === 'string') : [];
       return problems.length > 0 ? '新闻源现在取不到，晚点再看看。' : '新闻那边现在没有新消息。';
     }
-    case 'xixi_set_reminder_stub': {
+    case 'xixi_set_reminder': {
       const what = textField(payload, 'what');
       if (what === null) return '这件事我还没记清楚，你再说一遍好吗？';
       const when = textField(payload, 'when') ?? '尽快';

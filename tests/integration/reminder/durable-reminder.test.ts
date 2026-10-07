@@ -27,7 +27,7 @@ import { DurableReminderSink, ProactiveLoop, ReminderScheduler, buildToolChain }
 const SPOKEN_AT = new Date('2026-09-30T23:40:00+08:00');
 const DUE_AT = new Date('2026-10-01T08:00:00+08:00');
 const SHANGHAI = 'Asia/Shanghai';
-const TOOL = 'xixi_set_reminder_stub';
+const TOOL = 'xixi_set_reminder';
 const UTTERANCE = '明天八点提醒我打电话。';
 
 const CONFIG_YAML = `

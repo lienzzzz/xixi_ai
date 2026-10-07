@@ -15,7 +15,7 @@ import { test } from 'node:test';
 import { CONVERSATION_SCOPE, buildToolChain } from '../../scripts/field-test.ts';
 import { loadConfig } from '../../scripts/lib/harness.ts';
 
-const BUILT_INS = ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'];
+const BUILT_INS = ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder'];
 
 test('控制台的工具链：出厂不 ASK，声明之后才 ask 且仍然可见', () => {
   const config = loadConfig();
@@ -27,13 +27,13 @@ test('控制台的工具链：出厂不 ASK，声明之后才 ask 且仍然可�
     {
       xixi_get_current_time: 'allow',
       xixi_get_weather: 'allow',
-      xixi_set_reminder_stub: 'allow',
+      xixi_set_reminder: 'allow',
     },
     '出厂配置（config/xixi.example.yaml 的 tools.approval.ask 为空）不该有任何工具需要审批',
   );
 
-  const declared = buildToolChain(config, { approval: { ask: ['xixi_set_reminder_stub'], ttlSeconds: 120 } });
-  assert.equal(declared.check('xixi_set_reminder_stub', CONVERSATION_SCOPE).verdict, 'ask', '声明了才 ask');
+  const declared = buildToolChain(config, { approval: { ask: ['xixi_set_reminder'], ttlSeconds: 120 } });
+  assert.equal(declared.check('xixi_set_reminder', CONVERSATION_SCOPE).verdict, 'ask', '声明了才 ask');
   assert.equal(declared.check('xixi_get_weather', CONVERSATION_SCOPE).verdict, 'allow', '没声明的照旧 allow');
   // 同一个工具集：ask 不是「藏起来」，而是「调用时停下来等人点头」。
   assert.deepEqual(

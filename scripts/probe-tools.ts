@@ -175,7 +175,7 @@ console.log(
     // The programme's own answers, printed so a reader can see the boundaries without a call:
     permissionProbe: {
       guestReminder: new ToolPermission({ role: 'guest' }).check(
-        conversations.find((tool) => tool.name === 'xixi_set_reminder_stub') ?? conversations[0]!,
+        conversations.find((tool) => tool.name === 'xixi_set_reminder') ?? conversations[0]!,
         { scope: 'conversation', role: 'guest' },
       ),
       guestScopeWeather: registry.check('xixi_get_weather', 'guest'),

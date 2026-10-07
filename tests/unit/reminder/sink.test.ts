@@ -1,5 +1,5 @@
 /**
- * V0.3 P2-E — 工具面的接线：`xixi_set_reminder_stub` 真的写进 durable 表（pack §7）。
+ * V0.3 P2-E — 工具面的接线：`xixi_set_reminder` 真的写进 durable 表（pack §7）。
  *
  * 这一组用例走的是**真实工具链**（`buildToolChain` + `ToolRegistry.execute` + 真的内置工具），
  * 而不是往 sink 上直接塞数据 —— P2 之前的缺陷正是「工具接的是内存 sink，所以进程一结束就没了」。
@@ -22,7 +22,7 @@ import { DurableReminderSink, ToolApprovalManager, buildToolChain } from '@xixi/
 
 const SPOKEN_AT = new Date('2026-09-30T23:40:00+08:00');
 const SHANGHAI = 'Asia/Shanghai';
-const TOOL = 'xixi_set_reminder_stub';
+const TOOL = 'xixi_set_reminder';
 
 const CONFIG_YAML = `
 xixi:

@@ -23,7 +23,7 @@ import {
 const CONTEXT = { scope: 'conversation' as const, timezone: 'Asia/Shanghai', now: new Date('2026-10-01T09:00:00+08:00') };
 // V0.3 P2-D: three built-ins. The news tool left this package — it is a plugin tool now
 // (`news.search` / `news.latest` / `news.for_interests`), pinned in tests/unit/core/tool-loop.test.ts.
-const BUILT_INS = ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'];
+const BUILT_INS = ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder'];
 
 function probeTool(overrides: Partial<AgentTool> & { readonly name: string }): AgentTool & { readonly calls: { count: number } } {
   const calls = { count: 0 };
@@ -51,8 +51,8 @@ test('the built-in set is offered to the model as exactly the three Phase 2 tool
   );
   // A guest may read, but the one write tool is not even advertised.
   const forGuest = registry.listForAgent('guest').map((tool) => tool.name);
-  assert.ok(!forGuest.includes('xixi_set_reminder_stub'), `a guest must not see the write tool: ${forGuest.join(',')}`);
-  const guestDecision = registry.check('xixi_set_reminder_stub', 'guest');
+  assert.ok(!forGuest.includes('xixi_set_reminder'), `a guest must not see the write tool: ${forGuest.join(',')}`);
+  const guestDecision = registry.check('xixi_set_reminder', 'guest');
   assert.equal(guestDecision.verdict, 'deny');
   assert.match(guestDecision.reason, /guest|客人|不属于/);
 });

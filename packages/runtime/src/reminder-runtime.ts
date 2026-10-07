@@ -1,9 +1,10 @@
 /**
  * Durable reminder scheduling — the host side of pack `docs/03_AGENT_PLUGIN.md` §7.
  *
- * What was wrong before this file existed: `xixi_set_reminder_stub` wrote the user's words into an
- * in-process array, and the tool itself answered 「到点不会自动响，需要人看一眼」. Nothing survived the
- * process, and nothing ever fired. Two pieces replace that:
+ * What was wrong before this file existed: the reminder tool (then named `xixi_set_reminder_stub`; it
+ * became `xixi_set_reminder` in V0.3 P2.5-E, when the `_stub` name and this wording stopped being
+ * true) wrote the user's words into an in-process array, and answered 「到点不会自动响，需要人看一眼」.
+ * Nothing survived the process, and nothing ever fired. Two pieces replace that:
  *
  *   * {@link DurableReminderSink} is a `ReminderSink` backed by the domain's `reminders` table, so
  *     「明天八点提醒我打电话」 becomes an absolute `due_at` + `timezone` row that is still there after a
@@ -69,7 +70,7 @@ export interface DurableReminderSinkOptions {
 
 /**
  * A `ReminderSink` that persists. Wire it into the tool chain as the `reminderSink` option and
- * `xixi_set_reminder_stub` stops being a memory hole.
+ * `xixi_set_reminder` stops being a memory hole.
  *
  * The returned `ScheduledReminder.when` is the **resolved absolute instant**, not the user's words:
  * the tool result then tells the model the exact time it recorded, and the raw 「明天早上八点」 never

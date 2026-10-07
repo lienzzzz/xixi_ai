@@ -447,7 +447,7 @@ test('a voice turn about the weather runs the tool, and text and voice share tha
     // The console states which capabilities its conversation scope offers: the three
     // built-ins (news is a plugin since P2-D, not a core tool), and the round cap the model cannot raise.
     const state = (await (await fetch(`${handle.url}/api/field/state`)).json()) as Record<string, any>;
-    assert.deepEqual([...state.tools.names].sort(), ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub']);
+    assert.deepEqual([...state.tools.names].sort(), ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder']);
     assert.equal(state.tools.scope, 'conversation');
     assert.equal(state.tools.maxRounds, 4);
 
@@ -528,7 +528,7 @@ test('启用插件后：插件工具在模型可见的链上，而且真被一�
     const state = (await (await fetch(`${handle.url}/api/field/state`)).json()) as Record<string, any>;
     assert.deepEqual(
       [...state.tools.names].sort(),
-      ['news.latest', 'xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'].sort(),
+      ['news.latest', 'xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder'].sort(),
       `插件工具必须对模型可见：${JSON.stringify(state.tools.names)}`,
     );
     assert.equal(handle.runtime.toolChain, handle.runtime.plugins.registry, '状态页与运行时必须是同一条链，不是两份');

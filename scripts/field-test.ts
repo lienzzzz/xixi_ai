@@ -6437,7 +6437,7 @@ export async function runSelfTest(options: { log?: (line: string) => void } = {}
       const builtIns = Array.isArray(toolState.tools?.names) ? [...(toolState.tools.names as string[])].sort() : [];
       check(
         '语音问天气真的调用了工具，回复没有工具内部字样；文字路径走的是同一条链',
-        builtIns.join(',') === ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'].sort().join(',') &&
+        builtIns.join(',') === ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder'].sort().join(',') &&
           toolState.tools.maxRounds === 4 &&
           toolVoice.toolName === 'xixi_get_weather' &&
           toolText.toolName === 'xixi_get_weather' &&

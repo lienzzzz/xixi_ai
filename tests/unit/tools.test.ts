@@ -102,19 +102,21 @@ test('the built-in set is the three Phase 2 tools, and each carries its risk', (
   const tools: AgentTool[] = defaultTools({ defaultPlace: '成都' });
   assert.deepEqual(
     tools.map((tool) => tool.name).sort(),
-    ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'],
+    ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder'],
   );
   for (const tool of tools) {
     assert.equal(tool.parameters.type, 'object');
     assert.equal(tool.parameters.additionalProperties, false, 'tools must not accept undeclared arguments');
     assert.ok(tool.scopes.length > 0, `${tool.name} must declare which surfaces it belongs to`);
   }
-  // The one write tool is a *stub* and declares itself as such: the registry narrows it
-  // (resident, conversation only). Nothing dangerous exists in the PoC (§19.2, 铁律 7).
-  assert.equal(tools.find((tool) => tool.name === 'xixi_set_reminder_stub')?.risk, 'write');
+  // The one write tool is the narrowest one: the registry narrows it to a resident on the
+  // conversation surface. Nothing dangerous exists in the PoC (§19.2, 铁律 7).
+  assert.equal(tools.find((tool) => tool.name === 'xixi_set_reminder')?.risk, 'write');
   assert.ok(tools.filter((tool) => tool.risk === 'read').length >= 2, 'the rest are read-only');
   assert.ok(!tools.some((tool) => tool.risk === 'dangerous'));
   assert.ok(!tools.some((tool) => /delete|control|unlock|pay/i.test(tool.name)));
+  // V0.3 P2.5-E：改名是**改名**，不是「注册一个新的再留一个旧的」——旧名字不许作为第二个注册面回来。
+  assert.ok(!tools.some((tool) => tool.name === 'xixi_set_reminder_stub'), '旧名字不许留兼容别名');
 });
 
 /**
@@ -133,7 +135,7 @@ test('no core tool carries a news seam any more (P2-D moved it into a plugin)', 
   assert.ok(!names.includes('xixi_news_stub'), 'P2-D 删掉了这个命名');
 });
 
-test('the reminder stub records what it was told and still declares a write risk', async () => {
+test('the reminder tool records what it was told, answers 「已经记下」, and still declares a write risk', async () => {
   const sink = createMemoryReminderSink();
   const tool = createReminderTool({ sink });
   const result = await tool.execute({ what: '吃药', when: '晚上七点' }, CONTEXT);
@@ -141,6 +143,11 @@ test('the reminder stub records what it was told and still declares a write risk
   assert.equal(sink.reminders.length, 1);
   assert.equal(sink.reminders[0]?.what, '吃药');
   assert.equal(sink.reminders[0]?.when, '晚上七点');
+  // 名字与回话都不再自述实现细节（V0.3 P2.5-E）：内存 sink 时代那句「到点不会自动响，需要人看一眼」
+  // 在 durable sink + 调度器接上之后与事实相反；模型也不需要知道 scheduler 内部在做什么。
+  assert.equal(tool.name, 'xixi_set_reminder');
+  assert.equal(result.note, '已经记下');
+  assert.ok(!/不会自动响|需要人看一眼|stub/.test(JSON.stringify(result)), `返回里不许再自述实现细节：${JSON.stringify(result)}`);
   // Nothing to remind about is a refusal, not an empty reminder row.
   const empty = await tool.execute({ what: '  ' }, CONTEXT);
   assert.equal(empty.registered, false);

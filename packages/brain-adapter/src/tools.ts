@@ -9,7 +9,7 @@
  * Phase 2 set — three built-ins:
  *   * `xixi_get_current_time`  (read)   — local date/time/weekday
  *   * `xixi_get_weather`       (read)   — short forecast from the weather client
- *   * `xixi_set_reminder_stub` (write)  — records a reminder
+ *   * `xixi_set_reminder`      (write)  — records a reminder
  *
  * V0.3 P2-D removed the fourth one, `xixi_news_stub`: news is a **plugin** now
  * (`@xixi/plugins/news` contributes `news.search` / `news.latest` / `news.for_interests`), so this
@@ -154,7 +154,11 @@ export interface ScheduledReminder {
   readonly recordedAt: string;
 }
 
-/** Where `xixi_set_reminder_stub` puts a reminder (the PoC sink is in-process). */
+/**
+ * Where `xixi_set_reminder` puts a reminder. The default here is in-process
+ * ({@link createMemoryReminderSink}); a deployment that wants the reminder to survive a restart wires
+ * the durable one instead (`DurableReminderSink` in `@xixi/runtime`, backed by the `reminders` table).
+ */
 export interface ReminderSink {
   schedule(input: { readonly what: string; readonly when: string; readonly recordedAt: string }): Promise<ScheduledReminder> | ScheduledReminder;
 }
@@ -178,15 +182,21 @@ export function createMemoryReminderSink(): ReminderSink & { readonly reminders:
 }
 
 /**
- * `xixi_set_reminder_stub` — a *write* tool: the first one in the PoC, so it is the
- * one the permission policy has to narrow (resident only, conversation/admin scope,
- * never for a guest, never while she is talking to herself).
+ * `xixi_set_reminder` — the one *write* tool: the first one in the PoC, so it is the one the
+ * permission policy has to narrow (resident only, conversation/admin scope, never for a guest,
+ * never while she is talking to herself).
+ *
+ * V0.3 P2.5-E renamed it from `xixi_set_reminder_stub`: the `_stub` suffix and the return text that
+ * admitted 「到点不会自动响」 both described the in-process sink, and both stopped being true once the
+ * durable sink and the scheduler landed. There is **no** compatibility alias — a second registration
+ * of the same capability under the old name would be exactly the two-names-for-one-thing the rename
+ * is meant to end.
  */
 export function createReminderTool(options: ReminderToolOptions = {}): AgentTool {
   const sink = options.sink ?? createMemoryReminderSink();
   const now = options.now ?? (() => new Date());
   return {
-    name: 'xixi_set_reminder_stub',
+    name: 'xixi_set_reminder',
     description: '帮用户记一件事，到点提醒。用户说“提醒我……”时使用。记下后用自己的话说一声就好，不要念字段名。',
     parameters: {
       type: 'object',
@@ -206,7 +216,7 @@ export function createReminderTool(options: ReminderToolOptions = {}): AgentTool
       const when = typeof args.when === 'string' && args.when.trim().length > 0 ? args.when.trim() : '尽快';
       const recordedAt = now().toISOString();
       const reminder = await sink.schedule({ what, when, recordedAt });
-      return { registered: true, id: reminder.id, what: reminder.what, when: reminder.when, recordedAt, note: '已经记下；到点不会自动响，需要人看一眼' };
+      return { registered: true, id: reminder.id, what: reminder.what, when: reminder.when, recordedAt, note: '已经记下' };
     },
   };
 }

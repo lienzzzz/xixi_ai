@@ -38,7 +38,7 @@ xixi:
 `);
 
 const CONTEXT: ToolExecutionContext = { scope: 'conversation', timezone: 'Asia/Shanghai', now: new Date('2026-10-05T09:00:00+08:00') };
-const BUILT_INS = ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'];
+const BUILT_INS = ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder'];
 
 test('the namespace is mcp.<server>.<tool>, and it is built from a conservative sanitizer', () => {
   assert.equal(mcpToolName('weather', 'forecast'), 'mcp.weather.forecast');

@@ -101,7 +101,7 @@ test('四个 live 入口报告的工具链与 console 是同一条', { timeout: 
   // part of what "the same chain" means.
   assert.deepEqual(
     expected.tools,
-    ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'],
+    ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder'],
     '内置工具集就是这三个（pack Phase 2；新闻不是内置工具了）',
   );
   assert.deepEqual(
@@ -109,7 +109,7 @@ test('四个 live 入口报告的工具链与 console 是同一条', { timeout: 
     {
       xixi_get_current_time: 'allow',
       xixi_get_weather: 'allow',
-      xixi_set_reminder_stub: 'allow',
+      xixi_set_reminder: 'allow',
     },
     '三个内置工具的权限判定（会话作用域）',
   );
@@ -190,7 +190,7 @@ test('试用页：启用插件后跑得完一轮文字对话，插件工具真�
     assert.equal(trial.state, 'started');
     assert.deepEqual(
       trial.toolChain.listForAgent(CONVERSATION_SCOPE).map((tool) => tool.name).sort(),
-      ['news.latest', 'xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder_stub'].sort(),
+      ['news.latest', 'xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder'].sort(),
       '插件工具必须挂在这一页的那条链上（模型可见）',
     );
     // 入口自己那个运行时（模块级）也走同一个装配函数：链就是它的注册表。
