@@ -193,30 +193,81 @@ xixi:
   # 不做「看起来危险就先问一句」的自动推断 —— 那会让每个部署凭空多出一步人工确认。
   tools:
     approval:
-      ask: []            # 需要人工确认的工具名，精确匹配；例如写 ["xixi_set_reminder_stub"]
+      ask: []            # 需要人工确认的工具名，精确匹配；例如写 ["xixi_set_reminder"]
       ttl_seconds: 300   # 待批请求的有效期（秒）：过期不执行，落 approval_expired
 
-  # 新闻（V0.3 P2-D，pack `docs/03_AGENT_PLUGIN.md` §6）。
-  # **这一段今天是注释，不是可调键** —— `parseXixiConfig` 不读它（`packages/domain/src/config.ts`
-  # 的配置解析不在本次改动范围）。读新闻参数的是插件自己的入参
-  # `createNewsPlugin({ sources, interests, ledger, quietHours, presence, defaultTopic })`
-  # （`@xixi/plugins/news`）与装配点 `buildPluginRuntime(config, { news: … })`。
-  # 把「配置文件 → 插件」接起来是下一阶段的显式接线项；在那之前这里**不写假的键**，
-  # 免得有人改了一个没人读的数字还以为生效了（这条纪律是本文件既有做法）。
+  # 插件层（V0.3 P2.5-H，pack `docs/03_AGENT_PLUGIN.md` §1/§4/§6）。
+  # **这一段是真键**，不是注释模板：`packages/domain/src/plugin-settings.ts` 的 `parsePluginSettings`
+  # 严格解析它（越界的值、写错的键名、拼错的 transport 都在**加载配置**时就带路径报错），常驻装配点
+  # `packages/runtime/src/resident-runtime.ts` 在装配时消费它。范围只有三件事：预装的原生插件目录、
+  # 新闻来源、MCP 服务器 —— **没有**远程插件市场（V0.3 不做）。
   #
-  # 今天的新闻面（改代码前先读这三条）：
-  #   * 三个工具 `news.search` / `news.latest` / `news.for_interests` 由插件 `xixi.news` 提供，
-  #     manifest 里显式声明 `capabilities: [tool, topic_source]` 与
-  #     `permissions: [network, tool.register, topic.read]`——多出来的 `network` 是因为 RSS 与公开 API
-  #     都要走 HTTP（`tool.register` 与 `topic.read` 分别是 tool 与 topic_source 两种能力的必需权限）。
-  #     内置工具里**没有**新闻：`xixi_news_stub` 这个命名在 P2-D 被删除。
-  #   * 来源四种：离线桩（`createStubNewsSource`）、RSS（`createRssNewsSource`）、公开 JSON API
-  #     （`createJsonApiNewsSource`）、web search 适配器（`createWebSearchNewsSource`，引擎由部署注入，
-  #     本仓库没有自己的搜索客户端）。来源取不到只会变成返回里的 `problems`，不会让一轮对话崩掉。
-  #   * 主动新闻要过 pack §6 四条（fresh / personally relevant / not already mentioned /
-  #     not quiet context）；静默时段沿用上面的 `proactive.quiet_hours`。
-  # 手动验证（都不花钱）：`node scripts/probe-tools.ts --news` 是离线零网络的端到端探针，
-  # `node scripts/probe-tools.ts --news-live` 取一个真实 RSS（可用 `--news-live <url>` 换源）。
+  # 合并规则一句话：**配置声明了这一层就由配置说了算，没写就照旧**。照旧 = 谁声明谁负责 ——
+  # 入口脚本（终端对话 / 语音单轮 / 设备自检 / 真人感评测 / 对话评测，都在 `scripts/` 里）各自带一份
+  # 新闻来源，现场测试控制台与试用页一个都不带（要复核这条：`git grep -n 'createRssNewsSource' -- scripts`）。
+  plugins:
+    # 插件层总开关。false = 下面的 news / MCP / 目录以及入口自己带的插件一个都不装
+    # （一个部署想退回「没有插件内核」的西西，这是唯一的键）。
+    enabled: true
+
+    # 预装的原生插件目录：每个插件一个 `plugin.json`（内核递归扫描；与 `pluginDirectory` 同一条口径）。
+    # 空 = 不扫描任何目录。目录不存在不报错，只是发现不到插件（内核既有降级口径）。
+    directories: []
+    # 例：
+    # directories:
+    #   - ./plugins
+
+    # 新闻（V0.3 P2-D 的插件 `xixi.news`，pack §6）。
+    news:
+      # `enabled` 问的是**这份配置要不要接管新闻来源**，不是「新闻开不开」：
+      #   false（出厂）= 不接管：谁声明谁负责（入口脚本自带来源，控制台与试用页没有新闻工具）；
+      #   true        = 接管：**所有**入口都用下面这些来源（入口自带的那份被顶掉），控制台与试用页
+      #                 也会因此多出 news.search / news.latest / news.for_interests 三个工具。
+      # 要连新闻一起关掉，用上面的 `plugins.enabled: false`。
+      enabled: false
+      # 只有 `type: rss` 能写在这里：json_api 来源需要一层 map 函数、web-search 来源需要一个注入的
+      # 搜索引擎，两者都不是字符串，所以它们属于原生插件而不属于配置 —— 写别的 type 会被拒并说明理由。
+      # `name` 是返回与健康行里的出处名；不写就用 URL 的主机名。
+      sources:
+        - type: rss
+          name: BBC World
+          url: https://feeds.bbci.co.uk/news/world/rss.xml
+      # `news.for_interests` 的排序依据：这个家关心什么（空 = 还没有可证明相关的东西）。
+      interests: []
+
+    # MCP 服务器（pack §4）：`transport: stdio` 起一个命令，`transport: http` 连一个地址。
+    # 配置里只能写这两样 —— **连接函数是在装配点由它们造出来的**，配置类型里没有函数。
+    # `risk` 是这个部署对这些工具能干什么的声明（默认 read，永远不是服务器自称）；
+    # `dangerous` 会被核心一律拒绝（铁律 7）。`<name>` 就是命名空间段：工具名 `mcp.<name>.<tool>`。
+    mcp:
+      servers: {}
+      # 例（stdio）：
+      #   weather:
+      #     transport: stdio
+      #     command: node
+      #     args: ['./tools/weather-mcp.js']
+      #     timeout_ms: 15000        # 单次请求上限，[1000, 600000] ms
+      # 例（http）：
+      #   calendar:
+      #     transport: http
+      #     url: https://mcp.example.com/calendar
+      # 停用一台：`enabled: false`（留在配置里，但不进内核、不连、不向模型广告它的工具）。
+      # 注意：配了服务器之后，`--print-wiring` 会真的连一次（它要报告模型可见的工具集）；连不上只会
+      # 少几个工具并在健康报告里留下服务器自己的失败原因，不会让入口起不来。
+      #
+      # 今天的新闻面（改代码前先读这三条）：
+      #   * 三个工具 `news.search` / `news.latest` / `news.for_interests` 由插件 `xixi.news` 提供，
+      #     manifest 里显式声明 `capabilities: [tool, topic_source]` 与
+      #     `permissions: [network, tool.register, topic.read]`——多出来的 `network` 是因为 RSS 与公开 API
+      #     都要走 HTTP（`tool.register` 与 `topic.read` 分别是 tool 与 topic_source 两种能力的必需权限）。
+      #     内置工具里**没有**新闻：`xixi_news_stub` 这个命名在 P2-D 被删除。
+      #   * 来源四种：离线桩（`createStubNewsSource`）、RSS（`createRssNewsSource`）、公开 JSON API
+      #     （`createJsonApiNewsSource`）、web search 适配器（`createWebSearchNewsSource`，引擎由部署注入，
+      #     本仓库没有自己的搜索客户端）。来源取不到只会变成返回里的 `problems`，不会让一轮对话崩掉。
+      #   * 主动新闻要过 pack §6 四条（fresh / personally relevant / not already mentioned /
+      #     not quiet context）；静默时段沿用上面的 `proactive.quiet_hours`。
+      # 手动验证（都不花钱）：`node scripts/probe-tools.ts --news` 是离线零网络的端到端探针，
+      # `node scripts/probe-tools.ts --news-live` 取一个真实 RSS（可用 `--news-live <url>` 换源）。
 
   # 提醒（V0.3 P2-E，pack `docs/03_AGENT_PLUGIN.md` §7 durable Reminder）。
   # 本段**已被代码读取**：`packages/domain/src/reminders.ts` 的 `parseReminderSettings` 读它，

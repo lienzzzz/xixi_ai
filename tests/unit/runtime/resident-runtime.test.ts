@@ -25,16 +25,24 @@
  * `packages/runtime/src/resident-runtime.ts` 的接线状态块，最后一条用例会守着它。
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { FakeBrainAdapter, type AgentTool, type ScriptedToolRequest, type ToolExecutionContext, type ToolRegistry } from '@xixi/brain-adapter';
 import { ConversationEngine } from '@xixi/conversation';
-import { ReminderStore, openXixiStore, parseXixiConfig, type XixiConfig, type XixiStore } from '@xixi/domain';
+import { ReminderStore, loadXixiConfig, openXixiStore, parseXixiConfig, type XixiConfig, type XixiStore } from '@xixi/domain';
 import type { InlinePlugin } from '@xixi/plugins';
-import { CONVERSATION_SCOPE, DurableReminderSink, RuntimeError, createResidentRuntime, type XixiResidentRuntime } from '@xixi/runtime';
+import { createStubNewsSource, stubItem, type NewsPluginOptions } from '@xixi/plugins/news';
+import {
+  CONVERSATION_SCOPE,
+  DurableReminderSink,
+  RuntimeError,
+  createResidentRuntime,
+  type PluginChainOptions,
+  type XixiResidentRuntime,
+} from '@xixi/runtime';
 
 /** A fixed instant: 「明天八点」 is 2026-10-06 08:00 in Shanghai, and nothing here reads the wall clock. */
 const T0 = new Date('2026-10-05T09:00:00+08:00');
@@ -109,27 +117,38 @@ interface Rig {
  *
  * The adapter is scripted to ask for that tool on the first round of a turn whose text contains
  * 「插件」, so the same rig serves both the visibility assertions and a real end-to-end turn.
- * `plugins` 给了就用给的那一批（坏插件那两条用例要的是别的插件，不是这一支）。
+ * `plugins` 给了就用给的那一批（坏插件那两条用例要的是别的插件，不是这一支）；`chain` 是**入口自己声明的**
+ * 插件层入参（news / mcpServers / sources / fetchImpl…），P2.5-H 的「配置 vs 入口声明」两条用例要用它；
+ * `toolName` 换掉替身请求的那个工具（默认 `demo.echo`）。
  */
-function rig(overrides: { readonly config?: XixiConfig; readonly plugins?: readonly InlinePlugin[] } = {}): Rig {
+function rig(
+  overrides: {
+    readonly config?: XixiConfig;
+    readonly plugins?: readonly InlinePlugin[];
+    readonly chain?: PluginChainOptions;
+    readonly toolName?: string;
+  } = {},
+): Rig {
   const root = mkdtempSync(join(tmpdir(), 'xixi-resident-runtime-'));
   const store = openXixiStore({ dbPath: join(root, 'xixi.sqlite'), clock: () => T0 });
   const options = overrides.config ?? config();
   store.seedSelfProfile(options.personality.base);
   const echo = probeTool('demo.echo');
+  const scripted = overrides.toolName ?? 'demo.echo';
   const builtWith: { toolChain?: ToolRegistry } = {};
   const runtime = createResidentRuntime({
     config: options,
     store,
     now: () => T0,
     inline: overrides.plugins ?? [inlinePlugin('xixi.demo', echo)],
+    ...(overrides.chain ?? {}),
     conversation: { clock: () => T0, turnTimeoutMs: 5_000 },
     model: ({ toolChain }) => {
       builtWith.toolChain = toolChain;
       return new FakeBrainAdapter({
         registry: toolChain,
         scope: CONVERSATION_SCOPE,
-        toolPlan: (input, round): readonly ScriptedToolRequest[] => (round === 1 && input.text.includes('插件') ? [{ name: 'demo.echo' }] : []),
+        toolPlan: (input, round): readonly ScriptedToolRequest[] => (round === 1 && input.text.includes('插件') ? [{ name: scripted }] : []),
       });
     },
   });
@@ -471,6 +490,246 @@ test('插件层失败不穿透装配点：activate / dispose 抛异常都不让 
     assert.deepEqual(runtime.toolChain.names(), []);
   } finally {
     dispose(r);
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// V0.3 P2.5-H：配置真的能管插件（`xixi.plugins` → 目录 / 新闻来源 / MCP 服务器）
+//
+// 这一组的判据不是「源码里出现了某个函数名」，而是**装配之后能观察到什么**：
+//   * 配置里的 MCP 服务器 → `runtime.plugins.mcp.serverNames()`（内核真的收到了），且**还没连**；
+//   * 配置里的 `command` → 真的连上了一台本地桩服务器，工具挂进模型可见的链并被一轮对话执行；
+//   * 配置里的新闻来源 → 插件 `state().sources` 里那一条（全程一个请求都没发）；
+//   * 配置里的目录 → 内核真的发现了那个插件并挂上它的工具。
+// 反面同样重要：出厂配置（`news.enabled: false`、空 servers）与「入口自己声明的那份」都不许被改变 ——
+// 那一条就是「加配置不改变默认工具集」。
+// ---------------------------------------------------------------------------------------------
+
+const EXAMPLE_CONFIG = join(REPO_ROOT, 'config', 'xixi.example.yaml');
+
+/** `plugins.mcp.servers` 的一段 YAML：一台真的 stdio 服务器，外加一台被停用的（它不该进内核）。 */
+function mcpServersYaml(script: string): string {
+  // 单引号是 YAML 的字面量引法：Windows 的 `C:\...` 用双引号会被当成转义序列。
+  return `  plugins:
+    mcp:
+      servers:
+        fixture:
+          transport: stdio
+          command: '${process.execPath}'
+          args: ['${script}']
+          timeout_ms: 15000
+        retired:
+          enabled: false
+          transport: stdio
+          command: '${process.execPath}'
+          args: ['${script}']
+`;
+}
+
+/**
+ * 一个**跑在另一个进程里**的桩 MCP 服务器（配置里写的就是「起哪个命令」，所以它必须是个真实的可执行入口）。
+ *
+ * SDK 用绝对 URL 引：临时目录不在仓库里，Node 从那里向上找不到 `node_modules`。
+ */
+function writeFixtureMcpServer(dir: string): string {
+  const main = import.meta.resolve('@modelcontextprotocol/server');
+  const stdio = import.meta.resolve('@modelcontextprotocol/server/stdio');
+  const script = join(dir, 'fixture-mcp-server.mjs');
+  writeFileSync(
+    script,
+    [
+      `import { fromJsonSchema, McpServer } from '${main}';`,
+      `import { StdioServerTransport } from '${stdio}';`,
+      "const server = new McpServer({ name: 'fixture', version: '0.0.1' });",
+      "server.registerTool('echo', { description: '配置驱动的桩 MCP 工具',",
+      "  inputSchema: fromJsonSchema({ type: 'object', properties: {}, additionalProperties: false }) },",
+      "  async () => ({ content: [{ type: 'text', text: '来自配置里的 MCP 服务器' }] }));",
+      'await server.connect(new StdioServerTransport());',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  return script;
+}
+
+test('配置声明的 MCP 服务器在装配时变成连接函数（还没连）；enabled:false 的那台不进内核（P2.5-H）', () => {
+  // 这一步故意**不** start()：要证明的是「配置 → McpServerSpec + connect 工厂」这一层在装配时就完成了，
+  // 而连接仍然是惰性的（内核在自己的 activate() 里才连）。
+  const r = rig({ config: config(mcpServersYaml('/tmp/xixi-never-run.mjs')), plugins: [] });
+  try {
+    assert.deepEqual(r.runtime.plugins.mcp?.serverNames(), ['fixture'], '配置里的那台进了内核，被停用的那台没进');
+    const statuses = r.runtime.plugins.mcp?.status() ?? [];
+    assert.deepEqual(statuses.map((entry) => `${entry.server}=${entry.state}`), ['fixture=idle'], '装配只翻译配置，不连接');
+    assert.equal(statuses[0]?.stats.connects, 0, '一次连接都不许发生');
+  } finally {
+    dispose(r);
+  }
+});
+
+test('配置里的 MCP 服务器真的连得上：工具挂进模型可见的链，并被一轮对话执行（离线本地桩服务器）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'xixi-mcp-fixture-'));
+  const r = rig({ config: config(mcpServersYaml(writeFixtureMcpServer(dir))), plugins: [], toolName: 'mcp.fixture.echo' });
+  try {
+    const report = await r.runtime.start();
+    const status = r.runtime.plugins.mcp?.status()[0];
+    assert.equal(status?.state, 'connected', `配置里那台必须真的连上：${JSON.stringify(status)}`);
+    assert.ok(report.tools.includes('mcp.fixture.echo'), `模型可见的工具里该有它：${report.tools.join('、')}`);
+    assert.ok(report.mounted.includes('mcp.fixture.echo'), '它必须是「这次启动挂上去的」，不是本来就在链上');
+    assert.ok(offeredTools(r.runtime.toolChain).includes('mcp.fixture.echo'));
+
+    // 「接得上」不是读状态：走一轮真实对话，模型请求它、核心执行它。
+    const session = r.store.createSession();
+    const turn = await r.runtime.conversation.respond({ sessionId: session.sessionId, text: '用插件里的 MCP 工具试试', addressed: true });
+    assert.equal(turn.toolName, 'mcp.fixture.echo', '这一轮必须走配置里那台服务器的工具');
+    // 回复文案不断言：离线替身不为它不认识的工具说话（`sayToolResult` 的 default 分支）。
+    // 「那台服务器真的答了」由核心执行路径证明：工具链 → MCP 适配器 → 子进程 → 结果回读。
+    const called = await r.runtime.toolChain.execute({ name: 'mcp.fixture.echo', arguments: {} }, CONTEXT);
+    assert.equal(called.record.error, null, `工具调用不该失败：${JSON.stringify(called.record)}`);
+    assert.match(JSON.stringify(called.payload), /来自配置里的 MCP 服务器/, '结果必须来自配置里那台服务器');
+
+    // 关停真的把连接放掉（子进程随之结束），链也清空。
+    await r.runtime.stop();
+    assert.notEqual(r.runtime.plugins.mcp?.status()[0]?.state, 'connected', '关停之后不许还挂着一条连接');
+    assert.deepEqual(r.runtime.toolChain.names(), []);
+  } finally {
+    if (r.runtime.state === 'started') await r.runtime.stop();
+    dispose(r);
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('配置里的新闻来源真的装进插件（离线、一个请求都不发）；出厂配置不接管，入口自己那份照旧（P2.5-H）', async () => {
+  const fetched: string[] = [];
+  const spyFetch = (async (input: string | URL | Request) => {
+    fetched.push(String(input));
+    throw new Error('离线用例不许联网');
+  }) as unknown as typeof fetch;
+
+  // ① 配置接管：`enabled: true` + 一条 rss → 没有自带来源的入口也用它。
+  const withConfigNews = rig({
+    config: config(`  plugins:
+    news:
+      enabled: true
+      sources:
+        - type: rss
+          name: 配置里的来源
+          url: https://example.com/config-feed.xml
+`),
+    plugins: [],
+    chain: { fetchImpl: spyFetch },
+  });
+  try {
+    await withConfigNews.runtime.start();
+    assert.deepEqual(
+      withConfigNews.runtime.plugins.news?.state().sources.map((source) => `${source.name}:${source.kind}`),
+      ['配置里的来源:rss'],
+      '配置里那条 RSS 必须真的成为插件的来源',
+    );
+    assert.deepEqual(fetched, [], '装配来源不许发请求（来源只在被调用时才取）');
+  } finally {
+    await withConfigNews.runtime.stop();
+    dispose(withConfigNews);
+  }
+
+  // ② 出厂的 `news.enabled: false`（配置不接管）+ 入口自己声明的那份 → 入口那份照旧。
+  //    这正是四个 CLI 入口今天的处境：它们各自在 scripts/ 里带了一条 RSS。
+  const ownNews: NewsPluginOptions = {
+    sources: [() => createStubNewsSource({ name: '入口自己那份', items: [stubItem({ id: 'own-1', title: '入口的头条' })] })],
+  };
+  const byEntry = rig({ config: loadXixiConfig(EXAMPLE_CONFIG), plugins: [], chain: { news: ownNews, fetchImpl: spyFetch } });
+  try {
+    await byEntry.runtime.start();
+    assert.deepEqual(byEntry.runtime.plugins.news?.state().sources.map((source) => source.name), ['入口自己那份']);
+  } finally {
+    await byEntry.runtime.stop();
+    dispose(byEntry);
+  }
+
+  // ③ 出厂配置 + 入口一个都不声明（现场测试控制台与试用页就是这一类）→ 没有新闻插件。
+  //    「加配置不改变默认工具集」在新闻这一半上的证据就是这一条。
+  const none = rig({ config: loadXixiConfig(EXAMPLE_CONFIG), plugins: [], chain: { fetchImpl: spyFetch } });
+  try {
+    const report = await none.runtime.start();
+    assert.equal(none.runtime.plugins.news, undefined, '出厂配置不接管新闻：没有自带来源的入口就没有新闻工具');
+    assert.deepEqual([...report.tools].sort(), ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder'].sort());
+  } finally {
+    await none.runtime.stop();
+    dispose(none);
+  }
+
+  assert.deepEqual(fetched, [], '整条用例一个请求都没发过');
+});
+
+test('plugins.enabled:false 是插件层总开关：入口自己带的 inline 插件也不装，链上只剩三个内置工具（P2.5-H）', async () => {
+  // 反面对照就在本文件第一条用例：默认配置（`enabled` 缺省 = true）下，同一个 rig 的 `demo.echo` 是装上的。
+  const r = rig({ config: config('  plugins:\n    enabled: false\n') });
+  try {
+    const report = await r.runtime.start();
+    assert.deepEqual(
+      [...report.tools].sort(),
+      ['xixi_get_current_time', 'xixi_get_weather', 'xixi_set_reminder'].sort(),
+      `关掉插件层之后链上只剩内置工具：${report.tools.join('、')}`,
+    );
+    assert.deepEqual(report.mounted, []);
+    assert.equal(report.plugins.length, 0);
+    assert.equal(r.echo.calls.count, 0, 'inline 插件也不该被激活');
+    assert.equal(r.runtime.plugins.news, undefined);
+    assert.equal(r.runtime.plugins.mcp, undefined);
+  } finally {
+    await r.runtime.stop();
+    dispose(r);
+  }
+});
+
+test('配置里的插件目录真的被内核发现并装上（预装的原生插件，P2.5-H）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'xixi-plugin-dir-'));
+  const pluginRoot = join(dir, 'native');
+  mkdirSync(pluginRoot, { recursive: true });
+  writeFileSync(
+    join(pluginRoot, 'plugin.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      id: 'demo.native',
+      name: '配置目录里的原生插件',
+      version: '0.1.0',
+      entry: './index.mjs',
+      permissions: ['tool.register'],
+      capabilities: ['tool'],
+    }),
+    'utf8',
+  );
+  writeFileSync(
+    join(pluginRoot, 'index.mjs'),
+    [
+      'export function activate() {',
+      '  return {',
+      '    tools: [{',
+      '      tool: {',
+      "        name: 'native.echo',",
+      "        description: '配置目录里的插件工具',",
+      "        parameters: { type: 'object', properties: {}, additionalProperties: false },",
+      "        risk: 'read',",
+      "        scopes: ['conversation'],",
+      "        async execute() { return { from: 'native.echo' }; },",
+      '      },',
+      '    }],',
+      '  };',
+      '}',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+
+  const r = rig({ config: config(`  plugins:\n    directories:\n      - '${pluginRoot}'\n`), plugins: [] });
+  try {
+    const report = await r.runtime.start();
+    assert.deepEqual(report.plugins.map((entry) => `${entry.pluginId}=${entry.state}`), ['demo.native=active']);
+    assert.ok(report.mounted.includes('native.echo'), `目录里的插件工具该被挂上：${report.mounted.join('、') || '无'}`);
+    assert.ok(offeredTools(r.runtime.toolChain).includes('native.echo'), '模型该看得到它');
+  } finally {
+    await r.runtime.stop();
+    dispose(r);
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
 
