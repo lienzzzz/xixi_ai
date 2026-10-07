@@ -6,7 +6,7 @@
  *          → health → deactivate → dispose
  * ```
  *
- * Four things about this class are deliberate:
+ * Six things about this class are deliberate:
  *
  *  1. **The order is data, not prose.** Every run of the pipeline appends to a journal, so
  *     「permission 先于 load 生效」 is an assertion a test can make (`steps()`), not a claim in a
@@ -19,6 +19,16 @@
  *     failure and keeps the others, so a bad plugin cannot take the household down.
  *  4. **Re-activation is a first-class state.** `deactivate` then `activate` again runs the pipeline
  *     a second time with a fresh bundle, which is how hot-plugging is tested.
+ *
+ * Two more invariants were added by P2.5-I, both about 「状态不许撒谎」:
+ *
+ *  5. **Starting is a one-shot contract.** `loadAll` runs once; a second call is refused with
+ *     `PluginAlreadyStartedError` instead of re-running the pipeline. The old silent behaviour ran
+ *     `activate` twice and left a capability-contributing plugin **inactive** while its tools were
+ *     still in the core registry. Cycling a plugin goes through `deactivate` → `activate` (point 4).
+ *  6. **Health describes a running plugin.** `deactivate` / `dispose` / rollback drop the health
+ *     report together with the capabilities, so nothing can report `ok` (or `degraded`) about a
+ *     plugin that is not running; `PluginInstance.online` is the field that says which case it is.
  */
 import type { AgentScope, AgentTool, ToolRegistry } from '@xixi/brain-adapter';
 
@@ -42,7 +52,7 @@ import {
   type PluginStorage,
 } from './context.ts';
 import { DisposableBundle } from './disposal.ts';
-import { PluginError, PluginLifecycleError, PluginPermissionError } from './errors.ts';
+import { PluginAlreadyStartedError, PluginError, PluginLifecycleError, PluginPermissionError } from './errors.ts';
 import {
   asModuleShape,
   FilePluginSource,
@@ -98,7 +108,23 @@ export interface PluginInstance {
   readonly pluginId: string;
   readonly manifest: PluginManifest;
   readonly state: PluginState;
+  /**
+   * Whether this plugin is running right now — exactly `state === 'active'` (P2.5-I ②).
+   *
+   * It is here because `health` alone cannot answer the question. A console panel that prints only
+   * `health?.status` used to show 「ok」 about a plugin that had already been deactivated, and
+   * 「1 个 MCP 工具在线」 about a connection that was idle. Read `online` first; `health` is only
+   * meaningful while it is `true`.
+   */
+  readonly online: boolean;
   readonly capabilities: readonly string[];
+  /**
+   * The last health report of a plugin that is running (or was running until this moment).
+   *
+   * `undefined` once the plugin is stopped or disposed: a stopped plugin has no live health, and
+   * minting an 「offline」 status here would collide with the plugin's own `down`. It is *not* a
+   * stale snapshot — it is dropped by the same call that releases the plugin's capabilities.
+   */
   readonly health: PluginHealthReport | undefined;
   readonly error: string | undefined;
   readonly journal: readonly PluginLifecycleRecord[];
@@ -134,6 +160,10 @@ export interface PluginManagerOptions {
 }
 
 const PERMISSION_KEYS: readonly PluginPermissionKey[] = ['network', 'storage', 'notify', 'context.read', 'topic.read', 'tool.register', 'sensor.events'];
+
+/** Why a second start is refused (P2.5-I ①). One constant, so the message cannot drift per call site. */
+const ALREADY_STARTED_RUNTIME =
+  'loadAll 已经启动过：重复启动是宿主 bug，静默返回会让「插件到底起来了没有」看不出来。要重新启动，先 stop()，再新建一个 runtime。';
 
 /** A step body that threw a boundary/permission refusal keeps that identity: callers assert on it. */
 function fail(step: PluginLifecycleStep, cause: unknown): never {
@@ -173,6 +203,8 @@ export class PluginManager {
   readonly #discovered = new Map<string, DiscoveredPlugin>();
   readonly #auditLog: PluginAuditRecord[] = [];
   #disposed = false;
+  /** `loadAll` is the host's one-shot start (P2.5-I ①); set before the first step runs. */
+  #started = false;
 
   constructor(options: PluginManagerOptions) {
     this.#host = options.host;
@@ -252,8 +284,18 @@ export class PluginManager {
     return found;
   }
 
-  /** Steps 1–7 for every source, isolating per-plugin failures. */
+  /**
+   * Steps 1–7 for every source, isolating per-plugin failures.
+   *
+   * **This is the host's one-shot start (P2.5-I ①).** A second call is refused with
+   * `PluginAlreadyStartedError` rather than re-running the pipeline: repeating a start is a host
+   * bug, and quietly doing it again used to leave the plugins in a state that lied. The flag is set
+   * *before* the first step, so a concurrent second call is refused as well. To start over, stop
+   * this runtime and build a new one — restarting is not a state of this object.
+   */
   async loadAll(): Promise<readonly PluginInstance[]> {
+    if (this.#started) throw this.#refuseStart('loadAll', '(manager)', ALREADY_STARTED_RUNTIME);
+    this.#started = true;
     await this.discover();
     for (const id of [...this.#discovered.keys()]) {
       try {
@@ -277,7 +319,7 @@ export class PluginManager {
       this.#push(pluginId, 'validate', 'failed', `没有发现这个插件：${pluginId}`);
       throw new PluginLifecycleError('validate', `没有发现这个插件：${pluginId}`);
     }
-    return this.#pipeline(discovered);
+    return this.#pipeline(discovered, 'loadPlugin');
   }
 
   /** Steps 2–7 for a plugin the host already holds in memory. */
@@ -288,11 +330,25 @@ export class PluginManager {
       this.#discovered.set(inline.id, inline);
       this.#push(inline.id, 'discover', 'ok', 'inline');
     }
-    return this.#pipeline(inline);
+    return this.#pipeline(inline, 'loadInline');
   }
 
-  /** Steps 2–7, in order, for one discovered plugin. */
-  async #pipeline(discovered: DiscoveredPlugin): Promise<PluginInstance> {
+  /**
+   * Steps 2–7, in order, for one discovered plugin.
+   *
+   * `entry` only names the caller in the refusal of a repeated start (P2.5-I ①); the guard runs
+   * before any step, so a refusal cannot leave a half-registered activation behind.
+   */
+  async #pipeline(discovered: DiscoveredPlugin, entry: string): Promise<PluginInstance> {
+    const running = this.#runtimes.get(discovered.id);
+    if (running?.state === 'active') {
+      throw this.#refuseStart(
+        entry,
+        discovered.id,
+        `${discovered.id} 已经启动过（第 ${running.activationCount} 次激活）：重复启动是宿主 bug，它会重复跑 activate，` +
+          '并留下「插件 inactive 但工具仍在核心表里」的半坏状态。要重新起来，先 deactivate() 再 activate()。',
+      );
+    }
     // ---- step 2: validate
     let manifest: PluginManifest;
     try {
@@ -487,13 +543,19 @@ export class PluginManager {
     return this.#registry.list().some((entry) => entry.pluginId === pluginId && entry.name === requirement);
   }
 
-  /** Step 8 — `deactivate`: release the capabilities, then run the plugin's own hook. */
+  /**
+   * Step 8 — `deactivate`: release the capabilities, then run the plugin's own hook.
+   *
+   * The running state (capabilities **and** health) is dropped *before* the plugin's hook runs, so a
+   * hook that throws leaves `failed` — a state that is honestly not running — instead of `failed`
+   * with a health report still claiming it is online (P2.5-I ②).
+   */
   async deactivate(pluginId: string): Promise<boolean> {
     const runtime = this.#runtimes.get(pluginId);
     if (runtime === undefined) return false;
     if (runtime.state !== 'active') return false;
     try {
-      const released = this.#releaseCapabilities(runtime);
+      const released = this.#stopRunning(runtime);
       await runtime.module?.deactivate?.();
       runtime.state = 'inactive';
       this.#push(pluginId, 'deactivate', 'ok', `释放了 ${released} 项能力`);
@@ -509,10 +571,12 @@ export class PluginManager {
   async activate(pluginId: string): Promise<PluginInstance> {
     const runtime = this.#runtimes.get(pluginId);
     if (runtime === undefined) throw new PluginLifecycleError('activate', `没有这个插件：${pluginId}`);
+    // Already running: this entry point is the idempotent one (the repeat-start refusals live in
+    // `#pipeline`, which a running plugin never reaches).
     if (runtime.state === 'active') return this.#view(runtime);
     const discovered = runtime.discovered ?? this.#discovered.get(pluginId);
     if (discovered === undefined) throw new PluginLifecycleError('activate', `没有这个插件的来源：${pluginId}`);
-    return this.#pipeline(discovered);
+    return this.#pipeline(discovered, 'activate');
   }
 
   /** Step 9 — `dispose`: release whatever is left, then let the plugin tear itself down. */
@@ -521,7 +585,7 @@ export class PluginManager {
     if (runtime === undefined) return false;
     if (runtime.state === 'disposed') return false;
     try {
-      const released = this.#releaseCapabilities(runtime);
+      const released = this.#stopRunning(runtime);
       await runtime.module?.dispose?.();
       runtime.state = 'disposed';
       this.#push(pluginId, 'dispose', 'ok', `释放了 ${released} 项能力`);
@@ -571,6 +635,24 @@ export class PluginManager {
     return out;
   }
 
+  /**
+   * The plugin stops running here: its capability registrations are released **and** its health
+   * report is dropped (P2.5-I ②).
+   *
+   * Both halves belong together. Keeping the report after `deactivate`/`dispose` is how a panel ended
+   * up showing 「ok」 / 「1 个 MCP 工具在线」 about a plugin that was not running — the same lie as a
+   * stale state, one field over. Dropping it (rather than minting an 「offline」 status) keeps `health`
+   * meaning 「the last report about a plugin that was running」, with `PluginInstance.online` saying
+   * which case a reader is in.
+   *
+   * Returns how many capability registrations were released.
+   */
+  #stopRunning(runtime: Runtime): number {
+    const released = this.#releaseCapabilities(runtime);
+    runtime.health = undefined;
+    return released;
+  }
+
   /** Release the capability registrations this activation owns. Returns how many were released. */
   #releaseCapabilities(runtime: Runtime): number {
     const released = runtime.capabilities.length;
@@ -586,8 +668,10 @@ export class PluginManager {
 
   /** Undo a half-finished activation. Adds no journal entries: the failure is already recorded. */
   async #rollback(runtime: Runtime): Promise<void> {
-    runtime.activation.dispose();
-    runtime.capabilities = [];
+    // Same invariant as `deactivate`: a plugin that is not running has no capabilities and no
+    // health report (P2.5-I ②) — otherwise a failed re-activation would leave the previous
+    // report standing about a plugin that no longer runs.
+    this.#stopRunning(runtime);
     runtime.state = 'inactive';
     try {
       await runtime.module?.deactivate?.();
@@ -628,6 +712,19 @@ export class PluginManager {
     return runtime;
   }
 
+  /**
+   * P2.5-I ① — refuse a repeated start.
+   *
+   * The refusal goes to the **audit** stream (the host keeps that, so a double start is visible even
+   * if the throw is swallowed) but deliberately not into the plugin's journal and not into its state:
+   * the journal records which lifecycle steps ran, and marking a running plugin `failed` here would
+   * be exactly the lie this task is about.
+   */
+  #refuseStart(entry: string, pluginId: string, detail: string): PluginAlreadyStartedError {
+    this.#audit(pluginId, { kind: 'lifecycle', step: 'load', outcome: 'failed', detail });
+    return new PluginAlreadyStartedError(entry, pluginId, detail);
+  }
+
   #push(pluginId: string, step: PluginLifecycleStep, outcome: 'ok' | 'failed', detail?: string): void {
     const runtime = this.#runtimes.get(pluginId) ?? this.#ensure({ id: pluginId, name: pluginId, manifest: undefined }, undefined);
     const state: PluginState = outcome === 'failed' ? 'failed' : stepState(step);
@@ -656,6 +753,8 @@ export class PluginManager {
       pluginId: runtime.manifest.id,
       manifest: runtime.manifest,
       state: runtime.state,
+      // Derived, never stored: `online` cannot drift away from the state it describes.
+      online: runtime.state === 'active',
       capabilities: [...runtime.capabilities],
       health: runtime.health,
       error: runtime.error,
@@ -701,7 +800,8 @@ export interface PluginRuntime {
   readonly capabilities: CapabilityRegistry;
   readonly corePrompt: CorePromptAuthority;
   readonly permission: PluginHost['capabilities']['permission'];
-  /** Load every configured source and bring up what can be brought up. */
+  /** Load every configured source and bring up what can be brought up. Call it **once** (P2.5-I ①):
+   * a second call is refused rather than re-run; cycling one plugin goes through the manager. */
   start(): Promise<readonly PluginInstance[]>;
   /** Shut everything down: deactivate, release, dispose. */
   stop(): Promise<number>;

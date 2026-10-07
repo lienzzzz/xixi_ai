@@ -18,6 +18,7 @@ export type PluginErrorCode =
   | 'PLUGIN_CAPABILITY_CONFLICT'
   | 'PLUGIN_RESERVED_NAME'
   | 'PLUGIN_BOUNDARY_VIOLATION'
+  | 'PLUGIN_ALREADY_STARTED'
   | 'PLUGIN_LIFECYCLE_ERROR';
 
 /** Base class so `catch` can tell plugin refusals apart from ordinary bugs. */
@@ -71,5 +72,31 @@ export class PluginLifecycleError extends PluginError {
     super('PLUGIN_LIFECYCLE_ERROR', message, options);
     this.name = 'PluginLifecycleError';
     this.step = step;
+  }
+}
+
+/**
+ * A start entry point was called on something that is **already running** (P2.5-I ①).
+ *
+ * Refusing loudly was chosen over 「幂等返回已有状态」 on purpose. A resident host that starts the
+ * same plugin runtime twice is a host bug, and a silent `return` hides 「插件到底起来了没有」; worse,
+ * re-running the pipeline used to call `activate` a second time and, for a plugin that contributes
+ * capabilities, fail at `register-capabilities` against its *own* first registration — leaving
+ * 「state inactive, tools still in the core registry」, i.e. a model able to call a dead plugin's
+ * tool. The refusal happens before any step runs, so nothing is mutated and no half-state exists.
+ *
+ * Cycling a plugin is still supported; it goes through `deactivate()` → `activate()`.
+ */
+export class PluginAlreadyStartedError extends PluginError {
+  /** The entry point that refused: `loadAll`, `loadPlugin` or `loadInline`. */
+  readonly entry: string;
+  /** The plugin that is already running, or `(manager)` when the refusal is about the whole runtime. */
+  readonly pluginId: string;
+
+  constructor(entry: string, pluginId: string, message: string) {
+    super('PLUGIN_ALREADY_STARTED', message);
+    this.name = 'PluginAlreadyStartedError';
+    this.entry = entry;
+    this.pluginId = pluginId;
   }
 }

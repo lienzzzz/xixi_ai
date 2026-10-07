@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { MAX_TOOL_ROUNDS, ToolPermission, ToolRegistry, type AgentTool, type ToolExecutionContext } from '@xixi/brain-adapter';
 import { parseXixiConfig } from '@xixi/domain';
-import { CapabilityRegistry, type InlinePlugin } from '@xixi/plugins';
+import { CapabilityRegistry, PluginAlreadyStartedError, type InlinePlugin } from '@xixi/plugins';
 import { buildPluginRuntime } from '@xixi/runtime';
 
 /**
@@ -166,4 +166,64 @@ test('F4：ToolRegistry.dispose() 做什么、不做什么（它是清空，不�
   pluginSideRegistry.dispose();
   assert.deepEqual(capabilities.names('tool'), ['demo.plugin_tool'], '核心注册表清空不影响能力登记表');
   assert.equal(capabilities.get<{ tool: AgentTool }>('tool', 'demo.plugin_tool')?.tool, specTool);
+});
+
+/**
+ * P2.5-I ① — the registered finding (t19 的 O1) read: 「第二次 start() 留下『插件 inactive 但工具仍在核心
+ * 表里』的半坏状态，模型仍能调用一个已失活插件的工具」. The kernel now refuses the second start before
+ * any step runs, so this test asserts both halves of the fixed behaviour: the host hears a written
+ * refusal, **and** the plugin it already started keeps running with its tool still mounted.
+ */
+test('P2.5-I ①：repeat start() 响亮拒绝，不会留下「插件 inactive 但工具还在核心表里」的半坏状态', async () => {
+  const mount = buildPluginRuntime(CONFIG, { inline: [inlinePlugin('xixi.demo', 'demo.echo')] });
+  await mount.start();
+  assert.deepEqual([...mount.registry.names()].sort(), [...BUILT_INS, 'demo.echo'].sort());
+  const before = mount.runtime.manager.instance('xixi.demo');
+  assert.equal(before?.state, 'active');
+  assert.equal(before?.health?.status, 'ok');
+
+  await assert.rejects(
+    () => mount.start(),
+    (error: unknown) => {
+      assert.ok(error instanceof PluginAlreadyStartedError, '重复 start() 必须抛内核写明的错误，而不是静默再跑一遍');
+      assert.equal(error.code, 'PLUGIN_ALREADY_STARTED');
+      assert.equal(error.entry, 'loadAll');
+      assert.match(error.message, /已经启动过/);
+      return true;
+    },
+  );
+
+  // 半坏状态没有了：插件还在跑，模型侧那一份也还在，而且两边的说法一致。
+  const after = mount.runtime.manager.instance('xixi.demo');
+  assert.equal(after?.state, 'active');
+  assert.equal(after?.online, true);
+  assert.equal(after?.activationCount, 1, '没有第二次激活');
+  assert.deepEqual(after?.health, before?.health, '第二次没有重跑 health');
+  assert.deepEqual(mount.notes.mounted, ['demo.echo'], '也没有重复挂载');
+  assert.ok(mount.registry.names().includes('demo.echo'), '工具仍在核心表里——插件确实还在跑，所以这是对的');
+
+  const execution = await mount.registry.execute({ name: 'demo.echo', arguments: '{}' }, CONTEXT);
+  assert.equal(execution.record.ok, true, '重复 start() 之后工具照旧执行得动（没有把运行中的插件弄坏）');
+
+  await mount.shutdown();
+});
+
+/**
+ * P2.5-I ② — the other registered finding (t21 复审的 O1): `instance().health` was 「最后一次记录的
+ * 报告」, so after `deactivate`/`shutdown` it still reported the plugin as if it were running.
+ */
+test('P2.5-I ②：shutdown 之后调试面读到的是「已停用」，不是一份还在线的健康报告', async () => {
+  const mount = buildPluginRuntime(CONFIG, { inline: [inlinePlugin('xixi.demo', 'demo.echo')] });
+  await mount.start();
+  const live = mount.runtime.manager.instance('xixi.demo');
+  assert.equal(live?.online, true);
+  assert.equal(live?.health?.status, 'ok');
+
+  await mount.shutdown();
+
+  const stopped = mount.runtime.manager.instance('xixi.demo');
+  assert.equal(stopped?.state, 'disposed');
+  assert.equal(stopped?.online, false);
+  assert.equal(stopped?.health, undefined, '关停之后不许再显示在线');
+  assert.deepEqual(stopped?.capabilities, []);
 });

@@ -7,6 +7,7 @@ import {
   CORE_PROMPT_AUTHORITY,
   createPluginRuntime,
   inlinePluginSource,
+  PluginAlreadyStartedError,
   PluginBoundaryError,
   PluginError,
   PluginLifecycleError,
@@ -19,6 +20,7 @@ import {
   type PluginContextLike,
   type PluginContribution,
   type PluginHost,
+  type PluginInstance,
 } from '@xixi/plugins';
 
 /**
@@ -445,4 +447,236 @@ test('a tool registered by a plugin still goes through ToolPermission when the c
   for (const release of mounted) release.dispose();
   assert.deepEqual(registry.names(), [], '卸载之后名字不再可达');
   assert.equal(capabilities.has('tool', 'demo.echo'), true, '卸载的是核心注册表里的那一份，不是插件的能力');
+});
+
+/**
+ * P2.5-I ① — **starting is a one-shot contract.**
+ *
+ * Measured before the fix (the run this file was written against): a second `loadAll()` re-ran
+ * `validate → health`, called the plugin's `activate` a second time, pushed `activationCount` to 2,
+ * and for a plugin that contributes capabilities failed at `register-capabilities` against its *own*
+ * first registration — leaving `state: 'inactive'` while the capability (and the copy mounted in the
+ * core registry) was still there. The reproducer is the second half of this test.
+ *
+ * The chosen behaviour is a **loud refusal** rather than 「幂等返回」: a resident host that starts a
+ * plugin runtime twice is a host bug, and a silent return hides whether the plugins came up at all.
+ * The refusal must leave the running plugin exactly as it was — no extra `activate`, no state flip,
+ * no second pass over the health hook, and no `(source)` duplicate-discovery record.
+ */
+test('P2.5-I ①：loadAll 只认一次——第二次响亮拒绝，且不重复激活、不把 active 的插件翻成别的状态', async () => {
+  const registry = new ToolRegistry();
+  const capabilities = new CapabilityRegistry({ permission: new ToolPermission() });
+  const host: PluginHost = { tools: registry, capabilities, corePrompt: CORE_PROMPT_AUTHORITY };
+  const activations: string[] = [];
+  const healthChecks: string[] = [];
+  const manager = new PluginManager({
+    host,
+    sources: [
+      inlinePluginSource([
+        inline({ id: 'xixi.tool', permissions: ['tool.register'], capabilities: ['tool'] }, {
+          activate: () => {
+            activations.push('xixi.tool');
+            return { tools: [{ tool: probeTool('demo.echo') }] };
+          },
+          health: () => {
+            healthChecks.push('check');
+            return { status: 'degraded', detail: '上游慢' };
+          },
+        }),
+      ]),
+    ],
+  });
+
+  const first = await manager.loadAll();
+  assert.deepEqual(
+    first.map((instance) => `${instance.pluginId}:${instance.state}:${instance.online}`),
+    ['xixi.tool:active:true'],
+  );
+  const before = manager.instance('xixi.tool');
+  assert.equal(before?.health?.status, 'degraded');
+  const stepsBefore = manager.steps('xixi.tool');
+
+  await assert.rejects(
+    () => manager.loadAll(),
+    (error: unknown) => {
+      assert.ok(error instanceof PluginAlreadyStartedError, '要抛内核写明的「已经启动过」错误，不是静默再跑一遍');
+      assert.equal(error.code, 'PLUGIN_ALREADY_STARTED');
+      assert.equal(error.entry, 'loadAll');
+      assert.equal(error.pluginId, '(manager)');
+      assert.match(error.message, /已经启动过/);
+      return true;
+    },
+  );
+
+  // 第二次一步都没跑：activate / health 都没被再叫一次。
+  assert.deepEqual(activations, ['xixi.tool'], 'activate 一次都没多跑');
+  assert.equal(healthChecks.length, 1, 'health 也没被重新问一遍');
+
+  // 运行中的插件原样不动——这正是「不许留下半坏状态」的可观察形式。
+  const after = manager.instance('xixi.tool');
+  assert.equal(after?.state, 'active');
+  assert.equal(after?.online, true);
+  assert.equal(after?.activationCount, 1);
+  assert.equal(after?.error, undefined);
+  assert.deepEqual(after?.health, before?.health, '那份健康报告连时间戳都没换（没有被重跑一遍）');
+  assert.deepEqual(after?.capabilities, ['tool:demo.echo']);
+  assert.deepEqual(manager.steps('xixi.tool'), stepsBefore, 'journal 里没有多出第二次装载的步骤');
+  assert.equal(capabilities.has('tool', 'demo.echo'), true, '能力还在登记表里');
+
+  // 被拒的这一次也不是无声的：审计流里有它（宿主那份日志看得到宿主自己的 bug）。
+  assert.equal(
+    manager.auditLog.some((record) => record.pluginId === '(manager)' && record.event.kind === 'lifecycle' && record.event.outcome === 'failed'),
+    true,
+    '重复启动要进审计流',
+  );
+  // 拒绝发生在 discover 之前，所以不会再造一条「插件 id 重复」的假发现。
+  assert.deepEqual(manager.steps('(source)'), []);
+});
+
+test('P2.5-I ①：对已经 active 的插件再走 loadInline / loadPlugin 也被拒；deactivate 之后它们才是正路', async () => {
+  const { manager, capabilities } = harness();
+  const plugin = inline({ id: 'xixi.demo', permissions: ['tool.register'], capabilities: ['tool'] }, {
+    activate: () => ({ tools: [{ tool: probeTool('demo.echo') }] }),
+  });
+  await manager.loadInline(plugin);
+  const stepsBefore = manager.steps('xixi.demo');
+
+  await assert.rejects(
+    () => manager.loadInline(plugin),
+    (error: unknown) => error instanceof PluginAlreadyStartedError && error.entry === 'loadInline' && error.pluginId === 'xixi.demo',
+  );
+  await assert.rejects(
+    () => manager.loadPlugin('xixi.demo'),
+    (error: unknown) => error instanceof PluginAlreadyStartedError && error.entry === 'loadPlugin',
+  );
+
+  // 两条被拒的路径都没有动过它。
+  const still = manager.instance('xixi.demo');
+  assert.equal(still?.state, 'active');
+  assert.equal(still?.activationCount, 1);
+  assert.deepEqual(still?.capabilities, ['tool:demo.echo']);
+  assert.deepEqual(manager.steps('xixi.demo'), stepsBefore);
+
+  // activate() 是唯一的幂等分支（它不该抛）：重复调用只是把当前状态还给你。
+  const idempotent = await manager.activate('xixi.demo');
+  assert.equal(idempotent.activationCount, 1, 'activate 对 active 的插件是幂等返回');
+
+  // 守卫只拦「正在运行」：停用之后，两条启动入口都是允许的（热插拔就是这样做的）。
+  assert.equal(await manager.deactivate('xixi.demo'), true);
+  const byActivate = await manager.activate('xixi.demo');
+  assert.equal(byActivate.state, 'active');
+  assert.equal(byActivate.activationCount, 2);
+  assert.equal(capabilities.has('tool', 'demo.echo'), true);
+
+  assert.equal(await manager.deactivate('xixi.demo'), true);
+  const byLoad = await manager.loadPlugin('xixi.demo');
+  assert.equal(byLoad.state, 'active');
+  assert.equal(byLoad.activationCount, 3, '停用之后 loadPlugin 可以再跑一遍 pipeline');
+  assert.deepEqual(
+    manager.steps('xixi.demo'),
+    [...stepsBefore, 'deactivate', ...stepsBefore.slice(1), 'deactivate', ...stepsBefore.slice(1)],
+    'journal 记的是真的跑过的步骤：两次完整重装，而被拒的那两次一个步骤都没留下',
+  );
+});
+
+/**
+ * P2.5-I ② — **a stopped plugin must not report health.**
+ *
+ * Before the fix, `deactivate`/`dispose` released the capabilities but kept `runtime.health`, so
+ * `instance().health` kept saying `ok`/`degraded` about something that was not running (a console
+ * panel read 「1 个 MCP 工具在线」 about a connection that was idle). The report is now dropped by the
+ * same call that releases the capabilities — dropped, not replaced: a plugin that is not running is
+ * not 「down」 either, and asking its `health()` about a stopped plugin would make a plugin *without*
+ * a hook answer `ok` (「未声明 health 钩子」).
+ */
+test('P2.5-I ②：停用之后健康快照不再显示在线，调试面能区分「活跃 + 健康」与「已停用」', async () => {
+  const { manager, capabilities } = harness();
+  const healthChecks: string[] = [];
+  await manager.loadInline(
+    inline({ id: 'xixi.demo', permissions: ['tool.register'], capabilities: ['tool'] }, {
+      activate: () => ({ tools: [{ tool: probeTool('demo.echo') }] }),
+      health: () => {
+        healthChecks.push('check');
+        return { status: 'degraded', detail: '上游慢' };
+      },
+    }),
+  );
+
+  // 调试面读的就是这三样：state / online / health。面板那一行长这样。
+  const panel = (instance: PluginInstance | undefined): string =>
+    instance === undefined ? '(没有这个插件)' : instance.online ? `在线/${instance.health?.status ?? '无报告'}` : `已停用(${instance.state})`;
+
+  assert.equal(panel(manager.instance('xixi.demo')), '在线/degraded');
+  assert.equal(healthChecks.length, 1);
+
+  assert.equal(await manager.deactivate('xixi.demo'), true);
+  const stopped = manager.instance('xixi.demo');
+  assert.equal(stopped?.state, 'inactive');
+  assert.equal(stopped?.online, false);
+  assert.equal(stopped?.health, undefined, '停用之后不再留着一份说它还在线的报告');
+  assert.equal(panel(stopped), '已停用(inactive)');
+  assert.deepEqual(await manager.checkHealth(), [], '已经不跑的插件不在 checkHealth 的名单里');
+  assert.equal(healthChecks.length, 1, '报告是被丢掉，不是被换掉：没有再去问一次 health');
+  assert.deepEqual(capabilities.names('tool'), [], '能力与报告一起走');
+
+  // 再激活：报告是**新的**（health 又被问了一次），而在线与停用的读法仍然分得清。
+  const again = await manager.activate('xixi.demo');
+  assert.equal(again.online, true);
+  assert.equal(again.health?.status, 'degraded');
+  assert.equal(healthChecks.length, 2);
+  assert.equal(panel(again), '在线/degraded');
+
+  // 另一个插件（health 是 ok 的那种）走 dispose：同一次快照里两种状态都能读出来。
+  const other = await manager.loadInline(inline({ id: 'xixi.other' }, { activate: () => ({}) }));
+  assert.equal(other.health?.status, 'ok');
+  assert.equal(await manager.dispose('xixi.other'), true);
+  const disposed = manager.instance('xixi.other');
+  assert.equal(disposed?.state, 'disposed');
+  assert.equal(disposed?.online, false);
+  assert.equal(disposed?.health, undefined);
+  assert.equal(panel(disposed), '已停用(disposed)');
+  assert.equal(panel(manager.instance('xixi.demo')), '在线/degraded', '同一份 instances() 里两者的区别是可读的');
+});
+
+test('P2.5-I ②：停用钩子自己炸了也是「已停用」，不留一份在线的健康报告', async () => {
+  const { manager } = harness();
+  await manager.loadInline(inline({ id: 'xixi.sticky' }, {
+    activate: () => ({}),
+    deactivate: () => {
+      throw new Error('停用钩子炸了');
+    },
+  }));
+  assert.equal(manager.instance('xixi.sticky')?.online, true);
+
+  await assert.rejects(() => manager.deactivate('xixi.sticky'), (error: unknown) => error instanceof PluginLifecycleError);
+
+  const failed = manager.instance('xixi.sticky');
+  assert.equal(failed?.state, 'failed', '钩子炸了是 failed，不是 inactive');
+  assert.equal(failed?.online, false, 'failed 也不能算在线');
+  assert.equal(failed?.health, undefined, '停用失败也不许留下一份说它还在线的报告');
+});
+
+test('P2.5-I ②：加载失败回滚的插件一样没有健康报告', async () => {
+  // 这条守的是**不变量**，不是上面那条缺陷的证据：被回滚的插件从来没跑起来过，所以它本来就没有
+  // 报告可留（把回滚里的 health 清除撤掉，这条仍然绿——突变实验实测）。真正拦得住「停用后还在线」
+  // 的是前面三条；这条防的是将来有人造出一条「运行中的插件走进 rollback」的新路径。
+  const { manager, capabilities } = harness();
+  await manager.loadInline(inline({ id: 'xixi.good', permissions: ['tool.register'], capabilities: ['tool'] }, {
+    activate: () => ({ tools: [{ tool: probeTool('demo.taken') }] }),
+  }));
+
+  // 第二个插件在注册步骤撞名而回滚：能力没留下，报告也不许留下。
+  await assert.rejects(
+    () =>
+      manager.loadInline(inline({ id: 'xixi.clash', permissions: ['tool.register'], capabilities: ['tool'] }, {
+        activate: () => ({ tools: [{ tool: probeTool('demo.taken') }] }),
+      })),
+    (error: unknown) => error instanceof PluginError && error.code === 'PLUGIN_CAPABILITY_CONFLICT',
+  );
+
+  const rolledBack = manager.instance('xixi.clash');
+  assert.equal(rolledBack?.state, 'inactive');
+  assert.equal(rolledBack?.online, false);
+  assert.equal(rolledBack?.health, undefined);
+  assert.deepEqual(capabilities.values('tool').length, 1, '撞名的那一个没有留下任何登记');
 });

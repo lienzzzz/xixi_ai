@@ -6,7 +6,9 @@
  *
  *  * `PluginManager` — the nine-step lifecycle (`discover → validate → permission → load →
  *    activate(ctx) → register capabilities → health → deactivate → dispose`), with a journal that
- *    makes the order observable.
+ *    makes the order observable. Two honesty invariants were added by P2.5-I: starting is one-shot
+ *    (`PluginAlreadyStartedError` instead of a silent second run), and a stopped plugin keeps no
+ *    health report (`PluginInstance.online` says whether a report is meaningful).
  *  * `CapabilityRegistry` — the five V0.3 capability kinds (`tool`, `topic_source`,
  *    `context_provider`, `sensor_source`, `action`), every registration returning a Disposable.
  *  * manifest validation (`validateManifest`, `PLUGIN_MANIFEST_SCHEMA_V1`) and the permission
@@ -20,6 +22,7 @@
  */
 export { DisposableBundle, isDisposable, onceDisposable, toRegistration, type Disposable, type Registration } from './disposal.ts';
 export {
+  PluginAlreadyStartedError,
   PluginBoundaryError,
   PluginError,
   PluginLifecycleError,
