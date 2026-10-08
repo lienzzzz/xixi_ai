@@ -52,6 +52,9 @@
 > 仓库现在也在 **Linux / WSL2** 上跑（`/home/u24/projects/xixi_ai`）。Linux 侧的版本矩阵、
 > 建 venv 的命令、移植挖出的平台假设缺陷与「这台机器上验不了的四类事」见
 > [`docs/recon/linux-port-environment-2026-10-07.md`](docs/recon/linux-port-environment-2026-10-07.md)（**动手前先读**）。
+> **真机设备（麦克风 / 扬声器 / 摄像头）在 WSL 里的拿法见该文 §7**：音频走 WSLg 的 Pulse 桥（缺
+> `libportaudio2`），摄像头走 `usbipd` 直通（**前置条件是 WSL 侧先 `sudo modprobe vhci-hcd`**，
+> 漏了它 attach 就没有落点）——两份各一条 sudo 命令，都不需要自编译内核。
 > 跨平台纪律见 §10。
 >
 > **DSH 版本（2026-10-07 更正，Linux 侧生效）**：仓库原本钉 `@deepseek-ai/dsh-tools@0.1.7-rc.2`，

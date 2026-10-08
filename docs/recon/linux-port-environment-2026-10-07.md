@@ -193,11 +193,13 @@ AssertionError: 刚提取出来是候选，还没问过
 | **DSH 路径（M0 / `verify:provider` / `--dsh`）** | 全局 DSH 是 **0.2.0-rc.2**，而 `plugins/xixi-tools/package.json` 的 peerDependency 钉的是 **0.1.7-rc.2**。组合 profile 时 DSH 直接**跳过**这个 bundle：`Plugin dsh-xixi-tool@0.1.0 is incompatible with dsh 0.2.0-rc.2: peerDependencies {...}`，于是 `npm run install:profile` 的 `verifyBoot()` 报 `composed profile does not contain "xixi-tools"`。全局安装目录 `~/.npm-global` **归 root**，本机没有 sudo，所以换版本要用户自己来（`npm i -g @deepseek-ai/dsh@0.1.7-rc.2`，或把插件 peer 升到 0.2.0-rc.2）。 | 装与仓库一致的 DSH 版本后 `npm run install:profile` → `npm run verify:m0` |
 | ↳ **已于 2026-10-07 关闭（同一晚）** | 用户指示「修复 `verify:provider`，适配当前版本」，选了**升仓库**这条路（不动全局、不开 `allow-version` 豁免）：插件 peer 与根 devDependency 一并升到 `0.2.0-rc.2`，`package-lock.json` 整份重新解析（0.2.0 把 11 个 `@deepseek-ai/dsh-*` 升格为 peer，旧 lock 会 ERESOLVE）。 | **已实测通过**：`install:profile` exit 0、`verify:provider` exit 0 且 `toolName: "xixi_get_current_time"`；同一次运行 `npm test` 720/720、`check:types` exit 0。过程与三条依赖解析岔路见 [`../progress.md`](../progress.md) §11 |
 | **一切真实模型调用**（`chat` / `web` / `verify:*` / `eval:*` / `voice:turn` 真跑） | 本机**没有 `.env`**（`MIMO_API_KEY` 缺失，`.env` 在 `.gitignore` 里、不会随检出来） | 填 `.env` 后按 `README.md` 的命令跑 |
-| **麦克风 / 扬声器 / 摄像头（真机采集）** | WSL2 默认不把音频与摄像头设备暴露给 Linux 侧；`sounddevice` 需要 PortAudio/ALSA 设备，`cv2.VideoCapture` 需要 `/dev/video*`。**离线自检本来就不碰硬件**，所以能跑；真采集不能。 | 在 Windows 侧跑（`npm run field-test`），或给 WSL 配 USB 设备直通 |
+| **麦克风 / 扬声器 / 摄像头（真机采集）** | 音频：WSLg 的 Pulse 桥**在**（`/mnt/wslg/PulseServer`），但 `libportaudio2` 没装，`sounddevice` 起不来；摄像头：`usbipd` 直通路径**在**，但 `vhci-hcd` 模块默认没加载，所以 `/dev/video0` 不出现。两条都只差一条 sudo 命令——**拿法与判据见 §7**。 | 见 §7：`sudo apt-get install -y libportaudio2 pulseaudio-utils`（音频）与 `sudo modprobe vhci-hcd` + Windows 侧 `usbipd attach`（摄像头）。**在真的录到/放出采样、真的从 `/dev/video0` 抓到帧之前，本条仍算未验。** |
 | **`field-test --self-test` 的两条 FAIL** | 30 项通过 / **2 项失败**，两条都是 Windows 专属读数：F7 的「输入采集增益」走 `pycaw`（Windows Core Audio），另一条同源。**这是环境缺失，不是回归**（离线自检在 Windows 上是 32/32）。 | 在 Windows 上跑同一条命令 |
 
-**`scripts/verify-camera-presence.ts` 与 `--live` 的摄像头路径同样验不了**（没有 `/dev/video*`），
-但 `tests/perception/` 的**离线**回归（Python unittest + 契约校验 + 投影语义）在本机是真跑的。
+**`scripts/verify-camera-presence.ts` 与 `--live` 的摄像头路径同样验不了**（没有 `/dev/video*`）——
+但这条的前置条件已经变了：按 §7.2 做完 `usbipd` 直通后 `/dev/video0` 会出现，那条入口就能真跑；
+**在实跑出结果之前，本节仍按「未验」登记**。
+`tests/perception/` 的**离线**回归（Python unittest + 契约校验 + 投影语义）在本机是真跑的。
 
 ---
 
@@ -250,6 +252,97 @@ npm run check:types && npm test && npm run check:docs
 cd services/voice-edge && /home/u24/projects/xixi_ai/.venvs/voice-pipecat/bin/python3 \
     -m voice_edge.segment /home/u24/projects/xixi_ai/tests/audio-fixtures/direct-question.wav
 ```
+
+---
+
+## 7. 真机设备（麦克风 / 扬声器 / 摄像头）在 WSL 里的拿法（2026-10-08 实测）
+
+这一节是**操作手册**，不是结论清单：两条路都有一段前置步骤，漏了就表现为「设备明明插着却看不见」。
+
+### 7.1 音频：WSLg 已经把桥搭好了，缺的只是 PortAudio 客户端库
+
+实测事实（命令 + 输出）：
+
+```bash
+ls -la /mnt/wslg/          # PulseServer / PulseAudioRDPSink / PulseAudioRDPSource 三个套接字都在
+env | grep PULSE           # PULSE_SERVER=unix:/mnt/wslg/PulseServer（WSLg 自己设好的）
+ls -la /dev/snd/           # **只有 timer，没有任何 pcm 设备**
+ldconfig -p | grep portaudio   # 空 → libportaudio2 没装
+```
+
+三个容易误判的点：
+
+1. **`/dev/snd` 里没有 pcm 设备是正常的**：WSLg 的音频走 **PulseAudio over RDP**，不走 ALSA。
+   所以 `arecord` / `aplay` 这类 ALSA 工具看不到设备，**这不代表音频不可用**；要看的是上面那两个套接字。
+2. **套接字存在 ≠ 能录音/放音**：客户端库没装时 `sounddevice` 直接报 `PortAudio library not found`。
+   **在真的录到/放出一个采样之前，不许写成「音频已可用」**（本文档 2026-10-08 就因为把「套接字存在」
+   当成「设备可用」而被更正过一次）。
+3. `PulseAudioRDPSink` = 播放到 **Windows 的扬声器**；`PulseAudioRDPSource` = 从 **Windows 的麦克风**采集。
+   设备名与增益仍由 Windows 侧决定。
+
+一条命令装齐：
+
+```bash
+sudo apt-get install -y libportaudio2 pulseaudio-utils
+```
+
+装完自检（用带 `sounddevice` 的 venv）：
+
+```bash
+/home/u24/projects/xixi_ai/.venvs/voice-pipecat/bin/python3 -c \
+  "import sounddevice as sd; print(sd.query_devices())"
+```
+
+`pactl info` / `pactl list short sources` 用来确认默认设备是不是那两个 RDPSink/RDPSource（`pulseaudio-utils` 提供）。
+
+### 7.2 摄像头：`usbipd` + **先加载 `vhci-hcd`**
+
+WSL2 不自动把 USB 设备暴露给 Linux；UVC 摄像头是 USB 设备，所以要走 USB/IP 直通。
+**这一步不需要自编译内核**——微软的 WSL2 内核已经把 usbip 做成了模块，只是默认不加载：
+
+```bash
+# WSL 侧：加载 USB/IP 虚拟主控（接收端）。没做这一步，Windows 那边的 attach 没有落点。
+sudo modprobe vhci-hcd
+
+# 让它跨 WSL 重启仍然自动加载（systemd 是 PID 1，所以 modules-load.d 生效）
+echo vhci-hcd | sudo tee /etc/modules-load.d/usbip.conf
+```
+
+判据（三条都该有输出）：
+
+```bash
+ls /sys/devices/platform/vhci_hcd*    # 虚拟主控已注册
+ls /sys/bus/usb/devices/              # USB 总线出现（加载前连这个目录都没有）
+ls -l /dev/video0                     # attach 之后摄像头设备节点
+```
+
+**Windows 侧（管理员 PowerShell）** —— 用户给定的切换方法，照抄：
+
+```powershell
+# 切给 WSL（先关掉 Windows 里正在用摄像头的软件）
+usbipd bind --busid 1-6 --force
+usbipd attach --wsl --busid 1-6
+
+# 切回 Windows
+usbipd unbind --busid 1-6
+```
+
+`--busid` 用 `usbipd list` 查（本例 `1-6`）。**顺序要紧**：先 `vhci-hcd` 就位，再 `attach`；
+倒过来做的表现是 attach 成功但 WSL 里没有 `/dev/video0`。
+
+模块与依赖（2026-10-08 实测存在，无需安装）：
+
+```text
+/lib/modules/6.18.40.1-microsoft-standard-WSL2/kernel/drivers/usb/usbip/vhci-hcd.ko
+  depends: usbcore, usbip-core, usb-common     ← 三者都在同一模块树里
+```
+
+### 7.3 与 §4 的关系
+
+§4 原先把「麦克风 / 扬声器 / 摄像头（真机采集）」整条登记为**这台机器上验不了**。按本节实测，这条**要拆开读**：
+音频有桥（缺库）、摄像头有直通路径（缺模块加载），两者都**只差一条 sudo 命令**，
+不再是「必须回 Windows 才能验」。**但登记只在真的跑通之后才改**——本节给出的是拿法，
+「音频/摄像头在本机验过」这句话要等 §4 那三行有对应的实跑输出再写。
 
 ---
 
