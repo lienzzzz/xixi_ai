@@ -23,6 +23,7 @@ import sys
 import unittest
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 # Allow running this file directly (python tests/perception/test_presence.py) as well as
@@ -31,6 +32,12 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "services" / "perception-ed
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
+from perception_edge.camera import (  # noqa: E402
+    CameraConfig,
+    backend_name,
+    default_backend,
+    negotiated_fourcc,
+)
 from perception_edge.contracts import (  # noqa: E402
     EVENT_ID_PATTERN,
     TIMESTAMP_PATTERN,
@@ -519,6 +526,69 @@ class OptionalExternalPositiveControlTests(unittest.TestCase):
         captured = run_script(face_track(60) + still_track(120, fill=70), detector="yunet", **FIELD_THRESHOLDS)
         self.assertEqual(captured.states, [ABSENT, PRESENT, ABSENT])
         self.assertGreater(captured.summary["counters"]["frames_with_face"], 0)
+
+
+class CameraBackendTests(unittest.TestCase):
+    """`default_backend()` must be right on **both** platforms, not only the one running the suite.
+
+    Why this exists: the backend used to be the module constant `int(cv2.CAP_DSHOW)`. That value is
+    a *Windows* fact — on the original dev machine MSMF fails instantly and DSHOW was the only
+    backend that opened the Chicony camera — but it was written as a platform-independent constant.
+    `cv2.CAP_DSHOW` is still *defined* on Linux, so the failure was not an ImportError or a clear
+    "unsupported backend" error: the camera simply reported `isOpened() == False` on a machine whose
+    camera worked fine (measured 2026-10-08 on WSL2 with a 2K USB Camera over `usbipd`).
+    The Linux port could not have caught it — that machine had no camera to try.
+
+    Both branches are asserted on purpose, so that whichever platform runs `npm test`, the *other*
+    mapping is exercised too and neither can rot unnoticed.
+    """
+
+    def test_windows_uses_dshow(self) -> None:
+        self.assertEqual(default_backend("win32"), int(cv2.CAP_DSHOW))
+
+    def test_posix_uses_v4l2(self) -> None:
+        for platform in ("linux", "darwin", "freebsd13"):
+            with self.subTest(platform=platform):
+                self.assertEqual(default_backend(platform), int(cv2.CAP_V4L2))
+
+    def test_module_default_and_config_follow_the_rule_for_this_platform(self) -> None:
+        # The constant drifting away from the function *is* the defect; assert they agree, and that
+        # a default-constructed CameraConfig picks it up (both run.py call sites rely on that).
+        from perception_edge import camera as camera_module
+
+        self.assertEqual(camera_module.DEFAULT_BACKEND, default_backend(sys.platform))
+        self.assertEqual(CameraConfig().backend, camera_module.DEFAULT_BACKEND)
+
+    def test_default_backend_is_never_cap_any(self) -> None:
+        # "Explicit rather than left to OpenCV": CAP_ANY would silently pick one.
+        for platform in ("win32", "linux"):
+            with self.subTest(platform=platform):
+                self.assertNotEqual(default_backend(platform), int(cv2.CAP_ANY))
+
+    def test_backend_name_names_the_backend_that_failed(self) -> None:
+        # The old failure message said "backend=CAP_DSHOW" whatever the configured backend was.
+        self.assertEqual(backend_name(int(cv2.CAP_DSHOW)), "CAP_DSHOW")
+        self.assertEqual(backend_name(int(cv2.CAP_V4L2)), "CAP_V4L2")
+        self.assertEqual(backend_name(int(cv2.CAP_ANY)), "CAP_ANY")
+
+    def test_default_config_requests_mjpg(self) -> None:
+        # Not cosmetic: uncompressed YUYV at 640x480 is ~614 KB/frame and over a virtual USB link
+        # that costs ~205-225 ms/frame (~4.5 fps) where MJPG costs ~30 ms (~32 fps). The real-camera
+        # path refuses below 20 fps, so a missing MJPG request reads as "the camera is too slow".
+        self.assertEqual(CameraConfig().fourcc, "MJPG")
+
+    def test_negotiated_fourcc_is_read_back_not_assumed(self) -> None:
+        # The request is best-effort; the report must show what the driver actually settled on.
+        class _FakeCapture:
+            def __init__(self, value: int) -> None:
+                self._value = value
+
+            def get(self, _prop: int) -> float:
+                return float(self._value)
+
+        self.assertEqual(negotiated_fourcc(_FakeCapture(cv2.VideoWriter_fourcc(*"MJPG"))), "MJPG")  # type: ignore[arg-type]
+        self.assertEqual(negotiated_fourcc(_FakeCapture(cv2.VideoWriter_fourcc(*"YUYV"))), "YUYV")  # type: ignore[arg-type]
+        self.assertEqual(negotiated_fourcc(_FakeCapture(0)), "", "驱动不报格式时给空串，不编一个")  # type: ignore[arg-type]
 
 
 def _presence_input(**overrides):

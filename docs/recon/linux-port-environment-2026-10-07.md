@@ -193,12 +193,14 @@ AssertionError: 刚提取出来是候选，还没问过
 | **DSH 路径（M0 / `verify:provider` / `--dsh`）** | 全局 DSH 是 **0.2.0-rc.2**，而 `plugins/xixi-tools/package.json` 的 peerDependency 钉的是 **0.1.7-rc.2**。组合 profile 时 DSH 直接**跳过**这个 bundle：`Plugin dsh-xixi-tool@0.1.0 is incompatible with dsh 0.2.0-rc.2: peerDependencies {...}`，于是 `npm run install:profile` 的 `verifyBoot()` 报 `composed profile does not contain "xixi-tools"`。全局安装目录 `~/.npm-global` **归 root**，本机没有 sudo，所以换版本要用户自己来（`npm i -g @deepseek-ai/dsh@0.1.7-rc.2`，或把插件 peer 升到 0.2.0-rc.2）。 | 装与仓库一致的 DSH 版本后 `npm run install:profile` → `npm run verify:m0` |
 | ↳ **已于 2026-10-07 关闭（同一晚）** | 用户指示「修复 `verify:provider`，适配当前版本」，选了**升仓库**这条路（不动全局、不开 `allow-version` 豁免）：插件 peer 与根 devDependency 一并升到 `0.2.0-rc.2`，`package-lock.json` 整份重新解析（0.2.0 把 11 个 `@deepseek-ai/dsh-*` 升格为 peer，旧 lock 会 ERESOLVE）。 | **已实测通过**：`install:profile` exit 0、`verify:provider` exit 0 且 `toolName: "xixi_get_current_time"`；同一次运行 `npm test` 720/720、`check:types` exit 0。过程与三条依赖解析岔路见 [`../progress.md`](../progress.md) §11 |
 | **一切真实模型调用**（`chat` / `web` / `verify:*` / `eval:*` / `voice:turn` 真跑） | 本机**没有 `.env`**（`MIMO_API_KEY` 缺失，`.env` 在 `.gitignore` 里、不会随检出来） | 填 `.env` 后按 `README.md` 的命令跑 |
-| **麦克风 / 扬声器 / 摄像头（真机采集）** | 音频：WSLg 的 Pulse 桥**在**（`/mnt/wslg/PulseServer`），但 `libportaudio2` 没装，`sounddevice` 起不来；摄像头：`usbipd` 直通路径**在**，但 `vhci-hcd` 模块默认没加载，所以 `/dev/video0` 不出现。两条都只差一条 sudo 命令——**拿法与判据见 §7**。 | 见 §7：`sudo apt-get install -y libportaudio2 pulseaudio-utils`（音频）与 `sudo modprobe vhci-hcd` + Windows 侧 `usbipd attach`（摄像头）。**在真的录到/放出采样、真的从 `/dev/video0` 抓到帧之前，本条仍算未验。** |
+| **摄像头（真机采集）** | ✅ **已验（2026-10-08）**。设备 2K USB Camera 经 `usbipd` 直通；`node scripts/verify-camera-presence.ts --seconds 12` → **verdict PASS**，`fps_processed 26.6`（门槛 20）、`camera.fourcc "MJPG"`、`read_ms_mean 26.8`、契约校验 0 问题、隐私 `local_only`。过程挖出**两个平台缺陷**（后端写死 `CAP_DSHOW`、没请求 MJPG 导致 4.5 fps），都已修——**两个缺陷的实测数字与修法见 §7.4**。 | 复跑同一条命令；拿法与前置条件见 §7.2 |
+| **麦克风（真机采集）** | ⚠ **设备可用，"人声电平"未验**。`/dev/snd/pcmC0D0c`（就在那只 USB 摄像头里）录音 6 s 成功、无削顶，RMS −63.7 dBFS = **静音房间的底噪**；所以「能采集」成立，「能采到可用人声」要有人说话才算。 | 对着摄像头说一句话后重录；见 §7.4 |
+| **扬声器（真机采集）** | ⚠ **通道可用，但 `sounddevice` 放不了音**。Windows 扬声器只能经 WSLg 的 Pulse（`RDPSink`），而本机 PortAudio **没编 Pulse 后端**（HostAPI 只有 ALSA/OSS），ALSA 侧又无播放设备。`paplay` 实测 `exit=0`（通道通），但 **`voice_edge/loopback.py` 的 `sd.playrec(...)` 在本机跑不通**。 | 要 Python 放音：用 `soundcard`，或把 ALSA `default` 指到 pulse（`libasound2-plugins` + `~/.asoundrc`）；见 §7.4 |
 | **`field-test --self-test` 的两条 FAIL** | 30 项通过 / **2 项失败**，两条都是 Windows 专属读数：F7 的「输入采集增益」走 `pycaw`（Windows Core Audio），另一条同源。**这是环境缺失，不是回归**（离线自检在 Windows 上是 32/32）。 | 在 Windows 上跑同一条命令 |
 
-**`scripts/verify-camera-presence.ts` 与 `--live` 的摄像头路径同样验不了**（没有 `/dev/video*`）——
-但这条的前置条件已经变了：按 §7.2 做完 `usbipd` 直通后 `/dev/video0` 会出现，那条入口就能真跑；
-**在实跑出结果之前，本节仍按「未验」登记**。
+**`scripts/verify-camera-presence.ts` 的摄像头路径已验（2026-10-08，verdict PASS）**——
+上面那条「验不了」的记录就此关闭，实测数字见 §7.4 与本节表格。`--live` 那条（控制台「启用」用的实时预览路径）
+本轮**没有**单独跑，仍按未验登记。
 `tests/perception/` 的**离线**回归（Python unittest + 契约校验 + 投影语义）在本机是真跑的。
 
 ---
@@ -342,7 +344,86 @@ usbipd unbind --busid 1-6
 §4 原先把「麦克风 / 扬声器 / 摄像头（真机采集）」整条登记为**这台机器上验不了**。按本节实测，这条**要拆开读**：
 音频有桥（缺库）、摄像头有直通路径（缺模块加载），两者都**只差一条 sudo 命令**，
 不再是「必须回 Windows 才能验」。**但登记只在真的跑通之后才改**——本节给出的是拿法，
-「音频/摄像头在本机验过」这句话要等 §4 那三行有对应的实跑输出再写。
+「音频/摄像头在本机验过」这句话要等 §4 那三行有对应的实跑输出再写（摄像头那半已在 §7.4 补上）。
+
+### 7.4 摄像头在这台机器上**验过了**，并因此挖出两个平台缺陷（2026-10-08）
+
+设备：**2K USB Camera**（`2bdf:028a`），经 `usbipd` 直通进 WSL2；`uvcvideo` 绑上后 `/dev/video0`
+是采集节点、`/dev/video1` 是 UVC 的 metadata 节点（打不开是正常的）。
+
+**这一节的意义**：这两个缺陷在移植时**不可能被发现**——那台机器没有摄像头，
+而它们正是 §10 说的「在原机器上永远看不见」那一类。
+
+#### 缺陷 ①：采集后端被写死成 Windows 专属的 `CAP_DSHOW`
+
+原代码 `services/perception-edge/perception_edge/camera.py` 写的是
+`DEFAULT_BACKEND = int(cv2.CAP_DSHOW)`，理由（文件头记着）是在原开发机上实测「只有 DSHOW 能打开
+Chicony 摄像头，MSMF 秒失败」——**那是个 Windows 事实，却被写成了平台无关的常量**。
+
+在 Linux 上 `cv2.CAP_DSHOW` **仍然是个有定义的常量**（=700），所以失败既不是 ImportError 也不是
+「不支持的后端」，而是摄像机**明明好用却 `isOpened() == False`**。实测（同一台机器、同一只摄像头）：
+
+```text
+(0, CAP_DSHOW) → isOpened=False      ← 原写法
+(0, CAP_V4L2)  → isOpened=True  640x480
+(0, CAP_ANY)   → isOpened=True  640x480
+```
+
+修法：`default_backend(platform=None)` 按平台给（`win32` → DSHOW，POSIX → V4L2），
+`DEFAULT_BACKEND = default_backend()`。抽成**函数**是为了让一台机器能同时验两个分支
+（否则 win32 分支只在 Windows 上被跑到，反之亦然）。报错文案也改成报**真正失败的那个后端**——
+原来无论配置成什么，消息里都写死「backend=CAP_DSHOW」，在 Linux 上那句话是假的。
+
+#### 缺陷 ②：没有请求 MJPG，于是拿到未压缩 YUYV，在虚拟 USB 上慢到 4.5 fps
+
+修好后端之后真机验收仍然 **FAIL**：`处理帧率 4.3 < 门槛 20 fps`。逐项量下来，慢的是**采集**不是检测
+（`detector.detect_ms_mean = 8.96 ms`，而 `camera.read_ms_mean = 200.4 ms`）。
+把变量分开做对照（同一只摄像头、同一台机器，**只改格式**）：
+
+| 请求格式 | 实测分辨率 | 读耗时/帧 | 有效帧 |
+|---|---|---|---|
+| 默认（驱动给 YUYV） | 640×480 | **225.4 ms**（≈4.4 fps） | 12/12 |
+| **MJPG** | 640×480 | **31.1 ms**（≈32 fps） | 12/12 |
+| **MJPG** | 1280×720 | **28.6 ms**（≈35 fps） | 12/12 |
+| YUYV | 640×480 | **205.7 ms** | 12/12 |
+
+原因：YUYV 一帧 640×480×2 = **614 KB**，走 USB/IP（等时传输被虚拟化之后）就成了瓶颈；
+MJPG 每帧几十 KB，直接快 7 倍。**画面本身一直是好的**（两种格式的标准差都是 70–83），所以这不是
+「摄像头坏了」，而是「传输格式选错了」。
+
+修法：`CameraConfig.fourcc = "MJPG"`（可为空 = 不动驱动默认），在 `open()` 里**先设格式再设分辨率**
+（V4L2 上选格式会重新协商并可能重置尺寸），并把**协商后的实际格式读回来**进报告
+（`negotiated_fourcc()` → `camera.fourcc`）——请求是 best-effort，报告必须写实际值。
+
+修前 / 修后（`node scripts/verify-camera-presence.ts --seconds 12`，同一条命令）：
+
+| | 修前 | 修后 |
+|---|---|---|
+| `camera.frames` | 52 | **321** |
+| `camera.read_ms_mean` | 200.4 | **26.8** |
+| `camera.fps_measured` | 5 | **37.3** |
+| `fps_processed`（门槛 20） | 4.3 | **26.6** |
+| `camera.fourcc` | （无此字段） | **"MJPG"** |
+| `verdict` | **FAIL** | **PASS** |
+
+`frames_with_signal` 修后仍是 0，这是**对的**：它统计的是**帧间差分**（`detector.py` 的
+`moved / difference.size`），人坐着不动就没有运动证据。它**不表示**驱动回传空帧
+（那要靠 `--probe-frames` 看逐帧亮度）。这条别读反。
+
+#### 音频那半的实测边界（同一轮）
+
+* **麦克风：可用**。录音 6 s / 16000 Hz / 无削顶，RMS −63.7 dBFS ——那是**静音房间的底噪**，
+  所以「设备能采集」成立，「能采到可用人声电平」要等有人说话才谈得上。
+  设备身份：`/dev/snd/pcmC0D0c`（by-id 指向这只 USB 摄像头，**麦克风就在摄像头里**）。
+* **扬声器：通道可用，但 `sounddevice` 放不了音**。PortAudio 在这个 build 里**没有编 Pulse 后端**
+  （`strings libportaudio.so.2 | grep -i pulse` 为空，HostAPI 只有 `['ALSA','OSS']`），
+  而 ALSA 侧没有播放设备（摄像头只有采集端）；Windows 的扬声器只能经 WSLg 的 Pulse
+  （`RDPSink`）。所以：
+  * `paplay`/`pacat`（pulseaudio-utils）**可以**放音 → 实测 `paplay exit=0`；
+  * `sounddevice` 看到 0 个输出设备 → **`services/voice-edge/voice_edge/loopback.py` 的
+    `sd.playrec(...)` 在本机跑不通**（放音那一步找不到设备）；
+  * 要用 Python 走 Pulse，得用 `soundcard`（仓库的 `AUDIO_PYTHON` 本来就期望它）或把 ALSA 的
+    `default` 指到 pulse（`libasound2-plugins` + `~/.asoundrc`）。
 
 ---
 

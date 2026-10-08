@@ -13,7 +13,7 @@
 
 | 能力 | 状态 |
 |---|---|
-| 从默认摄像头周期抓帧 | **已实现**（DSHOW 后端，640×480@30 级） |
+| 从默认摄像头周期抓帧 | **已实现**（后端按平台选：Windows DSHOW / Linux V4L2；默认请求 MJPG，640×480） |
 | 本地判定有人/无人（帧差动 + 人脸确认） | **已实现** |
 | 状态变化写成 `presence.changed` 事件 | **已实现**（复用已发布的 v1 契约，未新增事件类型） |
 | WorldState-lite 当前在场投影（value/source/updated_at/confidence/TTL） | **已实现** |
@@ -25,7 +25,7 @@
 ## 2. 数据流（一条线，没有旁路）
 
 ```text
-默认摄像头 (CAP_DSHOW, 640x480)
+默认摄像头（后端按平台选；默认 MJPG 640x480）
    │  逐帧，只在内存里
    ▼
 帧差动门（320x240 灰度，阈值 6 灰阶 + 运动像素 ≥0.5%）───┐
@@ -367,7 +367,9 @@ node scripts/verify-camera-presence.ts --camera-index -1 --seconds 3
 
 ```text
 摄像头在场检测 FAILED：没有可用的摄像头。
-摄像头不可用（已等待 2.5 秒后放弃，不会一直重试）：打不开摄像头 index=-1 backend=CAP_DSHOW：设备不存在、被别的程序占用，或 Windows 隐私设置里禁止了摄像头（设置 → 隐私和安全性 → 相机）。
+摄像头不可用（已等待 2.5 秒后放弃，不会一直重试）：打不开摄像头 index=-1 backend=CAP_V4L2：设备不存在、被别的程序占用，或当前用户没有访问权限（Linux：要在 `video` 组里、且 `/dev/video*` 存在；Windows：隐私设置里可能禁止了摄像头，设置 → 隐私和安全性 → 相机）。
+> 上面那段里的后端名跟着平台走（Windows `CAP_DSHOW` / Linux `CAP_V4L2`），并且报的是**真正失败的那个后端** —— 旧版无论配置成什么都在消息里写死 `CAP_DSHOW`，在 Linux 上那句话是假的。两个平台缺陷的实测与修法见 [`../recon/linux-port-environment-2026-10-07.md`](../recon/linux-port-environment-2026-10-07.md) §7.4。
+
 提示：先关掉占用摄像头的程序（相机 App / 会议软件 / 其它预览窗口），再重试；本机通常只有 1 个摄像头（索引 0），用别的索引一定打不开——要专门验证「打不开时会不会快速失败」，可以用 --camera-index -1。
 可能原因：设备不存在 / 被别的程序占用（相机 App、会议软件、另一个预览窗口）/ Windows 隐私设置禁止了相机。
 先关掉占用摄像头的程序，或换 --camera-index（环境变量 XIXI_PERCEPTION_PYTHON 可指定解释器）。

@@ -200,7 +200,7 @@ packages/runtime/         生产装配（V0.3 P0-A/P2.5-A）：**常驻装配点
 apps/brain-dsh/           DSH 侧接线：profile patch（MiMo 路由）与 CLI transport
 plugins/xixi-tools/       西西最小工具集（含 xixi_get_current_time / 天气等）
 services/voice-edge/      语音前端（Python）：去直流 + 高通 + 门限 + 校准 + 噪声夹具生成
-services/perception-edge/ 在场检测（Python）：DSHOW 抓帧 → 帧差动 + YuNet → presence 事件
+services/perception-edge/ 在场检测（Python）：摄像头抓帧（后端按平台选：Windows DSHOW / Linux V4L2；MJPG）→ 帧差动 + YuNet → presence 事件
 config/                   xixi.example.yaml（方案 §42）
 scripts/                  安装、验收、演示与现场测试控制台（field-test.ts 是控制台入口）
 tests/                    unit / integration / perception / console / scenarios / replay

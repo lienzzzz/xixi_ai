@@ -169,7 +169,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  CAM["摄像头（DSHOW，本机唯一可开）<br/>640×480@30fps"] --> RUN["perception_edge.run --live<br/>（子进程；帧只在内存）"]
+  CAM["摄像头（后端按平台选：DSHOW/V4L2；MJPG）<br/>640×480@30fps"] --> RUN["perception_edge.run --live<br/>（子进程；帧只在内存）"]
   RUN --> FD["帧差动（廉价门，1.17ms/对）"]
   FD --> YN["YuNet 人脸确认（38.3ms/帧，227KB）"]
   YN --> EV["appendEvent('presence.changed')"]

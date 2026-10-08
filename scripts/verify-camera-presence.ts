@@ -7,7 +7,8 @@
  *
  * 它做的事：
  *   1. 先打开一次 `XixiStore`（这样迁移必然跑过，Python 侧才能安全地只做 INSERT）；
- *   2. 用 `services/perception-edge` 抓帧若干秒（默认 20 s，摄像头 DSHOW 后端）；
+ *   2. 用 `services/perception-edge` 抓帧若干秒（默认 20 s；后端按平台选：Windows DSHOW / Linux V4L2，
+ *      默认请求 MJPG —— 见 `docs/recon/linux-port-environment-2026-10-07.md` §7.4）；
  *   3. Python 把每个 `presence.changed` 事件**在数据库事务里**追加进 `events`；
  *   4. 脚本把事件按 `event_id` 去重、重建信封并用 `validateEvent()` 校验一遍，
  *      再读回 `world_state` 投影，打印帧率 / 抓帧耗时 / 检测耗时 / 状态。
@@ -268,7 +269,8 @@ interface SummaryRecord {
  * Budget handed to the child for waiting on the device. Measured (t89): the whole run must come
  * back in about 5 s, and this process needs 1-1.5 s of its own for probing the interpreter and
  * opening the store. 2.5 s here leaves the end-to-end failure path inside the target even when the
- * DSHOW constructor is slow (measured 0.1-1.4 s across runs) while still giving a real device time
+ * The capture constructor is slow (measured 0.1-1.4 s across runs, DSHOW on Windows) while still
+ * giving a real device time
  * to answer — enumeration is fast; it is waiting for a device that does not exist that is pointless.
  */
 const CHILD_CAMERA_OPEN_TIMEOUT_S = 2.5;
@@ -329,7 +331,7 @@ if (liveMode) {
 console.log(
   selfTest
     ? `自检模式：用生成帧（不是真人）跑通检测→事件→投影的写库路径；写入自检库 ${dbPath}`
-    : `用真实摄像头跑 ${seconds} s（索引 ${cameraIndex}）：${python} -m perception_edge.run（摄像头 DSHOW，画面不出本机）；写入台账 ${dbPath}`,
+    : `用真实摄像头跑 ${seconds} s（索引 ${cameraIndex}）：${python} -m perception_edge.run（真实摄像头，画面不出本机）；写入台账 ${dbPath}`,
 );
 const frames: FrameRecord[] = [];
 /** t78 `--live`: one entry per frame the child streamed on stdout (base64 JPEG in memory). */

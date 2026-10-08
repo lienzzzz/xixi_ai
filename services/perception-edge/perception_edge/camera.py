@@ -3,6 +3,8 @@
 Field facts this file encodes (measured on this machine, see
 `docs/recon/field-test-environment-2026-09-30.md` §3):
   * Only the DSHOW backend opens the Chicony USB2.0 Camera; MSMF fails instantly.
+    **That is a Windows fact** — on Linux DSHOW does not exist and the backend is V4L2;
+    the mapping is `default_backend()` below.
   * 640x480 read() costs ~33.4 ms (about 30 fps); 1920x1080 requests are capped to 1280x720.
   * The driver does not report CAP_PROP_FPS (-1.0), so frame rate is measured, never trusted.
 
@@ -13,6 +15,7 @@ not implemented.
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Iterator, Protocol, Sequence
@@ -20,9 +23,51 @@ from typing import Iterator, Protocol, Sequence
 import cv2
 import numpy as np
 
-#: Backend for the real device. Anything else (MSMF / CAP_ANY) either fails or silently
-#: falls back, so the choice is explicit rather than left to OpenCV.
-DEFAULT_BACKEND = int(cv2.CAP_DSHOW)
+
+def default_backend(platform: str | None = None) -> int:
+    """The backend to open the real camera with on `platform` (defaults to the running one).
+
+    The choice is explicit rather than left to OpenCV (`CAP_ANY` picks whatever the platform
+    offers and then fails in ways the caller has to guess at) — but *which* backend is right is
+    **platform-specific**, and that is the part the original code got wrong:
+
+      * Windows (`win32`): **DSHOW**. Measured on the original dev machine with the Chicony
+        USB2.0 Camera, MSMF fails instantly, so DSHOW was the only backend that opened it.
+      * POSIX (Linux / WSL2): **V4L2**. DSHOW does not exist there — but `cv2.CAP_DSHOW` is
+        still defined as a constant, so hardcoding it produces `isOpened() == False` on a
+        machine whose camera works fine. Measured 2026-10-08 on WSL2 with a 2K USB Camera
+        passed through `usbipd`: `(0, CAP_DSHOW)` → not opened; `(0, CAP_V4L2)` and
+        `(0, CAP_ANY)` → 640x480 frames.
+
+    Kept as a function of `platform` so a single machine can test **both** branches, instead of
+    each branch only ever being exercised on the platform that happens to run the suite.
+    """
+    return int(cv2.CAP_DSHOW) if (platform or sys.platform) == "win32" else int(cv2.CAP_V4L2)
+
+
+#: Backend used unless a `CameraConfig` overrides it.
+DEFAULT_BACKEND = default_backend()
+
+
+def backend_name(backend: int) -> str:
+    """`CAP_*` name for a backend id — error messages must name the backend that actually failed."""
+    for name in ("CAP_DSHOW", "CAP_MSMF", "CAP_V4L2", "CAP_GSTREAMER", "CAP_FFMPEG", "CAP_ANY"):
+        if getattr(cv2, name, None) == backend:
+            return name
+    return f"backend#{backend}"
+
+
+def negotiated_fourcc(capture: cv2.VideoCapture) -> str:
+    """The pixel format the driver actually settled on (``''`` when it reports none).
+
+    Requesting MJPG is best-effort — a driver may ignore it or cap it — so the format that ends up
+    on the wire is *read back* and reported. Without it, a slow run is indistinguishable from a
+    fast one until somebody measures the frame rate.
+    """
+    raw = int(capture.get(cv2.CAP_PROP_FOURCC))
+    if raw <= 0:
+        return ""
+    return "".join(chr((raw >> (8 * i)) & 0xFF) for i in range(4)).strip("\x00 ")
 
 
 @dataclass(frozen=True)
@@ -33,6 +78,16 @@ class CameraConfig:
     width: int = 640
     height: int = 480
     backend: int = DEFAULT_BACKEND
+    #: Requested pixel format as a FOURCC string; empty means "leave the driver default alone".
+    #:
+    #: MJPG by default, and this is not cosmetic: uncompressed YUYV at 640x480 is ~614 KB per
+    #: frame, and over a *virtual* USB link (WSL2 + `usbipd`) the transport becomes the bottleneck —
+    #: measured 2026-10-08 on a 2K USB Camera, same device, same resolution, only the format
+    #: differing: YUYV 205-225 ms/frame (~4.5 fps) vs MJPG 29-31 ms/frame (~32 fps). The camera
+    #: path refuses to run below 20 fps, so without this the real-camera verification fails on WSL
+    #: while the picture itself is perfectly fine.
+    #: See `docs/recon/linux-port-environment-2026-10-07.md` §7.4.
+    fourcc: str = "MJPG"
     warmup_frames: int = 1
     open_timeout_s: float = 5.0
     #: How long `open()` may keep skipping blank frames while hunting for a usable first frame
@@ -103,6 +158,9 @@ class FrameStats:
     read_ms: list[float] = field(default_factory=list)
     width: int = 0
     height: int = 0
+    #: Pixel format the driver actually negotiated ('' when it reports none). Read back rather than
+    #: assumed: the request for MJPG is best-effort, and YUYV over a virtual USB link is ~7x slower.
+    fourcc: str = ""
     #: Blank frames skipped while looking for the first usable frame (t99 diagnosis).
     blank_frames_skipped: int = 0
 
@@ -116,6 +174,7 @@ class FrameStats:
                 "frames": 0,
                 "width": self.width,
                 "height": self.height,
+                "fourcc": self.fourcc,
                 "blank_frames_skipped": self.blank_frames_skipped,
             }
 
@@ -129,6 +188,7 @@ class FrameStats:
             "frames": count,
             "width": self.width,
             "height": self.height,
+            "fourcc": self.fourcc,
             "blank_frames_skipped": self.blank_frames_skipped,
             "read_ms_mean": round(sum(reads) / count, 1),
             "read_ms_p50": round(percentile(0.5), 1),
@@ -165,8 +225,13 @@ class FrameGrabber:
     def open(self) -> None:
         started = time.perf_counter()
         capture = cv2.VideoCapture(self.config.index, self.config.backend)
-        # Property setting is best-effort: the driver may cap the resolution, so the
-        # authoritative size is read back below rather than assumed from the request.
+        # Property setting is best-effort: the driver may cap the resolution or ignore the format,
+        # so the authoritative values are read back below rather than assumed from the request.
+        #
+        # Format **before** size: on V4L2, picking a pixel format renegotiates the stream and can
+        # reset the frame size, so setting the size first would be undone by this line.
+        if self.config.fourcc:
+            capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.config.fourcc))
         if self.config.width > 0:
             capture.set(cv2.CAP_PROP_FRAME_WIDTH, float(self.config.width))
         if self.config.height > 0:
@@ -178,9 +243,14 @@ class FrameGrabber:
 
         if not capture.isOpened():
             capture.release()
+            # The message names the backend that actually failed (it used to say CAP_DSHOW even
+            # when the configured backend was something else — on Linux that sentence was simply
+            # false), and lists causes that exist on both platforms.
             raise CameraUnavailable(
-                f"打不开摄像头 index={self.config.index} backend=CAP_DSHOW："
-                "设备不存在、被别的程序占用，或 Windows 隐私设置里禁止了摄像头（设置 → 隐私和安全性 → 相机）。"
+                f"打不开摄像头 index={self.config.index} backend={backend_name(self.config.backend)}："
+                "设备不存在、被别的程序占用，或当前用户没有访问权限"
+                "（Linux：要在 `video` 组里、且 `/dev/video*` 存在；"
+                "Windows：隐私设置里可能禁止了摄像头，设置 → 隐私和安全性 → 相机）。"
             )
 
         frame = None
@@ -226,6 +296,7 @@ class FrameGrabber:
         self.stats.open_ms = (first_started - started) * 1000.0
         self.stats.first_frame_ms = (time.perf_counter() - first_started) * 1000.0
         self.stats.height, self.stats.width = frame.shape[:2]
+        self.stats.fourcc = negotiated_fourcc(capture)
         self.stats.blank_frames_skipped = blank_frames
         self._capture = capture
 

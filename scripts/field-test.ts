@@ -1301,14 +1301,29 @@ def mode_speaker(root, fixture, gain):
 def mode_camera():
     import cv2
 
-    result = {"ok": True, "backend": "CAP_DSHOW"}
-    capture = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    # Backend by platform — the same rule as perception_edge.camera.default_backend()
+    # (one decision, two languages; do not let them drift).
+    #   * Windows: DSHOW. Measured on the original dev machine: MSMF fails instantly.
+    #   * POSIX: V4L2. cv2.CAP_DSHOW is still *defined* on Linux but the backend does not
+    #     exist, so hardcoding it means isOpened() == False on a machine whose camera is fine.
+    # NOTE for editors: this file embeds Python inside a TS template literal, so a backtick
+    # anywhere in here (including in a comment) terminates the literal. Use plain words.
+    is_windows = sys.platform == "win32"
+    backend = int(cv2.CAP_DSHOW) if is_windows else int(cv2.CAP_V4L2)
+    result = {"ok": True, "backend": "CAP_DSHOW" if is_windows else "CAP_V4L2"}
+    capture = cv2.VideoCapture(0, backend)
     result["opened"] = bool(capture.isOpened())
     if not capture.isOpened():
         emit(result)
         return
+    # MJPG *before* the size (V4L2 renegotiates and can reset it): uncompressed YUYV at 640x480 is
+    # ~614 KB/frame, which over a virtual USB link (WSL2 + usbipd) costs ~200 ms/frame vs ~30 ms
+    # for MJPG — that difference alone reads as "the camera is too slow". Read the format back.
+    capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    fourcc_raw = int(capture.get(cv2.CAP_PROP_FOURCC))
+    result["fourcc"] = "".join(chr((fourcc_raw >> (8 * i)) & 0xFF) for i in range(4)).strip("\x00 ") if fourcc_raw > 0 else ""
     frames = []
     started = time.perf_counter()
     for _ in range(15):
