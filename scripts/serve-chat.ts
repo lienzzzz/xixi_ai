@@ -1090,7 +1090,20 @@ const server = createServer((request, response) => {
   })();
 });
 
-const PAGE = `<!doctype html>
+/**
+ * The trial page, as one template literal.
+ *
+ * Exported for the fast UI tier (`tests/ui/smoke/page-script.test.ts`, inside `npm test`): ADR-0021's
+ * parse check has to compile the page the server **really emits**, and this is the page the
+ * 2026-10-08 「麦克风、打字、所有按钮全不动」 incident happened on (one level of backslash escaping was
+ * lost while the template was evaluated, so the emitted `<script>` died in the parser). The tier
+ * imports this const instead of copying the markup — a copy would grade the copy, not the page.
+ *
+ * Note for whoever edits it: the interpolated pieces below are text and shared scripts
+ * (`segmentTtsNote(...)`, the proactive panel, `XIXI_PLAYBACK_JS`), so the *script* code is the same
+ * for every runtime state; keep it that way, or the gate will only be checking one variant.
+ */
+export const PAGE = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>和西西说话</title>

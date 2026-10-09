@@ -1,6 +1,11 @@
 # 测试
 
-> 最后更新：2026-10-10（V0.3 **D1**：新增 §2 的 `tests/console/live-entry-proactive-seams.test.ts` 小节
+> 最后更新：2026-10-10（覆盖缺口补齐：快档从「只编译控制台页的内联 `<script>`」扩到**三个页面 + 外链脚本**——
+> 现场测试控制台 `GET /`、**试用页** `GET /`（`scripts/serve-chat.ts` 的 `PAGE`，即那次「所有按钮点了没反应」
+> 事故发生的页面）、`apps/demo-ui/index.html` 与它的外链 `app.js`（静态文件，此前默认门禁里没人解析过它）。
+> §1 的 UI 行、§2 的 `tests/ui/**` 小节、§3.2 的「能抓什么/抓不到什么」与覆盖范围、§6 第 8 条同步；
+> 另外记下一条**已知豁免**（跨页共享片段在 id 检查里按「谁拥有这些 id」归页）与它对应的收尾任务）
+> 上一版：2026-10-10（V0.3 **D1**：新增 §2 的 `tests/console/live-entry-proactive-seams.test.ts` 小节
 > （入口主动循环的两个接缝：到点提醒与插件话题，判据是**入口自己的循环的可观察行为**）、§3 的 `verify:p2.5`
 > 行按新口径改写——场景 2 **不再手调读接缝**，改成「先断言仍是 `pending`，再让循环自己推进到 `candidate`」；
 > 复核接缝的命令**必须带排除项** `':!scripts/verify-p2-5.ts'`（该脚本自己也引用它）。
@@ -34,7 +39,7 @@
 | 场景 | `tests/scenarios/` | 对话语料（8 场景，数据驱动），由 `scripts/eval-conversation.ts` 执行 | 执行时联网 | `corpus.ts`（**不是**空目录，也不产生 `npm test` 用例：它是数据模块） |
 | 回放 | `tests/replay/` | 导出事件区间 → 重放 → 复现决策（§22.3） | 否 | **空**（属 M5） |
 | 控制台 | `tests/console/` | 现场测试控制台的隐私保留策略、多段语音规划、在场回退、报告与错误文案、主动开口面板、三栏页面、「看一眼」、**入口主动循环的两个接缝（V0.3 D1）**、`/demo/` 三条静态路由（D0.1/D0.2）（项数以 `npm run test:console` 末行为准） | 否 | `field-test-console.test.ts`、`proactive-console.test.ts`、`proactive-loop.test.ts`、`three-column-console.test.ts`、`look-once-console.test.ts`、`live-entry-proactive-seams.test.ts`（D1，见 §2）、`serve-chat-demo-route.test.ts`（D0，路由）；**已在 `npm test` 的 glob 里（t16 起）**，也可用 `npm run test:console` 单跑 |
-| UI 页面（两档） | `tests/ui/` | **快档**：控制台页面的内联脚本能不能解析、脚本按字面量找的元素 id 在不在页面里（零依赖、纯文本分析，**在 `npm test` 里**）；**深档**：真实 Chromium 加载 `GET /`，断言零 `pageerror` 与关键控件真的执行处理器（`npm run test:ui`，**不在默认门禁**，需先取一次浏览器） | 两档都不联网（深档也不需要密钥/真库，用 `--offline` + 临时库） | `smoke/page-script.test.ts`、`e2e/page-behavior.test.ts`，共用 `lib/harness.ts`；**这是仓库里唯一真的执行页面 JS 的一层**，口径与边界见 §3.2，决策见 [`adr/0021`](adr/0021-browser-ui-testing.md) |
+| UI 页面（两档） | `tests/ui/` | **快档**：**三个页面**（现场测试控制台的 `GET /`、试用页的 `GET /`、`apps/demo-ui/index.html`）的内联脚本**与它们用 `<script src>` 加载的本地脚本文件**（如 demo 的 `app.js`）能不能解析，以及脚本按字面量找的元素 id 在不在页面里（零依赖、纯文本分析，**在 `npm test` 里**）；**深档**：真实 Chromium 加载**控制台的** `GET /`，断言零 `pageerror` 与关键控件真的执行处理器（`npm run test:ui`，**不在默认门禁**，需先取一次浏览器） | 两档都不联网（深档也不需要密钥/真库，用 `--offline` + 临时库） | `smoke/page-script.test.ts`、`e2e/page-behavior.test.ts`，共用 `lib/harness.ts`；**这是仓库里唯一真的执行页面 JS 的一层**（执行面目前只有控制台页；试用页与 demo 页只有解析与 id 两层），口径与边界见 §3.2，决策见 [`adr/0021`](adr/0021-browser-ui-testing.md) |
 | 感知 | `tests/perception/` | 摄像头在场检测的 TS 契约 + 转发 Python 回归套件（合成场景，不需要真相机；项数以 `npm run test:perception` 末行为准） | 否 | 需要带 cv2 的 venv（`.venvs/field-probe` 或 `.venvs/cv4`，缺了**直接失败**而不是跳过）；也可用 `npm run test:perception` 单跑 |
 | 真实 API 验收 | `scripts/verify-*.ts`、`eval-conversation.ts`、`voice-*.ts` | 真实 MiMo 调用、语音闭环、打断 | **是** | 见下方「新增验证脚本」，**都不在 `npm test` 里** |
 | 真机设备验收 | `scripts/field-test.ts --acceptance` | 麦克风/扬声器/摄像头自检（Windows：pycaw + WASAPI 回环 + DSHOW；Linux：ALSA 采集 + 按平台选的后端） | 否 | 需要真机；结果写 `docs/recon/field-test-report-<日期>.md` |
@@ -187,12 +192,15 @@ D1.1/D1.2 把两行写进 `scripts/serve-chat.ts` 与 `scripts/field-test.ts`，
 
 | 档 | 文件 | 判据 | 跑在哪 |
 |---|---|---|---|
-| 快档 | `tests/ui/smoke/page-script.test.ts` | ① 服务端真正发出的页面里每个内联 `<script>` 都能通过 `node:vm` 的编译（**只编译不执行**）；② 脚本按字面量找的每个元素 id（`el('x')` / `getElementById('x')` / `querySelector('#x')` / 共享面板的 `PX.ids = {…}` 映射）在页面里真实存在 | `npm test`（默认门禁）、`npm run test:ui:smoke` |
-| 深档 | `tests/ui/e2e/page-behavior.test.ts` | 真实 Chromium 打开真服务的 `GET /`：200、页面标题是控制台、`#p-listen` 由 `/api/field/state` 的真实往返填出来、**零 `pageerror`**、零失败请求、零 `console.error`；再点关键控件（刷新设备读数 / 今天安静点 / 新会话 / 打字回车）并断言**处理器真的执行过**（页内监听器计数探针 + DOM 结果 + 真实 `/api/*` 往返） | `npm run test:ui`（**不在默认门禁**） |
+| 快档 | `tests/ui/smoke/page-script.test.ts` | ① **三个页面**的内联 `<script>` **与它们加载的本地脚本文件**都能通过 `node:vm` 的编译（**只编译不执行**）——现场测试控制台 `GET /`、试用页 `GET /`（`scripts/serve-chat.ts` 的 `PAGE`）、`apps/demo-ui/index.html` 的 `app.js`；② 脚本按字面量找的每个元素 id（`getElementById('x')` / `querySelector('#x')` / **识别出来的 id 助手**如控制台的 `el('x')` 与 demo 的 `$('x')` / 共享面板的 `PX.ids = {…}` 映射）在页面里真实存在；③ 相对 `<script src>` 指不到文件、或声明的共享片段找不到，都是**红**，不许静默放过 | `npm test`（默认门禁）、`npm run test:ui:smoke` |
+| 深档 | `tests/ui/e2e/page-behavior.test.ts` | 真实 Chromium 打开真服务的 `GET /`（**控制台页**）：200、页面标题是控制台、`#p-listen` 由 `/api/field/state` 的真实往返填出来、**零 `pageerror`**、零失败请求、零 `console.error`；再点关键控件（刷新设备读数 / 今天安静点 / 新会话 / 打字回车）并断言**处理器真的执行过**（页内监听器计数探针 + DOM 结果 + 真实 `/api/*` 往返） | `npm run test:ui`（**不在默认门禁**） |
 
-两档读的是**同一个页面来源**：`buildConsolePage()` 调真的 `buildFieldPage()`（同一个 boot 形状），
-不是手抄一份 markup——抄一份就等于测副本。页面文本断言（`tests/console/*`）继续管它们各自的事，
-本档只补「这段代码浏览器能不能跑、跑了有没有真的接上」这一层。
+两档读的都是页面的**真实出处**（不是手抄一份 markup，抄一份就等于测副本）：控制台页 `buildFieldPage()` 现算，
+试用页取 `serve-chat.ts` 导出的 `PAGE`（导入该入口会顺带按 §3.1 的纪律把库落到进程临时目录——与
+`tests/console/voice-streaming-console.test.ts` 同一种做法），demo 页直接读 `apps/demo-ui/index.html`。
+**覆盖边界**：执行（真的跑页面 JS）目前只有控制台页一个人在做，试用页与 demo 页只有「解析 + id」两层；
+`/demo/` 的浏览器取证是一次性的（见 [`progress.md` §14](progress.md)），不构成自动防线。
+页面文本断言（`tests/console/*`）继续管它们各自的事，本档只补「这段代码浏览器能不能跑、跑了有没有真的接上」这一层。
 
 ## 3. 怎么跑
 
@@ -283,20 +291,38 @@ npm run test:ui            # 深档：真实 Chromium；缺浏览器时明确报
 
 1. **整块脚本解析失败**（那次「所有按钮点了没反应」的形态）：抽出每个内联 `<script>` 用 `node:vm` 编译，
    只编译不执行——浏览器解析器会拒绝的，它同样拒绝。
-2. **脚本找的 id 不在页面里**：`el('x')`、`getElementById('x')`、`querySelector('#x')` 以及共享面板发出的
+2. **脚本找的 id 不在页面里**：`getElementById('x')`、`querySelector('#x')`、**识别出来的 id 助手**
+   （控制台的 `el('x')`、demo 页的 `$('x')`——助手的判定要求函数体**就是**一次 `document.getElementById`，
+   放宽会把 `pxVal('cooldown')` 这类逻辑键当成 id）以及共享面板发出的
    `PX.ids = {"save":"px-save",…}` 映射，逐条核对 markup 里有没有这个 id（页面连自己发出的脚本都对不上，
    点下去就是「没反应」）。
+3. **外链脚本**：页面用 `<script src="./app.js">` 加载的**仓库内**文件也会被读进来编译（demo 原型页的
+   脚本就是这样——它是静态文件，内联抽取永远看不见它）；相对路径指不到文件、或页面没声明资源目录，
+   都是**红**，不是跳过。
+4. **声明过的共享片段真的在**：见下面的覆盖范围与豁免。
+
+**覆盖范围（2026-10-10）**
+
+- 快档覆盖**三个页面**：现场测试控制台 `GET /`、**试用页 `GET /`**（`scripts/serve-chat.ts` 的 `PAGE`——
+  那次事故就发生在它身上，第一版防线恰恰漏了它）、`apps/demo-ui/index.html` + 它的外链 `app.js`。
+- **深档仍只覆盖控制台的 `GET /`**：试用页与 demo 页的*运行时行为*今天没有自动防线（`/demo/` 的浏览器取证
+  是一次性的，见 [`progress.md` §14](progress.md)）；要接是它们各自任务里的一件事。
+- **已知豁免（临时）**：试用页把控制台的面板脚本与播放规则**逐字**嵌进自己的 `<script>`，而那段面板脚本里
+  有硬编码的控制台 id（`px-cam-problem*`、`turns`、`presence-text`、`px-live-*`）。解析检查照旧覆盖它们的
+  每一个字节；**id 检查**把这两个片段归给控制台（同一份字节、那些 id 都在）。声明是响亮的：片段逐字找不到
+  就报红（有夹具守着）。根因（`scripts/field-test.ts` 的 `proactivePanelScript` 硬编码控制台 id，导致试用页上
+  这 30 条查找永远找不到节点、那几条分支是死的，但有守卫不会崩）已单开收尾任务；修好后这段声明的范围应
+  相应收紧甚至消失。
 
 **快档抓不到什么（深档的职责）**
 
 - **运行时行为**：handler 里访问了不存在的属性、`null.addEventListener`、异步分支根本没跑、
-  点了之后状态没渲染——这些都不在文本里，快档一个字都看不见。
-- **间接引用**：`document.getElementById(PX.ids.save)` 这类经变量的查找不做静态推断（只识别上面那种
-  显式的 `ids` 映射）。
+  点了之后状态没渲染——这些都不在文本里，快档一个字都看不见。demo 页的 `app.js` 暴露面是**普通的语法错误
+  与手误**（静态文件不经模板求值，**不是**控制台那次「模板吃掉一层转义」的机制）。
+- **间接引用**：`document.getElementById(PX.ids.save)` 这类经变量的查找不做静态推断（只识别上面那几种
+  显式形态）。
 - **模块脚本**：`<script type="module">` 会被**明确拒绝**（报错说清「本档只编译经典内联脚本」），
-  不是静默跳过；今天两个页面都是单文件经典内联脚本。
-- 覆盖范围目前只有**现场测试控制台的 `GET /`**：试用页（`scripts/serve-chat.ts`）与
-  `apps/demo-ui/` 的交互原型页面由它们各自的任务接（见 §6 第 8 条）。
+  不是静默跳过；今天三个页面都是单文件经典内联脚本。
 
 **深档补上的那一层**：真实 Chromium（headless）→ 真 HTTP 服务（`createFieldServer`，临时库 + `--offline` +
 无密钥）→ 断言零 `pageerror`、零失败请求、页面自己的启动代码真的完成了 `/api/field/state` 往返，
@@ -366,11 +392,13 @@ manual audio hardware tests 三档；`AGENTS.md` 第 2 节也要求「联网验�
 7. **`npm test` 不检查 DSH profile 是否装好**：`node scripts/install-dsh-profile.ts --check`
    会 `--dump-config` 并断言 `dsh-llm-pi-ai` / `xixi-tools` / `openai-completions` / `mimo-v2.6-flash`
    四个标志存在；它需要 DSH 已安装，因此没有放进离线测试。
-8. **页面 JS 的防线只覆盖了「根路径调试页面」**：快档 + 深档（§3.2）已覆盖现场测试控制台的 `GET /`，
-   但**试用页（`scripts/serve-chat.ts`）与 `apps/demo-ui/` 的交互原型页面还没有**；而且快档本身
-   **看不见运行时行为**（handler 里访问不存在的属性、`null.addEventListener`、异步分支没跑）——
-   那是深档的职责，深档又需要先取一次浏览器（不在默认门禁里，因此**不会每次迭代都跑**）。
-   谁改动任何页面的内联脚本，除 `npm test` 外还应跑一次 `npm run test:ui`（分档理由与代价见
+8. **页面 JS 的防线：解析与 id 已覆盖三个页面，真正的「跑一遍」只有控制台页**：快档（§3.2）覆盖现场测试
+   控制台 `GET /`、试用页 `GET /`、`apps/demo-ui/index.html` + 它的外链 `app.js`（解析 + id 两层，且在
+   `npm test` 里每次迭代都跑）；**深档只覆盖控制台的 `GET /`**，所以试用页与 demo 页的**运行时行为**
+   今天没有自动防线（`/demo/` 的浏览器取证是一次性的）。另外快档**看不见运行时行为**（handler 里访问
+   不存在的属性、`null.addEventListener`、异步分支没跑）——那是深档的职责，而深档要先取一次浏览器
+   （不在默认门禁里，**不会每次迭代都跑**）。谁改动任何页面的脚本（含 `<script src>` 指向的文件），
+   除 `npm test` 外还应跑一次 `npm run test:ui`；demo 页与试用页的运行时防线是待办（分档理由与代价见
    [`adr/0021`](adr/0021-browser-ui-testing.md)）。
 
 ## 7. 2026-09-30 新增：对话层、语音闭环与评测

@@ -11,7 +11,10 @@
  *
  *   * fast tier — `tests/ui/smoke/page-script.test.ts`, inside `npm test`: zero dependencies
  *     (`node:vm` compiles the extracted blocks, plain regexes find the element ids). No browser,
- *     no network, no database.
+ *     no network, no database. It covers **every page this repository ships**: the console page
+ *     (`buildFieldPage()`), the trial page (`scripts/serve-chat.ts`'s `PAGE` — the page the incident
+ *     happened on) and the static demo prototype (`apps/demo-ui/index.html` plus its external
+ *     `./app.js`, which no in-markup extraction can see).
  *   * deep tier — `tests/ui/e2e/page-behavior.test.ts`, `npm run test:ui` only: real Chromium
  *     loads the page from the real HTTP server and the assertions are about *behaviour* —
  *     zero `pageerror`, and the key controls really run their handlers.
@@ -22,9 +25,9 @@
  * property that does not exist, an id that is only created later by script). That is the deep
  * tier's job.
  */
-import { mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { Script } from 'node:vm';
 
 import type { Browser, Page } from 'playwright';
@@ -32,6 +35,7 @@ import type { Browser, Page } from 'playwright';
 import {
   buildFieldPage,
   createFieldServer,
+  proactivePanelScript,
   readCalibration,
   retentionPolicy,
   type FieldBootstrap,
@@ -39,6 +43,7 @@ import {
   type ProbeRunner,
 } from '../../../scripts/field-test.ts';
 import { REPO_ROOT, loadConfig } from '../../../scripts/lib/harness.ts';
+import { XIXI_PLAYBACK_JS } from '../../../services/voice-edge/voice_edge/voice_stream.ts';
 
 // ============================================================ page under test
 
@@ -63,6 +68,78 @@ export function consolePageBoot(overrides: Partial<FieldBootstrap> = {}): FieldB
 /** The real page, exactly as `GET /` would serve it (same builder, same boot shape). */
 export function buildConsolePage(overrides: Partial<FieldBootstrap> = {}): string {
   return buildFieldPage(consolePageBoot(overrides));
+}
+
+/**
+ * A page this repository really ships.
+ *
+ * `assetDir` is the directory a relative `<script src="./x.js">` resolves against. `null` means the
+ * page is rendered by a server and carries no static asset directory — a relative `src` on such a
+ * page is then reported as unresolved instead of being skipped (see `collectExternalScripts`).
+ *
+ * `sharedFragments` are pieces of script this page embeds **verbatim** from another page's source
+ * (the proactive panel and the browser playback rules). They are still parsed here — the parse check
+ * covers every byte the page emits — but they are left out of *this page's* id check, because they
+ * are written for the page that owns their element ids: the console page emits the same bytes with
+ * its ids present, so that is where their lookups get checked. `checkPage` fails loudly if a
+ * declared fragment is not actually found, so this exclusion cannot quietly grow.
+ */
+export interface SharedFragment {
+  readonly name: string;
+  readonly code: string;
+}
+
+export interface PageUnderTest {
+  readonly label: string;
+  readonly html: string;
+  readonly assetDir: string | null;
+  readonly sharedFragments?: readonly SharedFragment[];
+}
+
+/** The field-test console's page, exactly as `buildFieldPage()` emits it. */
+export function consolePageSource(): PageUnderTest {
+  return { label: '现场测试控制台 GET /', html: buildConsolePage(), assetDir: null };
+}
+
+/**
+ * The trial page — `scripts/serve-chat.ts`'s `PAGE`, i.e. the page the 2026-10-08 "every button is
+ * dead" incident happened on, and the one page the first version of this tier missed.
+ *
+ * The import is **dynamic** on purpose: `PAGE` is a module-level const built from the entry's own
+ * state, and importing the entry also opens its store (into the process temp dir under
+ * `NODE_TEST_CONTEXT` — the same discipline `tests/console/voice-streaming-console.test.ts` already
+ * relies on inside `npm test`). Keeping it dynamic means only this tier pays for it.
+ */
+export async function trialPageSource(): Promise<PageUnderTest> {
+  const { PAGE } = await import('../../../scripts/serve-chat.ts');
+  return {
+    label: '试用页 GET /（serve-chat.ts 的 PAGE）',
+    html: PAGE,
+    assetDir: null,
+    // The page embeds these two fragments verbatim. Both are written against the console page's
+    // element ids (`px-cam-problem`, `turns`, `presence-text`, …), which the trial page does not
+    // have — its own camera card is `cam-*`. They stay in the parse check; their id lookups are
+    // checked where those ids exist (the console page emits the same code).
+    sharedFragments: [
+      { name: "proactivePanelScript('/api')", code: proactivePanelScript('/api') },
+      { name: 'XIXI_PLAYBACK_JS', code: XIXI_PLAYBACK_JS },
+    ],
+  };
+}
+
+/** A page that is a file on disk (the demo prototype), resolved with its own asset directory. */
+export function shippedPageSource(repoRelativePath: string): PageUnderTest {
+  const absolute = join(REPO_ROOT, repoRelativePath);
+  return {
+    label: repoRelativePath,
+    html: readFileSync(absolute, 'utf8'),
+    assetDir: dirname(absolute),
+  };
+}
+
+/** A repo-relative POSIX path (as it appears in messages and in `changedPaths`). */
+function repoPath(absolute: string): string {
+  return relative(REPO_ROOT, absolute).split('\\').join('/');
 }
 
 // ============================================================ fast tier: static checks
@@ -188,18 +265,62 @@ export function collectDefinedIds(html: string): string[] {
 }
 
 /**
- * Literal element lookups. Three shapes cover what a page can do without indirection:
- * `el('x')` (the console's own helper), `getElementById('x')`, `querySelector('#x')`.
+ * Names of helpers in this script that *are* `document.getElementById` under another name, so their
+ * literal calls can be treated as element lookups too.
+ *
+ * Why this exists: `apps/demo-ui/app.js` reaches every element through `const $ = (id) =>
+ * document.getElementById(id)`, so without this the demo page's lookups would be invisible and the
+ * check would pass vacuously. The detection is deliberately narrow — the helper's body must *be* a
+ * direct `return document.getElementById(...)` (arrow body, one-statement function, or `.bind`) —
+ * because a looser rule ("any function whose body mentions `getElementById`") matches
+ * `pxVal(name)` / `pxStatus(text)` on the console page, whose string arguments are *logical keys*,
+ * not ids, and would turn real code into false reds.
+ */
+export function collectIdHelpers(code: string): string[] {
+  const shapes: readonly RegExp[] = [
+    // const $ = (id) => document.getElementById(id);
+    /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*document\.getElementById\s*\(/g,
+    // const byId = function (id) { return document.getElementById(id); };
+    /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*function\s*\([^)]*\)\s*\{\s*return\s+document\.getElementById\s*\(/g,
+    // const byId = document.getElementById.bind(document);
+    /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:document\.)?getElementById\s*\.\s*bind\s*\(/g,
+    // function el(id) { return document.getElementById(id); }
+    /function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{\s*return\s+document\.getElementById\s*\(/g,
+  ];
+  const names = new Set<string>();
+  for (const shape of shapes) {
+    for (const match of code.matchAll(new RegExp(shape.source, shape.flags))) {
+      const name = match[1];
+      if (name !== undefined) names.add(name);
+    }
+  }
+  return [...names];
+}
+
+function escaped(name: string): string {
+  return name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Literal element lookups. Four shapes cover what a page can do without indirection:
+ * `el('x')` (the console's own helper, pinned by name), `getElementById('x')`,
+ * `querySelector('#x')`, and `<helper>('x')` for helpers `collectIdHelpers()` recognises.
  *
  * Indirection is deliberately *not* guessed at: `document.getElementById(PX.ids.save)` yields
- * nothing here. `ids = { … }` maps are read as a second, documented source (see below) because the
+ * nothing here. `ids = { … }` maps are read as a further, documented source (see below) because the
  * shared proactive panel is emitted that way — and a map whose value is not in the markup is a real
  * defect, not a false positive.
  */
 export function collectIdReferences(scripts: readonly PageScript[]): IdReference[] {
   const references: IdReference[] = [];
+  // Helpers are collected across the whole page, then their calls are found per script: the demo
+  // page defines `$` in `app.js` and uses it there, but a page could just as well define one in an
+  // inline block and call it from a file.
+  const helpers = new Set<string>();
+  for (const script of scripts) {
+    for (const helper of collectIdHelpers(script.code)) helpers.add(helper);
+  }
   const patterns: readonly { readonly via: string; readonly pattern: RegExp }[] = [
-    { via: 'el()', pattern: /\bel\(\s*(?:"([^"]+)"|'([^']+)')\s*\)/g },
     { via: 'getElementById()', pattern: /getElementById\(\s*(?:"([^"]+)"|'([^']+)')\s*\)/g },
     { via: "querySelector('#…')", pattern: /querySelector(?:All)?\(\s*["']#([A-Za-z][\w-]*)["']\s*\)/g },
   ];
@@ -208,6 +329,14 @@ export function collectIdReferences(scripts: readonly PageScript[]): IdReference
       for (const match of script.code.matchAll(new RegExp(pattern.source, pattern.flags))) {
         const id = match[1] ?? match[2];
         if (id !== undefined) references.push(reference(id, via, script, match.index ?? 0));
+      }
+    }
+    // Recognised id helpers, e.g. the console's `el('turns')` and the demo page's `$('message-input')`.
+    for (const helper of helpers) {
+      const call = new RegExp(`(?<![\\w$.])${escaped(helper)}\\(\\s*(?:"([^"]+)"|'([^']+)')\\s*\\)`, 'g');
+      for (const match of script.code.matchAll(call)) {
+        const id = match[1] ?? match[2];
+        if (id !== undefined) references.push(reference(id, `${helper}()`, script, match.index ?? 0));
       }
     }
     // `PX.ids = {"save":"px-save",…}` — the ids the shared panel looks up by name. The emitted map
@@ -245,6 +374,180 @@ export function analyzePage(html: string): PageAnalysis {
   const definedIds = collectDefinedIds(html);
   const references = collectIdReferences(scripts);
   return { scripts, definedIds, references, syntaxProblems: compilePageScripts(scripts), missingIds: findMissingIds(definedIds, references) };
+}
+
+// ============================================================ fast tier: scripts that are files
+
+/** `<script src="…">` on the page, in markup order. */
+const SCRIPT_SRC = /<script\b[^>]*\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')[^>]*>/gi;
+
+/** A local script file the page loads, read from disk. */
+export interface ExternalScript {
+  /** The `src` as the markup writes it (`./app.js`). */
+  readonly src: string;
+  /** Repo-relative POSIX path of the file that was compiled. */
+  readonly relativePath: string;
+  readonly code: string;
+}
+
+/** Something the tier could not compile, and why — never a silent skip. */
+export interface NotCompiled {
+  readonly src: string;
+  readonly reason: string;
+}
+
+export interface ExternalScripts {
+  readonly scripts: readonly ExternalScript[];
+  /** Relative `src`s that name no readable repo file (including "this page has no asset dir"). */
+  readonly unresolved: readonly NotCompiled[];
+  /** Non-repo `src`s (URLs, `data:`, absolute paths): reported, not compiled. */
+  readonly notCompiled: readonly NotCompiled[];
+}
+
+/**
+ * Read every `<script src="…">` that points at a file in this repository.
+ *
+ * The demo prototype's `app.js` is the reason this exists: it is a **static file**, so no inline
+ * extraction can ever see it, and until this check ran nothing in the default gate parsed it
+ * (`tests/console/serve-chat-demo-route.test.ts` asserts status, `content-type` and a substring).
+ */
+export function collectExternalScripts(page: PageUnderTest): ExternalScripts {
+  const scripts: ExternalScript[] = [];
+  const unresolved: NotCompiled[] = [];
+  const notCompiled: NotCompiled[] = [];
+  for (const match of page.html.matchAll(new RegExp(SCRIPT_SRC.source, SCRIPT_SRC.flags))) {
+    const src = (match[1] ?? match[2] ?? '').trim();
+    if (src === '') continue;
+    if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(src)) {
+      notCompiled.push({ src, reason: '外部地址（不是仓库里的文件）' });
+      continue;
+    }
+    if (src.startsWith('/')) {
+      notCompiled.push({ src, reason: '绝对路径由服务端路由提供，不指向仓库文件' });
+      continue;
+    }
+    if (page.assetDir === null) {
+      unresolved.push({ src, reason: `「${page.label}」是服务端生成的页面，这一档没有声明它的静态资源目录` });
+      continue;
+    }
+    const absolute = resolve(page.assetDir, src.split('?')[0] ?? src);
+    try {
+      scripts.push({ src, relativePath: repoPath(absolute), code: readFileSync(absolute, 'utf8') });
+    } catch {
+      unresolved.push({ src, reason: `仓库里没有这个文件（按 ${repoPath(page.assetDir)}/ 解析）` });
+    }
+  }
+  return { scripts, unresolved, notCompiled };
+}
+
+/** One problem, already labelled with the file it came from so a failure names the culprit. */
+export interface ScriptProblem {
+  readonly source: string;
+  readonly message: string;
+}
+
+/**
+ * Blank out a declared shared fragment, keeping its newlines so every reported line number still
+ * points at the same line of the emitted script.
+ */
+function blankFragment(code: string, fragment: SharedFragment): string | null {
+  if (fragment.code.length === 0 || !code.includes(fragment.code)) return null;
+  return code.replace(fragment.code, fragment.code.replace(/[^\n]/g, ''));
+}
+
+/** The result of both fast-tier checks over one page *including the scripts it loads as files*. */
+export interface CheckedPage {
+  readonly label: string;
+  readonly inlineScripts: number;
+  /** Repo-relative paths of the external scripts that were compiled. */
+  readonly externalFiles: readonly string[];
+  /** Shared fragments found verbatim and therefore left out of *this page's* id check. */
+  readonly sharedFragments: readonly string[];
+  readonly notCompiled: readonly NotCompiled[];
+  readonly problems: readonly ScriptProblem[];
+  readonly references: readonly IdReference[];
+  readonly missingIds: readonly IdReference[];
+  /** Total bytes of script text this page contributed (a floor against "checked nothing"). */
+  readonly scriptBytes: number;
+}
+
+/**
+ * Both checks for one page: every inline block **and** every local script it loads as a file, plus
+ * the id cross-check over all of them together. Problems carry the source they came from.
+ *
+ * Declared `sharedFragments` are removed from the *id* check only (their lookups belong to the page
+ * that owns those ids, which emits the same bytes), and a declared fragment that is not found is a
+ * problem — an exclusion that no longer matches reality must not stay quiet.
+ */
+export function checkPage(page: PageUnderTest): CheckedPage {
+  const inline = extractPageScripts(page.html);
+  const external = collectExternalScripts(page);
+  const externalAsScripts: PageScript[] = external.scripts.map((script, index) => ({
+    index: inline.length + index,
+    type: '',
+    code: script.code,
+    line: 1,
+  }));
+
+  const problems: ScriptProblem[] = [];
+  for (const problem of compilePageScripts(inline)) {
+    problems.push({ source: `${page.label} 内联脚本 #${problem.scriptIndex}`, message: problem.message });
+  }
+  for (const [index, problem] of compilePageScripts(externalAsScripts).entries()) {
+    const owner = external.scripts[index];
+    problems.push({ source: owner?.relativePath ?? `${page.label} 外部脚本 #${index}`, message: problem.message });
+  }
+  for (const item of external.unresolved) {
+    problems.push({ source: `${page.label} <script src="${item.src}">`, message: `没有编译它：${item.reason}` });
+  }
+
+  const fragments = page.sharedFragments ?? [];
+  const found: string[] = [];
+  const blanked = inline.map((script) => {
+    let code = script.code;
+    for (const fragment of fragments) {
+      const next = blankFragment(code, fragment);
+      if (next === null) continue;
+      code = next;
+      if (!found.includes(fragment.name)) found.push(fragment.name);
+    }
+    return { ...script, code };
+  });
+  for (const fragment of fragments) {
+    if (!found.includes(fragment.name)) {
+      problems.push({
+        source: page.label,
+        message: `声明了共享片段「${fragment.name}」，但页面脚本里逐字找不到它 —— 这条排除规则已过期，必须重新核对（不许让它悄悄变宽）`,
+      });
+    }
+  }
+
+  const references = collectIdReferences([...blanked, ...externalAsScripts]);
+  const definedIds = collectDefinedIds(page.html);
+  const scriptBytes =
+    inline.reduce((total, script) => total + script.code.length, 0) +
+    external.scripts.reduce((total, script) => total + script.code.length, 0);
+  return {
+    label: page.label,
+    inlineScripts: inline.length,
+    externalFiles: external.scripts.map((script) => script.relativePath),
+    sharedFragments: found,
+    notCompiled: external.notCompiled,
+    problems,
+    references,
+    missingIds: findMissingIds(definedIds, references),
+    scriptBytes,
+  };
+}
+
+/** `checkPage` over several pages, keeping every problem's page label. */
+export function checkPages(pages: readonly PageUnderTest[]): CheckedPage[] {
+  return pages.map((page) => checkPage(page));
+}
+
+/** Render a problem list for an assertion message. */
+export function describeProblems(problems: readonly ScriptProblem[]): string {
+  return problems.map((problem) => `${problem.source}: ${problem.message}`).join(' | ');
 }
 
 /** One-line-per-problem text for assertion messages. */
