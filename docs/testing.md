@@ -1,10 +1,14 @@
 # 测试
 
-> 最后更新：2026-10-10（覆盖缺口补齐：快档从「只编译控制台页的内联 `<script>`」扩到**三个页面 + 外链脚本**——
+> 最后更新：2026-10-10（**t31：快档的 id 检查不再有任何豁免**。共享面板片段原先逐字内嵌控制台的 id，
+> 快档为此把那段归给控制台检查；根因已修——`proactivePanelScript()` 现在默认只发页面无关的核心，
+> 控制台那几张卡（相机问题卡/实时传感/看一眼/一键启用）只在控制台传 `{ consoleCards: true }` 时随页面发出，
+> 于是试用页与片段两边都按自己的字节过检。§2 的判据 ③④ 与「覆盖范围」小节同步改写）
+> 上一版：2026-10-10（覆盖缺口补齐：快档从「只编译控制台页的内联 `<script>`」扩到**三个页面 + 外链脚本**——
 > 现场测试控制台 `GET /`、**试用页** `GET /`（`scripts/serve-chat.ts` 的 `PAGE`，即那次「所有按钮点了没反应」
 > 事故发生的页面）、`apps/demo-ui/index.html` 与它的外链 `app.js`（静态文件，此前默认门禁里没人解析过它）。
 > §1 的 UI 行、§2 的 `tests/ui/**` 小节、§3.2 的「能抓什么/抓不到什么」与覆盖范围、§6 第 8 条同步；
-> 另外记下一条**已知豁免**（跨页共享片段在 id 检查里按「谁拥有这些 id」归页）与它对应的收尾任务）
+)
 > 上一版：2026-10-10（V0.3 **D1**：新增 §2 的 `tests/console/live-entry-proactive-seams.test.ts` 小节
 > （入口主动循环的两个接缝：到点提醒与插件话题，判据是**入口自己的循环的可观察行为**）、§3 的 `verify:p2.5`
 > 行按新口径改写——场景 2 **不再手调读接缝**，改成「先断言仍是 `pending`，再让循环自己推进到 `candidate`」；
@@ -192,7 +196,7 @@ D1.1/D1.2 把两行写进 `scripts/serve-chat.ts` 与 `scripts/field-test.ts`，
 
 | 档 | 文件 | 判据 | 跑在哪 |
 |---|---|---|---|
-| 快档 | `tests/ui/smoke/page-script.test.ts` | ① **三个页面**的内联 `<script>` **与它们加载的本地脚本文件**都能通过 `node:vm` 的编译（**只编译不执行**）——现场测试控制台 `GET /`、试用页 `GET /`（`scripts/serve-chat.ts` 的 `PAGE`）、`apps/demo-ui/index.html` 的 `app.js`；② 脚本按字面量找的每个元素 id（`getElementById('x')` / `querySelector('#x')` / **识别出来的 id 助手**如控制台的 `el('x')` 与 demo 的 `$('x')` / 共享面板的 `PX.ids = {…}` 映射）在页面里真实存在；③ 相对 `<script src>` 指不到文件、或声明的共享片段找不到，都是**红**，不许静默放过 | `npm test`（默认门禁）、`npm run test:ui:smoke` |
+| 快档 | `tests/ui/smoke/page-script.test.ts` | ① **三个页面**的内联 `<script>` **与它们加载的本地脚本文件**都能通过 `node:vm` 的编译（**只编译不执行**）——现场测试控制台 `GET /`、试用页 `GET /`（`scripts/serve-chat.ts` 的 `PAGE`）、`apps/demo-ui/index.html` 的 `app.js`；② 脚本按字面量找的每个元素 id（`getElementById('x')` / `querySelector('#x')` / **识别出来的 id 助手**如控制台的 `el('x')` 与 demo 的 `$('x')` / 共享面板的 `PX.ids = {…}` 映射）在页面里真实存在；③ 相对 `<script src>` 指不到文件就是**红**，不许静默放过；**没有豁免**——每个页面都要按自己发出的字节过检（跨页共享的片段自己不许写另一个页面的 id） | `npm test`（默认门禁）、`npm run test:ui:smoke` |
 | 深档 | `tests/ui/e2e/page-behavior.test.ts` | 真实 Chromium 打开真服务的 `GET /`（**控制台页**）：200、页面标题是控制台、`#p-listen` 由 `/api/field/state` 的真实往返填出来、**零 `pageerror`**、零失败请求、零 `console.error`；再点关键控件（刷新设备读数 / 今天安静点 / 新会话 / 打字回车）并断言**处理器真的执行过**（页内监听器计数探针 + DOM 结果 + 真实 `/api/*` 往返） | `npm run test:ui`（**不在默认门禁**） |
 
 两档读的都是页面的**真实出处**（不是手抄一份 markup，抄一份就等于测副本）：控制台页 `buildFieldPage()` 现算，
@@ -299,7 +303,8 @@ npm run test:ui            # 深档：真实 Chromium；缺浏览器时明确报
 3. **外链脚本**：页面用 `<script src="./app.js">` 加载的**仓库内**文件也会被读进来编译（demo 原型页的
    脚本就是这样——它是静态文件，内联抽取永远看不见它）；相对路径指不到文件、或页面没声明资源目录，
    都是**红**，不是跳过。
-4. **声明过的共享片段真的在**：见下面的覆盖范围与豁免。
+4. **没有豁免可开**：id 检查不给任何页面开天窗（t28 曾为试用页内嵌的控制台片段声明过一条豁免，t31 把
+   根因修掉后连机制一起删了——留着一条没人需要的豁免，下一个人就会用它来压红，而不是去修页面）。
 
 **覆盖范围（2026-10-10）**
 
@@ -307,12 +312,15 @@ npm run test:ui            # 深档：真实 Chromium；缺浏览器时明确报
   那次事故就发生在它身上，第一版防线恰恰漏了它）、`apps/demo-ui/index.html` + 它的外链 `app.js`。
 - **深档仍只覆盖控制台的 `GET /`**：试用页与 demo 页的*运行时行为*今天没有自动防线（`/demo/` 的浏览器取证
   是一次性的，见 [`progress.md` §14](progress.md)）；要接是它们各自任务里的一件事。
-- **已知豁免（临时）**：试用页把控制台的面板脚本与播放规则**逐字**嵌进自己的 `<script>`，而那段面板脚本里
-  有硬编码的控制台 id（`px-cam-problem*`、`turns`、`presence-text`、`px-live-*`）。解析检查照旧覆盖它们的
-  每一个字节；**id 检查**把这两个片段归给控制台（同一份字节、那些 id 都在）。声明是响亮的：片段逐字找不到
-  就报红（有夹具守着）。根因（`scripts/field-test.ts` 的 `proactivePanelScript` 硬编码控制台 id，导致试用页上
-  这 30 条查找永远找不到节点、那几条分支是死的，但有守卫不会崩）已单开收尾任务；修好后这段声明的范围应
-  相应收紧甚至消失。
+- **没有豁免（2026-10-10，t31 收口）**：试用页曾经把控制台的面板脚本**逐字**嵌进自己的 `<script>`，那段里
+  有硬编码的控制台 id（`px-cam-problem*`、`turns`、`presence-text`、`px-live-*`），于是试用页上有约 30 条
+  「按字面量找不到节点」的查找（都有 `if (!box) return` 守卫，所以是**静默死分支**，不崩），并且每秒拉一次
+  控制台独有的 `GET /api/live`（真浏览器里就是每秒一条 404 `console.error`）。t28 当时给这两段开了显式豁免；
+  t31 修的是根因——`scripts/field-test.ts` 的 `proactivePanelScript()` 现在默认只发**页面无关的核心**，控制台
+  独有的那几张卡只在调用方传 `{ consoleCards: true }` 时随页面发出，核心通过 `PX.hooks.appendConversation`
+  把「主动开口的那一句」交给它。豁免机制（`PageUnderTest.sharedFragments`）连同夹具一起删掉了：今天三个
+  页面都按自己的字节过检。判据见 `tests/ui/smoke/page-script.test.ts` 的
+  「the shared panel core carries no other page ids」那条（核心不许含控制台的字面量查找，控制台形态必须仍然全有）。
 
 **快档抓不到什么（深档的职责）**
 

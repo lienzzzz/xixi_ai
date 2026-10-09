@@ -35,7 +35,6 @@ import type { Browser, Page } from 'playwright';
 import {
   buildFieldPage,
   createFieldServer,
-  proactivePanelScript,
   readCalibration,
   retentionPolicy,
   type FieldBootstrap,
@@ -43,7 +42,6 @@ import {
   type ProbeRunner,
 } from '../../../scripts/field-test.ts';
 import { REPO_ROOT, loadConfig } from '../../../scripts/lib/harness.ts';
-import { XIXI_PLAYBACK_JS } from '../../../services/voice-edge/voice_edge/voice_stream.ts';
 
 // ============================================================ page under test
 
@@ -77,23 +75,16 @@ export function buildConsolePage(overrides: Partial<FieldBootstrap> = {}): strin
  * page is rendered by a server and carries no static asset directory — a relative `src` on such a
  * page is then reported as unresolved instead of being skipped (see `collectExternalScripts`).
  *
- * `sharedFragments` are pieces of script this page embeds **verbatim** from another page's source
- * (the proactive panel and the browser playback rules). They are still parsed here — the parse check
- * covers every byte the page emits — but they are left out of *this page's* id check, because they
- * are written for the page that owns their element ids: the console page emits the same bytes with
- * its ids present, so that is where their lookups get checked. `checkPage` fails loudly if a
- * declared fragment is not actually found, so this exclusion cannot quietly grow.
+ * There is deliberately **no per-page exemption** from the id check (t28 added one for the trial
+ * page, t31 removed it): a fragment written for another page's element ids is a defect, not something
+ * to declare away. `scripts/field-test.ts`'s `proactivePanelScript()` now emits only a page-neutral
+ * core by default and the console's own cards only when the console asks for them
+ * (`ProactivePanelOptions.consoleCards`), so every page checks clean on its own bytes.
  */
-export interface SharedFragment {
-  readonly name: string;
-  readonly code: string;
-}
-
 export interface PageUnderTest {
   readonly label: string;
   readonly html: string;
   readonly assetDir: string | null;
-  readonly sharedFragments?: readonly SharedFragment[];
 }
 
 /** The field-test console's page, exactly as `buildFieldPage()` emits it. */
@@ -109,6 +100,12 @@ export function consolePageSource(): PageUnderTest {
  * state, and importing the entry also opens its store (into the process temp dir under
  * `NODE_TEST_CONTEXT` — the same discipline `tests/console/voice-streaming-console.test.ts` already
  * relies on inside `npm test`). Keeping it dynamic means only this tier pays for it.
+ *
+ * This page used to embed the console's proactive panel **verbatim** (control panel plus camera and
+ * vision cards written against the console's element ids), which is why t28 declared that fragment as
+ * an exemption for its id check. t31 removed the cause instead of the symptom: the panel fragment now
+ * ships a page-neutral core here and the console's cards only to the console, so the trial page is
+ * checked on its own bytes with **no exemptions at all**.
  */
 export async function trialPageSource(): Promise<PageUnderTest> {
   const { PAGE } = await import('../../../scripts/serve-chat.ts');
@@ -116,14 +113,6 @@ export async function trialPageSource(): Promise<PageUnderTest> {
     label: '试用页 GET /（serve-chat.ts 的 PAGE）',
     html: PAGE,
     assetDir: null,
-    // The page embeds these two fragments verbatim. Both are written against the console page's
-    // element ids (`px-cam-problem`, `turns`, `presence-text`, …), which the trial page does not
-    // have — its own camera card is `cam-*`. They stay in the parse check; their id lookups are
-    // checked where those ids exist (the console page emits the same code).
-    sharedFragments: [
-      { name: "proactivePanelScript('/api')", code: proactivePanelScript('/api') },
-      { name: 'XIXI_PLAYBACK_JS', code: XIXI_PLAYBACK_JS },
-    ],
   };
 }
 
@@ -446,23 +435,12 @@ export interface ScriptProblem {
   readonly message: string;
 }
 
-/**
- * Blank out a declared shared fragment, keeping its newlines so every reported line number still
- * points at the same line of the emitted script.
- */
-function blankFragment(code: string, fragment: SharedFragment): string | null {
-  if (fragment.code.length === 0 || !code.includes(fragment.code)) return null;
-  return code.replace(fragment.code, fragment.code.replace(/[^\n]/g, ''));
-}
-
 /** The result of both fast-tier checks over one page *including the scripts it loads as files*. */
 export interface CheckedPage {
   readonly label: string;
   readonly inlineScripts: number;
   /** Repo-relative paths of the external scripts that were compiled. */
   readonly externalFiles: readonly string[];
-  /** Shared fragments found verbatim and therefore left out of *this page's* id check. */
-  readonly sharedFragments: readonly string[];
   readonly notCompiled: readonly NotCompiled[];
   readonly problems: readonly ScriptProblem[];
   readonly references: readonly IdReference[];
@@ -475,9 +453,11 @@ export interface CheckedPage {
  * Both checks for one page: every inline block **and** every local script it loads as a file, plus
  * the id cross-check over all of them together. Problems carry the source they came from.
  *
- * Declared `sharedFragments` are removed from the *id* check only (their lookups belong to the page
- * that owns those ids, which emits the same bytes), and a declared fragment that is not found is a
- * problem — an exclusion that no longer matches reality must not stay quiet.
+ * There is no exemption from the id check: every byte the page emits is parsed and every literal
+ * lookup must resolve in **that** page's markup. When the trial page embedded the console's panel
+ * verbatim, t28 declared the fragment as an exemption; t31 removed the cause (the panel fragment now
+ * ships a page-neutral core) and with it the exemption, because an escape hatch nobody needs is the
+ * next drift (a red could be silenced by declaring a fragment instead of fixing the page).
  */
 export function checkPage(page: PageUnderTest): CheckedPage {
   const inline = extractPageScripts(page.html);
@@ -501,28 +481,7 @@ export function checkPage(page: PageUnderTest): CheckedPage {
     problems.push({ source: `${page.label} <script src="${item.src}">`, message: `没有编译它：${item.reason}` });
   }
 
-  const fragments = page.sharedFragments ?? [];
-  const found: string[] = [];
-  const blanked = inline.map((script) => {
-    let code = script.code;
-    for (const fragment of fragments) {
-      const next = blankFragment(code, fragment);
-      if (next === null) continue;
-      code = next;
-      if (!found.includes(fragment.name)) found.push(fragment.name);
-    }
-    return { ...script, code };
-  });
-  for (const fragment of fragments) {
-    if (!found.includes(fragment.name)) {
-      problems.push({
-        source: page.label,
-        message: `声明了共享片段「${fragment.name}」，但页面脚本里逐字找不到它 —— 这条排除规则已过期，必须重新核对（不许让它悄悄变宽）`,
-      });
-    }
-  }
-
-  const references = collectIdReferences([...blanked, ...externalAsScripts]);
+  const references = collectIdReferences([...inline, ...externalAsScripts]);
   const definedIds = collectDefinedIds(page.html);
   const scriptBytes =
     inline.reduce((total, script) => total + script.code.length, 0) +
@@ -531,7 +490,6 @@ export function checkPage(page: PageUnderTest): CheckedPage {
     label: page.label,
     inlineScripts: inline.length,
     externalFiles: external.scripts.map((script) => script.relativePath),
-    sharedFragments: found,
     notCompiled: external.notCompiled,
     problems,
     references,

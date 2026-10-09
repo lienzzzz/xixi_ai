@@ -4921,10 +4921,26 @@ export function proactivePanelHtml(): string {
  * same. It is written as a plain script body (no modules) because both pages are single files
  * with inline scripts.
  */
-export function proactivePanelScript(apiBase: string): string {
+/** 共享核心之外，页面要不要一并发出**控制台独有的那几张卡**（见 `PROACTIVE_CONSOLE_CARDS_SCRIPT`）。 */
+export interface ProactivePanelOptions {
+  /**
+   * 「这个页面有控制台的相机问题卡 / 实时传感 / 看一眼 / 一键启用」。默认 `false`：
+   * 只发页面无关的核心 —— 那正是「共享片段不许写另一个页面的 id」的落地方式。
+   * 现场测试控制台传 `true`（它的 markup 有那些 id）；试用页只调 `proactivePanelScript('/api')`，
+   * 拿到的就是核心，一个控制台 id 都不带。
+   */
+  readonly consoleCards?: boolean;
+}
+
+export function proactivePanelScript(apiBase: string, options: ProactivePanelOptions = {}): string {
   const id = PROACTIVE_PANEL_IDS;
+  const consoleCards = options.consoleCards === true ? PROACTIVE_CONSOLE_CARDS_SCRIPT : '';
   return `var PX = { base: ${JSON.stringify(apiBase)}, timers: [] };
 PX.ids = ${JSON.stringify(id)};
+/* 页面自己装上的扩展点（现场测试控制台在 PROACTIVE_CONSOLE_CARDS_SCRIPT 里装）：共享核心只认这张表，
+   不认任何一个页面的 id —— 试用页没有那些卡时，这里就是空的，不会有找不到节点的死分支。*/
+PX.hooks = {};
+function pxHook(name) { var hook = PX.hooks[name]; if (typeof hook === 'function') return hook.apply(null, Array.prototype.slice.call(arguments, 1)); }
 function pxSet(name, value) { var node = document.getElementById(PX.ids[name]); if (node) node.value = value; }
 function pxVal(name) { var node = document.getElementById(PX.ids[name]); return node ? node.value : undefined; }
 function pxStatus(text, rejected) {
@@ -5010,15 +5026,6 @@ function pxRender(state) {
 async function pxLoad() {
   try { pxRender(await (await fetch(PX.base + '/proactive')).json()); }
   catch (error) { pxStatus('读取主动性设置失败：' + error.message); }
-}
-/** 看一眼 的开关与上传记录（t88）: refreshed with the live payload, so the panel always matches. */
-async function pxLoadVision() {
-  try {
-    var payload = await (await fetch(PX.base + '/live')).json();
-    if (payload.ok !== false && payload.vision) pxRenderVision(payload.vision);
-  } catch (error) {
-    /* the live endpoint is refreshed every second anyway */
-  }
 }
 async function pxSave(patch, note) {
   var result = await pxPost('/proactive/settings', patch || pxPatch());
@@ -5172,8 +5179,9 @@ function pxLoopEntry(entry) {
     }
     // Let a host page (the trial page) also show it in its own conversation log.
     if (typeof window.pxOnProactiveMessage === 'function') window.pxOnProactiveMessage(entry);
-    // t78: the 对话记录 column shows 西西's own lines too, labelled 「主动开口」.
-    pxAppendConversation('xixi', entry.text, entry.segments, entry.gapMs, entry.triggerLabel);
+    // t78: the 对话记录 column shows 西西's own lines too, labelled 「主动开口」. 那是**控制台**的列，
+    // 所以走钩子：没有这张卡的页面（试用页）什么都没装，这里就是个空调用，核心不认识「turns」。
+    pxHook('appendConversation', 'xixi', entry.text, entry.segments, entry.gapMs, entry.triggerLabel);
   } else {
     var why = document.createElement('div');
     why.style.marginTop = '4px';
@@ -5220,7 +5228,79 @@ async function pxLoopTick() {
   if (!first) for (var i = 0; i < payload.entries.length; i += 1) pxLoopEntry(payload.entries[i]);
 }
 
-/* ---------------------------------------------------------------- 启用 + 传感器（t78） */
+/* ---------------------------------------------------------------- 总开关：主动开口 on/off 一处生效（t78） */
+
+/**
+ * The ONE switch (user request, 2026-10-08): 主动开口 on/off does everything.
+ *
+ * Before this, turning her on took two controls in two places — the enabled checkbox plus a
+ * click on 保存, and then a *separate* 「开始自动考虑」 checkbox before she would ever speak
+ * unprompted. The switch now (a) persists enabled immediately without 保存 and (b) starts or
+ * stops the resident consideration loop with it, because those two are the same decision from
+ * the user's side: 「她会不会自己开口」. Everything else moved into 高级设置 (collapsed).
+ */
+async function pxMaster(on) {
+  await pxSave({ enabled: on }, on ? '已打开主动开口' : '已关闭主动开口');
+  if (on) await pxLoopStart();
+  else await pxLoopStop();
+  pxStatus(on
+    ? '已打开：她会自己找话说（能不能开口仍要过硬底线，说不说由模型读空气决定）'
+    : '已关闭：她不会主动开口，你说话她照常回');
+}
+
+/** Start the resident loop at the default interval (same route the 高级设置 checkbox uses). */
+async function pxLoopStart() {
+  var seconds = Number(pxVal('loopInterval'));
+  var payload = await pxPost('/proactive/loop', { action: 'start', intervalMs: (isFinite(seconds) && seconds > 0 ? seconds : 30) * 1000 });
+  if (payload.ok === false) { pxStatus('自动考虑启动失败：' + payload.error); return; }
+  pxLoopStatus(payload);
+}
+
+async function pxLoopStop() {
+  var payload = await pxPost('/proactive/loop', { action: 'stop' });
+  if (payload.ok === false) { pxStatus('自动考虑停止失败：' + payload.error); return; }
+  pxLoopStatus(payload);
+}
+
+(function pxWire() {
+  var save = document.getElementById(PX.ids.save); if (save) save.addEventListener('click', function () { void pxSave(); });
+  var off = document.getElementById(PX.ids.off); if (off) off.addEventListener('click', function () { void pxSave({ enabled: false }, '已一键关闭主动开口'); });
+  // The master switch: applies on the spot, and the loop follows it. pxSave re-renders, so the
+  // checkbox can never disagree with the server after this.
+  var master = document.getElementById(PX.ids.enabled);
+  if (master) master.addEventListener('change', function () { void pxMaster(master.checked); });
+  var advanced = document.getElementById(PX.ids.advanced);
+  var advancedBody = document.getElementById(PX.ids.advancedBody);
+  if (advanced && advancedBody) {
+    advanced.addEventListener('change', function () { advancedBody.hidden = !advanced.checked; });
+  }
+  var drill = document.getElementById(PX.ids.drill); if (drill) drill.addEventListener('click', function () { void pxDrill(); });
+  var loopBox = document.getElementById(PX.ids.loopEnabled);
+  if (loopBox) {
+    loopBox.checked = false; // 默认关：页面刷新/重开不会自己开始说话
+    loopBox.addEventListener('change', function () { void pxLoopToggle(); });
+  }
+  var loopTick = document.getElementById(PX.ids.loopTick); if (loopTick) loopTick.addEventListener('click', function () { void pxLoopTick(); });
+  void pxLoad();
+  void pxLoopPoll();
+  PX.loopPoller = setInterval(function () { void pxLoopPoll(); }, 2000);
+})();
+${consoleCards}`;
+}
+/**
+ * 现场测试控制台**独有**的那几张卡：相机问题卡、实时传感与在场、看一眼、一键启用。
+ *
+ * 为什么它们不在共享核心里（t31 修的缺陷）：试用页没有这些卡（它自己的相机卡是 `cam-*`），这段代码
+ * 发到试用页只会得到约 30 条按字面量找不到节点的死分支，外加每秒一次 `GET /api/live` 的 404 ——
+ * **共享片段不许写另一个页面的 id**。它们只在调用方显式声明「这个页面有这些卡」时才随页面发出
+ * （见 `ProactivePanelOptions.consoleCards`），而这里只写控制台的 id：那些 id 在控制台的 markup 里
+ * 真实存在，页面 JS 快档会逐个核对（那一档现在**没有豁免**）。
+ *
+ * 与共享核心的接口只有一条：核心用 `PX.hooks.appendConversation` 把「西西主动开口的这一句」交给它，
+ * 由它写进控制台的 对话记录 列（`turns`）。核心不认识控制台的任何 id，试用页也不会走到这里。
+ */
+const PROACTIVE_CONSOLE_CARDS_SCRIPT = `
+/* ---------------------------------------------------------------- 启用 + 传感器 + 看一眼（t78 / t88 / t103） */
 
 /**
  * t103: show 「摄像头交不出画面」 as its own state, never as 「房间没人」.
@@ -5425,57 +5505,19 @@ async function pxVisionToggle(on) {
   pxStatus(on ? '已允许西西自己看（默认关，打开后仍要过全部硬门禁）' : '已恢复为「只有你按看一眼才传画面」');
 }
 
-/**
- * The ONE switch (user request, 2026-10-08): 主动开口 on/off does everything.
- *
- * Before this, turning her on took two controls in two places — the enabled checkbox plus a
- * click on 保存, and then a *separate* 「开始自动考虑」 checkbox before she would ever speak
- * unprompted. The switch now (a) persists enabled immediately without 保存 and (b) starts or
- * stops the resident consideration loop with it, because those two are the same decision from
- * the user's side: 「她会不会自己开口」. Everything else moved into 高级设置 (collapsed).
- */
-async function pxMaster(on) {
-  await pxSave({ enabled: on }, on ? '已打开主动开口' : '已关闭主动开口');
-  if (on) await pxLoopStart();
-  else await pxLoopStop();
-  pxStatus(on
-    ? '已打开：她会自己找话说（能不能开口仍要过硬底线，说不说由模型读空气决定）'
-    : '已关闭：她不会主动开口，你说话她照常回');
-}
-
-/** Start the resident loop at the default interval (same route the 高级设置 checkbox uses). */
-async function pxLoopStart() {
-  var seconds = Number(pxVal('loopInterval'));
-  var payload = await pxPost('/proactive/loop', { action: 'start', intervalMs: (isFinite(seconds) && seconds > 0 ? seconds : 30) * 1000 });
-  if (payload.ok === false) { pxStatus('自动考虑启动失败：' + payload.error); return; }
-  pxLoopStatus(payload);
-}
-
-async function pxLoopStop() {
-  var payload = await pxPost('/proactive/loop', { action: 'stop' });
-  if (payload.ok === false) { pxStatus('自动考虑停止失败：' + payload.error); return; }
-  pxLoopStatus(payload);
-}
-
-(function pxWire() {
-  var save = document.getElementById(PX.ids.save); if (save) save.addEventListener('click', function () { void pxSave(); });
-  var off = document.getElementById(PX.ids.off); if (off) off.addEventListener('click', function () { void pxSave({ enabled: false }, '已一键关闭主动开口'); });
-  // The master switch: applies on the spot, and the loop follows it. pxSave re-renders, so the
-  // checkbox can never disagree with the server after this.
-  var master = document.getElementById(PX.ids.enabled);
-  if (master) master.addEventListener('change', function () { void pxMaster(master.checked); });
-  var advanced = document.getElementById(PX.ids.advanced);
-  var advancedBody = document.getElementById(PX.ids.advancedBody);
-  if (advanced && advancedBody) {
-    advanced.addEventListener('change', function () { advancedBody.hidden = !advanced.checked; });
+/** 看一眼 的开关与上传记录（t88）: refreshed with the live payload, so the panel always matches. */
+async function pxLoadVision() {
+  try {
+    var payload = await (await fetch(PX.base + '/live')).json();
+    if (payload.ok !== false && payload.vision) pxRenderVision(payload.vision);
+  } catch (error) {
+    /* the live endpoint is refreshed every second anyway */
   }
-  var drill = document.getElementById(PX.ids.drill); if (drill) drill.addEventListener('click', function () { void pxDrill(); });
-  var loopBox = document.getElementById(PX.ids.loopEnabled);
-  if (loopBox) {
-    loopBox.checked = false; // 默认关：页面刷新/重开不会自己开始说话
-    loopBox.addEventListener('change', function () { void pxLoopToggle(); });
-  }
-  var loopTick = document.getElementById(PX.ids.loopTick); if (loopTick) loopTick.addEventListener('click', function () { void pxLoopTick(); });
+}
+
+/* 控制台自己的接线：一键启用/停用、两个开关、看一眼。共享核心不认识这些 id。 */
+(function pxWireConsoleCards() {
+  PX.hooks.appendConversation = pxAppendConversation;
   // t78: the one-button 启用/停用 + the two switches + the live sensor view.
   var enable = document.getElementById('px-enable'); if (enable) enable.addEventListener('click', function () { void pxEnable(true); });
   var disable = document.getElementById('px-disable'); if (disable) disable.addEventListener('click', function () { void pxEnable(false); });
@@ -5484,16 +5526,12 @@ async function pxLoopStop() {
   // t88: the manual 「看一眼」 button and the default-off autonomy switch.
   var look = document.getElementById('px-look'); if (look) look.addEventListener('click', function () { void pxLook(); });
   var visionAuto = document.getElementById('px-vision-auto'); if (visionAuto) visionAuto.addEventListener('change', function () { void pxVisionToggle(visionAuto.checked); });
-  void pxLoad();
   void pxLoadVision();
-  void pxLoopPoll();
   void pxLiveRefresh();
-  PX.loopPoller = setInterval(function () { void pxLoopPoll(); }, 2000);
   // The sensor column must show *now*: frames every second while the camera loop runs.
   PX.livePoller = setInterval(function () { void pxLiveRefresh(); }, 1000);
 })();
 `;
-}
 
 /** Small CSS the two pages share for the proactive card. */
 export const PROACTIVE_PANEL_CSS = `
@@ -5723,7 +5761,7 @@ var micCtx = null, micAnalyser = null, micStream = null, micLevels = [], micTime
 var recorder = null;
 var recordingUrls = [];
 
-${proactivePanelScript('/api/field')}
+${proactivePanelScript('/api/field', { consoleCards: true })}
 ${XIXI_PLAYBACK_JS}
 
 function el(id) { return document.getElementById(id); }

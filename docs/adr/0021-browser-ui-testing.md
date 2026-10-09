@@ -128,15 +128,19 @@
    `apps/demo-ui/index.html` 与它的外链 `app.js`。**深档仍只覆盖控制台的 `GET /`**：试用页与 demo 页的
    *运行时行为*今天没有自动防线（`/demo/` 的浏览器取证是一次性的，见 [`../progress.md` §14](../progress.md)）。
    两个页面若要接深档，是各自任务里的一件事。
-6. **跨页共享片段在 id 检查里按「谁拥有这些 id」归页**：试用页把控制台的主动性面板脚本
-   （`proactivePanelScript('/api')`）与浏览器播放规则（`XIXI_PLAYBACK_JS`）**逐字**嵌进自己的 `<script>`，
-   而那段面板脚本里有为控制台写的硬编码 id（`px-cam-problem*`、`turns`、`presence-text`、`px-live-*`）。
-   于是：**解析检查照旧覆盖它们的每一个字节**（这正是本档要的），id 检查则把这两个片段交给控制台的检查
-   （控制台发出同一份字节、且那些 id 都在）。声明必须是响亮的——`checkPage` 会逐字定位每个声明的片段，
-   **找不到就报红**（「这条排除规则已过期」），并有夹具守着这条守卫。**这条豁免是临时性的**：根因在
-   `scripts/field-test.ts` 的 `proactivePanelScript`（它硬编码了控制台的 id，试用页上那 30 条查找永远
-   找不到节点，虽然有守卫不会崩，但那几条分支在试用页上是死的），已单开收尾任务修它；修好之后这段
-   声明的范围应相应收紧甚至消失。
+6. **跨页共享片段不再有豁免（2026-10-10 收口；原文是这一档最初落地时的时点记录）**：
+   *时点记录*：试用页把控制台的主动性面板脚本（`proactivePanelScript('/api')`）与浏览器播放规则
+   （`XIXI_PLAYBACK_JS`）**逐字**嵌进自己的 `<script>`，而那段面板脚本里有为控制台写的硬编码 id
+   （`px-cam-problem*`、`turns`、`presence-text`、`px-live-*`）。当时的处置是：解析检查照旧覆盖每一个字节，
+   id 检查把这段交给控制台，并给「声明过的片段」加了一条响亮的守卫（逐字定位不到就报红）。
+   *现状*：根因已修（t31）——`scripts/field-test.ts` 的 `proactivePanelScript()` 默认只发**页面无关的核心**，
+   控制台独有的那几张卡只在调用方传 `{ consoleCards: true }` 时随页面发出，核心用
+   `PX.hooks.appendConversation` 把「主动开口的那一句」交给它；于是试用页不再有那 30 条死分支，也不再
+   每秒拉一次它没有的 `GET /api/live`（真浏览器里那是每秒一条 404 `console.error`）。
+   **豁免机制（`PageUnderTest.sharedFragments`）连同它的夹具一起删掉了**：今天三个页面都按自己发出的字节
+   过检——没有豁免可开，也就没有下一条「用声明压红」的漂移。防回退的两条判据在
+   `tests/ui/smoke/page-script.test.ts`：改坏共享片段的语法仍必须红（整段字节都被编译），
+   共享片段里写一个本页没有的 id 仍必须红（豁免没了，但检查的牙还在）。
 7. **深档不测硬件**：它跑在 `--offline`、无密钥、临时库上，设备读数用桩；麦克风/扬声器/摄像头仍由
    `node scripts/field-test.ts --acceptance` 手工跑（见 [`../testing.md`](../testing.md) §6）。
 8. **深档断言的是「页面这一侧」**：它不覆盖模型/语音质量，也不替代 `tests/console/*` 已有的大量文本与

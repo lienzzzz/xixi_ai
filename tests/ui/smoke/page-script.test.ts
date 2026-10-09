@@ -32,6 +32,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
+import { proactivePanelScript } from '../../../scripts/field-test.ts';
+
 import {
   analyzePage,
   checkPage,
@@ -122,20 +124,13 @@ test('every element id these pages look up exists in the page that ships with it
     `demo 脚本用 $() 找节点，这里应该看到这类引用：${describeReferences(demo?.references.slice(0, 5) ?? [])}`,
   );
 
-  // The trial page embeds the console's panel and playback scripts verbatim; those two fragments are
-  // left out of *its* id check (the console page emits the same bytes with its ids present). This
-  // asserts the exclusion really happened, so the trial page cannot silently check nothing.
-  assert.equal(
-    trial?.sharedFragments.length,
-    2,
-    `试用页必须逐字定位到那两个共享片段（实际：${trial?.sharedFragments.join('、') || '（一个都没有）'}）`,
-  );
+  // 试用页曾经逐字内嵌控制台的面板片段，t28 因此给它开了两条豁免；t31 把根因修掉之后豁免全部消失
+  // （下面「共享核心不带另一个页面的 id」那条用例守着这件事）。这里只留非空守卫：豁免没有了，
+  // 试用页必须靠自己的 47 条查找过检，而不是「什么都没检查」。
   assert.ok(
     (trial?.references.length ?? 0) > 10,
-    `排除共享片段之后，试用页自己的脚本仍要有实打实的查找被检查（实测 ${trial?.references.length ?? 0} 条）`,
+    `试用页自己的脚本要有实打实的查找被检查（实测 ${trial?.references.length ?? 0} 条）`,
   );
-  assert.deepEqual(consolePage?.sharedFragments, [], '控制台不排除任何片段：它的 id 就是那些片段要找的 id');
-  assert.deepEqual(demo?.sharedFragments, [], 'demo 页不排除任何片段');
 });
 
 /**
@@ -245,51 +240,74 @@ test('a broken script file, a missing script file and a mistyped id all turn thi
   assert.equal(external.notCompiled[0]?.src, 'https://cdn.example.com/x.js');
 });
 
-test('a declared shared fragment is exempted from the id check, and the exemption cannot go quiet', () => {
-  // A page that embeds a fragment written for another page's ids (this is exactly the trial page's
-  // situation with the console's panel script).
-  const fragment = "function pxCamProblem() {\n  var box = document.getElementById('console-only');\n  if (!box) return;\n}\n";
-  const page: PageUnderTest = {
-    label: 'fixture/index.html',
-    html: pageWith(`var own = document.getElementById('go');\n${fragment}`, '<button id="go">go</button>'),
-    assetDir: null,
-  };
+/**
+ * t31：共享面板不再写另一个页面的 id。
+ *
+ * 修之前的形态（t28 在求值后的页面上量到的）：试用页发出的那段与控制台逐字共用，里面有约 30 条
+ * `getElementById('px-cam-problem')` / `('turns')` / `('presence-text')` 这类查找 —— 试用页没有那些节点，
+ * 全部是静默死分支；它还每秒拉一次控制台独有的 `/api/live`（试用页上就是每秒一条 404）。根因是共享片段
+ * 写死了控制台的 id，所以修法也落在根因上：核心只发页面无关的那一半，控制台那几张卡只在控制台要的时候
+ * （`{ consoleCards: true }`）随页面发出。
+ *
+ * 这条用例是那件事的判据：**核心不许含控制台的字面量查找，控制台形态必须仍然全都有**。两侧都断言，
+ * 免得「把控制台卡片整段删掉」也能变绿。
+ */
+test('the shared panel core carries no other page ids — the console cards ship only to the console', () => {
+  const core = proactivePanelScript('/api'); // 试用页拿到的就是这一份（serve-chat.ts 只传 apiBase）
+  const withCards = proactivePanelScript('/api/field', { consoleCards: true });
 
-  // Without the declaration the page is red — which is what makes the exemption load-bearing.
-  const undeclared = checkPage(page);
-  assert.equal(undeclared.missingIds.length, 1, '没有声明豁免时，那份片段里的查找就该被判红');
-  assert.equal(undeclared.missingIds[0]?.id, 'console-only');
+  const consoleOnlyLookups = [
+    "getElementById('px-cam-problem')",
+    "getElementById('px-cam-problem-title')",
+    "getElementById('px-cam-problem-note')",
+    "getElementById('px-cam-problem-steps')",
+    "getElementById('px-cam-problem-command')",
+    "getElementById('px-cam-problem-raw')",
+    "getElementById('presence-text')",
+    "getElementById('turns')",
+    "getElementById('px-cam')",
+    "getElementById('px-cam-note')",
+    "getElementById('px-live-frames')",
+    "getElementById('px-live-frame-note')",
+    "getElementById('px-enable')",
+    "getElementById('px-disable')",
+    "getElementById('px-enable-state')",
+    "getElementById('px-enable-detail')",
+    "getElementById('px-tts-switch')",
+    "getElementById('px-camera-switch')",
+    "getElementById('px-vision-auto')",
+    "getElementById('px-look')",
+    "getElementById('px-look-status')",
+    "getElementById('px-look-history')",
+    "getElementById('px-look-history-note')",
+    "getElementById('px-look-privacy')",
+  ];
+  for (const lookup of consoleOnlyLookups) {
+    assert.equal(core.includes(lookup), false, `共享核心不许按字面量找控制台的节点：${lookup}`);
+    assert.ok(withCards.includes(lookup), `控制台形态必须仍然有它（否则是「把卡片删掉」而不是「拆开」）：${lookup}`);
+  }
+  // 控制台独有的那条每秒轮询也不许跟到试用页：`/api/live` 只存在于控制台。
+  assert.equal(core.includes("'/live'"), false, '共享核心不许拉控制台独有的 /live');
+  assert.ok(withCards.includes("'/live'"), '控制台形态仍然拉 /live');
 
-  // With the declaration: the fragment's lookups are left to the page that owns those ids…
-  const declared = checkPage({ ...page, sharedFragments: [{ name: 'shared panel', code: fragment }] });
-  assert.deepEqual(declared.sharedFragments, ['shared panel'], '声明的片段必须真的被逐字定位到');
-  assert.deepEqual(declared.missingIds, [], '被豁免的片段不再参与本页的 id 判定');
-  assert.equal(declared.references.length, 1, '本页自己的那条查找仍然在检查范围内');
-  // …but it is still *parsed* here: the exemption is about ids, not about skipping bytes.
-  assert.deepEqual(declared.problems, [], '片段本身仍然参与解析检查（这里是能编译的，所以没有问题）');
-
-  // A declaration that no longer matches reality must be a failure, never a silent widening.
-  const stale = checkPage({ ...page, sharedFragments: [{ name: 'gone fragment', code: 'var notThere = 1;' }] });
-  assert.equal(stale.problems.length, 1, '声明了却找不到的片段必须判红');
-  assert.match(String(stale.problems[0]?.message), /逐字找不到它/, '报错要说清是「找不到这个片段」');
-  assert.match(String(stale.problems[0]?.source), /fixture\/index\.html/, '报错要点出是哪个页面');
-
-  // Blanking a fragment keeps line numbering intact: the bad lookup sits *after* the fragment, and
-  // the reported line must still be the line that really does the lookup.
-  const afterFragment = `${fragment}var own = document.getElementById('gone');`;
-  const htmlWithBadLookup = pageWith(afterFragment, '<button id="go">go</button>');
-  const lineCheck = checkPage({
-    label: 'fixture/index.html',
-    html: htmlWithBadLookup,
-    assetDir: null,
-    sharedFragments: [{ name: 'shared panel', code: fragment }],
-  });
-  assert.equal(lineCheck.missingIds.length, 1, '豁免只吃掉片段，本页自己的坏引用照旧要红');
-  assert.match(
-    lineOfPage(htmlWithBadLookup, lineCheck.missingIds[0]?.pageLine ?? 0),
-    /getElementById\('gone'\)/,
-    `被豁免片段之后的行号不能被移位（报到第 ${lineCheck.missingIds[0]?.pageLine ?? -1} 行）`,
+  // 非空守卫：两侧都要有实际内容，否则上面那两条可能只是在比两个空串。
+  assert.ok(core.length > 10_000, `共享核心要有实际内容（实测 ${core.length} B）`);
+  assert.ok(
+    withCards.length > core.length,
+    `控制台形态要比核心多出那几张卡（核心 ${core.length} B / 控制台 ${withCards.length} B）`,
   );
+
+  // 而**真实控制台页面**必须真的带上这几张卡 —— 断言上面那种「调用形态」是不够的：把
+  // `buildFieldPage` 里的 `{ consoleCards: true }` 去掉时，控制台的 markup 里那些 id 就没人找了，
+  // id 检查反而全绿（它只核对「出现过的查找」）。这条把「谁必须发出这些卡」钉在真页面上。
+  const consolePage = consolePageSource();
+  for (const lookup of ["getElementById('px-cam-problem')", "getElementById('turns')", "getElementById('px-live-frames')"]) {
+    assert.ok(
+      consolePage.html.includes(lookup),
+      `控制台页必须真的发出这几张卡：${lookup}（八成是调用点漏了 { consoleCards: true }）`,
+    );
+  }
+  assert.deepEqual(analyzePage(consolePage.html).missingIds, [], '控制台页那几张卡必须找得到自己的节点');
 });
 
 test('the id-helper rule is narrow enough to be useful and strict enough not to invent ids', () => {
