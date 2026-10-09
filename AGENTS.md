@@ -313,6 +313,14 @@ E:\worker2\.venvs\voice-livekit\Scripts\python.exe     # livekit-agents 1.8.3（
    **正解**：对**最终字节**重跑那几处突变（t19 就是这样：修完两行类型后把判官那两处突变再跑一次），
    或者在回报里**逐项写明**每份红证对应的文件哈希；**测试文件未变的那几处不必重跑**（t19 明确写了
    「store.ts 那一处测试文件窗口后未改，红证继续有效」——这种逐项声明比笼统说「都验过」有用得多）。
+   **⑦ 仓外副本必须 `cp -a node_modules`，不能只做软链**（V0.3 t28 换来，形态是**静默假绿**）：
+   `REPO_ROOT` 由 `packages/runtime/src/repo.ts` 经 `@xixi/runtime` 决定。若副本里的 `node_modules` 只是软链，
+   副本的 `@xixi/runtime` 仍指向**真仓库**，于是 `REPO_ROOT`＝真仓库，副本里读到的
+   `apps/demo-ui/index.html` 其实是仓库那一份——**突变根本看不见**，副本照样全绿。
+   t28 第一次 M1 就是这样静默变绿的，重建自包含副本（`cp -a`）之后才拿到真红证。
+   **判据**：副本里跑突变若是绿的，先问一句「我改的那个文件，副本真的读到了吗」——
+   用一条**会因该文件内容而变**的断言自证（或 `readlink -f` 核对解析路径），
+   别把「绿」直接当成「这个突变不影响行为」。
 11. **`deliverables` 必须与「本次真正会改动的文件」一致**（不只是 `inScope` 允许改的集合）。
    反例：t26 为满足某条验收顺手改了 `docs/recon/camera-detector-choice-2026-09-30.md`，它写在 inScope 里但不在 deliverables，
    于是**没有进 changedPaths**，只能靠成员主动披露 + 评审逐处核对才被发现。派单时请把「验收会碰到的文件」全部列进 deliverables。
