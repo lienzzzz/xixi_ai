@@ -983,9 +983,32 @@ function wiringMismatches(block: string, wired: (entry: string) => boolean): str
       problems.push(`scripts/${entry}.ts 还在自己拼链（live 入口必须走装配点取链）`);
     }
   }
-  // 提醒回路那句仍然承重（P2.5-F 之前它必须还在），别在改口时被顺手删掉。
-  if (!/提醒回路尚未接线/.test(block)) {
-    problems.push('「提醒回路尚未接线」这句口径不见了');
+  // 「提醒回路尚未接线」这句**已经在 D1.1+D1.2 还清**（两个 live 入口都写上了接缝）。所以这里**不再要求**
+  // 块里留着它 —— 旧判据（`if (!/提醒回路尚未接线/.test(block))`）守的是一句被推翻的旧话，事实一变它就该
+  // 永久为真，那是恒假守卫（AGENTS §9.25 ⑤）。旧话可以留，但只能作为**带时点标注的历史引文**：当现状说
+  // 就被这条判出来。时点标注要认得出（`P2.5-x` / 「历史引文」/「…时的口径」三者之一）—— 光写一句
+  // 「这句话是历史」不算标注：那正是旧话本身在自我声明，不是出处。
+  const historyBullet = wiringBullets(block).find((bullet) => bullet.includes('提醒回路尚未接线'));
+  if (historyBullet !== undefined && !/P2\.5-[A-Z]|历史引文|时的口径/.test(historyBullet)) {
+    problems.push('「提醒回路尚未接线」已经被 D1.1+D1.2 还清：它只能作为带时点标注的历史引文出现，不许当现状说');
+  }
+  // 现状必须给得出可复核命令（名单会过期，命令不会）：提醒接缝与插件话题各一条。
+  if (!/git grep -n 'reminderSeams' -- scripts/.test(block)) {
+    problems.push("缺少提醒接缝的现状复核命令（git grep -n 'reminderSeams' -- scripts）");
+  }
+  if (!/git grep -n 'readPluginTopics' -- scripts/.test(block)) {
+    problems.push("缺少插件话题的现状复核命令（git grep -n 'readPluginTopics' -- scripts）");
+  }
+  // 命令指的那件事要真的成立：至少有一个 live 入口**真的写了**那两行（不是只在注释里提到它们）。
+  // 认的是接线形态：展开要带逗号（`...runtime.reminderSeams,`，注释里引它时没有逗号），选项要真的赋了函数
+  // （`readPluginTopics: (…) =>`）。认形态而不是认名字，是因为注释里提一句就能让它假绿 ——
+  // 那种「口径说接了、接线其实被拆了」正是这条要抓的。
+  const seamEntries = LIVE_ENTRIES.filter((entry) => {
+    const text = readFileSync(join(SCRIPTS_DIR, `${entry}.ts`), 'utf8');
+    return /\.\.\.runtime\.reminderSeams,/.test(text) && /readPluginTopics:\s*(?:async\s*)?\(/.test(text);
+  });
+  if (seamEntries.length === 0) {
+    problems.push('口径说提醒接缝与插件话题已经接进 live 入口，但没有任何 live 入口**真的写着** `...runtime.reminderSeams,` 与 `readPluginTopics: (…) =>`');
   }
   // 口径说「已经接线」不能是空话：四个 live 入口至少要有一个真的在调装配点。
   if (!LIVE_ENTRIES.some((entry) => wired(entry))) {
@@ -1020,15 +1043,33 @@ test('接线口径由调用图判定：给得出可复核命令，点名了入�
     ' * ```text',
     " * git grep -n 'createResidentRuntime(' -- scripts",
     " * git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'",
+    " * git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts'",
+    " * git grep -n 'readPluginTopics' -- scripts",
     ' * ```',
     ' *  * **live 入口已经接线**：`scripts/chat.ts`、`scripts/serve-chat.ts`、`scripts/field-test.ts`、`scripts/voice-turn.ts`',
-    ' *  * **提醒回路尚未接线**：…',
+    ' *  * **历史引文（V0.3 P2.5-F 写下这条时的口径）：「提醒回路尚未接线」**：…',
   ].join('\n');
   assert.deepEqual(wiringMismatches(synthetic, () => true), [], '四个入口都接了时它该判一致');
   assert.notDeepEqual(
     wiringMismatches(synthetic, (entry) => entry !== 'chat'),
     [],
     '把 chat 换成「没接」，该判出不一致（这条证明上面的判据不是恒真）',
+  );
+  // 现状命令与「旧话不许当现状说」这两条判据各自的反事实（同一段合成口径上算）。
+  assert.notDeepEqual(
+    wiringMismatches(synthetic.replace("git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts'", ''), () => true),
+    [],
+    '去掉提醒接缝那条现状命令，必须判出来（验收第 2 条的牙）',
+  );
+  assert.notDeepEqual(
+    wiringMismatches(synthetic.replace("git grep -n 'readPluginTopics' -- scripts", ''), () => true),
+    [],
+    '去掉插件话题那条现状命令，必须判出来',
+  );
+  assert.notDeepEqual(
+    wiringMismatches(synthetic.replace('**历史引文（V0.3 P2.5-F 写下这条时的口径）：「提醒回路尚未接线」**', '**提醒回路尚未接线**'), () => true),
+    [],
+    '把旧话从「历史引文」改回现状口吻，必须判出来',
   );
 });
 
