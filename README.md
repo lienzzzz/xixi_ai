@@ -6,7 +6,10 @@
 **不可替换**的是长期状态与行为策略（WorldState、Memory、FutureHook、SelfModel、RelationshipModel、
 RoutineModel、Proactive policy、Conversation state）。
 
-当前进度（**2026-10-08**：V0.3 **P2.5** 收口，把 Agent 能力接进四个 live 入口——见下面「V0.3 P2.5」那段；
+当前进度（**2026-10-10**：V0.3 **D0 + D1**——交互原型页 `apps/demo-ui/` 由试用页服务的 `/demo/` 三条静态路由提供；
+页面 JS 有了**两档浏览器防线**（零依赖快档在 `npm test` 里，真实 Chromium 深档单跑 `npm run test:ui`）；
+主动循环的**到点提醒**与**插件话题**两个接缝接进了两个 live 入口——见下面「V0.3 D0 / D1」那段。
+2026-10-08：V0.3 **P2.5** 收口，把 Agent 能力接进四个 live 入口——见下面「V0.3 P2.5」那段；
 2026-10-07：仓库现在同时在 **Windows 与 Linux/WSL2** 上跑，三门禁在这台 Linux 机器上全绿——`npm test` 项数以末行为准；
 移植细节与「这台机器上验不了的事」见 [`docs/recon/linux-port-environment-2026-10-07.md`](docs/recon/linux-port-environment-2026-10-07.md)。
 以下能力清单仍是 2026-10-03 第五轮收口的快照）：**M0 文本 Harness 已验收；噪声鲁棒语音前端、摄像头在场检测（M6）、
@@ -26,8 +29,19 @@ RoutineModel、Proactive policy、Conversation state）。
 现在都经**同一个常驻装配点**
 [`packages/runtime/src/resident-runtime.ts`](packages/runtime/src/resident-runtime.ts) 的 `createResidentRuntime()`
 取工具链与引擎，插件工具（含 `news.*`）第一次真的出现在模型可见的工具列表里，审批闸门与 durable 提醒也由它接管。
-**仍然没接的**是「到点提醒由入口自己说出来」那一行与外部 MCP 服务器；逐条口径与可复核命令见
+**当时仍然没接的**是「到点提醒由入口自己说出来」那一行与外部 MCP 服务器——**前者已由下面 D1.1 补上**，
+后者仍没接；逐条口径与可复核命令见
 [`docs/progress.md`](docs/progress.md) §12 与 [`docs/handoff.md`](docs/handoff.md) §0.2。
+
+**V0.3 D0 / D1（2026-10-10）**：① 交互原型页落在 `apps/demo-ui/`（静态三件套），由试用页服务的 `/demo/`
+三条静态路由提供——`npm run web` 之后访问 http://127.0.0.1:8791/demo/（**末尾斜杠不能少**，`?mode=live`
+才接真实 `/api/*`，否则是页面内模拟数据）；② 页面 JS 有了**两档浏览器防线**：快档 `npm run test:ui:smoke`
+（也在 `npm test` 里）把服务端发出的每个内联脚本抽出来编译并核对它按字面量找的 id，深档 `npm run test:ui`
+用真 Chromium 点关键控件并断言处理器真的执行（**不在默认门禁**，首次先 `npm run test:ui:install`）；
+③ 主动循环的两个接缝接进了两个 live 入口——`scripts/serve-chat.ts` 与 `scripts/field-test.ts` 的
+`new ProactiveLoop({…})` 里各有一行 `...runtime.reminderSeams`（到点提醒）与一行 `readPluginTopics`（插件话题），
+行为证据在 `tests/console/live-entry-proactive-seams.test.ts`。逐条口径、边界与已知缺口见
+[`docs/progress.md`](docs/progress.md) §14 与 [`docs/handoff.md`](docs/handoff.md) §0.4。
 
 > 完整设计与实施方案见 [`xixi_ai_companion_project_plan.md`](xixi_ai_companion_project_plan.md)；
 > 编码约定见 [`AGENTS.md`](AGENTS.md)；**接手顺序**见 [`docs/README.md`](docs/README.md)（文档地图）
@@ -44,6 +58,10 @@ Copy-Item .env.example .env                   # 填入 MIMO_API_KEY（.env 已�
 
 npm test                                      # 全部离线测试（不花 API 费用）
                                               #   项数以末行为准（不写死数字）
+npm run test:ui:smoke                         # 页面 JS 快档（也在 npm test 里）：内联脚本能否编译 + 脚本按字面量找的 id 在不在页面里
+npm run test:ui:install                       # 一次性取浏览器（playwright install chromium --only-shell，约 278 MB，不进版本库）
+npm run test:ui                               # 页面 JS 深档：真 Chromium 加载控制台页面、点关键控件并断言处理器真的执行
+                                              #   **不在默认门禁**；缺浏览器时报缺并 exit 1（不静默跳过）
 npm run field-test                            # 👉 现场测试控制台：http://127.0.0.1:8792
 ```
 
@@ -61,6 +79,9 @@ node scripts/field-test.ts --self-test     # 离线自检（不碰硬件；项�
 node scripts/field-test.ts --acceptance    # 只跑一次真机验收，重写 docs/recon/field-test-report-<日期>.md
 
 npm run web                                # 试用对话页：http://127.0.0.1:8791（含按住🎤语音输入）
+                                           #   交互原型页在 http://127.0.0.1:8791/demo/（**末尾的斜杠不能少**，
+                                           #   `/demo` 会被 302 到 `/demo/?…`；`?mode=live` 才接真实 `/api/*`，
+                                           #   不加就是页面内模拟数据）
 npm run chat                               # 终端对话（直连 MiMo 实时路径）
 npm run chat -- --personality verbosity=0.1,talkativeness=0.2
                                            # 人格的持久化行政覆盖（写 self_profile + history，重启仍生效，
@@ -118,6 +139,8 @@ npm run check:types && npm test && npm run check:docs
 | **制品清洗（`REPLY_HYGIENE`）** | 工具调用标记与外文推理在进 TTS / 日志 / 工作记忆前被程序剔除（`sanitizeSpokenReply`）；整轮只剩制品 → 沉默，并写原因码 **`ARTIFACT_ONLY_REPLY`**（与「模型自己选择沉默」`MODEL_SILENCE` 可区分）。`REPLY_HYGIENE` / `UNBACKED_FACT_CLAIM` 两类 `onNotice` 审计通知已被**试用页（`serve-chat.ts`）与现场测试控制台（`field-test.ts`）**订阅并在页面显示；文字 CLI（`chat.ts`）与语音轮次（`voice-turn.ts`）未订阅（逐入口清单见 `docs/progress.md` §4） |
 | **工具链覆盖（逐入口）** | **唯一装配点是 `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime()`**（V0.3 P2.5-A）：入口取 `runtime.toolChain`，插件内核、MCP、news、审批宿主与 durable 提醒都由它一次装好（`buildToolChain` 只是它内部把配置摊平的一步，不再是入口的出口）。走它的是**七个入口脚本**——文字 CLI `scripts/chat.ts`、语音单轮 `scripts/voice-turn.ts`、设备自检 `scripts/voice-device-check.ts`、真人感评测 `scripts/eval-realism.ts`、对话评测 `scripts/eval-conversation.ts`、现场测试控制台 `scripts/field-test.ts`、试用页 `scripts/serve-chat.ts`；复核：`git grep -l 'createResidentRuntime(' -- scripts`（应命中这七个 + 验收脚本，`git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'` 应为 **0 命中**）。插件工具经 `mountPluginTools()` 复制进同一个注册表，权限、轮次上限与超时都不变。离线自证是 `--print-wiring`（打印 `{entry,language,maxToolRounds,tools,permissions,plugins}` 后退出，不调模型、不建库）：四个支持该开关的入口实测**除 `entry` 外逐字段相同**，默认给出三个内置 + 三个 `news.*` 插件工具（`node scripts/chat.ts --print-wiring` 可直接看）。**设备自检没有离线端到端证据**（需真实 WAV + 硬件 + 真实 ASR），见 `docs/progress.md` §2.10 |
 | **「看一眼」（视觉）** | `UserTurnInput.images` → OpenAI 风格 `image_url`（data URL）；真机实测能描述画面内容；DSH 路径发不了图时**明确报错**而不是静默丢图 |
+| **页面 JS 的两档防线（V0.3 D0.3）** | 快档 `npm run test:ui:smoke`（也在 `npm test` 里）：把服务端真正发出的页面里每个内联 `<script>` 抽出来用 `node:vm` **只编译不执行**，并核对脚本按字面量找的每个 id 在 markup 里存在——2026-10-08 那次「整页按钮没响应」（模板字符串少一层反斜杠 → 整块脚本解析阶段就抛 `SyntaxError`）今天会在这里变红。深档 `npm run test:ui`：真 Chromium 打开真服务，断言零 `pageerror`、零失败请求，再点关键控件并断言**处理器真的执行**（**不在默认门禁**，首次先 `npm run test:ui:install`）。**边界**：今天只覆盖控制台的 `GET /`，试用页与原型页还没有；快档看不见运行时行为。口径见 [`docs/testing.md`](docs/testing.md) §3.2、决策见 [`docs/adr/0021`](docs/adr/0021-browser-ui-testing.md) |
+| **交互原型页（V0.3 D0.1/D0.2）** | `npm run web` → http://127.0.0.1:8791/demo/ 提供 `apps/demo-ui/` 的静态三件套（三条静态路由由试用页服务；`/demo` 302 且保留查询串、`/demo/nope.js` 是 404）。`?mode=live` 才接真实 `/api/*`，默认是页面内模拟数据。离线用例 `tests/console/serve-chat-demo-route.test.ts` 守的是**路由**；页面自身的交互不在上面那两档里 |
 | 质量过程 | `npm test` 全绿（**项数以末行为准**）；[`docs/review/`](docs/review/) 有评审报告（含复审与再复审），[`docs/verification/`](docs/verification/) 有独立验证报告，[`docs/benchmarks/`](docs/benchmarks/realism-metrics.md) 有可重跑的基准与前后对比 |
 
 ## 「真人感」改造成什么样了（含前后对比）
@@ -198,12 +221,13 @@ packages/model-adapters/  MiMo 直连适配器（含图像 image_url 构造）
 packages/plugins/         插件内核（manifest / 五能力 / 九步生命周期 / 四条「插件不能做」）；子路径 ./mcp（SDK v2 客户端适配器）与 ./news（真实 News 插件）
 packages/runtime/         生产装配（V0.3 P0-A/P2.5-A）：**常驻装配点 `createResidentRuntime`**（resident-runtime.ts：工具链、插件内核、审批宿主、durable 提醒、提示词权威、能力桥）、工具链与 buildPluginRuntime、工具审批宿主、durable 提醒调度、常驻考虑循环、语音缝、感知入库
 apps/brain-dsh/           DSH 侧接线：profile patch（MiMo 路由）与 CLI transport
+apps/demo-ui/             交互原型页（V0.3 D0）：静态三件套（index.html / styles.css / app.js），由试用页的 /demo/ 三条静态路由提供
 plugins/xixi-tools/       西西最小工具集（含 xixi_get_current_time / 天气等）
 services/voice-edge/      语音前端（Python）：去直流 + 高通 + 门限 + 校准 + 噪声夹具生成
 services/perception-edge/ 在场检测（Python）：摄像头抓帧（后端按平台选：Windows DSHOW / Linux V4L2；MJPG）→ 帧差动 + YuNet → presence 事件
 config/                   xixi.example.yaml（方案 §42）
 scripts/                  安装、验收、演示与现场测试控制台（field-test.ts 是控制台入口）
-tests/                    unit / integration / perception / console / scenarios / replay
+tests/                    unit / integration / perception / console / scenarios / replay / ui（D0.3：smoke 快档进默认门禁，e2e 深档单跑 `npm run test:ui`）
 docs/                     README（地图）、architecture、event-contracts、testing、progress、
                           progress-v03（按 Phase 的交付与遗留）、handoff、design/、adr/、recon/、review/、verification/、benchmarks/
 ```
@@ -250,6 +274,10 @@ docs/                     README（地图）、architecture、event-contracts、
 - **长期记忆与未完话题**：写侧已落地（pack Phase 4），**V0.3 P1-b 补齐了入口覆盖**——`chat.ts` / `serve-chat.ts` / `voice-turn.ts`
   都走 `@xixi/runtime` 的 `createTurnExtraction`（共用装配 + 关库前 `await drain()`），三入口各有真子进程或真 HTTP 证据。
   读侧（检索进提示词、纠正让旧事实失效）见 [docs/progress-v03.md](docs/progress-v03.md) 的 P1 段。
+- **页面 JS 防线的覆盖边界**：两档（`npm run test:ui:smoke` / `npm run test:ui`）今天只覆盖**现场测试控制台的 `GET /`**——
+  试用页（`scripts/serve-chat.ts`）与交互原型页（`apps/demo-ui/`）的内联脚本还没有门禁；而且快档看不见运行时行为
+  （handler 访问不存在的属性、异步分支根本没跑），那一层要深档，深档又不在默认门禁、得先取一次浏览器。
+  见 [`docs/testing.md`](docs/testing.md) §3.2 与 §6 第 8 条。
 - **金额级费用上限未实现**：主动开口的额度是**次数**（6 小时 / 当日），它是当前的费用代理。
 
 ## 许可

@@ -1,6 +1,8 @@
 # 大脑与模型：`TurnModelProvider` 三接口、MiMo 直连、DSH Harness
 
-> 最后更新：2026-10-08（V0.3 **P2.5** 收口：§3 的「逐入口覆盖」改成事实——唯一装配点是
+> 最后更新：2026-10-10（V0.3 **D1**：工具表的 `xixi_set_reminder` 行改成事实——到点提醒**已经**由两个 live 入口
+> 的主动循环自己读出来（各一行 `...runtime.reminderSeams`；复核命令**必须带排除项** `':!scripts/verify-p2-5.ts'`））
+> 上一版：2026-10-08（V0.3 **P2.5** 收口：§3 的「逐入口覆盖」改成事实——唯一装配点是
 > `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime()`，插件工具（含 `news.*`）真的进了
 > 入口的模型可见清单；提醒工具改名 `xixi_set_reminder` 且不再退回内存 sink）
 > 上一版：2026-10-04（V0.3 P2-F/P2 收口：§2 从七成员 `BrainAdapter` 改成三个接口，四个能力退役并注明归属；
@@ -161,7 +163,7 @@ resume 的两个硬约束（相同 cwd、相同 profile）在 `CliDshTransport` 
 | `xixi_get_current_time` | L0（内部只读，`risk: read`） | `{type:'object', properties:{}, additionalProperties:false}` | 返回 `iso` / `localDate` / `weekday`（`Asia/Shanghai`，代码内固定时区） |
 | `xixi_get_weather` | L1（外部只读，`risk: read`） | `place`(string)、`day`(enum `today`/`tomorrow`/`day_after_tomorrow`)、**`additionalProperties:false`** | `place` 省略时用 `defaultPlace`；`day` 默认 `tomorrow`；返回 `place`/`day`/`date`/`summary`/`temperatureMaxC`/`temperatureMinC`/`precipitationChance`/`advice`/`daysUntil`/`requestedAt`/`timezone` |
 | `news.search` / `news.latest` / `news.for_interests` | 插件工具（`network` 权限，manifest 声明） | 见 `packages/plugins/news/tools.ts` | V0.3 P2-D 起新闻是**插件**，不再是内置：返回的外部文本一律带 `untrusted` 与 `flags`，拿不到来源时在 `problems` 里说原因（不编） |
-| `xixi_set_reminder` | **`risk: write`** | `what`(string)、`when`(string，自然语言) | 名字与文案已随 V0.3 P2.5-E 改好（`_stub` 与「到点不会自动响」都不在了，**没有兼容别名**）：入口经常驻装配点拿到的 sink 是 `DurableReminderSink`，落 `reminders` 表并到点写事件，返回文案「已经记下」（[ADR-0019](../adr/0019-news-and-reminder-data-model.md)）。**仍未接的一环**：到点由主动循环说出来，要入口那一行 `...runtime.reminderSeams`（今天 `scripts/` 下零命中，见 [architecture.md](../architecture.md) §6.2） |
+| `xixi_set_reminder` | **`risk: write`** | `what`(string)、`when`(string，自然语言) | 名字与文案已随 V0.3 P2.5-E 改好（`_stub` 与「到点不会自动响」都不在了，**没有兼容别名**）：入口经常驻装配点拿到的 sink 是 `DurableReminderSink`，落 `reminders` 表并到点写事件，返回文案「已经记下」（[ADR-0019](../adr/0019-news-and-reminder-data-model.md)）。**已接线（V0.3 D1.1）**：到点由主动循环自己读出来——`scripts/serve-chat.ts` 与 `scripts/field-test.ts` 的 `new ProactiveLoop({…})` 里各有一行 `...runtime.reminderSeams`，证据 `tests/console/live-entry-proactive-seams.test.ts` 与 `npm run verify:p2.5 -- --scenario=reminder --offline`（复核命令**要带排除项** `':!scripts/verify-p2-5.ts'`，见 [architecture.md](../architecture.md) §6.2） |
 
 - 天气来源是 **Open-Meteo，无需密钥**（`packages/model-adapters/src/weather.ts`）：geocoding + forecast 两个端点，
   超时 15s，WMO 天气码译成中文口语（`describeWeatherCode`），**30 分钟缓存**（`report(place, cacheMs = 30 * 60_000)`，按 trim 后的地名键控）。

@@ -1,6 +1,9 @@
 # 安全与隐私：§19 权限身份、§20 数据、§53 不可信内容、§41.7 审计
 
-> 最后更新：2026-10-08（V0.3 **P2.5** 收口：§2 的工具面与审批闸门改成事实——四个 live 入口与控制台、试用页
+> 最后更新：2026-10-10（V0.3 **D1**：§2 的 L2 行改成事实——到点提醒**已经**由两个 live 入口的主动循环
+> 读出来（各一行 `...runtime.reminderSeams`；复核命令**必须带排除项** `':!scripts/verify-p2-5.ts'`，
+> 验收脚本自己也引用它））
+> 上一版：2026-10-08（V0.3 **P2.5** 收口：§2 的工具面与审批闸门改成事实——四个 live 入口与控制台、试用页
 > 都经 `createResidentRuntime()` 取链（`buildToolChain` 不再是入口出口），插件工具（含 `news.*`）在入口里可见，
 > `ToolApprovalManager` 已接成 `approvalGate`；提醒工具改名 `xixi_set_reminder` 且入口已接 durable sink；
 > 另补 `HARD_POLICY` 的**第二条边界**「写操作必须走工具」）
@@ -34,7 +37,7 @@
 |---|---|---|
 | L0 内部只读 | 当前时间、WorldState、Memory search | 只有 `xixi_get_current_time`（`packages/brain-adapter/src/tools.ts` 注释标 L0；参数 `properties:{}` + `additionalProperties:false`）。**WorldState 投影已存在**（`world_state` 表，`002_world_state.sql`；由 `recordPresenceChanged` 与感知边维护）**但没有给模型读它的工具**；Memory search 未实现 |
 | L1 普通外部只读 | 天气、新闻、日历读取 | `xixi_get_weather`（内置，注释标 L1）与 **News 插件的三个工具**（`news.search` / `news.latest` / `news.for_interests`，`packages/plugins/news/`，manifest 显式声明 `network` 权限，返回的外部文本一律带 `untrusted` 标记与 `flags`；[ADR-0019](../adr/0019-news-and-reminder-data-model.md)）。**旧的 `xixi_news_stub` 已随 V0.3 P2-D 从注册路径里删除**；日历未实现 |
-| L2 低风险可逆 | 提醒、播放音乐、开灯 | `xixi_set_reminder`（**内置写工具**；V0.3 P2.5-E 从 `xixi_set_reminder_stub` 改名，**没有兼容别名**，返回文案是「已经记下」）——四个 live 入口经常驻装配点拿到的 sink 是 `DurableReminderSink`：落 `reminders` 表（迁移 008，五态 + 到点事件），重启后仍在（[ADR-0019](../adr/0019-news-and-reminder-data-model.md)）。**仍未接线的一环**：到点提醒要入口那一行 `...runtime.reminderSeams` 才会被主动循环说出来，见下面 §2 末与 [architecture.md](../architecture.md) §6.2。播放音乐 / 开灯未实现 |
+| L2 低风险可逆 | 提醒、播放音乐、开灯 | `xixi_set_reminder`（**内置写工具**；V0.3 P2.5-E 从 `xixi_set_reminder_stub` 改名，**没有兼容别名**，返回文案是「已经记下」）——四个 live 入口经常驻装配点拿到的 sink 是 `DurableReminderSink`：落 `reminders` 表（迁移 008，五态 + 到点事件），重启后仍在（[ADR-0019](../adr/0019-news-and-reminder-data-model.md)）。**已接线（V0.3 D1.1）**：到点提醒由两个 live 入口的主动循环读出来——`scripts/serve-chat.ts` 与 `scripts/field-test.ts` 的 `new ProactiveLoop({…})` 里各有一行 `...runtime.reminderSeams`（复核命令**必须带排除项** `':!scripts/verify-p2-5.ts'`，验收脚本自己也引用它；行为证据 `tests/console/live-entry-proactive-seams.test.ts`，见 [architecture.md](../architecture.md) §6.2）。播放音乐 / 开灯未实现 |
 | L3 外部通信 / 隐私 | 发消息、上传图片、改日历 | 未实现 |
 | L4 高风险 | 门锁、支付、紧急呼叫 | **一律不做**（`AGENTS.md` 铁律 7；`tools.ts` 顶部注释：`No shell, no filesystem, no messaging, no high-risk actions exist yet`） |
 

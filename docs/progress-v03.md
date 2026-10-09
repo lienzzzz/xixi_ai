@@ -1,6 +1,9 @@
 # 西西 V0.3 阶段进度（progress-v03）
 
-最后更新：2026-10-08（新增 **P2.5 Production Wiring** 段——常驻装配点与七个入口接线、`news.*` 进模型可见链、
+最后更新：2026-10-10（新增 **D0 + D1 段**——交互原型页 `apps/demo-ui/` 与试用页的 `/demo/` 三条静态路由、
+页面 JS 的**两档浏览器防线**（快档进 `npm test`、深档 `npm run test:ui`）、主动循环的**两个接缝**接进两个 live 入口；
+P2.5 段 §3 的「仍未接线」第 1 / 2 条按 D1 的实测**就地加注、原文保留**，总表与 P2-E 行同步）
+上一版：2026-10-08（新增 **P2.5 Production Wiring** 段——常驻装配点与七个入口接线、`news.*` 进模型可见链、
 审批与 durable 提醒由装配点接管、配置管插件、两个内核修复；P2 段的结论按 §9.21 **只加注不改写**）
 上一版：2026-10-04（P2 收口：交付表、四条 gate、两个场景、未达标四条与下一阶段六条遗留）
 
@@ -17,10 +20,10 @@
 
 ---
 
-### 0. 总表（P0 + P1 + P2）
+### 0. 总表（P0 + P1 + P2 + P2.5 + D）
 
-> 本文件按 Phase 索引：P0 → P1 → P2，越靠后越新。**P2 段的逐项交付表、gate 实测、未达标项与遗留在本文件末**，
-> 下面这七行只是索引（同一批交付号，细节见 P2 段与四份 ADR）。
+> 本文件按 Phase 索引：P0 → P1 → P2 → P2.5 → D，越靠后越新。**靠后各段的逐项交付表、gate 实测、
+> 未达标项与遗留就在对应的段里**，下面这些行只是索引（同一批交付号的细节见对应段与本文件的链接）。
 
 | Phase / 项 | 交付（交付号） | 关键实测（口径与命令见本节对应的 P0 / P1 / P2 段） | 遗留 |
 |---|---|---|---|
@@ -37,9 +40,10 @@
 | P2-B 工具审批 | 迁移 007 + `packages/domain/src/approvals.ts` + `packages/runtime/src/tool-approval.ts`（`d64066b` + 修复轮 `f57282d`、`8dfc0bd`） | 冻结参数摘要对不上就 `APPROVAL_MISMATCH` 且零调用；拒绝/到期都不执行且都落审计 | ~~入口没接 `approvalGate`~~ → **已由 P2.5 关闭**（接线在装配点内部，所以 `approvalGate` 在 `scripts` 下仍是 0 命中——那是对的）；manifest 的 tool 级 approval **仍未实现**（P2 §5） |
 | P2-F 接口收缩 | `packages/brain-adapter/src/types.ts` 三接口 + manifest 补 `@xixi/model-adapters`（`19b54b9` + `f2f3af1`） | 四能力从接口与实现一并退役；`packages/brain-adapter` 里 `@deepseek-ai/dsh` 零命中 | 两条接缝（`supportsImages` / `inferJson`）在生产侧**没有消费者** |
 | P2-D 真实 News | `packages/plugins/news/**`（`3ada7cd`） | 三个工具 + `news.topics`；真实 RSS 与公开 JSON API 手动复验（事件日志 `tool_name="news.latest"`）；默认门禁用离线桩 | ~~入口未接线~~ → **已由 P2.5 关闭**（`news.*` 在入口的模型可见清单里）；真实来源属手动证据；**来源仍由入口各自带一条 RSS**（「全部由配置说了算」属另一条任务，见 P2.5 段 §3） |
-| P2-E durable Reminder | 迁移 008 + `packages/domain/src/reminders.ts` + `packages/runtime/src/reminder-runtime.ts`（`3bd7d3e` + `5336b13`） | 自然语言解析成绝对时刻 + 时区（跨日/跨时区边界有用例）；新进程读得到 `pending`，到点 `pending→due→candidate` 三条事件 | durable sink/scheduler **已由 P2.5 接进装配点**；~~模型只有 27% 会真的调这个工具~~ → **已更正**：那是 2026-10-04 的一次历史观测、同日同口径不可复现（见 P2 段 §4.2 的加注）；**到点由入口说出来仍未接**（`reminderSeams` 在 `scripts` 下 0 命中） |
+| P2-E durable Reminder | 迁移 008 + `packages/domain/src/reminders.ts` + `packages/runtime/src/reminder-runtime.ts`（`3bd7d3e` + `5336b13`） | 自然语言解析成绝对时刻 + 时区（跨日/跨时区边界有用例）；新进程读得到 `pending`，到点 `pending→due→candidate` 三条事件 | durable sink/scheduler **已由 P2.5 接进装配点**；~~模型只有 27% 会真的调这个工具~~ → **已更正**：那是 2026-10-04 的一次历史观测、同日同口径不可复现（见 P2 段 §4.2 的加注）；~~**到点由入口说出来仍未接**（`reminderSeams` 在 `scripts` 下 0 命中）~~ → **已由 D1.1 接上（2026-10-10）**：两个 live 入口的主动循环里各有一行 `...runtime.reminderSeams`——复核命令**要带排除项** `':!scripts/verify-p2-5.ts'`（验收脚本自己也引用它），见 D1 段 |
 | P2-G 上一轮遗留 | `packages/conversation/src/extractor.ts` 的 `lacksObject`（`d573437`） | 「铁观音我平时喜欢」三句从 3 条截断记忆变 0 条、正常句照旧 | 词表之外的宾语前置句仍照写 |
-| P2.5 Production Wiring | `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime` + 七个入口 + `scripts/verify-p2-5.ts`（见 P2.5 段） | 入口接线、`news.*` 进模型可见链、审批闭环（执行**冻结**参数）、durable 提醒接缝、配置真的管插件/新闻/MCP、两个内核修复；`npm run verify:p2.5 -- --offline` 四场景 exit 0 | **仍未接三条**：入口那一行 `reminderSeams`、活入口读插件话题、外部 MCP 服务器（P2.5 段 §3） |
+| P2.5 Production Wiring | `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime` + 七个入口 + `scripts/verify-p2-5.ts`（见 P2.5 段） | 入口接线、`news.*` 进模型可见链、审批闭环（执行**冻结**参数）、durable 提醒接缝、配置真的管插件/新闻/MCP、两个内核修复；`npm run verify:p2.5 -- --offline` 四场景 exit 0 | **仍未接**：外部 MCP 服务器、新闻来源全部由配置说了算（P2.5 段 §3 的第 3 / 4 条）。**第 1 / 2 条（入口那一行 `reminderSeams`、活入口读插件话题）已由 D1 接上**，见 D1 段 |
+| D0 + D1（2026-10-10） | `apps/demo-ui/`；`tests/ui/{smoke,e2e,lib}/`；`scripts/serve-chat.ts` 的 `/demo/` 三条静态路由；两个 live 入口主动循环的两行接缝（见 D1 段） | 原型页三条路由与 302 保留查询串（`tests/console/serve-chat-demo-route.test.ts`）；快档编译页面里每个内联脚本（在 `npm test` 里）、深档真 Chromium 点关键控件（`npm run test:ui`）；提醒与插件话题由入口**自己的**循环读出来（`tests/console/live-entry-proactive-seams.test.ts`） | **覆盖边界**：两档只看现场测试控制台的 `GET /`，试用页与 `apps/demo-ui/` 的内联脚本还没有门禁；试用页那行 `readPluginTopics` 没有独立行为证据（见 D1 段） |
 
 
 > 交付号取自 `git log`；**成员只报基线、不提交代码**，交付号由 captain 提交后回填（AGENTS §9.20）。
@@ -449,7 +453,8 @@ C:\Users\zz\AppData\Local\Temp\t11-store\xixi.sqlite
 > `verifyOnAssemble` 的调用点（`git grep -n 'verifyOnAssemble(' -- packages/runtime/src`），
 > `ToolApprovalManager` 由装配点接成 `approvalGate` 并经 `useRegistry()` 闭合执行路径；
 > 「装配点在跑、入口不在跑」这句话**对这几个入口已经不再成立**。**第 4 条（manifest 的 tool 级 approval 声明）
-> 仍未做**。P2.5 段还列出**三条仍未接线**（入口那一行 `reminderSeams`、活入口读插件话题、外部 MCP 服务器）。
+> 仍未做**。P2.5 段还列出**三条仍未接线**（入口那一行 `reminderSeams`、活入口读插件话题、外部 MCP 服务器）
+> ——**⚠ 前两条已过期**：2026-10-10 的 D1.1/D1.2 已把它们接上，见本文件末的 D1 段。
 
 其余边界与遗留：
 
@@ -511,10 +516,16 @@ npm run verify:p2.5 -- --offline                  # 四个真入口场景，exit
 
 ### 3. 仍未接线（**不许写成活的**）
 
-1. **到点提醒由入口说出来**：`git grep -n 'reminderSeams' -- scripts` **零命中**，`new ProactiveLoop(` 有三处
+> **2026-10-10 更正（§9.21：加注、原文保留）**：第 1、2 条**已由 D1.1 / D1.2 接上**——`scripts/serve-chat.ts`
+> 与 `scripts/field-test.ts` 的 `new ProactiveLoop({…})` 里现在各有 `...runtime.reminderSeams` 与 `readPluginTopics`。
+> 复核命令**必须带排除项**（验收脚本自己也引用 `reminderSeams`）：
+> `git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts'`、`git grep -n 'readPluginTopics' -- scripts`；
+> 行为证据 `tests/console/live-entry-proactive-seams.test.ts`。见本文件末的 D1 段。
+
+1. ~~**到点提醒由入口说出来**：`git grep -n 'reminderSeams' -- scripts` **零命中**，`new ProactiveLoop(` 有三处
    （`scripts/field-test.ts`、`scripts/serve-chat.ts`、`scripts/eval-proactive-timeline.ts`）。成立的是
-   「接缝可用 + 到点会被主动路径说出来」（验收脚本按那一行接法驱动），**不是**「活的西西已经在说提醒」。
-2. **活入口真在用插件话题**：`git grep -n 'readPluginTopics' -- scripts` **零命中**。
+   「接缝可用 + 到点会被主动路径说出来」（验收脚本按那一行接法驱动），**不是**「活的西西已经在说提醒」。~~
+2. ~~**活入口真在用插件话题**：`git grep -n 'readPluginTopics' -- scripts` **零命中**。~~
 3. **外部 MCP 服务器**：没有任何入口配置过（唯一入口是配置 `xixi.plugins.mcp.servers`，出厂空表）；
    证据仍是 SDK v2 真 client + 真 server 走 `InMemoryTransport`。
 4. **新闻来源全部由配置说了算**：入口各自带一条 RSS（`git grep -n 'createRssNewsSource' -- scripts`）；
@@ -531,3 +542,39 @@ npm run verify:p2.5 -- --offline                  # 四个真入口场景，exit
 ① 硬边界现在写全两条（`WRITE_OPERATION_RULE` 补进 `docs/design/conversation.md` 与
 `docs/design/security-and-privacy.md`）；② 本文 P2 段与 `docs/verification/t14-p2-gate-independent-verification-2026-10-04.md`
 里那句「27%」都已**加注**（原文一字未改）。
+
+## D0 + D1 — 交互原型、两档浏览器防线、主动循环两个接缝接进 live 入口（2026-10-10）
+
+**为什么有这一段**：[`progress.md`](progress.md) §13 那次真机试用挖出的第 2 个缺陷（试用页**整页按钮没响应**）暴露了同一件事——
+**页面的 JS 当时没有任何门禁**；同一次试用还留下一个诉求：把界面与文案先定下来的**交互原型**。
+D0 做这两件（原型页 + 两档防线），D1 把 P2.5 已经备好、但**入口没写**的那两行接缝补上。
+
+### 1. 交付
+
+| 块 | 交付物 | 一句话 |
+|---|---|---|
+| D0.1 / D0.2 | `apps/demo-ui/index.html`、`apps/demo-ui/styles.css`、`apps/demo-ui/app.js`；`scripts/serve-chat.ts` 的 `/demo/` 三条静态路由；`tests/console/serve-chat-demo-route.test.ts` | 原型挂在试用页服务上：`/demo/` 默认**页面内模拟数据**，`?mode=live` 才接真实 `/api/*`；`/demo` 302 且**保留查询串**、`/demo/nope.js` 404、旧调试页 `/` 不变 |
+| D0.3 | `tests/ui/smoke/page-script.test.ts`（在 `npm test` 里）、`tests/ui/e2e/page-behavior.test.ts`（`npm run test:ui`）、`tests/ui/lib/harness.ts`、`docs/adr/0021-browser-ui-testing.md`、`docs/testing.md`、`package.json` 的三条脚本 | 快档：编译页面里每个内联脚本 + 核对脚本按字面量找的 id；深档：真 Chromium 打开真服务，断言零 `pageerror` / 零失败请求并点关键控件 |
+| D1.1 / D1.2 | `scripts/serve-chat.ts` 与 `scripts/field-test.ts` 的 `new ProactiveLoop({…})` 各两行；`tests/console/live-entry-proactive-seams.test.ts`；`scripts/verify-p2-5.ts` 场景 2 | `...runtime.reminderSeams`（读接缝是整个时钟 pass）+ `readPluginTopics`（插件 `topic_source` 提案） |
+
+### 2. 判据（命令优先）
+
+```bash
+npm run test:ui:smoke                       # 快档（也在 npm test 里）
+npm run test:ui                             # 深档：真 Chromium（不在默认门禁；首次先 npm run test:ui:install）
+node --test tests/console/serve-chat-demo-route.test.ts
+node --test tests/console/live-entry-proactive-seams.test.ts
+npm run verify:p2.5 -- --offline            # 场景 2 现在由循环自己读库
+git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts'   # 排除项必须有：验收脚本自己也引用它
+git grep -n 'readPluginTopics' -- scripts
+```
+
+### 3. 边界（**不许写成「页面的 JS 已经全都有防线」**）
+
+- 两档今天只看**现场测试控制台的 `GET /`**：试用页与 `apps/demo-ui/` 的内联脚本还没有门禁
+  （见 [`testing.md`](testing.md) §6 第 8 条）。
+- 快档**看不见运行时行为**；深档不在默认门禁、要先取一次浏览器（`npm run test:ui:install`）。
+- 试用页那一行 `readPluginTopics` **没有独立行为证据**（试用页没有插件注入缝，删掉它现有用例仍全绿）。
+- 原型页的逐控件点击是**一次性浏览器取证**，仓库里没有留下脚本，**不能重跑**。
+
+逐条明细、已验证与缺口见 [`progress.md`](progress.md) §14 与 [`handoff.md`](handoff.md) §0.4。

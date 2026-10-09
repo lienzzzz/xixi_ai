@@ -1,6 +1,11 @@
 # 测试
 
-> 最后更新：2026-10-10（D0.3：新增**两档浏览器防线**——零依赖快档进默认门禁、真实 Chromium 深档单跑一条命令；
+> 最后更新：2026-10-10（V0.3 **D1**：新增 §2 的 `tests/console/live-entry-proactive-seams.test.ts` 小节
+> （入口主动循环的两个接缝：到点提醒与插件话题，判据是**入口自己的循环的可观察行为**）、§3 的 `verify:p2.5`
+> 行按新口径改写——场景 2 **不再手调读接缝**，改成「先断言仍是 `pending`，再让循环自己推进到 `candidate`」；
+> 复核接缝的命令**必须带排除项** `':!scripts/verify-p2-5.ts'`（该脚本自己也引用它）。
+> D0.3 的两档浏览器防线（下面 §2 的 `tests/ui/**` 小节与 §3.2）由 t23 写，本次未动）
+> 上一版：2026-10-10（D0.3：新增**两档浏览器防线**——零依赖快档进默认门禁、真实 Chromium 深档单跑一条命令；
 > 见 §1 的 UI 行、§2 的 `tests/ui/**` 小节、§3 的命令与 §3.2 的口径、§6 的新增缺口条；
 > 决策与代价见 [`adr/0021`](adr/0021-browser-ui-testing.md)）
 > 上一版：2026-10-08（V0.3 **P2.5** 收口：`--print-wiring` 行改成事实（插件工具真的在入口清单里）、
@@ -28,7 +33,7 @@
 | 集成 | `tests/integration/` | `TurnModelProvider` ↔ transport ↔ store、会话引擎、离线重启恢复、主动引擎门禁与重启不重发、**durable 提醒的两进程重启**（`tests/integration/reminder/`） | 否 | **以实跑为准**：文件数 `git ls-files "tests/integration/*.test.ts"`，项数 `npm run test:integration` 末行 |
 | 场景 | `tests/scenarios/` | 对话语料（8 场景，数据驱动），由 `scripts/eval-conversation.ts` 执行 | 执行时联网 | `corpus.ts`（**不是**空目录，也不产生 `npm test` 用例：它是数据模块） |
 | 回放 | `tests/replay/` | 导出事件区间 → 重放 → 复现决策（§22.3） | 否 | **空**（属 M5） |
-| 控制台 | `tests/console/` | 现场测试控制台的隐私保留策略、多段语音规划、在场回退、报告与错误文案、主动开口面板、三栏页面、「看一眼」（项数以 `npm run test:console` 末行为准） | 否 | `field-test-console.test.ts`、`proactive-console.test.ts`、`proactive-loop.test.ts`、`three-column-console.test.ts`、`look-once-console.test.ts`；**已在 `npm test` 的 glob 里（t16 起）**，也可用 `npm run test:console` 单跑 |
+| 控制台 | `tests/console/` | 现场测试控制台的隐私保留策略、多段语音规划、在场回退、报告与错误文案、主动开口面板、三栏页面、「看一眼」、**入口主动循环的两个接缝（V0.3 D1）**、`/demo/` 三条静态路由（D0.1/D0.2）（项数以 `npm run test:console` 末行为准） | 否 | `field-test-console.test.ts`、`proactive-console.test.ts`、`proactive-loop.test.ts`、`three-column-console.test.ts`、`look-once-console.test.ts`、`live-entry-proactive-seams.test.ts`（D1，见 §2）、`serve-chat-demo-route.test.ts`（D0，路由）；**已在 `npm test` 的 glob 里（t16 起）**，也可用 `npm run test:console` 单跑 |
 | UI 页面（两档） | `tests/ui/` | **快档**：控制台页面的内联脚本能不能解析、脚本按字面量找的元素 id 在不在页面里（零依赖、纯文本分析，**在 `npm test` 里**）；**深档**：真实 Chromium 加载 `GET /`，断言零 `pageerror` 与关键控件真的执行处理器（`npm run test:ui`，**不在默认门禁**，需先取一次浏览器） | 两档都不联网（深档也不需要密钥/真库，用 `--offline` + 临时库） | `smoke/page-script.test.ts`、`e2e/page-behavior.test.ts`，共用 `lib/harness.ts`；**这是仓库里唯一真的执行页面 JS 的一层**，口径与边界见 §3.2，决策见 [`adr/0021`](adr/0021-browser-ui-testing.md) |
 | 感知 | `tests/perception/` | 摄像头在场检测的 TS 契约 + 转发 Python 回归套件（合成场景，不需要真相机；项数以 `npm run test:perception` 末行为准） | 否 | 需要带 cv2 的 venv（`.venvs/field-probe` 或 `.venvs/cv4`，缺了**直接失败**而不是跳过）；也可用 `npm run test:perception` 单跑 |
 | 真实 API 验收 | `scripts/verify-*.ts`、`eval-conversation.ts`、`voice-*.ts` | 真实 MiMo 调用、语音闭环、打断 | **是** | 见下方「新增验证脚本」，**都不在 `npm test` 里** |
@@ -152,6 +157,27 @@ harness 映射仍在，并把持久化的 harness 会话原样交给 transport�
 
 判据口径与每一条的边界见 [`progress-v03.md`](progress-v03.md) 的 P2 段；**P2 的两个 pack 场景不在这张表里**
 （它们要真模型 + 真库，属手动复验，见 [`verification/t14-p2-gate-independent-verification-2026-10-04.md`](verification/t14-p2-gate-independent-verification-2026-10-04.md)）。
+
+### `tests/console/live-entry-proactive-seams.test.ts`：入口主动循环的两个接缝（V0.3 D1）
+
+**为什么需要它**：常驻装配点 `createResidentRuntime()` 早就交出 `runtime.reminderSeams`（到点的 durable 提醒）与
+`runtime.capabilities`（插件的 `topic_source` 提案），但 P2.5 时**两个 live 入口的 `new ProactiveLoop({…})` 里一个字都没写**，
+所以「到点她会说出来」当时只有**手调 `tick()` 或手调接缝**才看得见（AGENTS §9.24：字符串断言看不见调用图）。
+D1.1/D1.2 把两行写进 `scripts/serve-chat.ts` 与 `scripts/field-test.ts`，这个文件就是那条接线的门禁——
+判据是**入口自己的循环的可观察行为**，不是源码里有没有那行字：
+
+| 用例 | 断言的核心行为 |
+|---|---|
+| 提醒（试用页，真进程） | 往入口自己的库里写一条**已经到点**的提醒 → 只用入口自己的定时器（`/api/.../proactive/loop` 的 `start`，第一拍立即）→ 那条提醒在**入口的日志**里走完 `pending → due → candidate`，且循环推给页面的 `candidateId` 就是它。用例里**没有** `{action:'tick'}`、也**没有**任何地方手调 `runtime.reminderSeams`——入口没接那一对，提醒会一直停在 `pending`，这条必红 |
+| 提醒（控制台，`createFieldServer`） | 同上，走控制台自己的循环与库 |
+| 插件提案（控制台，inline 插件注册 `topic_source`） | 静默时段覆盖此刻时它**照样进候选**（循环考虑了它、候选 id 是它）但被硬底线拦成 `QUIET_HOURS`；关掉静默时段后同一份提案被说出来，且说的就是它自己那句。开口与否仍由既有硬底线与评分决定，插件只提供候选（铁律 3） |
+
+**全程离线**：没有密钥、没有网络、没有模型（控制台用 `offline: true`，试用页用 `--fake`）；在 `npm run test:console` 与 `npm test` 里。
+
+**如实记下的缺口**：试用页那一行 `readPluginTopics` 在本文件里**没有**行为证据——`createTrialRuntime()` 没有插件注入缝
+（控制台才有 `plugins.inline`），所以「试用页会读插件提案」今天只有「与它成对的 `reminderSeams` 有行为证据 +
+两处代码逐字相同」这两条间接支持；反事实实测：把试用页那一行删掉，本文件仍全绿。要补上它得先给试用页加一个
+插件注入缝（属 `scripts/` 的任务）。明细见 [`progress.md`](progress.md) §14。
 
 ### `tests/ui/`：页面 JS 的两档防线（D0.3）
 
@@ -388,7 +414,7 @@ manual audio hardware tests 三档；`AGENTS.md` 第 2 节也要求「联网验�
 | `npm run verify:structured-output` | 3~4 次 | 结构化输出契约 + MiMo 缺陷金丝雀 |
 | `npm run chat` / `--fake` / `--dsh` / `--print-wiring` | 每次一轮 | 交互式验证；`--fake` 完全离线（注入内存天气源）；`--print-wiring` **0 成本**：打印 `{entry,language,maxToolRounds,tools,permissions,plugins}` 后退出 |
 | 四个 live 入口的 `--print-wiring` | **0**（离线：不调模型、不建库） | **工具链覆盖的离线自证**：`scripts/chat.ts` / `voice-device-check.ts` / `eval-realism.ts` / `eval-conversation.ts` 各打印一行，实测**除 `entry` 外逐字段相同**（`language` 取自部署配置、`maxToolRounds: 4`、工具清单**以实跑为准**——默认含三个内置与三个 `news.*` 插件工具，V0.3 P2.5-C 起插件工具真的在入口的清单里；`plugins` 段给出 `start()` 自己的挂载记录），并与常驻装配点 `packages/runtime/src/resident-runtime.ts` 的 `createResidentRuntime()` 给出的同一条链逐字段相等（离线用例 `tests/console/live-entry-tool-chain.test.ts`）。**设备自检没有离线端到端证据**（要真实 WAV + 硬件 + 真实 ASR），它的证据就是这一行 + 与适配器共用一个 `deviceToolChain` 调用点 |
-| `npm run verify:p2.5`（`node scripts/verify-p2.5.ts`） | **0** 加 `--offline`（零费用、不联网）；不带时为**一次真实 MiMo 调用** | **P2.5 的真入口验收**（四个场景）：① 文字入口问新闻（真模型时由它自己调 `news.latest`，工具结果回到回答）；② 提醒跨重启（子进程写、父进程读、到点由 `runtime.reminderSeams` 变成候选并由主动路径说出来）；③ 审批（待批时业务数据零行、点头后执行**当时冻结**的参数）；④ 控制台 `close()` 之后链被清空、连接关掉、待办仍在库里。**口径**：场景 1 的 feed 是**本机 RSS 夹具**、场景 2 的「到点」用**注入时钟**造，脚本自己会打印这两点；`--scenario=<news\|reminder\|approval\|shutdown>` 单跑 |
+| `npm run verify:p2.5`（`node scripts/verify-p2.5.ts`） | **0** 加 `--offline`（零费用、不联网）；不带时为**一次真实 MiMo 调用** | **P2.5 的真入口验收**（四个场景）：① 文字入口问新闻（真模型时由它自己调 `news.latest`，工具结果回到回答）；② 提醒跨重启（子进程写、父进程读；**V0.3 D1 起脚本不再手调读接缝**——它先断言那条提醒仍是 `pending`，再让入口自己的循环在第一次 tick 时读库把它推进到 `candidate`，并由主动路径说出口）；③ 审批（待批时业务数据零行、点头后执行**当时冻结**的参数）；④ 控制台 `close()` 之后链被清空、连接关掉、待办仍在库里。**口径**：场景 1 的 feed 是**本机 RSS 夹具**、场景 2 的「到点」用**注入时钟**造，脚本自己会打印这两点；`--scenario=<news\|reminder\|approval\|shutdown>` 单跑。**复核接缝的接线**：`git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts'`（**排除项必须有**——本脚本自己也引用它，不排除就会得到一个假的「零命中」结论；行为证据见 §2 的 `live-entry-proactive-seams` 小节） |
 | `npm run web` / `npm run web -- --dsh` | 每次一轮 | 浏览器试用页（http://127.0.0.1:8791）；`--dsh` 切到 Harness 路径。**2026-10-08 起页面还带摄像头预览与录音回放**：预览复用控制台那份 `LiveSensors`（同一个子进程既出画面、也出 `presence.changed`；画面只在 localhost、不落盘），状态读 `GET /api/camera`、帧走 `GET /api/camera/frame.jpg`、起停用 `POST /api/camera`；「你说的那句」与「她的整段回复」各带一个**可重复播放**的播放器（要留档就点「⬇ 存到本地」）。**同一时刻摄像头只能被一个进程占用**——控制台与试用页别同时开着 |
 | `POST /api/voice`（试用页的🎤） | ASR + 一轮 | 浏览器采集 → VAD 只取语音段 → ASR → 对话 → TTS；无语音时返回 `NO_SPEECH_DETECTED` 而不是假装听懂。**整段录音写系统临时目录、不进 `data/`**（旧行为是先把整段写进 `data/voice-web/capture-*.wav` 再做 VAD，已修） |
 | `scripts/voice-device-check.ts` | ASR + 一轮 | 设备验收：对回环录音跑全链路并与原文比对字符级相似度（≥0.5 判 PASS） |

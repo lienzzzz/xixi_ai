@@ -1,11 +1,17 @@
 # 接手交接书（Handoff）
 
-> 最后更新：2026-10-09（新增 §0.3 **试用页接摄像头 + 一个总开关**——用户真机试用后提的四条都已落地，
+> 最后更新：2026-10-10（新增 §0.4 **V0.3 D0 + D1**：交互原型页 `apps/demo-ui/` 与试用页服务的 `/demo/` 三条
+> 静态路由、页面 JS 的**两档浏览器防线**（快档进 `npm test`、深档单跑 `npm run test:ui`）、主动循环的
+> **两个接缝**（到点提醒 + 插件话题）接进两个 live 入口；同日把 §0.3 第 1 条已知问题（「没有任何测试执行过
+> 页面的 JS」）按事实收口、§0.2 的「仍未接线」由三条减到一条并**就地加注**、§3 现状矩阵与 §4 的坑同步更新）
+> 上一版：2026-10-09（新增 §0.3 **试用页接摄像头 + 一个总开关**——用户真机试用后提的四条都已落地，
 > 并如实记下过程中抓到的**三个真缺陷**与**三条仍未修的已知问题**；其中最重要的一条是
 > **没有任何测试执行过页面的 JS**，所以那类缺陷今天零防线。§3 现状矩阵的摄像头/试用页两行同步更新）
+> ——**⚠ 该句已过期**：D0.3 已于 2026-10-10 补上两档门禁（只覆盖控制台的 `GET /`），见 §0.4）
 > 上一版：2026-10-08（新增 §0.2 **V0.3 P2.5 Production Wiring 收口**——四个 live 入口与控制台、试用页
 > 都经常驻装配点 `createResidentRuntime()` 取链，`news.*` 真的进了模型可见清单，审批与 durable 提醒由装配点接管；
-> 同节如实列出**仍未接线**的三条。§0.1 的「下一轮清单」第 1/3/5/10 条已按事实改口）
+> 同节如实列出**仍未接线**的三条——**其中两条（入口那一行 `reminderSeams`、活入口读插件话题）已由 D1 接上，
+> 见 §0.4**。§0.1 的「下一轮清单」第 1/3/5/10 条已按事实改口）
 > 上一版：2026-10-07（新增 §0.15 **双机环境：Linux（WSL2）移植**；同日关闭 §0.15 第 ②① 类「DSH 路径」——
 > 仓库已升到 `0.2.0-rc.2`，`verify:provider` 实测通过，见 `progress.md` §11；其余内容仍是 2026-10-03 第五轮收口中的快照）
 > 上一版：2026-10-03（第五轮 `xixi-v02-round5` 收口中，见 §0；第四轮已收口）
@@ -60,7 +66,7 @@
 - 另：**闸门本身目前是好的**（t14 的反事实只是临时把它改成恒真）。所以 `t20` 之后基线端到端探针**应当通过**；要验「覆盖缺口补上了」，正解是**对新用例做突变检验**（临时让 `renderGate` 恒真 → 断言**新用例**会红 → 按副本还原并报哈希），而不是期待基线探针变红。
 
 **P2 轮（`xixi-v03-p2`）留给下一轮的清单**（各任务收口时交回；编号是 P2 轮的，别与上面 P0/P1 轮的 t 编号混读）：
-1. ~~**四条「未接线」**~~ → **已由 V0.3 P2.5 关闭（2026-10-08，逐条复核命令见 §0.2）**：① 四个 live 入口都改走常驻装配点 `createResidentRuntime()`（`git grep -l 'createResidentRuntime(' -- scripts` 命中七个入口 + 验收脚本；反证 `git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'` **0 命中**）；② 提示词装配点上真的有 `verifyOnAssemble` 的调用点（`git grep -n 'verifyOnAssemble(' -- packages/runtime/src`），行为证据在 `tests/unit/runtime/resident-runtime.test.ts`；③ `ToolApprovalManager` 由装配点接成 `approvalGate` 并经 `useRegistry()` 闭合（注意 `git grep -n 'approvalGate' -- scripts` 仍是 0 命中，**这是对的**——接线在装配点内部）；④ durable 提醒的 sink 与 scheduler 由装配点给（`runtime.reminderSink` / `runtime.reminders`）。**仍未接的一条**是「到点由主动循环说出来」那一行，见 §0.2。
+1. ~~**四条「未接线」**~~ → **已由 V0.3 P2.5 关闭（2026-10-08，逐条复核命令见 §0.2）**：① 四个 live 入口都改走常驻装配点 `createResidentRuntime()`（`git grep -l 'createResidentRuntime(' -- scripts` 命中七个入口 + 验收脚本；反证 `git grep -n 'buildToolChain(' -- scripts ':!scripts/verify-p2-5.ts'` **0 命中**）；② 提示词装配点上真的有 `verifyOnAssemble` 的调用点（`git grep -n 'verifyOnAssemble(' -- packages/runtime/src`），行为证据在 `tests/unit/runtime/resident-runtime.test.ts`；③ `ToolApprovalManager` 由装配点接成 `approvalGate` 并经 `useRegistry()` 闭合（注意 `git grep -n 'approvalGate' -- scripts` 仍是 0 命中，**这是对的**——接线在装配点内部）；④ durable 提醒的 sink 与 scheduler 由装配点给（`runtime.reminderSink` / `runtime.reminders`）。~~**仍未接的一条**是「到点由主动循环说出来」那一行，见 §0.2。~~ → **这一条也已在 2026-10-10 由 D1.1 补上**（两个 live 入口各一行 `...runtime.reminderSeams`），见 §0.4 与 §0.2 的更正注。
 2. **manifest 的 tool 级 approval 声明**（今天只有 `config.tools.approval.ask` 在起作用，`packages/plugins/src/manifest.ts` 无 approval token）——captain 试排过本轮小任务，连撞两次依赖重叠，**明确留到下一轮**（P2.5-G 只做到「声明 → 权限策略」与运行时闭环，没动 manifest）。
 3. ~~**`PluginRuntimeMount.start()` 不幂等**（t19 的 O1）~~ → **已由 P2.5-I（t4）修掉**：重复启动**响亮拒绝**（`PluginAlreadyStartedError` / `PLUGIN_ALREADY_STARTED`，在任何步骤之前拒绝、不重复激活），常驻运行时这一层还有第二道门（`RESIDENT_RUNTIME_ALREADY_STARTED`）；用例在 `tests/unit/plugins/lifecycle.test.ts`。**相邻的一处仍未修**：per-plugin `dispose()` 不是插件级终态（§0.2「已知问题」）。
 4. **热插拔后 `shutdown()` 的 `unmounted` 少报**（t19 的 O2；只是报告口径，结束态正确）。
@@ -108,19 +114,29 @@ npm run verify:p2.5 -- --offline                  # 四个真入口场景（零�
 ⑥ 两个内核修复——插件启动幂等（响亮拒绝）与停用后健康快照不再撒谎（P2.5-I）；⑦ 世界状态进提示词、
 关系笔记按听众过滤（P2.5-J）；⑧ 提示词权威在生产装配点上的行为证据（P2.5-D）。
 
-**仍未接线（不许写成活的，三条）**：
-1. **到点提醒由入口说出来**：`git grep -n 'reminderSeams' -- scripts` **零命中**，而 `new ProactiveLoop(` 有三处
+**仍未接线（V0.3 D1 之后只剩一条；不许写成活的）**：
+
+> **2026-10-10 更正（D1.1 / D1.2，明细见 §0.4）**：原来的第 1、2 条**已经接上**——两个 live 入口
+> （`scripts/serve-chat.ts`、`scripts/field-test.ts`）的 `new ProactiveLoop({…})` 里现在各有一行
+> `...runtime.reminderSeams` 与一行 `readPluginTopics`（入口侧没有自己调 `markDue`）。复核命令**必须带排除项**
+> （验收脚本自己也引用 `reminderSeams`，不排除就会得到一个假的「零命中」结论）：
+> `git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts'` 与 `git grep -n 'readPluginTopics' -- scripts`；
+> 行为证据是 `tests/console/live-entry-proactive-seams.test.ts`。**下面原文按 §9.21 保留。**
+
+1. ~~**到点提醒由入口说出来**：`git grep -n 'reminderSeams' -- scripts` **零命中**，而 `new ProactiveLoop(` 有三处
    （`scripts/field-test.ts`、`scripts/serve-chat.ts`、`scripts/eval-proactive-timeline.ts`）。所以「活的西西已经
-   在说到点提醒」**不成立**——成立的是「接缝可用 + 到点会被主动路径说出来」（验收脚本场景②就按那行接法驱动）。
-2. **活入口真在用插件话题**：`git grep -n 'readPluginTopics' -- scripts` **零命中**，三处 `new ProactiveLoop`
-   都不读插件话题（P2.5-C 只把 `capabilities` 与形状备好）。
-3. **外部 MCP 服务器**：没有任何入口配置过服务器（唯一入口是配置 `xixi.plugins.mcp.servers`，出厂为空表），
+   在说到点提醒」**不成立**——成立的是「接缝可用 + 到点会被主动路径说出来」（验收脚本场景②就按那行接法驱动）。~~
+2. ~~**活入口真在用插件话题**：`git grep -n 'readPluginTopics' -- scripts` **零命中**，三处 `new ProactiveLoop`
+   都不读插件话题（P2.5-C 只把 `capabilities` 与形状备好）。~~
+3. **外部 MCP 服务器**（**仍未接**）：没有任何入口配置过服务器（唯一入口是配置 `xixi.plugins.mcp.servers`，出厂为空表），
    证据仍是 SDK v2 真 client + 真 server 走 `InMemoryTransport`。
 
 **已知问题（已知、未修，写明谁发现的）**：
-- **内核的 `#disposed` 只有一处守卫**（`loadPlugin` 查它，`loadInline` / `activate` 不查）→ `disposeAll()` 之后仍能把
+- ~~**内核的 `#disposed` 只有一处守卫**（`loadPlugin` 查它，`loadInline` / `activate` 不查）→ `disposeAll()` 之后仍能把
   插件**复活**（t16 的 F1 发现、t21 复核）。常驻运行时这一层已堵（关停后 `mount()` 抛 `RESIDENT_RUNTIME_CLOSED`），
-  **内核层未修**。
+  **内核层未修**。~~
+  → **已由提交 `bb494ba`（T21 收尾）修掉（2026-10-10 加注）**：`loadPlugin` / `loadInline` / `activate` 现在都查
+  `#disposed`（复核 `git grep -n '#disposed' -- packages/plugins/src/manager.ts`）；`disposeAll()` 之后把插件复活会被拒绝。
 - **`online` 的文档口径比代码强**：`checkHealth()` 复查失败会把 state 翻成 `failed`，而能力登记与模块还在——
   按「先读 `online`」的面板会对一个仍在跑的插件显示「已停用」（t16 的 F2，`#push` 的既有行为）。
 - **提示词权威的机制缺口**：`authority.verify` 对 system 串只查 `startsWith(CORE_IDENTITY)` 与 `includes(HARD_POLICY)`
@@ -144,7 +160,7 @@ npm run verify:p2.5 -- --offline                  # 四个真入口场景（零�
 | 缺陷 | 一句话根因 | 处置 |
 |---|---|---|
 | `--live` 摄像头预览**跑到 20 秒自己停**（画面冻住、页面仍写「运行中」） | `run.py` 的 `if live:` 块写在 `cfg = RunConfig(**parsed)` **之后**，那两行改的字典再没人读，`cfg.seconds` 一直是默认 20 | 块提到建配置之前 + 两条回归用例（含一条反事实：普通运行仍保留上限） |
-| 试用页**点了没反应**（所有按钮 / 打字 / 麦克风全不动） | 模板字符串里的 `'\n'` 在**求值时就变成真换行**，发到浏览器的脚本**解析阶段**就抛 `SyntaxError`，`<script>` 整块不执行 → 一个监听器都没挂上 | 改成 `'\\n'`（两处）。**注意仓库至今没有测试执行过页面的 JS**，见下面的缺口 |
+| 试用页**点了没反应**（所有按钮 / 打字 / 麦克风全不动） | 模板字符串里的 `'\n'` 在**求值时就变成真换行**，发到浏览器的脚本**解析阶段**就抛 `SyntaxError`，`<script>` 整块不执行 → 一个监听器都没挂上 | 改成 `'\\n'`（两处）。**当时仓库没有任何测试执行过页面的 JS**（见下面的缺口）；**2026-10-10（D0.3）起补上了两档**，但只覆盖控制台的 `GET /`，见 §0.4 |
 | 试用页的在场投影**写进另一个库** | `presenceStorePath` 原为 `join(REPO_ROOT, 'data')`：只读时没后果，摄像头接进来后它开始**写** | 改成 `DATA_DIR`，与 household 库统一（「一个西西」） |
 
 **怎么自证（都在离线门禁里）**：`npm run test:perception`（live 模式的配置契约，含反事实）、
@@ -152,8 +168,12 @@ npm run verify:p2.5 -- --offline                  # 四个真入口场景（零�
 端到端的那条：试用页 `/api/camera` 读出的预览子进程**连续 4204 帧 / 8 分 27 秒**（缺陷时是 161 帧 / 20.1 秒）。
 
 **三条已知问题（未修，别当成已解决）**：
-1. **没有任何测试执行过页面的 JS**——没有 jsdom，`tests/console/*` 全是对生成文本做正则断言，所以上面第 2 个缺陷那**一整类**
-   今天零防线；正解是把服务发出的内联脚本抽出来解析（`progress.md` §4 第 31 条）。
+1. ~~**没有任何测试执行过页面的 JS**——没有 jsdom，`tests/console/*` 全是对生成文本做正则断言，所以上面第 2 个缺陷那**一整类**
+   今天零防线；正解是把服务发出的内联脚本抽出来解析（`progress.md` §4 第 31 条）。~~
+   → **已由 D0.3 收口（2026-10-10，见 §0.4）**：「整块脚本解析失败」这一类现在有门禁了（`npm run test:ui:smoke`，
+   在 `npm test` 里，把页面里每个内联脚本抽出来编译并核对脚本按字面量找的 id）；「监听器有没有挂上」那一层在
+   `npm run test:ui`（真 Chromium，**不在默认门禁**）。**仍有的边界**：两档今天只看**现场测试控制台的 `GET /`**，
+   **试用页与 `apps/demo-ui/` 的内联脚本还没有门禁**。
 2. **`--self-test` 的 F7 第二条在本机必红**（31 通过 / 1 失败）：它要求提示语出现「可考虑设为 0 dB」，
    而 `noiseFloorHigh` 需要**读到一个噪声底**（本机没有 `data/voice/frontend-profile.json`）→ 走「不算高」分支。
    **在 HEAD 的干净 worktree 里跑出来一模一样**，是断言依赖机器状态，不是回归。
@@ -164,6 +184,39 @@ npm run verify:p2.5 -- --offline                  # 四个真入口场景（零�
 扬声器那项采集侧全是 −120（没数据，不是没响）、报告标签还写着 `CAP_DSHOW` 而 JSON 里其实是 `CAP_V4L2`
 （生成器的文案缺陷，未修）。**只有「摄像头通过」与「端点读数不可用」是这份报告在 Linux 上的可信部分**，
 逐条读法见 [`progress.md` §13.4](progress.md)。
+
+### 0.4 V0.3 D0 + D1（2026-10-10）——交互原型与两档浏览器防线、主动循环两个接缝接进 live 入口
+
+**一句话**：D0 把「界面与文案先定下来」的**交互原型页**落成 `apps/demo-ui/`（由试用页的 `/demo/` 三条静态路由
+提供），并给**页面的 JS** 补上**两档防线**——起因就是 §0.3 那个「整页按钮没响应」的缺陷当时**没有任何门禁看得见**；
+D1 把 P2.5 已经备好、但入口没写的那两行接缝（到点的 durable 提醒、插件的 `topic_source` 提案）接进两个 live 入口。
+
+**怎么自己看（都不花钱）**：
+
+```powershell
+npm run test:ui:smoke      # 快档（也在 npm test 里）：编译页面里每个内联脚本 + 核对脚本按字面量找的 id 在不在 markup 里
+npm run test:ui            # 深档：真 Chromium 打开真服务，点关键控件并断言处理器真的执行（**不在默认门禁**；首次先 test:ui:install）
+npm run web                # 原型页在 http://127.0.0.1:8791/demo/（**末尾斜杠不能少**；?mode=live 才接真实 /api/*）
+npm run verify:p2.5 -- --offline   # 场景 2 现在由循环自己读库（脚本不再手调 runtime.reminderSeams）
+```
+
+**三条最容易记错的**：
+
+1. **覆盖范围只有现场测试控制台的 `GET /`**：试用页与 `apps/demo-ui/` 的内联脚本**还没有**这两档门禁；
+   快档看不见运行时行为（`null.addEventListener`、异步分支没跑、点了没渲染），那一层要深档，而深档不在默认门禁、
+   且要先 `npm run test:ui:install` 取一次浏览器。分档口径见 [`testing.md`](testing.md) §3.2，决策见 [`adr/0021`](adr/0021-browser-ui-testing.md)。
+2. **`/demo/` 是原型**：默认模式全在本页内（模拟数据，不碰设备与库），只有 `?mode=live` 才去调真实 `/api/*`；
+   它**不是**第二个试用页。
+3. **复核接缝那条命令必须带排除项**：`git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts'`
+   ——验收脚本自己也引用它，不排除会得到一个**假的「零命中」**结论（§0.2 那段文字就是这么过期的）。
+
+**仍未接（本步之后剩下的）**：外部 MCP 服务器（没有任何入口配过，唯一入口是配置 `xixi.plugins.mcp.servers`，出厂空表）；
+「新闻来源全部由配置说了算」（入口今天各自带一条 RSS）；以及 §0.2「已知问题」里**还没被修**的那几条。
+
+**如实登记的缺口**：试用页那一行 `readPluginTopics` 没有独立行为证据（试用页没有插件注入缝——删掉它，现有用例仍全绿）；
+原型页的逐控件点击是**一次性浏览器取证**，仓库里没有留下脚本，**不能重跑**（要复现只能照 §0 或自己写一条）。
+
+**逐条明细**：[`progress.md`](progress.md) §14（交付表、判据、已验证、边界与缺口）。
 
 ### 0.15 双机环境：Linux（WSL2）移植（2026-10-07）
 
@@ -429,8 +482,11 @@ T5-F2（low：agent-loop 的 now 是回合开始快照）与 T5-F4（low：两�
 cd E:\worker2
 npm install                    # workspace 链接 + js-yaml + dsh-tools（失败可挂代理 127.0.0.1:7890）
 npm test                       # 期望：全绿，不联网（**项数以实跑末行为准**，别抄数字；最近实测点 2026-10-01 第四轮收口；耗时以实跑为准）
+npm run test:ui:smoke          # 页面 JS 快档（也在 npm test 里）：内联脚本能否编译 + 脚本按字面量找的 id 在不在页面里
+npm run test:ui                # 页面 JS 深档：真 Chromium（**不在默认门禁**；首次先 npm run test:ui:install 取浏览器）
 npm run field-test             # 👉 现场测试控制台 http://127.0.0.1:8792：麦克风电平/噪声底 + 摄像头在场 + 每轮延迟与动作 + 设备自检
 npm run web                    # 试用对话页 http://127.0.0.1:8791，打字或按住🎤说话
+                               #   交互原型页：http://127.0.0.1:8791/demo/（末尾斜杠不能少；?mode=live 才接真实 /api/*）
 ```
 
 需要真实调用（花钱、看外部系统是否健康）时：
@@ -463,6 +519,8 @@ npm run voice:bargein                # 0 次调用：打断判定延迟（纯本
 | 语音输入（浏览器采集 → VAD → ASR → 对话 → TTS） | ✅ 完成 | 页面按住🎤；或 POST `/api/voice`。**多段语音全部使用**（不再只取第一段），整段录音不落盘（`docs/field-test-report` 见下）。**2026-10-08 起你说的那句与她的整段回复各带一个可重复播放的播放器**（blob URL + 原生 `<audio controls>`，可拖回去重听、可下载；字节本来就在页面里，不额外往返） |
 | 现场测试控制台（一条命令 + 设备验收引导） | ✅ 完成 | `npm run field-test` → http://127.0.0.1:8792；离线自检 `node scripts/field-test.ts --self-test`（**项数看末行**；本机 2026-10-09 实测 31 通过 / 1 失败，那 1 项是机器状态依赖，见 §0.3）。**主动性只剩一个总开关**：拨动即生效并同时起停常驻考虑循环，旋钮都在默认收起的「高级设置」里 |
 | **试用页的摄像头预览与录音回放（2026-10-08）** | ✅ 可用（复用控制台同一份 `LiveSensors`，画面只进 localhost、不落盘，在场事件照常入库；**页面加载即打开摄像头并起常驻考虑循环**——控制台不自动起） | `npm run web` → http://127.0.0.1:8791，打开即出画面；状态 `curl -s http://127.0.0.1:8791/api/camera`（含 `frames` / `presenceEvents` / 「交不出画面」的 `problem`）。**同一时刻摄像头只能被一个进程占用**，控制台与试用页别同时开 |
+| **交互原型页（V0.3 D0.1/D0.2）** | ✅ 可用（`apps/demo-ui/` 的静态三件套，由试用页的 `/demo/` 三条路由提供；默认是页面内模拟数据） | `npm run web` → http://127.0.0.1:8791/demo/（**末尾的斜杠不能少**；`?mode=live` 才接真实 `/api/*`）；路由用例在 `npm run test:console` 里（`tests/console/serve-chat-demo-route.test.ts`） |
+| **页面 JS 的两档防线（V0.3 D0.3）** | ✅ 已落地（快档进默认门禁；深档单跑一条命令） | `npm run test:ui:smoke`（也在 `npm test` 里）编译页面里每个内联脚本并核对脚本按字面量找的 id；`npm run test:ui` 用真 Chromium 点关键控件（**不在默认门禁**，首次先 `npm run test:ui:install`）。**覆盖只有控制台的 `GET /`**，边界见 §0.4 第 1 条 |
 | 语音闭环（文件驱动） | ✅ 完成 | `npm run voice:turn -- --wav tests/audio-fixtures/direct-question.wav`（输出里含 `segmentsUsed/droppedSegments`） |
 | 打断判定（离线） | ✅ 完成（判定层面） | `npm run voice:bargein`（192ms） |
 | 真实麦克风/扬声器/摄像头验收 | ⚠️ 口径修正后扬声器判 FAIL（2026-09-30，Windows）；**Linux 侧 2026-10-08 也 FAIL 但读法不同** | `node scripts/field-test.ts --acceptance`：麦克风/摄像头通过，**扬声器按「能量比」口径只比噪声底高 ~2.4 dB（<10 dB）→ FAIL**（旧报告按帧级分位写 12.97 dB PASS，是乐观上界）。见 [`recon/field-test-report-2026-09-30.md`](recon/field-test-report-2026-09-30.md) 顶部的「口径变更说明」；改善路径：音量 ≥50%、麦克风离扬声器 0.3–1 m、采集增益设 0 dB 后重跑。**Linux 那份 FAIL 的三条逐条读法见 §0.3 与 [`progress.md` §13.4](progress.md)**——它**不是**设备否证 |
@@ -492,12 +550,16 @@ npm run voice:bargein                # 0 次调用：打断判定延迟（纯本
 8. **本机麦克风链路取不到语音**（Python `sounddevice` 路径）：录音 99.5% 能量 <100Hz。浏览器路径（`getUserMedia`）是另一套前端，优先用它。
 9. **`MIMO_API_KEY` 曾明文出现在对话里，应视为已泄露**，需到小米控制台轮换；密钥只在 `.env`（已 gitignore，提交里没有）。
 10. **不要用系统 Python 3.14** 跑语音代码（Pipecat/LiveKit 需要 3.10–3.12）；用 `.venvs/voice-pipecat` 或 `.venvs/voice-livekit`。
-11. **页面里的内联脚本没有任何测试执行过它**（2026-10-08 踩到，见 §0.3 第 2 个缺陷）：`serve-chat` / `field-test`
+11. ~~**页面里的内联脚本没有任何测试执行过它**（2026-10-08 踩到，见 §0.3 第 2 个缺陷）：`serve-chat` / `field-test`
     把 JS 嵌在 TS 模板字符串里发给浏览器，`tests/console/*` 只对**生成的文本**做正则断言——
     所以一个转义错误（`'\n'` 在模板求值时变成**真换行**）就能让整页 `<script>` 在解析阶段抛 `SyntaxError`、
-    **一个监听器都不挂**，而 `npm test` 全绿、后端 `/api/turn` 与 `/api/voice` 单独 POST 全正常。
-    **判据**：现象是「点了没反应」而**所有**按钮都不响应时，先怀疑整块脚本没跑，**不要**去查某一个按钮的处理函数。
-    手工核对：把页面内联脚本抽出来 `node --check`。**改这类代码后请手工打开一次页面**——自动门禁今天是看不见它的。
+    **一个监听器都不挂**，而 `npm test` 全绿、后端 `/api/turn` 与 `/api/voice` 单独 POST 全正常。~~
+    → **已由 D0.3 补上两档（2026-10-10，见 §0.4）**：`npm run test:ui:smoke`（在 `npm test` 里，快档）
+    把页面里每个内联脚本抽出来编译并核对脚本按字面量找的 id——**「整块脚本没跑」这一类现在会在默认门禁里变红**；
+    「监听器有没有挂上」那一层在 `npm run test:ui`（真 Chromium，**不在默认门禁**）。
+    **仍要手工看的是试用页与 `apps/demo-ui/`**：它们今天不在这两档的覆盖里。
+    **判据不变**：现象是「点了没反应」而**所有**按钮都不响应时，先怀疑整块脚本没跑，**不要**去查某一个按钮的处理函数。
+    手工核对仍是最后一步：把页面内联脚本抽出来 `node --check`（深档之外最便宜的自查）。
 12. **摄像头同一时刻只能被一个进程占用**（真机）：试用页、控制台、`verify-camera-presence.ts` 都开同一个设备，
     后到的那个会**快速失败（exit 2）并给出中文原因**，不会静默假通过。要重跑真机项之前，先确认页面上的摄像头已关掉。
 
@@ -514,6 +576,8 @@ npm run voice:bargein                # 0 次调用：打断判定延迟（纯本
 | Pipecat venv | `E:\worker2\.venvs\voice-pipecat`（pipecat-ai 1.12.0） |
 | LiveKit venv | `E:\worker2\.venvs\voice-livekit`（livekit-agents 1.8.3 + sounddevice/soundfile） |
 | 试用页 | `npm run web` → http://127.0.0.1:8791（`--dsh` 可切到 Harness 路径） |
+| 交互原型页 | `npm run web` 之后 http://127.0.0.1:8791/demo/（**末尾斜杠不能少**；`?mode=live` 才接真实 `/api/*`）；静态文件在 `apps/demo-ui/` |
+| 页面 JS 两档 | `npm run test:ui:smoke`（快档，也在 `npm test` 里）/ `npm run test:ui`（深档真 Chromium，**不在默认门禁**，首次先 `npm run test:ui:install`） |
 | 现场测试控制台 | `npm run field-test` → http://127.0.0.1:8792（设备验收报告：`docs/recon/field-test-report-<日期>.md`） |
 | 端点在不在静音 | `node scripts/field-test.ts --acceptance` 会打印默认输出/输入设备的 muted 与音量（出厂静音是上一轮验收失败的根因） |
 

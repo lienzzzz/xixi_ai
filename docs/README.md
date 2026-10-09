@@ -1,12 +1,19 @@
 # 西西项目文档地图
 
-> 最后更新：2026-10-09（**试用页接摄像头 + 一个总开关**：用户在 WSL 真机上试用后提的四条都已落地，
+> 最后更新：2026-10-10（V0.3 **D0 + D1**：交互原型落成 `apps/demo-ui/`、由试用页服务的 `/demo/` 三条静态路由提供，
+> 页面 JS 有了**两档浏览器防线**（零依赖快档进 `npm test`、真实 Chromium 深档单跑一条命令），主动循环的
+> **两个接缝**（到点的 durable 提醒、插件的 `topic_source` 提案）接进了两个 live 入口。
+> §0 补了 demo 页的打开方式、§1 报告表与 §3 触发表按事实更新——**其中「任何页面里内联的 JS 没有自动门禁看得见」那一行今天不成立**，
+> 已改成指向那条门禁（历史保留）。逐条见 [`progress.md`](progress.md) §14 与 [`handoff.md`](handoff.md) §0.4）
+> 上一版：2026-10-09（**试用页接摄像头 + 一个总开关**：用户在 WSL 真机上试用后提的四条都已落地，
 > 过程中抓到**三个真缺陷**（`--live` 20 秒自杀 / 整页按钮不响应 / 在场投影写错库）与**三条未修的已知问题**
-> ——重点是「**没有任何测试执行过页面的 JS**」；§0 的操作步骤与主动性说明、§1 的报告表、§3 的触发表都已同步。
+> ——重点是「**没有任何测试执行过页面的 JS**」（**该句已过期**：D0.3 已补上两档门禁，只覆盖控制台的 `GET /`，见最上面一行）；
+> §0 的操作步骤与主动性说明、§1 的报告表、§3 的触发表都已同步。
 > 逐条见 [`progress.md`](progress.md) §13 与 [`handoff.md`](handoff.md) §0.3）
 > 上一版：2026-10-08（V0.3 **P2.5 Production Wiring 收口**：四个 live 入口与控制台、试用页都经常驻装配点
 > `createResidentRuntime()` 取链，`news.*` 真的进模型可见工具链表，审批与 durable 提醒由装配点接管；
-> **仍未接的三条**写在 [`handoff.md`](handoff.md) §0.2 与 [`progress.md`](progress.md) §12.3。
+> **仍未接的三条**写在 [`handoff.md`](handoff.md) §0.2 与 [`progress.md`](progress.md) §12.3——**其中两条
+> （入口那一行 `reminderSeams`、活入口读插件话题）已由 D1 接上**，见 §0.4；
 > 同时按 §9.21 给历史记录加注：P2 段的「入口未接线」与那句「27%」都**只加注不改写**）
 > 上一版：2026-10-07（新增 [`recon/linux-port-environment-2026-10-07.md`](recon/linux-port-environment-2026-10-07.md)：
 > 仓库现在也在 **Linux（WSL2）** 上跑——本机版本矩阵、两个 venv 的建法、移植挖出的五个平台假设缺陷、
@@ -34,6 +41,13 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 你说的那句与西西的整段回复**各带一个播放器**（可反复听、可下载）。它与控制台共用同一套面板与同一份
 `LiveSensors`（所以「一个总开关」的用法两边一样），但两页的库不同：试用页用 `XIXI_DATA_DIR`（默认 `data/xixi`），
 控制台默认 `data/field-test`。细节与三条已知问题见 [`progress.md`](progress.md) §13。
+
+**交互原型页（`apps/demo-ui/`，2026-10-10 起）挂在同一个服务上**：`npm run web` 之后打开
+http://127.0.0.1:8791/demo/ ——**末尾的斜杠不能少**（`/demo` 会被 302 到 `/demo/?…`，查询串保留）。
+它默认是**页面内模拟数据**，加上 `?mode=live` 才去调真实 `/api/*`（摄像头预览、主动循环开关、安静一会儿等）。
+它是**交互原型**（把界面与文案先定下来用），不是第二个试用页：真实的语音 / 摄像头 / 主动循环仍只在试用页与控制台上跑。
+它自己那份 JS 今天**不在** §3 那两档浏览器防线的覆盖里（两档覆盖的是现场测试控制台发出去的页面），
+口径见 [`testing.md`](testing.md) §3.2、决策见 [`adr/0021`](adr/0021-browser-ui-testing.md)、明细见 [`progress.md`](progress.md) §14。
 
 **怎么判读结果**：
 
@@ -135,7 +149,7 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | [`review/reply-hygiene-review-2026-10-01.md`](review/reply-hygiene-review-2026-10-01.md) | 工具标记 / 英文推理清洗的评审（`REPLY_HYGIENE` 已实现；两条 requiredFix 已落地——试用页与控制台订阅 `onNotice`、沉默原因码 `ARTIFACT_ONLY_REPLY` 上线，逐入口清单见 `progress.md` §4） |
 | [`verification/t4-realism-verification-2026-10-01.md`](verification/t4-realism-verification-2026-10-01.md) | 「真人感」改造的独立验证：三次输入、主口径提问率、铁律未削弱 |
 | [`verification/t7-round5-independent-verification-2026-10-03.md`](verification/t7-round5-independent-verification-2026-10-03.md) | **第五轮四条工作的独立复验**：多日主动性（显著降频口径达标、未回应后不硬停）、话题收口升级（0/91 与反事实 9/91）、**首音延迟未达标（目标不可达）**、有界心情（0 越界 / ±6% / ±0.03 / 门禁同码）。三类证据分开、每个数字带可复跑命令 |
-| [`progress-v03.md`](progress-v03.md) | **V0.3 阶段进度（按 Phase 索引）**：P0 / P1 / P2 的交付清单、四条 Gate 实测、两个 pack 场景的独立复验、**未达标项**与遗留清单；每条结论带可重跑命令 |
+| [`progress-v03.md`](progress-v03.md) | **V0.3 阶段进度（按 Phase 索引）**：P0 / P1 / P2 / P2.5 / D 的交付清单、四条 Gate 实测、两个 pack 场景的独立复验、**未达标项**与遗留清单；每条结论带可重跑命令 |
 | [`adr/0014`](adr/0014-trusted-memory-policy-and-provenance.md) | 可信记忆策略与 provenance：三条来源与 `sourceType` 权重、四道先决、四条相关性路径（含话题点名）、注入 3~8 与两道分数线、两道出口闸门 |
 | [`adr/0015`](adr/0015-context-builder-and-engine-boundary.md) | ContextBuilder 与 ConversationEngine 的边界（谁装配上下文、谁做决定；两道出口闸门；「引擎自己会再建一次 context」这条实现细节） |
 | [`adr/0016`](adr/0016-memory-status-state-machine.md) | 记忆状态机（active / superseded / revoked / expired）与纠正闭环；为什么 `expired` 不自动过期 |
@@ -143,6 +157,7 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | [`adr/0018`](adr/0018-tool-approval-frozen-args.md) | 工具审批模型：七字段 + 摘要化冻结参数、五态与原因码、**恢复语义**（`approve()` 自带到期闸门）、拒绝与到期都落审计；`listForAgent` 改成「除 deny 之外都广告」的配套语义 |
 | [`adr/0019`](adr/0019-news-and-reminder-data-model.md) | 新闻与提醒的数据模型：三工具 + 四条主动判据 + 账本；八字段表 + 五态 + **时区语义**（按请求时区的当地日历，换时区必须换绝对时刻）+「到点成事件」的口径 |
 | [`adr/0020`](adr/0020-provider-three-interfaces-and-mcp-deps.md) | Provider 三接口拆分与四能力退役（含真实归属）、**两条接缝在生产侧没有消费者**、MCP 的依赖理由与 v1→v2 的选择 |
+| [`adr/0021`](adr/0021-browser-ui-testing.md) | 浏览器页面 JS 的两档门禁（V0.3 D0.3）：为什么不用 jsdom / puppeteer / 手写 CDP、两档各自抓什么、代价（+2 包、浏览器 `--only-shell` 278 MB 不进版本库）与已知边界 |
 | [`verification/t14-p2-gate-independent-verification-2026-10-04.md`](verification/t14-p2-gate-independent-verification-2026-10-04.md) | **Phase 2（P2 gate）的独立复验**：两个场景用真模型 + 真文件库跑通并留档；四个 live 入口未接线与提醒的 27% 可靠性**按未达标写**；四条 gate 的实测数字。**⚠ 两项都已过期**：入口接线由 V0.3 P2.5 关闭，「27%」由 t27 更正为**一次不可复现的历史观测**——都在文首的更正注里写明，原文一字未改 |
 | [`verification/t15-p1-independent-verification-2026-10-04.md`](verification/t15-p1-independent-verification-2026-10-04.md)（附可重跑探针 `t15-probe.mjs`） | **Phase 1 的独立复验**：四条技术验收自己复算（文件库 + 每步新进程）、两个场景真模型实跑、**pack 旗舰场景按原句未达标的三条写在最前面**（不替实现者圆场） |
 | [`v03/ACTUAL_RUNTIME_MAP.md`](v03/ACTUAL_RUNTIME_MAP.md) | **V0.3 Phase 0 的运行时地图**：pack 点名的十个概念（`buildToolChain` / `ProactiveLoop` / `createModelComposer` / `createModelDecider` / voice helpers / Memory extractor / 各入口 DB / perception DB / prompt builder / DSH 与直连）各自的定义处、调用点、目标包与迁移步；每行附一条可复跑的 `git grep`。另含对 pack 审计报告 `00_CODE_AUDIT.md` 的逐项复核（15 条：一致 / 偏差，附证据） |
@@ -191,9 +206,11 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | `scripts/lib/voice-latency.ts`（首音配对的判定规则） | [`design/voice.md`](design/voice.md) §6.3/§6.4、[`recon/voice-streaming-2026-10-01.md`](recon/voice-streaming-2026-10-01.md) §二的「结论句」、`tests/unit/voice/voice-latency.test.ts` |
 | `scripts/voice-turn.ts`（首音测量入口与 `--compare`） | [`design/voice.md`](design/voice.md) §6.4、[`recon/voice-streaming-2026-10-01.md`](recon/voice-streaming-2026-10-01.md) §一/§二、[`benchmarks/v01-baseline.md`](benchmarks/v01-baseline.md) §3.1 的四段口径 |
 | `services/perception-edge/**` 或在场检测参数 | [`design/perception.md`](design/perception.md)、`recon/camera-detector-choice-2026-09-30.md`；**改 `run.py` 的 `main()`／live 配置时，必须同时断言「live 拿到的配置」**（见 `design/perception.md` §7.1 里那条 20 秒自杀的记录） |
-| `scripts/field-test.ts`（现场测试控制台） | `design/perception.md`、`design/voice.md`、[`testing.md`](testing.md) 的脚本表、本文件 §0 的用户须知；**改共享的主动性面板（`proactivePanelHtml` / `PROACTIVE_PANEL_IDS`）会同时影响试用页**，两边都要看 |
-| `scripts/serve-chat.ts`（试用页） | 本文件 §0 的用户须知、[`design/voice.md`](design/voice.md) §3（浏览器语音路径与回放）、[`design/conversation.md`](design/conversation.md) 的「主动开口」行（它与控制台共用面板，差别只在页面加载是否自动起循环）、[`testing.md`](testing.md) 的脚本表、[`progress.md`](progress.md) §13 |
-| **任何页面里内联的 JS**（模板字符串里的 `<script>`） | **没有自动门禁看得见它**（无 jsdom，`tests/console/*` 只断言文本）：改完**必须手工打开一次页面**，或把发出的脚本抽出来 `node --check`。起因见 [`progress.md`](progress.md) §13.1 缺陷 2 |
+| `scripts/field-test.ts`（现场测试控制台） | `design/perception.md`、`design/voice.md`、[`testing.md`](testing.md) 的脚本表、本文件 §0 的用户须知；**改共享的主动性面板（`proactivePanelHtml` / `PROACTIVE_PANEL_IDS`）会同时影响试用页**，两边都要看；它的 `new ProactiveLoop({…})` 里有 `...runtime.reminderSeams` 与 `readPluginTopics` 两行（D1.1/D1.2，接线口径见 [`design/conversation.md`](design/conversation.md) 的「主动开口」行） |
+| `scripts/serve-chat.ts`（试用页） | 本文件 §0 的用户须知、[`design/voice.md`](design/voice.md) §3（浏览器语音路径与回放）、[`design/conversation.md`](design/conversation.md) 的「主动开口」行（它与控制台共用面板，差别只在页面加载是否自动起循环）、[`testing.md`](testing.md) 的脚本表、[`progress.md`](progress.md) §13；**`/demo/` 三条静态路由也在这里**（`/demo/` → `apps/demo-ui/index.html`、`/demo/styles.css`、`/demo/app.js`；`/demo` 少一个斜杠是 302 且**保留查询串**，旧调试页 `/` 与 `/demo/nope.js` 的 404 都不受影响——用例 `tests/console/serve-chat-demo-route.test.ts`），改它要同步本文件 §0 与 [`progress.md`](progress.md) §14 |
+| `apps/demo-ui/`（交互原型页，D0.1/D0.2） | 它是**静态三件套**（`apps/demo-ui/index.html` / `apps/demo-ui/styles.css` / `apps/demo-ui/app.js`），由试用页服务在 `/demo/` 提供（`npm run web` → http://127.0.0.1:8791/demo/，末尾斜杠与 `?mode=live` 见本文件 §0）；改它要同步本文件 §0 与上一条、[`progress.md`](progress.md) §14，并**手工在浏览器里点一遍**——它今天不在两档门禁的覆盖里（见 [`testing.md`](testing.md) §3.2、§6 第 8 条） |
+| `tests/ui/**`（页面 JS 的两档防线，D0.3） | **快档** `tests/ui/smoke/page-script.test.ts` 就在 `npm test` 里：编译服务端真正发出的每个内联 `<script>`（`node:vm`，只编译不执行）+ 核对脚本按字面量找的每个 id 在 markup 里存在；**深档** `tests/ui/e2e/page-behavior.test.ts` 单跑 `npm run test:ui`（真 Chromium + 真服务，**不在默认门禁**，首次先 `npm run test:ui:install`，缺浏览器时报缺并 exit 1）。两档的分工、能抓什么与抓不到什么见 [`testing.md`](testing.md) §3.2，决策与代价见 [`adr/0021`](adr/0021-browser-ui-testing.md) |
+| **任何页面里内联的 JS**（模板字符串里的 `<script>`） | **已有门禁：`npm run test:ui:smoke`（D0.3 起就在 `npm test` 里）**——它把服务端真正发出的页面里每个内联脚本抽出来用 `node:vm` **只编译不执行**，并核对脚本按字面量找的每个 id（`el('x')` / `getElementById` / `#x` / 共享面板的 `PX.ids`）在 markup 里真实存在。**边界**：它**看不见运行时行为**（handler 里 `null.addEventListener`、异步分支根本没跑、点了没渲染），那一层归深档 `npm run test:ui`（真 Chromium，**不在默认门禁**）；**今天覆盖的是现场测试控制台的 `GET /`，试用页与 `apps/demo-ui/` 还没有**。历史：2026-10-08 的「整页按钮没反应」就是模板字符串里少一层反斜杠、`<script>` 在解析阶段抛 `SyntaxError`，而当时**没有任何测试执行过页面的 JS**（`tests/console/*` 全是对生成文本做正则断言）——本行因此曾写成「改完必须手工打开一次页面」，那句话现在只对试用页与 demo 页成立。口径见 [`testing.md`](testing.md) §3.2、决策见 [`adr/0021`](adr/0021-browser-ui-testing.md)、起因见 [`progress.md`](progress.md) §13.1 缺陷 2 |
 | `packages/conversation/src/proactive.ts` 或人格默认值 | `design/conversation.md`、[`adr/0009`](adr/0009-proactive-triggers-and-hard-gates.md)、本文件 §0（主动性怎么调/怎么关） |
 | 任何 `scripts/verify-*.ts` / `eval-*.ts` / `voice-*.ts` | [`testing.md`](testing.md) 的脚本表、`README.md` 的命令段、`AGENTS.md` §7 |
 | 里程碑推进（做完 M2/M3/…） | `progress.md` §0/§1、`architecture.md` 的「未实现」列表、相关 `design/*` |
@@ -210,6 +227,8 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 cd E:\worker2
 npm test                                      # 测试数与 docs/testing.md、progress.md 是否一致
 npm run check:docs                            # 链接、文件引用、新鲜度标记是否仍然成立
+npm run test:ui:smoke                         # 页面 JS 快档：内联脚本能否编译 + 脚本按字面量找的 id 在不在页面里（也在 npm test 里）
+npm run test:ui                               # 页面 JS 深档：真 Chromium（**不在默认门禁**；首次先 npm run test:ui:install 取浏览器）
 npm run install:profile                       # profile 自检（会打印 bundles 与校验结果）
 node scripts/field-test.ts --self-test        # 现场测试控制台离线自检（项数以末行为准）
 node scripts/show-turns.ts data/chat/xixi.sqlite 3   # 事件日志仍可读、字段仍在
