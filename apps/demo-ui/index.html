@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#121c25" />
+  <title>西西 · 家庭陪伴</title>
+  <!-- No icon file exists here: an empty data: icon keeps the browser from asking for
+       /favicon.ico, so a page served from /demo/ loads with an empty console. -->
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="./app.js" defer></script>
+</head>
+<body>
+<div class="app-shell">
+  <aside class="rail" aria-label="主导航">
+    <div class="identity"><div class="mark" aria-hidden="true">西</div><div><strong>西西</strong><small>住在家里的 AI 伙伴</small></div></div>
+    <nav class="nav" aria-label="页面">
+      <button type="button" class="nav-item selected" data-view="home"><span aria-hidden="true">◉</span> 陪伴空间</button>
+      <button type="button" class="nav-item" data-view="lab"><span aria-hidden="true">⌁</span> 开发者实验室</button>
+    </nav>
+    <div class="rail-spacer"></div>
+    <div class="rail-note"><span class="status-led" id="rail-led"></span><span id="rail-caption">尚未开始陪伴</span></div>
+    <div class="rail-foot">本地优先 · 数据由你掌控</div>
+  </aside>
+  <main class="workspace" id="view-home">
+    <header class="topbar">
+      <div><div class="eyebrow">HOME COMPANION</div><h1>和西西待一会儿 <span class="heading-spark">✳</span></h1><p class="subtitle">可以聊天，也可以各忙各的。西西会记得你们聊过的事。</p></div>
+      <div class="top-actions"><span class="mode-pill" id="mode-pill">交互原型 · 模拟数据</span><button type="button" class="icon-button" id="settings-button" title="切换到实验室" aria-label="打开实验室">⚙</button></div>
+    </header>
+    <div class="page-grid">
+      <div class="primary-column">
+        <section class="companion-card" aria-label="西西当前状态">
+          <div class="orb-area"><div class="orb-shell" id="orb"><div class="orb-core"></div><div class="orb-ring ring-one"></div><div class="orb-ring ring-two"></div></div></div>
+          <div class="companion-info"><div class="kicker">西西现在</div><div class="companion-state" id="companion-state">安静待机</div><p id="companion-message">准备好了就打开陪伴，也可以直接打字聊天。</p><div class="state-chips"><span class="chip" id="chip-mic">麦克风：按键说话</span><span class="chip" id="chip-vision">摄像头：关闭</span><span class="chip" id="chip-proactive">主动聊天：关闭</span></div></div>
+          <button class="primary-action" type="button" id="companion-toggle"><span id="power-symbol">▶</span><span id="power-label">开启陪伴</span></button>
+        </section>
+        <section class="conversation-panel" aria-label="聊天记录">
+          <div class="conversation-header"><div><h2>今天的聊天</h2><span class="section-note" id="conversation-note">像平时说话一样就好</span></div><div class="conversation-actions"><button type="button" class="ghost-button" id="stop-playback" title="停止当前的朗读声音">■ 停止朗读</button><button type="button" class="ghost-button" id="clear-view" title="仅清理当前展示，不删除长期记忆">清空画面</button></div></div>
+          <div class="conversation-log" id="chat-log" role="log" aria-live="polite" aria-relevant="additions">
+            <div class="welcome" id="welcome"><div class="welcome-symbol">✳</div><h3>西西在这儿</h3><p>有事可以问，没事也可以聊聊。比如说说今天碰到了什么有趣的人。</p><div class="suggestions"><button type="button" class="suggestion" data-example="西西，今天有什么新闻？">今天有什么新闻？</button><button type="button" class="suggestion" data-example="明天早上八点提醒我打电话。">帮我记个提醒</button><button type="button" class="suggestion" data-example="今天去镇上，人真多。">随便聊聊</button></div></div>
+          </div>
+          <div class="composer-area"><div class="composer-meta"><span class="composer-dot" id="composer-dot"></span><span id="composer-status" aria-live="polite">可以输入文字，或点麦克风开始说话</span><span class="composer-right" id="speech-mode">按键式语音 · 尚非常驻监听</span></div><form class="composer" id="composer-form"><button type="button" class="mic-button" id="mic-button" aria-label="开始语音录制" title="点击开始录制，再点一次发送">♩<span class="mic-mini-dot"></span></button><textarea rows="1" id="message-input" placeholder="和西西说句话……（Enter 发送，Shift+Enter 换行）"></textarea><button class="send-button" type="submit" id="send-button" aria-label="发送消息">➤</button></form></div>
+        </section>
+      </div>
+      <aside class="context-column" aria-label="环境与日常">
+        <section class="context-card camera-card"><div class="section-top"><div><div class="mini-eyebrow">EYES OF THE HOME</div><h2>西西看到的</h2></div><button class="text-switch" type="button" id="camera-toggle">开启摄像头</button></div>
+          <div class="camera-view" id="camera-view"><img id="camera-image" alt="摄像头实时预览"/><div class="camera-off" id="camera-placeholder"><span class="camera-placeholder-icon">▣</span><strong>摄像头暂未开启</strong><small>开启后在这里看实时画面</small></div><span class="camera-overlay" id="camera-overlay">● 画面未连接</span></div>
+          <div class="camera-footer"><span class="small-led" id="camera-led"></span><span id="presence-label">环境状态未知</span><span class="camera-freshness" id="camera-detail">仅能检测有人，不能直接确认身份</span></div>
+        </section>
+        <section class="context-card status-card"><div class="section-top"><div><div class="mini-eyebrow">LIVING TOGETHER</div><h2>陪伴设置</h2></div></div>
+          <div class="setting-row"><div><strong>主动找你聊聊</strong><p>有合适的话题时，西西会主动开口</p></div><label class="switch"><input type="checkbox" id="proactive-switch" aria-label="开启主动聊天"/><span class="slider-track"></span></label></div>
+          <div class="setting-row"><div><strong>朗读西西回复</strong><p>语音与文字可以一起保留</p></div><label class="switch"><input type="checkbox" id="tts-switch" checked aria-label="朗读西西的回复"/><span class="slider-track"></span></label></div>
+          <button class="quiet-button" type="button" id="quiet-button">☾ 今天先安静一会儿</button>
+        </section>
+        <section class="context-card daily-card"><div class="mini-eyebrow">THINGS THAT MATTER</div><h2>西西正在惦记</h2><p class="daily-summary" id="daily-summary">这里会显示真正到期的提醒、未聊完的话题；在演示模式中使用示例数据。</p><div class="daily-list"><div class="daily-entry"><span class="entry-mark">◷</span><div><strong id="daily-first-title">未完的话题</strong><small id="daily-first-sub">示例：昨天说要去镇上办证</small></div></div><div class="daily-entry"><span class="entry-mark">✧</span><div><strong>插件能力</strong><small id="plugin-label">新闻、提醒 · 真实状态待查询</small></div></div></div></section>
+        <div class="privacy-foot"><span>◈</span> 画面不默认上传给模型；仅在明确调用视觉分析时才可能使用图像。<a href="#" id="privacy-link">了解行为边界</a></div>
+      </aside>
+    </div>
+  </main>
+  <main class="workspace lab-workspace hidden" id="view-lab">
+    <header class="topbar"><div><div class="eyebrow">DEVELOPER STUDIO</div><h1>西西实验室</h1><p class="subtitle">设备、工具、运行时和诊断都在这里，不打扰日常陪伴页面。</p></div><button class="ghost-button" type="button" id="return-home">返回陪伴</button></header>
+    <section class="lab-grid">
+      <article class="lab-card"><div class="mini-eyebrow">RUNTIME</div><h2>运行环境</h2><dl id="runtime-details"><dt>运行模式</dt><dd id="info-mode">模拟演示</dd><dt>模型连接</dt><dd id="info-provider">未连接</dd><dt>会话轮数</dt><dd id="info-turns">0</dd><dt>存储</dt><dd id="info-store">模拟内存</dd></dl><button class="secondary-button" id="refresh-info">刷新状态</button></article>
+      <article class="lab-card"><div class="mini-eyebrow">INPUT / OUTPUT</div><h2>传感器与语音</h2><p>当前 Demo 使用按键录音；常驻监听、唤醒词、多人说话判断尚属后续阶段。</p><dl><dt>摄像头</dt><dd id="info-camera">未启动</dd><dt>录音</dt><dd id="info-mic">待机</dd><dt>TTS</dt><dd id="info-tts">开启</dd></dl><button class="secondary-button" id="device-camera">切换摄像头</button></article>
+      <article class="lab-card"><div class="mini-eyebrow">PROACTIVE / TOOLS</div><h2>主动行为与工具</h2><p>实际环境下展示真实状态和决策证据；模拟模式不代表真实工具调用成功。</p><dl><dt>主动开口</dt><dd id="info-proactive">关闭</dd><dt>最近事件</dt><dd id="info-event">—</dd></dl><button class="secondary-button" id="tick-button">手动触发一次决策</button></article>
+      <article class="lab-card wide-card"><div class="mini-eyebrow">EVENTS</div><h2>调试事件</h2><pre id="event-log">[demo] 界面已加载，等待操作…</pre><p class="lab-hint">后续可接 Event Stream/SSE、WorldState、Attention 与工具调用 trace；这里不展示私人记忆正文。</p></article>
+    </section>
+  </main>
+</div>
+<div class="toast-container" id="toast-container" aria-live="polite"></div>
+<div class="dialog-backdrop hidden" id="privacy-dialog" role="dialog" aria-modal="true" aria-labelledby="privacy-title"><div class="privacy-dialog-content"><h2 id="privacy-title">西西的设备与数据边界</h2><p>摄像头预览和人物在场判断不是同一回事。预览只传到本地页面；画面中有人也不代表能确定是家人。普通对话不会自动把摄像头图片发给模型。</p><p>语音 Demo 使用按键录音并发送识别到的语音；常驻监听、声纹识别和电视噪声过滤需要下一阶段独立验收。</p><button class="primary-action" id="close-privacy">知道了</button></div></div>
+</body>
+</html>

@@ -10,6 +10,7 @@
  * 用法：node scripts/serve-chat.ts [--port 8791] [--no-tts]
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type ToolRegistry, type TurnModelProvider } from '@xixi/brain-adapter';
@@ -645,6 +646,43 @@ function sendJpeg(response: ServerResponse, bytes: Buffer): void {
   response.end(bytes);
 }
 
+/**
+ * V0.3 D0.1/D0.2: 交互原型（`apps/demo-ui/`）的三个静态资源。
+ *
+ * 为什么不内联成模板字符串：`PAGE` 那种写法（1000+ 行 HTML/CSS/JS 挤在 TypeScript 里）正是这次要
+ * 避免的东西——原型改一行 CSS 不该牵动 tsc 与测试。`/` 上的旧页面**逐字节保留**，仍是调试 fallback。
+ *
+ * 每次请求现读而不是启动时读一次：这是本地开发页，改完刷新即生效，不必重启服务；三个文件都很小。
+ */
+const DEMO_UI_DIR = join(REPO_ROOT, 'apps', 'demo-ui');
+const DEMO_UI_TYPES: Readonly<Record<'index.html' | 'styles.css' | 'app.js', string>> = {
+  'index.html': 'text/html; charset=utf-8',
+  'styles.css': 'text/css; charset=utf-8',
+  'app.js': 'text/javascript; charset=utf-8',
+};
+
+function sendDemoAsset(response: ServerResponse, file: 'index.html' | 'styles.css' | 'app.js'): void {
+  let body: Buffer;
+  try {
+    body = readFileSync(join(DEMO_UI_DIR, file));
+  } catch {
+    // 500 而不是 404：这三个文件是仓库的一部分，读不到是部署/工作区坏了，不是「这个地址没有东西」。
+    throw new RuntimeError(
+      'DEMO_ASSET_MISSING',
+      `原型资源读不到：${file}`,
+      `它应该由仓库提供（${DEMO_UI_DIR}）；确认 apps/demo-ui/ 下的三个文件还在`,
+      500,
+    );
+  }
+  response.writeHead(200, {
+    'content-type': DEMO_UI_TYPES[file],
+    'content-length': body.length,
+    // 本地开发页：不缓存，改完刷新就能看到最新的样式与脚本。
+    'cache-control': 'no-store',
+  });
+  response.end(body);
+}
+
 /** 收尾要用的几样东西（收窄成接口，测试可以直接驱动真收尾而不必起一个进程）。 */
 export interface ShutdownDeps {
   readonly server: { close(): unknown; closeAllConnections?: () => void };
@@ -820,6 +858,26 @@ const server = createServer((request, response) => {
       if (request.method === 'GET' && url.pathname === '/') {
         response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         response.end(PAGE);
+        return;
+      }
+      // V0.3 D0.1/D0.2: 交互原型（`apps/demo-ui/`）走这三条静态路由。`/demo/` 才是正式地址（末尾
+      // 带斜杠，页面里的 `./styles.css` 才会解析到 `/demo/styles.css`）；`/demo?mode=live` 这种少一个
+      // 斜杠的写法重定向过去，并且**保留查询串**——`mode=live` 在重定向里丢掉的话，页面会静默退回模拟模式。
+      if (request.method === 'GET' && url.pathname === '/demo') {
+        response.writeHead(302, { location: `/demo/${url.search}` });
+        response.end();
+        return;
+      }
+      if (request.method === 'GET' && (url.pathname === '/demo/' || url.pathname === '/demo/index.html')) {
+        sendDemoAsset(response, 'index.html');
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/demo/styles.css') {
+        sendDemoAsset(response, 'styles.css');
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/demo/app.js') {
+        sendDemoAsset(response, 'app.js');
         return;
       }
       if (request.method === 'GET' && url.pathname === '/api/state') {
