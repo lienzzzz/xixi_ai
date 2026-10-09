@@ -599,5 +599,70 @@ def _presence_input(**overrides):
     return PresenceEventInput(**values)
 
 
+class LiveModeConfigTests(unittest.TestCase):
+    """`--live` must actually run unbounded, and this is the config it runs with.
+
+    Why this exists (measured 2026-10-08): the live block in `main()` set `parsed["seconds"] = 0.0`
+    **after** `cfg = RunConfig(**parsed)` had already been built, so the mutation reached nobody.
+    `cfg.seconds` kept the `--seconds` default of 20 and `run()` stopped the loop on schedule —
+    the page's preview child exited with code 0 after 161 frames at 8 fps (about 20.1 s) while the
+    page still showed 「运行中」 and the picture simply froze. The module docstring had promised the
+    opposite all along ("The live loop has no `--seconds`"), so no reader could see the bug either.
+
+    `run()` is replaced rather than executed: the assertion is about the config live mode hands to
+    it, which needs no camera, no frames and no 20 seconds of waiting. Runs before the fix:
+    `seconds` is 20.0 and this test fails.
+    """
+
+    def test_live_mode_hands_run_an_unbounded_config(self) -> None:
+        from perception_edge import run as run_module
+
+        captured: dict[str, object] = {}
+
+        def fake_run(cfg, emitter, on_frame=None, should_stop=None, pace_fps=None):  # noqa: ANN001
+            captured["cfg"] = cfg
+            captured["pace_fps"] = pace_fps
+            captured["on_frame"] = on_frame
+            captured["should_stop"] = should_stop
+            return {"stopped": "test"}
+
+        original = run_module.run
+        run_module.run = fake_run
+        try:
+            exit_code = run_module.main(["--live", "--source", "synthetic", "--scenario", "empty-room"])
+        finally:
+            run_module.run = original
+
+        self.assertEqual(exit_code, 0)
+        cfg = captured["cfg"]
+        # The whole point: no time cap. 0 means "no limit" to the loop's own check.
+        self.assertEqual(cfg.seconds, 0.0, "live 模式不能被 --seconds 的默认值截断")
+        self.assertIsNone(cfg.max_frames, "也不该有帧数上限")
+        self.assertTrue(cfg.quiet_frames, "逐帧记录会淹掉 stdout，live 模式必须安静")
+        self.assertEqual(captured["pace_fps"], 8.0, "live 模式按 --live-fps 走（默认 8）")
+        self.assertIsNotNone(captured["should_stop"], "停止条件必须交出去（stdin 关闭即退出）")
+
+    def test_a_timed_run_keeps_its_cap(self) -> None:
+        """The counterfactual: the fix must not turn *every* run unbounded."""
+        from perception_edge import run as run_module
+
+        captured: dict[str, object] = {}
+
+        def fake_run(cfg, emitter, on_frame=None, should_stop=None, pace_fps=None):  # noqa: ANN001
+            captured["cfg"] = cfg
+            captured["pace_fps"] = pace_fps
+            return {"stopped": "test"}
+
+        original = run_module.run
+        run_module.run = fake_run
+        try:
+            run_module.main(["--source", "synthetic", "--scenario", "empty-room", "--seconds", "7"])
+        finally:
+            run_module.run = original
+
+        self.assertEqual(captured["cfg"].seconds, 7.0, "带 --seconds 的普通运行仍然有上限")
+        self.assertIsNone(captured["pace_fps"], "非 live 不按 fps 限速")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

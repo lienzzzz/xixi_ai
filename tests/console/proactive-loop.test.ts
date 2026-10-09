@@ -310,18 +310,47 @@ test('the drill button speaks too, through the same TTS seam (t74)', async () =>
   }
 });
 
-test('the loop starts off, and the panel says so', () => {
+test('the loop switch itself starts off — the master switch is what starts it', () => {
   const html = proactivePanelHtml();
   assert.ok(html.includes('id="px-loop-enabled"'), 'the page has the 「开始自动考虑」 switch');
   assert.match(html, /<input type="checkbox" id="px-loop-enabled" \/>/, 'and it is a checkbox (off by default)');
   assert.ok(html.includes('id="px-loop-interval"'), 'with an interval knob');
-  assert.match(html, /默认关/, 'and the copy says it is off by default');
+  assert.match(html, /总开关打开时它会一起启动/, 'and the copy says the loop follows the master switch');
   assert.match(html, /在场投影 \/ 上次说话过了多久 \/ 固定时钟钩子/, 'and names the factual sources');
   const script = proactivePanelScript('/api/field');
   assert.match(script, /loopBox\.checked = false/, 'the script never pre-checks the switch');
   assert.match(script, /this\.loopPoller = setInterval|PX\.loopPoller = setInterval/, 'the page polls for new messages');
   assert.match(script, /function pxPlayClips/, 'and plays the synthesized segments');
   assert.match(script, /window\.pxOnProactiveMessage/, 'and hands spoken messages to the host page');
+});
+
+/**
+ * 一个总开关（2026-10-08 用户要求）：`px-enabled` 拨动即生效，且自动考虑循环**跟着它**走。
+ *
+ * Before this the two were separate: the `enabled` checkbox only took effect on 保存, and the loop
+ * had its own switch in another block — so 「她会不会自己开口」 took two controls in two places.
+ * These assertions pin the wiring rather than the wording: the master handler must both save
+ * immediately and start/stop the loop (AGENTS §9.24 — a string in the page is not a call graph).
+ */
+test('the master switch applies at once and the loop follows it', () => {
+  const html = proactivePanelHtml();
+  assert.match(html, /<input type="checkbox" id="px-advanced" \/>/, 'the knobs sit behind 「高级设置」');
+  assert.match(html, /<div id="px-advanced-body" hidden>/, 'and that block is collapsed by default');
+  assert.ok(
+    html.indexOf('id="px-advanced-body"') < html.indexOf('id="px-cooldown"'),
+    'the collapse wrapper opens before the knobs it hides',
+  );
+  assert.ok(
+    html.indexOf('id="px-audit"') < html.lastIndexOf('</div>\n  </section>'),
+    'and closes after them (every knob is inside it)',
+  );
+  const script = proactivePanelScript('/api');
+  assert.match(script, /pxMaster\(master\.checked\)/, 'the checkbox change handler calls the master path');
+  assert.match(script, /function pxMaster\(on\)/, 'which exists');
+  assert.match(script, /await pxSave\(\{ enabled: on \}/, 'and persists without 保存');
+  assert.match(script, /if \(on\) await pxLoopStart\(\)/, 'and starts the loop with it');
+  assert.match(script, /else await pxLoopStop\(\)/, 'and stops it too');
+  assert.match(script, /advancedBody\.hidden = !advanced\.checked/, 'and the advanced block toggles');
 });
 
 test('candidates come from facts, and only from facts', () => {

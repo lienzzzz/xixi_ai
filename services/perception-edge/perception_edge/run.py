@@ -699,6 +699,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     _force_utf8_output()
     _silence_opencv_logging()
     _apply_thread_limit(threads)
+    if live:
+        # Unbounded loop, paced to `--live-fps`; the caller stops it (stop button / closed pipe).
+        #
+        # This block **must** run before `RunConfig(**parsed)` below. It used to sit after it, so
+        # these two lines mutated a dict nobody read again: `cfg.seconds` kept its `--seconds`
+        # default of 20, and `run()` broke out of the loop at
+        #     if cfg.seconds > 0 and time.perf_counter() - started >= cfg.seconds: break
+        # Measured 2026-10-08 on the trial page: the preview child exited with code 0 after exactly
+        # 161 frames at 8 fps (≈20.1 s) while the page still said 「运行中」 and the picture froze.
+        # The module docstring had promised the opposite the whole time ("The live loop has no
+        # `--seconds`: it ends when its stdin closes or it is interrupted") — intent and code
+        # disagreed, and nothing failed, because nothing asserted the config live mode runs with.
+        parsed["seconds"] = 0.0
+        parsed["quiet_frames"] = True
+        # stderr stays for real problems (camera busy, bad --db): the caller already gets every
+        # frame on stdout, so a per-frame note there would be noise.
+        live_options["quiet_frames"] = True
     cfg = RunConfig(**parsed)
     if probe_frames is not None:
         # Diagnostic mode (t99): never touches the event log, never runs the detector.
@@ -707,13 +724,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         except CameraUnavailable as cause:
             print(f"摄像头不可用：{cause}", file=sys.stderr)
             return 2
-    if live:
-        # Unbounded loop, paced to `--live-fps`; the caller stops it (stop button / closed pipe).
-        parsed["seconds"] = 0.0
-        parsed["quiet_frames"] = True
-        # stderr stays for real problems (camera busy, bad --db): the caller already gets every
-        # frame on stdout, so a per-frame note there would be noise.
-        live_options["quiet_frames"] = True
     emitter = EventEmitter(db_path=cfg.db, append=cfg.append, ttl_seconds=cfg.ttl_seconds)
     on_frame = None
     should_stop = None

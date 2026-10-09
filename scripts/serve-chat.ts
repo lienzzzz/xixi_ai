@@ -16,19 +16,23 @@ import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type ToolRegistry,
 import { CliDshTransport } from '@xixi/brain-dsh';
 import { TopicEngine } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
-import { openXixiStore, resolveCanonicalDataDir } from '@xixi/domain';
+import { openXixiStore, resolveCanonicalDataDir, type XixiStore } from '@xixi/domain';
 
 import { DSH_HOME, DSH_PROFILE, REPO_ROOT, harnessEnv, loadConfig, readDotEnv, resolvePython } from './lib/harness.ts';
 import {
   RuntimeError,
   DEFAULT_LOOP_INTERVAL_MS,
+  LIVE_PRIVACY_NOTE,
+  LiveSensors,
   MIN_LOOP_INTERVAL_MS,
+  PERCEPTION_SERVICE_DIR,
   PROACTIVE_PANEL_CSS,
   ProactiveLoop,
   segmentTtsNote,
   XIXI_DB_ENTRIES,
   applyAndPersistProactivePatch,
   createModelComposer,
+  createPerceptionLiveRunner,
   databaseNoteHtml,
   effectiveProactivity,
   handleVoiceTurn,
@@ -40,6 +44,7 @@ import {
   pruneVoiceDir,
   readPresence,
   recentUserTopics,
+  resolvePerceptionPython,
   retentionPolicy,
   restoreProactiveSettings,
   segmentPlan,
@@ -53,6 +58,7 @@ import {
 import {
   CONVERSATION_SCOPE,
   createResidentRuntime,
+  ingestPerceptionLine,
   type PluginChainOptions,
   type ResidentModelInput,
   type XixiResidentRuntime,
@@ -220,7 +226,16 @@ function proactivePayload(): ProactiveConsoleState & { readonly ok: true } {
 
 // Resident consideration loop (t70): same core as the console, off until the page asks for it.
 let turnInFlight = false;
-const presenceStorePath = join(REPO_ROOT, 'data');
+/**
+ * 「一个西西」：在场投影用**本页自己的**库，不是仓库根的 `data/`。
+ *
+ * 这一行原本是 `join(REPO_ROOT, 'data')`，写在这里的时候没有后果——因为那时只有**读**
+ * （考虑循环读一眼「有人在吗」）。摄像头接进来之后它开始**写**：再指着 `data/` 就会让画面看到的
+ * 事与对话/人格分家，而且凭空多出一个 `data/xixi.sqlite`。现场测试控制台早就统一成这条规矩
+ * （`presenceDataDir = options.presenceDataDir ?? dataDir`，注释写着「what the camera writes is
+ * what the page reads」），这里跟着它走。
+ */
+const presenceStorePath = DATA_DIR;
 const loopSynthesizeProvider = (): ((text: string) => Promise<Buffer>) | undefined =>
   ttsOn && client.hasKey ? async (text: string): Promise<Buffer> => await client.synthesize(text) : undefined;
 const proactiveLoop = new ProactiveLoop({
@@ -264,6 +279,64 @@ const proactiveLoop = new ProactiveLoop({
   }),
   log: (line) => console.log(line),
 });
+
+/** 本文件自己的日志行（和控制台一样，前缀只是习惯，方便 grep 现场）。 */
+const logLine = (line: string): void => { console.log(line); };
+
+// ---------------------------------------------------------------- 摄像头预览（复用控制台那份）
+/**
+ * The trial page shows the camera, and it does so through **the console's own sensor class** —
+ * `LiveSensors` + `createPerceptionLiveRunner` are imported, not re-implemented (AGENTS §10.2:
+ * one implementation per platform, or the second copy drifts).
+ *
+ * What that buys beyond a picture: the very same child process that feeds the `<img>` also
+ * produces the `presence.changed` events, and they enter the canonical store through
+ * `ingestPerceptionLine` — so 「画面里有人」 and WorldState can never disagree about what the
+ * camera saw. The child gets no `--db` of its own (V0.3 P0-B).
+ *
+ * The presence store is opened once and reused: it used to be `openXixiStore(...)` per read.
+ */
+let presenceStore: XixiStore | null = null;
+function getPresenceStore(): XixiStore | null {
+  if (presenceStore !== null) return presenceStore;
+  try {
+    presenceStore = openXixiStore({ dataDir: presenceStorePath });
+  } catch (error) {
+    logLine(`[presence] 在场投影的库打不开：${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+  return presenceStore;
+}
+let cameraIndex = 0;
+const liveSensors = new LiveSensors({
+  runner: createPerceptionLiveRunner({
+    python: () => resolvePerceptionPython(logLine),
+    serviceDir: PERCEPTION_SERVICE_DIR,
+    repoRoot: REPO_ROOT,
+    log: logLine,
+  }),
+  ingest: (line) => {
+    const target = getPresenceStore();
+    if (target === undefined || target === null) {
+      logLine('[perception] 在场投影的库打不开，这条在场事件没有入库');
+      return;
+    }
+    ingestPerceptionLine(line, { store: target, log: logLine });
+  },
+  cameraIndex: () => cameraIndex,
+  log: logLine,
+});
+function cameraPayload(): Record<string, unknown> {
+  return {
+    ok: true,
+    status: liveSensors.status(),
+    // t103: 「拿不到画面」 is its own fact, never 「房间没人」.
+    problem: liveSensors.cameraProblem(),
+    privacy: LIVE_PRIVACY_NOTE,
+    hint: '画面只在内存里编码、经 localhost 进这个页面：不产生图像文件、不上传。在场事件照常写进本地库。',
+  };
+}
+
 function loopPayload(cursor: number): Record<string, unknown> {
   const since = proactiveLoop.messagesSince(Number.isFinite(cursor) ? cursor : 0);
   return {
@@ -555,6 +628,23 @@ function json(response: ServerResponse, status: number, payload: unknown): void 
   response.end(body);
 }
 
+/**
+ * One JPEG frame as raw bytes, for `<img src="/api/camera/frame.jpg">`.
+ *
+ * Deliberately not JSON+base64 like the console's `/api/field/live`: the browser decodes
+ * `image/jpeg` natively, so base64 would inflate every frame by a third for no gain, and this
+ * route keeps the JSON channel free for status. `no-store` matters — a cached frame would look
+ * like a frozen picture rather than a stalled camera.
+ */
+function sendJpeg(response: ServerResponse, bytes: Buffer): void {
+  response.writeHead(200, {
+    'content-type': 'image/jpeg',
+    'content-length': bytes.length,
+    'cache-control': 'no-store, no-cache, must-revalidate',
+  });
+  response.end(bytes);
+}
+
 /** 收尾要用的几样东西（收窄成接口，测试可以直接驱动真收尾而不必起一个进程）。 */
 export interface ShutdownDeps {
   readonly server: { close(): unknown; closeAllConnections?: () => void };
@@ -791,6 +881,42 @@ const server = createServer((request, response) => {
         json(response, 200, { sessionId: session.sessionId });
         return;
       }
+      if (request.method === 'GET' && url.pathname === '/api/camera') {
+        json(response, 200, cameraPayload());
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/api/camera/frame.jpg') {
+        const frame = liveSensors.frame();
+        const prefix = 'data:image/jpeg;base64,';
+        if (frame === null || !frame.dataUrl.startsWith(prefix)) {
+          // 204, not an error page: 「还没有画面」 is a normal state of a loop that just started,
+          // and the page keeps showing the last frame it already has.
+          response.writeHead(204, { 'cache-control': 'no-store' });
+          response.end();
+          return;
+        }
+        sendJpeg(response, Buffer.from(frame.dataUrl.slice(prefix.length), 'base64'));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/camera') {
+        const body = (await readBody(request)) as Record<string, unknown>;
+        const action = typeof body['action'] === 'string' ? body['action'] : 'start';
+        if (typeof body['cameraIndex'] === 'number') cameraIndex = body['cameraIndex'];
+        if (action === 'start') {
+          // Open (and migrate) the presence store *before* the child starts writing: the child
+          // has no database of its own any more (V0.3 P0-B).
+          getPresenceStore();
+          liveSensors.start({ source: 'camera' });
+          logLine(`[camera] 预览已启动（pid ${liveSensors.status().child.pid ?? '?'}）：画面只进这个页面，在场事件照常入库`);
+        } else if (action === 'stop') {
+          liveSensors.stop();
+          logLine('[camera] 预览已停止（子进程退出，摄像头释放）');
+        } else {
+          throw new RuntimeError('UNKNOWN_CAMERA_ACTION', `不认识的摄像头操作「${action}」`, '可用：start（打开预览）、stop（关掉预览）');
+        }
+        json(response, 200, cameraPayload());
+        return;
+      }
       if (request.method === 'GET' && url.pathname === '/api/proactive') {
         json(response, 200, proactivePayload());
         return;
@@ -931,6 +1057,23 @@ ${PROACTIVE_PANEL_CSS}
   <button id="new">新会话</button>
 </header>
 <div id="log"></div>
+<section class="card" id="cam-card">
+  <h2 style="font-size:15px;margin:0 0 8px">摄像头</h2>
+  <div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap">
+    <div>
+      <img id="cam-img" alt="摄像头画面" style="width:320px;max-width:100%;border-radius:10px;border:1px solid #2a2f3a;background:#0b0d11;display:block" />
+      <div class="muted" id="cam-state" style="margin-top:6px">未启用。</div>
+    </div>
+    <div style="flex:1;min-width:240px">
+      <div style="margin-bottom:8px">
+        <button id="cam-toggle" class="primary">打开摄像头</button>
+        <span class="muted" id="cam-frames"></span>
+      </div>
+      <div class="muted" id="cam-problem" style="display:none;border:1px solid #7a3030;background:#2a1414;color:#ffb4b4;border-radius:10px;padding:8px 10px"></div>
+      <div class="muted">${LIVE_PRIVACY_NOTE}</div>
+    </div>
+  </div>
+</section>
 <div class="card">${databaseNoteHtml(DATA_DIR)}</div>
 <div class="card" style="border-color:#5c4a22; background:#2a2314; color:#ffe6b8">${segmentTtsNote(!ttsOn ? 'none' : client.hasKey ? 'streaming' : 'none')}</div>
 ${proactivePanelHtml()}
@@ -1063,15 +1206,58 @@ async function readVoiceStream(response) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
-    let newline = buffer.indexOf('\n');
+    let newline = buffer.indexOf('\\n');
     while (newline >= 0) {
       const line = buffer.slice(0, newline).trim();
       buffer = buffer.slice(newline + 1);
       if (line.length > 0) await handle(JSON.parse(line));
-      newline = buffer.indexOf('\n');
+      newline = buffer.indexOf('\\n');
     }
   }
   return { turn, end, failure, clauseTimings };
+}
+
+/**
+ * Attach a replayable player to a message (user request, 2026-10-08: 「我录的音要能播，西西说的
+ * 也要能重复播，方便我检查」).
+ *
+ * The bytes are already in this page — the browser's own recording for 「你」, and the stitched WAV
+ * the server sends on the end event for her reply — so this is a blob URL, no extra round trip.
+ * Native audio controls on purpose: 播放 / 暂停 / 拖回去重听 all come for free, which is what
+ * 「重复播放」 actually needs; a custom button would have to re-implement seeking.
+ */
+function base64ToBytes(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+function attachAudio(bubble, base64, label, fileName) {
+  if (!bubble || !base64) return null;
+  const url = URL.createObjectURL(new Blob([base64ToBytes(base64)], { type: 'audio/wav' }));
+  const row = document.createElement('div');
+  row.style.marginTop = '6px';
+  const audio = document.createElement('audio');
+  audio.controls = true;
+  audio.preload = 'metadata';
+  audio.src = url;
+  audio.style.height = '30px';
+  audio.style.maxWidth = '100%';
+  row.appendChild(audio);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  link.textContent = '⬇ 存到本地';
+  link.style.marginLeft = '8px';
+  link.style.fontSize = '12px';
+  link.style.color = '#8fb8ff';
+  row.appendChild(link);
+  const tag = document.createElement('div');
+  tag.className = 'seg';
+  tag.textContent = label;
+  row.appendChild(tag);
+  bubble.parentElement.appendChild(row);
+  return audio;
 }
 
 async function stopRecording() {
@@ -1091,13 +1277,15 @@ async function stopRecording() {
   const merged = new Float32Array(total);
   let offset = 0;
   for (const chunk of current.chunks) { merged.set(chunk, offset); offset += chunk.length; }
+  // Encoded once: the same bytes go to /api/voice and become the 「你的录音」 player below.
+  const userWavBase64 = toBase64(encodeWav(merged, current.sampleRate));
 
   hint.textContent = '录音 ' + seconds.toFixed(1) + 's，正在识别…';
   const pending = add('xixi', '…');
   try {
     const response = await fetch('/api/voice', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ audioBase64: toBase64(encodeWav(merged, current.sampleRate)), speak: speakBox.checked }),
+      body: JSON.stringify({ audioBase64: userWavBase64, speak: speakBox.checked }),
     });
     const { turn: raw, end, failure, clauseTimings } = await readVoiceStream(response);
     pending.parentElement.remove();
@@ -1114,15 +1302,17 @@ async function stopRecording() {
     }
     if (data.reason === 'NO_SPEECH_DETECTED') {
       add('xixi silent', '（没有听清：麦克风里没检测到语音）', data.notes ? data.notes[data.notes.length - 1] : '');
+      attachAudio(add('user', '（这次录到的声音）'), userWavBase64, '你刚录的 ' + seconds.toFixed(1) + 's（麦克风里没有语音，放出来听听是什么）', 'my-voice.wav');
     } else if (data.reason === 'ASSENT_ONLY') {
       // Pack Phase 8: a nod is not a turn. Before this branch the page said 「这句不是对西西说的」
       // — the wording of a *rejected* turn — for the one case where she is listening on purpose.
-      if (data.transcript) add('user', data.transcript);
+      if (data.transcript) attachAudio(add('user', data.transcript), userWavBase64, '你的录音 · ' + seconds.toFixed(1) + 's（可重复播放）', 'my-voice.wav');
       const ackMeta = (data.actionText ?? data.action) + ' · ' + (data.reasonText ?? data.reason) + ' · ' + data.state;
       add('xixi silent', '（应和：这一轮不算，西西继续听着）', ackMeta);
       hint.textContent = data.privacy ? data.privacy.note : '应和不算一轮：想让她回话就说一句完整的话。';
     } else {
-      if (data.transcript) add('user', data.transcript);
+      if (data.transcript) attachAudio(add('user', data.transcript), userWavBase64, '你的录音 · ' + seconds.toFixed(1) + 's（可重复播放）', 'my-voice.wav');
+      else attachAudio(add('user', '（这次录到的声音）'), userWavBase64, '你刚录的 ' + seconds.toFixed(1) + 's', 'my-voice.wav');
       const stages = data.stages ?? {};
       const firstClause = clauseTimings.length > 0 ? clauseTimings[0].ttsMs : null;
       const meta = (data.actionText ?? data.action) + ' · ' + (data.reasonText ?? data.reason)
@@ -1135,11 +1325,15 @@ async function stopRecording() {
         + ' · ' + data.state;
       const plan = end ? { segments: end.segments, gapMs: end.segmentGapMs } : { segments: [data.reply], gapMs: 450 };
       if (data.action === 'SILENCE' || data.accepted === false) add('xixi silent', data.accepted === false ? '（这句不是对西西说的）' : '（西西选择沉默）', meta);
-      else addSegmented('xixi', data.sourceLabel ?? '回应你', plan.segments, plan.gapMs, meta);
+      else {
+        const firstBubble = addSegmented('xixi', data.sourceLabel ?? '回应你', plan.segments, plan.gapMs, meta);
+        // The stitched WAV of the whole reply, so 「再听一遍」 does not mean replaying 3 段 by hand.
+        attachAudio(firstBubble, end ? end.audio : null, '西西这段话的录音（可重复播放）', 'xixi-reply.wav');
+      }
       if (data.privacy) hint.textContent = data.privacy.note;
     }
     setBanner(await (await fetch('/api/state')).json());
-    hint.textContent = '说完松开即发送。回复可朗读（右上角开关）。整段录音不落盘。';
+    hint.textContent = '说完松开即发送。你的录音和她的回复都带播放器，可以反复听——两者都只留在本页内存里（要留档就点「⬇ 存到本地」）。';
   } catch (error) {
     pending.parentElement.remove();
     add('xixi', '语音出错：' + error.message);
@@ -1247,7 +1441,10 @@ form.addEventListener('submit', async (event) => {
       add('xixi silent', why, meta + (data.finishReason ? ' · finish=' + data.finishReason : ''));
       if (data.hygiene) add('xixi silent', '剔除了 ' + (data.hygiene.removedMarkupChars + data.hygiene.removedMarkdownChars + data.hygiene.removedReasoningChars) + ' 字不能念的内容', 'hygiene');
     }
-    else addSegmented('xixi', data.sourceLabel ?? '回应你', data.segments, data.segmentGapMs ?? 450, meta + (data.finishReason === 'length' ? ' · ⚠ 被 token 上限截断' : ''));
+    else {
+      const firstBubble = addSegmented('xixi', data.sourceLabel ?? '回应你', data.segments, data.segmentGapMs ?? 450, meta + (data.finishReason === 'length' ? ' · ⚠ 被 token 上限截断' : ''));
+      attachAudio(firstBubble, data.audio ?? null, '西西这句话的录音（可重复播放）', 'xixi-reply.wav');
+    }
     if (data.audio) { const audio = new Audio('data:audio/wav;base64,' + data.audio); audio.play().catch(() => {}); }
     setBanner(await (await fetch('/api/state')).json());
   } catch (error) {
@@ -1268,6 +1465,96 @@ document.getElementById('new').addEventListener('click', async () => {
   await fetch('/api/session', { method: 'POST' });
   await refresh();
 });
+
+/**
+ * 摄像头画面（复用控制台那套 LiveSensors：同一个子进程既给画面、也给在场事件）。
+ *
+ * 每帧是 /api/camera/frame.jpg 的原始 JPEG，浏览器直接解码 —— 不走 JSON+base64，省掉三分之一的
+ * 体积，也让 JSON 通道留给状态。取下一帧用 onload 闸门：摄像头慢的时候不许请求堆积。
+ */
+const camImg = document.getElementById('cam-img');
+const camState = document.getElementById('cam-state');
+const camToggle = document.getElementById('cam-toggle');
+const camFrames = document.getElementById('cam-frames');
+const camProblem = document.getElementById('cam-problem');
+let cameraOn = false;
+let cameraTimer = null;
+let frameBusy = false;
+
+function renderCamera(payload) {
+  const status = payload.status ?? {};
+  const child = status.child ?? {};
+  const frame = status.lastFrame;
+  const problem = payload.problem;
+  cameraOn = child.running === true;
+  camToggle.textContent = cameraOn ? '关掉摄像头' : '打开摄像头';
+  camState.textContent = cameraOn
+    ? (child.frames > 0 ? '运行中（pid ' + child.pid + '）' : '正在打开摄像头…（第一次要等一两秒）')
+    : (child.startedAt ? '已停止（这次一共收到 ' + child.frames + ' 帧）' : '未启用。');
+  camFrames.textContent = child.frames > 0 && frame
+    ? '已收到 ' + child.frames + ' 帧｜最新 ' + frame.width + '×' + frame.height + '、' + Math.round(frame.jpegBytes / 1024) + 'KB'
+      + '｜' + (frame.present ? '画面里有人' : '画面里没人') + '（置信度 ' + frame.confidence.toFixed(2) + '）'
+    : '';
+  if (problem) {
+    camProblem.style.display = 'block';
+    camProblem.textContent = '⚠ ' + problem.title + '｜' + problem.note + '　可以试：' + problem.steps.join('；') + '（诊断命令：' + problem.command + '）';
+  } else {
+    camProblem.style.display = 'none';
+  }
+}
+function pumpFrame() {
+  if (!cameraOn || frameBusy) return;
+  frameBusy = true;
+  camImg.src = '/api/camera/frame.jpg?t=' + Date.now();
+}
+camImg.addEventListener('load', () => { frameBusy = false; });
+camImg.addEventListener('error', () => { frameBusy = false; });
+function startFrameTimer() {
+  if (cameraTimer !== null) return;
+  cameraTimer = window.setInterval(pumpFrame, 250);
+  pumpFrame();
+}
+function stopFrameTimer() {
+  if (cameraTimer !== null) { window.clearInterval(cameraTimer); cameraTimer = null; }
+}
+async function camPost(action) {
+  const payload = await (await fetch('/api/camera', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action }) })).json();
+  renderCamera(payload);
+  if (action === 'start') startFrameTimer(); else stopFrameTimer();
+}
+camToggle.addEventListener('click', () => { void camPost(cameraOn ? 'stop' : 'start'); });
+// Status every 1.5s (frames, presence, 「交不出画面」), so the numbers below the picture are live.
+window.setInterval(async () => {
+  try { renderCamera(await (await fetch('/api/camera')).json()); } catch (error) { /* 页面正在关就算了 */ }
+}, 1500);
+
+/**
+ * 主动开口默认打开（用户要求 2026-10-08）。
+ *
+ * The switch itself lives in the shared panel; this only carries the *default*: opening the page
+ * brings the resident loop up, so 「她会自己开口」 needs no clicking. localStorage remembers an
+ * explicit 「关掉」 so a reload does not silently undo the user's decision — a default that keeps
+ * re-asserting itself after being switched off is a bug, not a default.
+ */
+(async function autoProactive() {
+  try {
+    if (localStorage.getItem('xixi.proactive') === 'off') return;
+    const state = await (await fetch('/api/proactive')).json();
+    if (state.settings && state.settings.enabled === false) return; // 服务端总开关是关的，不要偷偷开
+    await fetch('/api/proactive/loop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'start' }) });
+  } catch (error) { /* 面板上的总开关还能手动开 */ }
+})();
+const masterBox = document.getElementById('px-enabled');
+if (masterBox) {
+  masterBox.addEventListener('change', () => {
+    try {
+      if (masterBox.checked) localStorage.removeItem('xixi.proactive');
+      else localStorage.setItem('xixi.proactive', 'off');
+    } catch (error) { /* 隐私模式下 localStorage 会抛，忽略即可 */ }
+  });
+}
+// 摄像头默认也打开：要看画面不该先找按钮。想省 CPU 就点「关掉摄像头」。
+void camPost('start');
 
 refresh();
 input.focus();

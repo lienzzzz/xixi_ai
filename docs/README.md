@@ -1,6 +1,10 @@
 # 西西项目文档地图
 
-> 最后更新：2026-10-08（V0.3 **P2.5 Production Wiring 收口**：四个 live 入口与控制台、试用页都经常驻装配点
+> 最后更新：2026-10-09（**试用页接摄像头 + 一个总开关**：用户在 WSL 真机上试用后提的四条都已落地，
+> 过程中抓到**三个真缺陷**（`--live` 20 秒自杀 / 整页按钮不响应 / 在场投影写错库）与**三条未修的已知问题**
+> ——重点是「**没有任何测试执行过页面的 JS**」；§0 的操作步骤与主动性说明、§1 的报告表、§3 的触发表都已同步。
+> 逐条见 [`progress.md`](progress.md) §13 与 [`handoff.md`](handoff.md) §0.3）
+> 上一版：2026-10-08（V0.3 **P2.5 Production Wiring 收口**：四个 live 入口与控制台、试用页都经常驻装配点
 > `createResidentRuntime()` 取链，`news.*` 真的进模型可见工具链表，审批与 durable 提醒由装配点接管；
 > **仍未接的三条**写在 [`handoff.md`](handoff.md) §0.2 与 [`progress.md`](progress.md) §12.3。
 > 同时按 §9.21 给历史记录加注：P2 段的「入口未接线」与那句「27%」都**只加注不改写**）
@@ -22,7 +26,14 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 
 **操作步骤**：① 页面打开后先看「传感器」栏的麦克风电平与噪声底；② 点「一键启用」开摄像头在场 + 自动考虑循环
 （会起一个 `perception_edge.run --live` 子进程，可在同一张卡上停用）；③ 在「对话」栏按住🎤或打字说话；
-④ 看「配置」栏调主动性 / 话痨 / 话长，以及冷却、额度、静默时段；⑤ 点「开始设备自检」跑麦克风 / 扬声器 / 摄像头自检。
+④ 「主动性」卡片上**只有一个总开关**「主动开口」，拨动即生效（不用点保存），并**同时起停常驻考虑循环**；
+十个旋钮（主动性 / 话痨 / 话长、冷却、额度、静默时段）与门禁判定、审计、日志都折进**默认收起**的「高级设置」里；
+⑤ 点「开始设备自检」跑麦克风 / 扬声器 / 摄像头自检。
+
+**试用页（`npm run web` → http://127.0.0.1:8791）自 2026-10-08 起也能看摄像头了**，并且**录音回放**：
+你说的那句与西西的整段回复**各带一个播放器**（可反复听、可下载）。它与控制台共用同一套面板与同一份
+`LiveSensors`（所以「一个总开关」的用法两边一样），但两页的库不同：试用页用 `XIXI_DATA_DIR`（默认 `data/xixi`），
+控制台默认 `data/field-test`。细节与三条已知问题见 [`progress.md`](progress.md) §13。
 
 **怎么判读结果**：
 
@@ -62,7 +73,11 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
   ② **主动性**（人格 `proactivity` 默认 **0.85** → 确定性评分只给候选与依据；**硬底线仍由程序判定**：
   静默时段 / 6 小时与当日**次数**额度 / 隐私与同意——**金额级费用上限尚未实现**；
   底线之上是否开口由模型读空气决定，见 [`adr/0011`](adr/0011-proactive-decision-ownership.md)；
-  控制台「配置」栏可调高/调低，**一键关闭**就是不开「自动考虑」开关或点停用；每次开口/被拦都落一条
+  调高/调低在「主动性」卡片的**高级设置**里（默认收起），而**开与关就是那一个总开关**「主动开口」：
+  拨动即生效（不用点保存），并**同时起停常驻考虑循环**。两页**共用这同一个面板**，差别只在
+  「**页面加载时要不要自动起循环**」——试用页会（除非你显式关掉过、或服务端总开关是关的），
+  控制台不会（`field-test.ts` 里写的就是「默认关：页面刷新/重开不会自己开始说话」，它由「一键启用」统一管），
+  见 [`progress.md`](progress.md) §13.3；每次开口/被拦都落一条
   **`proactive.decision`** 事件（`conversation.decision` 是「这一轮对话被不被接受」，两者不同），可回答「为什么今天没说话」）。
 - **第五轮新增的有界心情怎么用**：默认开着、不需要配置；它由事件自己演化并按小时回落，给模型的是一段**散文**
   （数值只在调试视图里）。想复现「心情在边界内」这件事：`node --test tests/unit/domain.test.ts`
@@ -109,7 +124,8 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | [`design/perception.md`](design/perception.md) | 摄像头在场检测（M6）的设计：抓帧、检测器、投影、隐私边界 |
 | [`recon/field-test-environment-2026-09-30.md`](recon/field-test-environment-2026-09-30.md) | 本机现场环境勘测（噪声、增益、静音、延迟、摄像头） |
 | [`recon/camera-detector-choice-2026-09-30.md`](recon/camera-detector-choice-2026-09-30.md) | 摄像头检测器选型实测（帧差动 / YuNet / HOG） |
-| [`recon/field-test-report-2026-09-30.md`](recon/field-test-report-2026-09-30.md) | 现场测试报告（设备自检结论：麦克风/扬声器/摄像头，含口径说明） |
+| [`recon/field-test-report-2026-09-30.md`](recon/field-test-report-2026-09-30.md) | 现场测试报告（设备自检结论：麦克风/扬声器/摄像头，含口径说明；**Windows 机**） |
+| [`recon/field-test-report-2026-10-08.md`](recon/field-test-report-2026-10-08.md) | 现场测试报告（**Linux/WSL2 机**，`--acceptance` 自动生成）：总体 **FAIL**，但三条 FAIL **都不是「设备坏了」**——麦克风那项录的是 3 秒环境声、扬声器那项采集侧全程 −120 dBFS（数字静音，没数据）、报告标签还写着 `CAP_DSHOW` 而 JSON 里其实是 `CAP_V4L2`。**可信部分是「摄像头通过」与「端点读数不可用」**；逐条读法见 [`progress.md`](progress.md) §13.4，**不要拿它当设备否证** |
 | [`verification/proactive-and-segments-verification-2026-09-30.md`](verification/proactive-and-segments-verification-2026-09-30.md) | 多段回复与主动性硬门禁的独立验证（27/27 门禁用例、投递与复算） |
 | [`verification/field-test-verification-2026-09-30.md`](verification/field-test-verification-2026-09-30.md) | 现场测试控制台的独立验证 |
 | [`review/proactive-and-segments-review-2026-09-30.md`](review/proactive-and-segments-review-2026-09-30.md) | 主动引擎与多段回复的评审（铁律 3 / 费用 / 隐私） |
@@ -174,8 +190,10 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 | `services/voice-edge/**/voice_stream.ts`（切块与流式合成） | [`design/voice.md`](design/voice.md) §6（流式语音：链路、ClauseChunker 触发条件、③/④ 口径、`--out`/`--compare` 复算）、[`recon/voice-streaming-2026-10-01.md`](recon/voice-streaming-2026-10-01.md)、`testing.md` 的语音命令 |
 | `scripts/lib/voice-latency.ts`（首音配对的判定规则） | [`design/voice.md`](design/voice.md) §6.3/§6.4、[`recon/voice-streaming-2026-10-01.md`](recon/voice-streaming-2026-10-01.md) §二的「结论句」、`tests/unit/voice/voice-latency.test.ts` |
 | `scripts/voice-turn.ts`（首音测量入口与 `--compare`） | [`design/voice.md`](design/voice.md) §6.4、[`recon/voice-streaming-2026-10-01.md`](recon/voice-streaming-2026-10-01.md) §一/§二、[`benchmarks/v01-baseline.md`](benchmarks/v01-baseline.md) §3.1 的四段口径 |
-| `services/perception-edge/**` 或在场检测参数 | [`design/perception.md`](design/perception.md)、`recon/camera-detector-choice-2026-09-30.md` |
-| `scripts/field-test.ts`（现场测试控制台） | `design/perception.md`、`design/voice.md`、[`testing.md`](testing.md) 的脚本表、本文件 §0 的用户须知 |
+| `services/perception-edge/**` 或在场检测参数 | [`design/perception.md`](design/perception.md)、`recon/camera-detector-choice-2026-09-30.md`；**改 `run.py` 的 `main()`／live 配置时，必须同时断言「live 拿到的配置」**（见 `design/perception.md` §7.1 里那条 20 秒自杀的记录） |
+| `scripts/field-test.ts`（现场测试控制台） | `design/perception.md`、`design/voice.md`、[`testing.md`](testing.md) 的脚本表、本文件 §0 的用户须知；**改共享的主动性面板（`proactivePanelHtml` / `PROACTIVE_PANEL_IDS`）会同时影响试用页**，两边都要看 |
+| `scripts/serve-chat.ts`（试用页） | 本文件 §0 的用户须知、[`design/voice.md`](design/voice.md) §3（浏览器语音路径与回放）、[`design/conversation.md`](design/conversation.md) 的「主动开口」行（它与控制台共用面板，差别只在页面加载是否自动起循环）、[`testing.md`](testing.md) 的脚本表、[`progress.md`](progress.md) §13 |
+| **任何页面里内联的 JS**（模板字符串里的 `<script>`） | **没有自动门禁看得见它**（无 jsdom，`tests/console/*` 只断言文本）：改完**必须手工打开一次页面**，或把发出的脚本抽出来 `node --check`。起因见 [`progress.md`](progress.md) §13.1 缺陷 2 |
 | `packages/conversation/src/proactive.ts` 或人格默认值 | `design/conversation.md`、[`adr/0009`](adr/0009-proactive-triggers-and-hard-gates.md)、本文件 §0（主动性怎么调/怎么关） |
 | 任何 `scripts/verify-*.ts` / `eval-*.ts` / `voice-*.ts` | [`testing.md`](testing.md) 的脚本表、`README.md` 的命令段、`AGENTS.md` §7 |
 | 里程碑推进（做完 M2/M3/…） | `progress.md` §0/§1、`architecture.md` 的「未实现」列表、相关 `design/*` |

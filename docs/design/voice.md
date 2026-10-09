@@ -349,15 +349,16 @@ recon §2.3 实测往返延迟：**WASAPI 42.9 ms vs MME 229.6 ms**（同一扫�
 浏览器路径的流程（`scripts/serve-chat.ts` → `handleVoice`）：
 
 1. `getUserMedia` → `AudioContext` 的 `createScriptProcessor(4096, 1, 1)` 采集 Float32 → `encodeWav` 成 16-bit PCM 单声道 WAV → base64 上传（未使用 `MediaRecorder`）；
-2. 服务端先把整段录音写到 `data/voice-web/capture-<ts>.wav`，再调 Python VAD（`voice_edge.segment`）；
-3. `segments[0]` 为空时直接返回 `accepted:false, reason:'NO_SPEECH_DETECTED'`，不进 ASR（前端提示「麦克风里没检测到语音」）；
-4. 有语音时**只把该语音段**切出来写 `speech-<ts>.wav` 并用它做 ASR（`sliceWav`，§20.1）；
-5. 回合交给 `ConversationEngine`，`action === 'SPEAK'` 才调 TTS，音频以 base64 返回给浏览器播放。
+2. 服务端把整段录音写进**系统临时目录**（`mkdtempSync(join(tmpdir(), 'xixi-vad-'))`，`scripts/field-test.ts` 的 `handleVoiceTurn`），在那里调 Python VAD（`voice_edge.segment`）。**不是 `data/`**——这一处在 2026-09-30 之前是反着的：旧 `/api/voice` **先把整段写进 `data/voice-web/capture-*.wav` 再做 VAD**，于是没有语音时也已经落盘；两个入口改用共享核心后修掉；
+3. `segments[0]` 为空时直接返回 `accepted:false, reason:'NO_SPEECH_DETECTED'`，不进 ASR（前端提示「麦克风里没检测到语音」），临时目录随即删除（自检里有两条断言钉住它：「无语音：磁盘上不留下原始录音」「无语音：临时目录已清理」）；
+4. 有语音时**只把 VAD 检出的那一段**切出来（`sliceWav`，§20.1）并用它做 ASR；语音段本身只在 `privacy.store_raw_audio` 明确打开时才写进 `data/voice-web/`，并按保留期自动清理（`retentionPolicy` + `pruneVoiceDir`，两个入口都在启动时清一次）；
+5. 回合交给 `ConversationEngine`，`action === 'SPEAK'` 才调 TTS，音频以 base64 返回给浏览器播放；
+6. **回放（2026-10-08 起）**：「你说的那句」与「她的整段拼接 WAV」**各带一个播放器**（blob URL + 原生 `<audio controls>`；字节本来就在页面里，不额外往返）。用原生控件是因为「重复播放」要的正是**拖回去重听**（seek），自己写按钮就得重造它。
 
 **隐私约束**：只有 VAD 检测到的语音段进入 ASR 与模型（`scripts/voice-turn.ts` 同样在注释里写明
 `Only the speech span is uploaded (§20.1)`）。
-**但要注意**：`data/voice-web/capture-*.wav`（整段原始录音）与 `data/voice/speech-*.wav` **确实落在本地磁盘上**，
-`data/` 已 gitignore；当前**没有**保留期/清理代码（详见 [security-and-privacy.md](security-and-privacy.md)）。
+**整段原始录音不落 `data/`**：它只在系统临时目录里存在到 VAD 结束；`data/voice-web/` 里可能留下的
+**只有语音段**，且受保留期约束（详见 [security-and-privacy.md](security-and-privacy.md)）。
 
 ## 4. 打断（§14.2）
 

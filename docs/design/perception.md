@@ -210,6 +210,15 @@ TypeScript 侧再用权威的 `validateEvent()` 复核一遍（`tests/perception
   误报成验收失败。参见 `services/perception-edge/perception_edge/run.py` 的模块注释。
 - 谁负责停：`--live` 没有 `--seconds`（一直跑到 stdin 关闭或被终止）。控制台先关 stdin 再
   `SIGTERM`，所以摄像头一定会被释放。
+  ⚠️ **这句话在 2026-10-08 之前一直是「文档说的」而不是「代码做的」**：`run.py` 的 `if live:` 块写在
+  `cfg = RunConfig(**parsed)` **之后**，那两行 `parsed["seconds"] = 0.0` 改的字典再没人读，`cfg.seconds`
+  一直是 `--seconds` 的默认 **20**，于是 live 循环到期就 `break`——试用页的预览子进程实测在
+  **161 帧 / 8 fps（≈20.1 秒）** 后 exit 0，而页面仍显示「运行中」、画面冻在最后一帧。
+  **现已修正**（live 块提到建配置之前），并由 `tests/perception/test_presence.py` 的 `LiveModeConfigTests`
+  钉住：一条断言 live 交给 `run()` 的配置是 `seconds == 0.0` 且无帧数上限，一条**反事实**断言普通运行仍保留
+  `--seconds` 的上限。生产侧观察点是 `/api/camera` 读出的 `child.frames` / `startedAt`：
+  修复后实测连续 **4204 帧 / 8 分 27 秒**。**这一条的价值在于它示范了一种失效方式——模块 docstring 的承诺
+  与代码相反，而没有任何断言看得见配置本身**；改这一带时请连同「live 拿到的配置」一起断言。
 
 「截图交多模态模型」的接口留在 `services/perception-edge/perception_edge/semantic.py`，
 并在文件头写清了将来实现必须遵守的五条（按需触发、单帧、可审计、结果带 TTL、默认关闭）。
@@ -227,7 +236,8 @@ E:\worker2\.venvs\cv4\Scripts\python.exe -m unittest discover -s tests/perceptio
 解释器选择是**显式探测**（`XIXI_PERCEPTION_PYTHON` → `.venvs/cv4` → `.venvs/field-probe`），
 一个都没有时测试**失败并给出安装命令**，不会静默跳过。
 
-覆盖的边角（`tests/perception/test_presence.py`，39 个用例）：
+覆盖的边角（`tests/perception/test_presence.py`；**用例数以实跑末行为准，别抄数字**——
+本机 2026-10-09 实测 `Ran 48 tests ... OK (skipped=3)`）：
 
 | 组 | 覆盖 |
 |---|---|

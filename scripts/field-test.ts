@@ -4811,6 +4811,8 @@ export function databaseNoteHtml(currentDir: string): string {
 /** Element ids of the proactive card, shared by both pages (so the tests can assert them). */export const PROACTIVE_PANEL_IDS = Object.freeze({
   card: 'px-card',
   enabled: 'px-enabled',
+  advanced: 'px-advanced',
+  advancedBody: 'px-advanced-body',
   cooldown: 'px-cooldown',
   per6h: 'px-6h',
   perDay: 'px-day',
@@ -4850,9 +4852,12 @@ export function databaseNoteHtml(currentDir: string): string {
 export function proactivePanelHtml(): string {
   const id = PROACTIVE_PANEL_IDS;
   return `  <section class="card" id="${id.card}">
-    <h2>主动性（主动开口的开关与强度）</h2>
-    <div class="muted">这一块决定「西西什么时候可以主动开口」。分两层：<b>硬底线由程序判定</b>（静默时段、6 小时与当日额度、安静模式、隐私与同意）——这些旋钮放宽不了它们；底线之上<b>由模型读空气决定说不说</b>，下面这些分数只提供候选与依据（冷却、话题重复、未回应都是<b>扣分项，不是禁止</b>）。保存后<b>立即生效</b>，并入一条审计记录（重启后仍是这套值）。</div>
-    <div style="margin:8px 0"><label><input type="checkbox" id="${id.enabled}" /> 允许西西主动开口</label> <span class="muted" id="${id.summary}">加载中…</span></div>
+    <h2>主动性</h2>
+    <div style="margin:8px 0"><label><input type="checkbox" id="${id.enabled}" /> <b>主动开口</b>（她自己找话说）</label> <span class="muted" id="${id.summary}">加载中…</span></div>
+    <div class="muted" style="margin:-2px 0 8px">勾上就是全部：她按<b>硬底线</b>判断能不能开口（静默时段 / 6 小时与当日额度 / 隐私与同意），底线之上<b>由模型读空气决定说不说</b>。取消勾选她就完全不主动开口。<b>拨动即生效，不用点保存。</b></div>
+    <div style="margin:8px 0"><label><input type="checkbox" id="${id.advanced}" /> 高级设置</label> <span class="muted">冷却、额度、静默时段、人格值、门禁判定与审计记录都在这里面，默认收起。</span></div>
+    <div id="${id.advancedBody}" hidden>
+    <div class="muted">下面是<b>调参</b>用的。这一块决定「西西什么时候可以主动开口」。分两层：<b>硬底线由程序判定</b>（静默时段、6 小时与当日额度、安静模式、隐私与同意）——这些旋钮放宽不了它们；底线之上<b>由模型读空气决定说不说</b>，下面这些分数只提供候选与依据（冷却、话题重复、未回应都是<b>扣分项，不是禁止</b>）。保存后<b>立即生效</b>，并入一条审计记录（重启后仍是这套值）。</div>
     <div class="px-grid">
       <label>打扰代价衰减（分钟）<input type="number" id="${id.cooldown}" min="0" max="1440" /></label>
       <label>6 小时额度<input type="number" id="${id.per6h}" min="0" max="100" /></label>
@@ -4874,8 +4879,8 @@ export function proactivePanelHtml(): string {
       <span class="muted" id="${id.status}"></span>
     </div>
     <div id="${id.result}"></div>
-    <h3 style="margin:12px 0 4px; font-size:14px">常驻自动考虑（M5-lite，默认关）</h3>
-    <div class="muted">打开后每 N 秒自己构造一个候选并过一遍九道门禁。候选只来自<b>事实</b>（在场投影 / 上次说话过了多久 / 固定时钟钩子），不靠模型编内容；放行时用真实 TTS 逐段合成并在下面逐条播放（段间停 segmentGapMs），被拦时写清第一道命中的门禁与中文原因。</div>
+    <h3 style="margin:12px 0 4px; font-size:14px">常驻自动考虑（M5-lite，跟着上面那个总开关走）</h3>
+    <div class="muted">打开后每 N 秒自己构造一个候选并过一遍九道门禁。候选只来自<b>事实</b>（在场投影 / 上次说话过了多久 / 固定时钟钩子），不靠模型编内容；放行时用真实 TTS 逐段合成并在下面逐条播放（段间停 segmentGapMs），被拦时写清第一道命中的门禁与中文原因。<b>总开关打开时它会一起启动</b>，这里可以单独停掉。</div>
     <div style="margin:8px 0">
       <label><input type="checkbox" id="${id.loopEnabled}" /> 开始自动考虑</label>
       <label>间隔（秒）<input type="number" id="${id.loopInterval}" min="5" max="3600" step="5" /></label>
@@ -4889,6 +4894,7 @@ export function proactivePanelHtml(): string {
     <div id="${id.log}" class="muted">还没有考虑记录。</div>
     <h3 style="margin:12px 0 4px; font-size:14px">设置变更审计</h3>
     <div id="${id.audit}" class="muted">还没有变更记录。</div>
+    </div>
   </section>
 `;
 }
@@ -5404,9 +5410,50 @@ async function pxVisionToggle(on) {
   pxStatus(on ? '已允许西西自己看（默认关，打开后仍要过全部硬门禁）' : '已恢复为「只有你按看一眼才传画面」');
 }
 
+/**
+ * The ONE switch (user request, 2026-10-08): 主动开口 on/off does everything.
+ *
+ * Before this, turning her on took two controls in two places — the enabled checkbox plus a
+ * click on 保存, and then a *separate* 「开始自动考虑」 checkbox before she would ever speak
+ * unprompted. The switch now (a) persists enabled immediately without 保存 and (b) starts or
+ * stops the resident consideration loop with it, because those two are the same decision from
+ * the user's side: 「她会不会自己开口」. Everything else moved into 高级设置 (collapsed).
+ */
+async function pxMaster(on) {
+  await pxSave({ enabled: on }, on ? '已打开主动开口' : '已关闭主动开口');
+  if (on) await pxLoopStart();
+  else await pxLoopStop();
+  pxStatus(on
+    ? '已打开：她会自己找话说（能不能开口仍要过硬底线，说不说由模型读空气决定）'
+    : '已关闭：她不会主动开口，你说话她照常回');
+}
+
+/** Start the resident loop at the default interval (same route the 高级设置 checkbox uses). */
+async function pxLoopStart() {
+  var seconds = Number(pxVal('loopInterval'));
+  var payload = await pxPost('/proactive/loop', { action: 'start', intervalMs: (isFinite(seconds) && seconds > 0 ? seconds : 30) * 1000 });
+  if (payload.ok === false) { pxStatus('自动考虑启动失败：' + payload.error); return; }
+  pxLoopStatus(payload);
+}
+
+async function pxLoopStop() {
+  var payload = await pxPost('/proactive/loop', { action: 'stop' });
+  if (payload.ok === false) { pxStatus('自动考虑停止失败：' + payload.error); return; }
+  pxLoopStatus(payload);
+}
+
 (function pxWire() {
   var save = document.getElementById(PX.ids.save); if (save) save.addEventListener('click', function () { void pxSave(); });
   var off = document.getElementById(PX.ids.off); if (off) off.addEventListener('click', function () { void pxSave({ enabled: false }, '已一键关闭主动开口'); });
+  // The master switch: applies on the spot, and the loop follows it. pxSave re-renders, so the
+  // checkbox can never disagree with the server after this.
+  var master = document.getElementById(PX.ids.enabled);
+  if (master) master.addEventListener('change', function () { void pxMaster(master.checked); });
+  var advanced = document.getElementById(PX.ids.advanced);
+  var advancedBody = document.getElementById(PX.ids.advancedBody);
+  if (advanced && advancedBody) {
+    advanced.addEventListener('change', function () { advancedBody.hidden = !advanced.checked; });
+  }
   var drill = document.getElementById(PX.ids.drill); if (drill) drill.addEventListener('click', function () { void pxDrill(); });
   var loopBox = document.getElementById(PX.ids.loopEnabled);
   if (loopBox) {
