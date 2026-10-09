@@ -15,7 +15,7 @@ import { join } from 'node:path';
 
 import { DshBrainAdapter, FakeBrainAdapter, MimoBrainAdapter, type ToolRegistry, type TurnModelProvider } from '@xixi/brain-adapter';
 import { CliDshTransport } from '@xixi/brain-dsh';
-import { TopicEngine } from '@xixi/conversation';
+import { TopicEngine, type ProactiveSettings } from '@xixi/conversation';
 import { MimoClient } from '@xixi/model-adapters';
 import { openXixiStore, resolveCanonicalDataDir, type XixiStore } from '@xixi/domain';
 
@@ -239,66 +239,126 @@ let turnInFlight = false;
 const presenceStorePath = DATA_DIR;
 const loopSynthesizeProvider = (): ((text: string) => Promise<Buffer>) | undefined =>
   ttsOn && client.hasKey ? async (text: string): Promise<Buffer> => await client.synthesize(text) : undefined;
-const proactiveLoop = new ProactiveLoop({
-  store,
-  readSettings: () => proactiveSnapshot.settings,
-  readState: () => engine.state,
-  readInFlightTurn: () => turnInFlight,
-  readProactivity: () => effectiveProactivity(store.selfProfile()),
-  readPresence: async () => {
-    const view = await readPresence({ store: openXixiStore({ dataDir: presenceStorePath }) });
-    return view === null ? null : { present: view.present, updatedAt: view.updatedAt, source: view.source };
-  },
-  readLastUserTurnAt: () => lastUserTurnAt(store, session.sessionId),
-  readRecentUserTopics: () => recentUserTopics(store, session.sessionId),
-  // pack Phase 3：先对齐（提取 / 标记已说过 / 按回答收口），再取「现在该追问的」。
-  readOpenThreads: () => {
-    const at = new Date();
-    topicEngine.reconcile(at);
-    return topicEngine.followUps(at);
-  },
+/**
+ * 试用页的主动循环：**接缝全部从传进来的那个运行时实例取**（V0.3 D1.1/D1.2 → t30 的可测形态）。
+ *
+ * 为什么抽成函数，而不是像以前那样在模块层直接 `new ProactiveLoop({…})`：P2.5-C/P2.5-F 交付的两个
+ * 接缝（`capabilities.topics` 插件提案、`reminderSeams` durable 提醒）都挂在**运行时实例**上，而循环
+ * 必须读**同一个实例**。以前那个字面量闭包抓的是模块级 `runtime`，于是「给试用页注入一个会提案的插件」
+ * 在离线用例里走不通：`createTrialRuntime({ plugins })` 造出来的是**另一个** runtime，循环看不见它——
+ * D1.2 的插件那半因此只有间接支持（删掉 `readPluginTopics` 也全绿，t25 的 S4 突变实测）。
+ *
+ * 抽成 `(runtime, deps) => ProactiveLoop` 之后，入口用**自己那个** runtime 调它，用例拿另一个（带
+ * inline 插件、走同一条 `start()` 生命周期）调**同一个函数** —— 形状与现场测试控制台的
+ * `createFieldServer({ plugins })` 一致（那里也是「同一个装配函数 + 注入插件」），不是第二种形状。
+ *
+ * `deps` 只放**入口自己的**会话与面板状态（它们不属于运行时实例）；其余一律取自 `runtime`。
+ */
+export interface TrialLoopDeps {
+  /** 未完话题的提取与追问候选（与 `/api/proactive` 面板共用同一个实例）。 */
+  readonly topicEngine: TopicEngine;
+  /** 当前会话 id（`POST /api/session` 会换一个，所以是函数而不是值）。 */
+  readonly sessionId: () => string;
+  /** 面板当前的主动性设置（`POST /api/proactive/settings` 会改它）。 */
+  readonly settings: () => ProactiveSettings;
+  /** 正在处理一轮回复时为 true：循环不会插话。 */
+  readonly inFlightTurn: () => boolean;
+  /** 在场投影读写在哪个库（试用页用的是本页自己的库，不是仓库根的 `data/`）。 */
+  readonly presenceDataDir: string;
+  /** 朗读开关（运行时可翻）：返回 `undefined` = 这一轮没有可用的 TTS。 */
+  readonly synthesizeProvider: () => ((text: string) => Promise<Buffer>) | undefined;
+  /** 模型现在能不能用（`--fake` / `--dsh` / 没有密钥时为 false，内容走离线兜底短句）。 */
+  readonly modelAvailable: () => boolean;
+  readonly log?: ((line: string) => void) | undefined;
+}
+
+export function createTrialProactiveLoop(runtime: XixiResidentRuntime, deps: TrialLoopDeps): ProactiveLoop {
+  const log = deps.log ?? ((line: string): void => console.log(line));
   /**
-   * V0.3 D1.1（把 P2.5-F 的接缝接进 live 入口）：到点的 durable 提醒。
-   *
-   * `...runtime.reminderSeams` 展开成**一对**：
-   *   * `readDueReminders` —— 先跑到点（`markDue`，全库唯一比时钟的地方）再取候选，所以「到点」是循环
-   *     自己判断出来的，而不是谁替它 tick 过一遍；
-   *   * `onReminderDelivered` —— 说出口之后的记账（`candidate → delivered`）。
-   * 只接一半的后果写在装配点 `XixiResidentRuntime.reminderSeams` 的文档里：只接读接缝时提醒会被反复
-   * 提议却永远停在 `candidate`；只接送达接缝则循环永远读不到东西。
-   *
-   * 时钟：本入口的运行时与循环都用真实时钟（本文件没有注入 `now`），所以「到点」判定与候选读取看的是
-   * 同一个时刻 —— 装配点的接口文档专门警告过「两处给不同时钟」这种隐形不一致。
+   * `compose` 要读「这一轮之前她说过什么」，而那个答案在循环自己身上 —— 先声明、构造之后再赋值；
+   * 闭包只在交付那一刻求值，那时循环早就在了。
    */
-  ...runtime.reminderSeams,
-  /**
-   * V0.3 D1.2（把 P2.5-C 的能力桥接进 live 入口）：插件提案的话题。
-   *
-   * 参数是**这一 tick 的 `now`**（提案用它判断新鲜度，所以必须是评分用的那一刻）。插件只提供候选与依据：
-   * 说不说仍由硬底线与既有评分决定（铁律 3）；插件候选也只在既有来源之后**追加**，挤不掉它们。
-   */
-  readPluginTopics: async (now) => (await runtime.capabilities.topics.propose({ now })).candidates,
-  readSessionId: () => session.sessionId,
-  replyLimits: config.reply,
+  let loop!: ProactiveLoop;
+  loop = new ProactiveLoop({
+    store: runtime.store,
+    readSettings: deps.settings,
+    readState: () => runtime.conversation.state,
+    readInFlightTurn: deps.inFlightTurn,
+    readProactivity: () => effectiveProactivity(runtime.store.selfProfile()),
+    readPresence: async () => {
+      const view = await readPresence({ store: openXixiStore({ dataDir: deps.presenceDataDir }) });
+      return view === null ? null : { present: view.present, updatedAt: view.updatedAt, source: view.source };
+    },
+    readLastUserTurnAt: () => lastUserTurnAt(runtime.store, deps.sessionId()),
+    readRecentUserTopics: () => recentUserTopics(runtime.store, deps.sessionId()),
+    // pack Phase 3：先对齐（提取 / 标记已说过 / 按回答收口），再取「现在该追问的」。
+    readOpenThreads: () => {
+      const at = new Date();
+      deps.topicEngine.reconcile(at);
+      return deps.topicEngine.followUps(at);
+    },
+    /**
+     * V0.3 D1.1（把 P2.5-F 的接缝接进 live 入口）：到点的 durable 提醒。
+     *
+     * `...runtime.reminderSeams` 展开成**一对**：
+     *   * `readDueReminders` —— 先跑到点（`markDue`，全库唯一比时钟的地方）再取候选，所以「到点」是循环
+     *     自己判断出来的，而不是谁替它 tick 过一遍；
+     *   * `onReminderDelivered` —— 说出口之后的记账（`candidate → delivered`）。
+     * 只接一半的后果写在装配点 `XixiResidentRuntime.reminderSeams` 的文档里：只接读接缝时提醒会被反复
+     * 提议却永远停在 `candidate`；只接送达接缝则循环永远读不到东西。
+     *
+     * 时钟：本入口的运行时与循环都用真实时钟（本文件没有注入 `now`），所以「到点」判定与候选读取看的是
+     * 同一个时刻 —— 装配点的接口文档专门警告过「两处给不同时钟」这种隐形不一致。
+     */
+    ...runtime.reminderSeams,
+    /**
+     * V0.3 D1.2（把 P2.5-C 的能力桥接进 live 入口）：插件提案的话题。
+     *
+     * 参数是**这一 tick 的 `now`**（提案用它判断新鲜度，所以必须是评分用的那一刻）。插件只提供候选与依据：
+     * 说不说仍由硬底线与既有评分决定（铁律 3）；插件候选也只在既有来源之后**追加**，挤不掉它们。
+     */
+    readPluginTopics: async (now) => (await runtime.capabilities.topics.propose({ now })).candidates,
+    readSessionId: deps.sessionId,
+    replyLimits: config.reply,
+    synthesizeProvider: deps.synthesizeProvider,
+    /**
+     * V0.3 P1-b（pack §6 §7）：读空气时也让它看到关系摘要与未完话题。
+     *
+     * 检索查询用**这一条候选自己的确定性依据**（`basis` 那几行：在场、沉默多久、话题池…）——
+     * 主动开口没有「对方刚说的一句话」，`basis` 就是这一轮最接近事实的文本。
+     * 没接线（`contextBuilder: false`）时返回 `null`，决策输入逐字不变。
+     */
+    readContext: (input) =>
+      runtime.conversation.buildProactiveDecisionContext({ fact: input.basis.join('；'), at: input.now }),
+    // Same composer as the console: the model writes the line (tools included), from inside the
+    // delivery seam only — the gates have already decided by then (t74).
+    compose: createModelComposer({
+      engine: runtime.conversation,
+      sessionId: deps.sessionId,
+      available: deps.modelAvailable(),
+      recentLines: () => loop.spokenLines(),
+      log,
+    }),
+    log,
+  });
+  return loop;
+}
+
+/**
+ * 本入口自己的那个循环（t70 起「页面问了才开」，`start()` 的第一拍是立即的）。
+ *
+ * 入口侧只提供会话与面板状态；**接缝全部来自上面那个 `runtime`**（插件提案、durable 提醒、读空气
+ * 上下文）。用例用另一个 runtime 调同一个 `createTrialProactiveLoop`，证明的就是下面这一行所用的那条
+ * 装配路径。
+ */
+const proactiveLoop = createTrialProactiveLoop(runtime, {
+  topicEngine,
+  sessionId: () => session.sessionId,
+  settings: () => proactiveSnapshot.settings,
+  inFlightTurn: () => turnInFlight,
+  presenceDataDir: presenceStorePath,
   synthesizeProvider: loopSynthesizeProvider,
-  /**
-   * V0.3 P1-b（pack §6 §7）：读空气时也让它看到关系摘要与未完话题。
-   *
-   * 检索查询用**这一条候选自己的确定性依据**（`basis` 那几行：在场、沉默多久、话题池…）——
-   * 主动开口没有「对方刚说的一句话」，`basis` 就是这一轮最接近事实的文本。
-   * 没接线（`contextBuilder: false`）时返回 `null`，决策输入逐字不变。
-   */
-  readContext: (input) =>
-    engine.buildProactiveDecisionContext({ fact: input.basis.join('；'), at: input.now }),
-  // Same composer as the console: the model writes the line (tools included), from inside the
-  // delivery seam only — the gates have already decided by then (t74).
-  compose: createModelComposer({
-    engine,
-    sessionId: () => session.sessionId,
-    available: !USE_FAKE && !USE_DSH && client.hasKey,
-    recentLines: () => proactiveLoop.spokenLines(),
-    log: (line) => console.log(line),
-  }),
+  modelAvailable: () => !USE_FAKE && !USE_DSH && client.hasKey,
   log: (line) => console.log(line),
 });
 

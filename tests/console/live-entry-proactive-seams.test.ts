@@ -19,24 +19,34 @@
  * 反事实（把 `...runtime.reminderSeams` / `readPluginTopics` 从入口里删掉）在回报里给了命令与哈希；
  * 那一行消失时本文件的对应用例变红，所以它不是「看起来接了」。
  *
- * **一条如实记下的缺口**：试用页那一行 `readPluginTopics` 在本文件里**没有**行为证据 ——
- * `createTrialRuntime()` 没有插件注入缝（控制台才有 `plugins.inline`），所以「试用页会读插件提案」
- * 这件事今天只有「与它成对的 `reminderSeams` 有行为证据 + 两处代码逐字相同」这两条间接支持。
- * 反事实实测：把试用页那一行删掉，本文件仍全绿（S4）。要补上它需要给试用页加一个插件注入缝
- * （`scripts/` 的一条任务），这里不假装已经有。
+ * **试用页那半的插件证据（t30 补上）**：上面第 2 条一开始只有控制台的证据 —— `createTrialRuntime()` 造出来
+ * 的 runtime 与**入口那个模块级循环**不是同一个实例，所以离线用例给不了试用页一个「会提案的插件」：
+ * 删掉 `readPluginTopics` 也全绿（t25 的 S4 突变实测）。现在入口的循环由
+ * `createTrialProactiveLoop(runtime, deps)` 装配（接缝全部取自**传进来的那个** runtime，形状与现场测试
+ * 控制台的 `createFieldServer({ plugins })` 一致），于是用例可以拿一个带 inline 插件的 trial runtime
+ * 调**同一个函数** —— 第 3 条就是那条接线的行为证据，删掉工厂里那一行时它必红。
+ * 第 4 条是它的小弟：只证明**入口真的用了这个工厂**（否则行为证据可以被「入口里另写一个循环」绕开）。
  *
  * 全程离线、不花钱：没有密钥、没有网络、没有模型（控制台用 `offline: true`，试用页用 `--fake`）。
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
+import { TopicEngine } from '@xixi/conversation';
 import { formatZonedIso, openXixiStore, ReminderStore, type XixiStore } from '@xixi/domain';
 import type { InlinePlugin, TopicSource } from '@xixi/plugins';
 
-import { createFakeProbeRunner, createFieldServer } from '../../scripts/field-test.ts';
+import {
+  applyProactiveSettingsPatch,
+  createFakeProbeRunner,
+  createFieldServer,
+  restoreProactiveSettings,
+} from '../../scripts/field-test.ts';
+import { loadConfig, REPO_ROOT } from '../../scripts/lib/harness.ts';
+import { createTrialProactiveLoop, createTrialRuntime } from '../../scripts/serve-chat.ts';
 
 import { startTrialPage } from './serve-chat-fixture.ts';
 
@@ -263,4 +273,102 @@ test('插件提案的话题进入控制台的主动候选；开口与否仍由�
     await handle.close();
     dropDir(root);
   }
+});
+
+/**
+ * 试用页那半（t30）：与控制台那条同一个模板，对象换成**试用页自己的装配路径**。
+ *
+ * 差别只在「谁给它一个会提案的插件」：控制台是 `createFieldServer({ plugins })`，试用页是
+ * `createTrialRuntime({ plugins })` + `createTrialProactiveLoop(runtime, deps)` —— 两者都是**入口自己
+ * 用的那个装配函数**，不是为测试另写一份。
+ *
+ * 断言的对象与上面那条逐字对应：插件提案**真的进了候选**（候选 id 就是它）却先被硬底线拦下，
+ * 关掉静默时段后说的就是它自己那一句。
+ */
+test('插件提案的话题进入试用页的主动候选；开口与否仍由硬底线与评分决定（D1.2，试用页那半）', async () => {
+  const topic = '小区门口的银杏黄了';
+  const presenceDir = tempDir('xixi-trial-plugin-presence-');
+  const runtime = createTrialRuntime({ plugins: { inline: [topicPlugin(topic)] } });
+  try {
+    // 插件走的是入口自己的九步生命周期：`start()` 之后它的 `topic_source` 才在能力注册表里 ——
+    // 这一句同时说明「插件真的被启动了」，不是把提案硬塞进候选池。
+    await runtime.start();
+    const store = runtime.store;
+    const config = loadConfig();
+    const quiet = quietWindowAround(new Date());
+    // 只留 topic_pool（插件候选借的就是这个 trigger），其余来源全关：这一拍**只有**插件那一条候选，
+    // 所以下面两条断言的对象不可能是别的来源。补丁走的是 `/api/proactive/settings` 背后同一个函数。
+    const patched = applyProactiveSettingsPatch(
+      restoreProactiveSettings(store, config.proactive as unknown as Record<string, unknown>).settings,
+      {
+        enabled: true,
+        quietStart: quiet.start,
+        quietEnd: quiet.end,
+        triggers: {
+          future_hook_due: false,
+          presence_arrived: false,
+          conversation_dangling: false,
+          routine_expected: false,
+          random_smalltalk: false,
+          topic_pool: true,
+        },
+      },
+    );
+    assert.deepEqual(patched.rejected, [], `设置补丁不许有被拒字段：${JSON.stringify(patched.rejected)}`);
+    let settings = patched.settings;
+
+    const session = store.createSession();
+    const loop = createTrialProactiveLoop(runtime, {
+      topicEngine: new TopicEngine({ store, config: config.openThreads, clock: () => new Date() }),
+      sessionId: () => session.sessionId,
+      settings: () => settings,
+      inFlightTurn: () => false,
+      presenceDataDir: presenceDir,
+      synthesizeProvider: () => undefined,
+      modelAvailable: () => false,
+      log: () => {},
+    });
+
+    // ① 静默时段覆盖此刻：提案**照样进候选**（循环考虑了它），但被硬底线拦下 —— 决定权不在插件。
+    const blocked = await loop.tickOnce();
+    assert.ok(blocked !== null, '这一拍必须有候选被考虑过');
+    assert.equal(blocked.speak, false, `静默时段里不许开口（实际 ${JSON.stringify(blocked.reasonCode)}）`);
+    assert.equal(blocked.reasonCode, 'QUIET_HOURS', '被拦的原因必须是硬底线，而不是「插件说了不算」');
+    assert.match(
+      String(blocked.candidateId),
+      /^loop-topic_pool-plugin-demo\.topics-/,
+      '被考虑的那条候选必须正是插件提的',
+    );
+
+    // ② 关掉静默时段：同一份提案被说出来，说的就是它自己那句（离线兜底 = 候选自己的 line）。
+    settings = applyProactiveSettingsPatch(settings, { quietStart: '00:00', quietEnd: '00:00' }).settings;
+    const spoken = await loop.tickOnce();
+    assert.ok(spoken !== null, '这一拍必须有候选被考虑过');
+    assert.equal(spoken.speak, true, `没有静默时段时插件提案该被说出来（实际 ${JSON.stringify(spoken.reasonCode)}）`);
+    assert.equal(spoken.text, `有个话题想跟你聊：${topic}`, '说出口的必须是插件那条候选自己那一句');
+    assert.equal(spoken.contentSource, 'fixed', '离线：内容是兜底短句，不经过模型');
+  } finally {
+    await runtime.stop();
+    dropDir(presenceDir);
+  }
+});
+
+/**
+ * 上面那条行为证据调的是 `createTrialProactiveLoop`；这条证明**入口自己也在调它**。
+ *
+ * 为什么需要它（AGENTS §9.24）：行为证据落在「工厂」这一层，如果哪天有人在 `serve-chat.ts` 的模块层
+ * 重新写一个自己的字面量循环，工厂里的接线照样被测到，而**入口**已经不走它了 —— 那又变回纸面防线。
+ * 这条是源码级断言（比行为证据弱），所以它只给上一条封边、不替代它。
+ */
+test('试用页入口自己的循环由 createTrialProactiveLoop 装配（模块层字面量不许回来）', () => {
+  const source = readFileSync(join(REPO_ROOT, 'scripts', 'serve-chat.ts'), 'utf8');
+  // 先去掉注释再数：注释里正当地引着旧写法（`new ProactiveLoop({…})`），那不是代码路径。
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+  assert.match(
+    code,
+    /const proactiveLoop = createTrialProactiveLoop\(runtime, \{/,
+    '入口必须用工厂装配自己的循环（接缝才会取自同一个 runtime 实例）',
+  );
+  const literals = code.match(/new ProactiveLoop\(/g) ?? [];
+  assert.equal(literals.length, 1, `new ProactiveLoop 只应出现在工厂里（实际 ${literals.length} 处）`);
 });
