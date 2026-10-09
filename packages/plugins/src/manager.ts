@@ -324,6 +324,10 @@ export class PluginManager {
 
   /** Steps 2–7 for a plugin the host already holds in memory. */
   async loadInline(plugin: InlinePlugin): Promise<PluginInstance> {
+    // 与 `loadPlugin` 同一条先例（内核启动只认一次那条 `#started` 守卫）：**已停用的内核不许再加载插件**。
+    // 少了这一行，`disposeAll()` 之后仍能 loadInline 一个插件、把它变成 `active` 并重新登记能力 ——
+    // 那就是「关停之后插件层又能被复活」。
+    if (this.#disposed) throw new PluginLifecycleError('load', '插件管理器已经 dispose，不再接受 inline 加载');
     const inline = new InlinePluginSource([plugin]).discover()[0];
     if (inline === undefined) throw new PluginLifecycleError('discover', 'inline 插件没有 manifest');
     if (!this.#discovered.has(inline.id)) {
@@ -569,6 +573,9 @@ export class PluginManager {
 
   /** Step 5 again — `activate` after `deactivate`, on a fresh capability bundle. */
   async activate(pluginId: string): Promise<PluginInstance> {
+    // 同 `loadPlugin` / `loadInline`：内核 dispose 之后不许再把任何插件变成 active ——
+    // 否则 `disposeAll()` 跑过的 deactivate/dispose 钩子会被绕过，插件层「关停了还能复活」。
+    if (this.#disposed) throw new PluginLifecycleError('activate', `${pluginId}：插件管理器已经 dispose，不再接受激活`);
     const runtime = this.#runtimes.get(pluginId);
     if (runtime === undefined) throw new PluginLifecycleError('activate', `没有这个插件：${pluginId}`);
     // Already running: this entry point is the idempotent one (the repeat-start refusals live in

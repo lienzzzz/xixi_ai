@@ -39,7 +39,7 @@ import { test } from 'node:test';
 import { FakeBrainAdapter, type AgentTool, type ScriptedToolPlan, type ScriptedToolRequest, type ToolExecutionContext, type ToolRegistry } from '@xixi/brain-adapter';
 import { CORE_IDENTITY, HARD_POLICY, ConversationEngine, PromptAssembler, type AssembleInput, type AssembledPrompt } from '@xixi/conversation';
 import { ReminderStore, loadXixiConfig, openXixiStore, parseXixiConfig, type XixiConfig, type XixiStore } from '@xixi/domain';
-import { PluginBoundaryError, type InlinePlugin } from '@xixi/plugins';
+import { PluginBoundaryError, PluginLifecycleError, type InlinePlugin } from '@xixi/plugins';
 import { createStubNewsSource, stubItem, type NewsPluginOptions } from '@xixi/plugins/news';
 import {
   CONVERSATION_SCOPE,
@@ -269,7 +269,7 @@ test('start() 只认一次：重复启动报声明性错误，关停之后也不
 /**
  * stop-before-start：一次都没 `start()` 过就先 `stop()`，之后 `start()` 必须**拒**。
  *
- * 缺陷本体（P2.5-C round 3，修复前实测）：这条路上 `startCalled` 还是 false，旧守卫放行 ——
+ * 缺陷本体（P2.5-C，修复前实测）：这条路上 `startCalled` 还是 false，旧守卫放行 ——
  * `plugins.start()` 返回空（插件内核已经 dispose，`loadAll` 是「能起来多少起来多少」的入口）、
  * 挂载无事可做，于是对象报 `state: 'started'` 而链是**空的**（内置工具在 `stop()` 时就 dispose 了）。
  * 「看起来起来了、其实什么都调不了」正是这条验收要消灭的静默状态。
@@ -985,7 +985,7 @@ test('接线口径由调用图判定：给得出可复核命令，点名了入�
 });
 
 /**
- * 关停的第二扇门（round 3 复审的 T21-F1）：链必须保持空，**谁的调用都不例外**。
+ * 关停的第二扇门：链必须保持空，**谁的调用都不例外**。
  *
  * 缺陷本体（captain 在 5ddec1d 上独立复现过）：内核 `loadInline()` 在 `disposeAll()` 之后仍能把插件
  * 复活成 `active`，而 `ToolRegistry.dispose()` 只做 `#tools.clear()`、**不是终态** —— 于是
@@ -1015,18 +1015,28 @@ test('关停之后 mount() 不再往链上挂东西：state 与链不可能不�
     assert.equal(runtime.state, 'stopped');
     assert.deepEqual(runtime.toolChain.names(), [], 'stop() 已经清空链');
 
-    // 内核层今天仍能复活一个**新**插件，并把它的能力重新登记进同一个注册表 —— 这正是第二扇门的入口。
-    const late = inlinePlugin('xixi.late', probeTool('demo.late'));
-    const instance = await runtime.plugins.runtime.manager.loadInline(late);
-    assert.equal(instance.state, 'active', '内核层事实：disposeAll 之后 loadInline 仍能复活插件');
+    // 内核层现在也关了门（内核侧的同一扇门）：`disposeAll()` 之后 `loadInline` 不许再
+    // 复活插件 —— 否则它的能力会重新登记进同一个注册表，`mount()` 就有东西可挂了。
+    await assert.rejects(
+      () => runtime.plugins.runtime.manager.loadInline(inlinePlugin('xixi.late', probeTool('demo.late'))),
+      (error: unknown) => {
+        assert.ok(error instanceof PluginLifecycleError, '内核该抛自己的生命周期错误');
+        assert.equal(error.step, 'load');
+        return true;
+      },
+    );
+
+    // 但「有没有东西可挂」不能靠内核拒绝来保证 —— 用公开的能力登记 API 直接放一个工具进去，
+    // 否则下面这道 mount() 守卫的判据会退化成恒真（没有东西可挂时，撤掉守卫也不会红）。
+    runtime.plugins.runtime.capabilities.registerTool('xixi.late', { tool: probeTool('demo.late') });
     assert.deepEqual(
       runtime.plugins.runtime.capabilities.list(),
       [{ kind: 'tool', name: 'demo.late', pluginId: 'xixi.late' }],
-      '关停后加载的插件会把能力重新登记 —— 所以 mount() 真的有东西可挂（这条件不成立时本用例就是恒真）',
+      '现在链外**确实有一个工具**等着被挂（这条件不成立时本用例就是恒真）',
     );
 
     // 不变量：常驻 runtime 已经关停，所以调用必须被**明确拒绝** —— 不是静默什么都不做（调用方会以为挂上了），
-    // 更不是悄悄挂上（那正是 T21-F1 的缺陷本体）。
+    // 更不是悄悄挂上（那正是这个缺陷的本体）。
     assert.throws(
       () => runtime.plugins.mount(),
       (error: unknown) => {
@@ -1037,14 +1047,13 @@ test('关停之后 mount() 不再往链上挂东西：state 与链不可能不�
     );
 
     assert.equal(runtime.state, 'stopped', 'state 不许因为一次 mount 调用而变');
-    assert.deepEqual(runtime.toolChain.names(), [], '链必须保持空 —— 这正是 T21-F1 的缺陷点');
+    assert.deepEqual(runtime.toolChain.names(), [], '链必须保持空 —— 这正是这个缺陷的落点');
     assert.equal(runtime.toolChain.definitionsForRound(CONVERSATION_SCOPE, 1), undefined, '模型不该看到任何工具');
 
-    // 记忆化的 stop() 不会来清第二次，所以「关停后不许再挂」只能靠这道守卫，而不是靠再清一遍。
-    // 第二次 stop() 返回的是**第一次那份报告**（引用相等），其中 `unmounted` 记的是启动期那次挂载
-    // 撤回的东西（rig 的 demo.echo）——它不可能是「关停后新挂的工具」。
+    // 第二次 stop()：链**仍然是空的**（上面那次 mount 被拒），所以还是同一份记忆化报告 —— ② 的
+    // 「不冻住不一致」没有破坏幂等。链真被写回时的行为见下一条用例（再清一次 + 给一份新报告）。
     const second = await runtime.stop();
-    assert.equal(second, first, 'stop() 幂等：第二次返回同一份报告（记忆化），不会再来清一次');
+    assert.equal(second, first, '链没漂移时 stop() 仍然幂等：返回同一份报告（记忆化）');
     assert.deepEqual(second.plugins.unmounted, ['demo.echo'], '那份报告记的是启动期挂载的撤回，不是新挂的东西');
     assert.deepEqual(runtime.toolChain.names(), [], '第二次 stop() 之后链仍然是空的');
   } finally {
@@ -1053,10 +1062,80 @@ test('关停之后 mount() 不再往链上挂东西：state 与链不可能不�
 });
 
 /**
- * 关停是**同步**的终态（round 3 复审的 T21-F2）：`stop()` 不 `await` 也已经开始关门。
+ * 关停的第二扇门：`runtime.plugins.start()`。
+ *
+ * `start()` 内部调的是**没有守卫的那一份** `mount()`（`buildPluginRuntime` 里的闭包），所以只包
+ * `mount()` 拦不住它 —— 这正是「关停之后链又能被填」的形态在另一条路上的复现。这条用例走「一次都没 start 过就
+ * stop」的路径：已 start 过的 runtime 上 `loadAll()` 会被 `PLUGIN_ALREADY_STARTED` 挡住，看不出门；
+ * 从没 start 过时 `loadAll()` 会真的跑完（逐插件失败被吞掉），随后那个内部 `mount()` 就把链外的工具
+ * 写回模型可见的链上 —— 撤掉 `start()` 那道守卫，本用例的 rejects 与「链必须为空」都会红。
+ */
+test('关停的第二扇门：plugins.start() 内部用的是未守卫的 mount —— 关停后必须被拒，链不许重新有工具', async () => {
+  const r = rig();
+  try {
+    const { runtime } = r;
+    const first = await runtime.stop();
+    assert.equal(runtime.state, 'stopped');
+
+    // 链外确实有一个工具等着被挂（公开 API，绕开内核）—— 所以「链必须为空」不是恒真条件。
+    runtime.plugins.runtime.capabilities.registerTool('xixi.late', { tool: probeTool('demo.late') });
+
+    await assert.rejects(
+      () => runtime.plugins.start(),
+      (error: unknown) => {
+        assert.ok(error instanceof RuntimeError, '该抛 runtime 自己的错误类型');
+        assert.equal(error.code, 'RESIDENT_RUNTIME_CLOSED');
+        return true;
+      },
+    );
+    assert.equal(runtime.state, 'stopped', 'state 不许因为一次 start 调用而变成 started');
+    assert.deepEqual(runtime.toolChain.names(), [], '链必须保持空 —— 撤掉这道守卫，这里会出现 demo.late');
+    assert.equal(runtime.toolChain.definitionsForRound(CONVERSATION_SCOPE, 1), undefined, '模型不该看到任何工具');
+    assert.equal(await runtime.stop(), first, '链没有漂移，所以 stop() 仍是同一份记忆化报告');
+  } finally {
+    dispose(r);
+  }
+});
+
+/**
+ * ② 不许把不一致冻住：如果**还有任何路径**能把工具写回链（这里取最直接的
+ * 那条：`runtime.toolChain` 就是模型读的那条链，它按设计交给入口用），那么下一次 `stop()` 必须再清
+ * 一次，并给出一份**新的**报告 —— 而不是拿记忆化的旧报告把「state=stopped 而链非空」永久冻住。
+ *
+ * 撤掉 `stop()` 里那段「链非空就丢掉缓存」的判断，本用例会红在「链必须重新为空」与「必须是新报告」。
+ */
+test('关停之后链又被人写回：下一次 stop() 再清一次并给新报告，绝不拿记忆化的旧报告冻住不一致', async () => {
+  const r = rig();
+  try {
+    const { runtime } = r;
+    await runtime.start();
+    const first = await runtime.stop();
+    assert.deepEqual(runtime.toolChain.names(), [], '正常关停之后链是空的');
+
+    // 等价输入：「还有路径能填充链」。
+    runtime.toolChain.register(probeTool('demo.backdoor'));
+    assert.deepEqual(runtime.toolChain.names(), ['demo.backdoor'], '链现在真的非空了');
+    assert.notEqual(runtime.toolChain.definitionsForRound(CONVERSATION_SCOPE, 1), undefined, '模型又能看到它了');
+
+    const second = await runtime.stop();
+    assert.notEqual(second, first, '不许把不一致冻在记忆化的旧报告里：必须给一份新的');
+    assert.equal(second.state, 'stopped');
+    assert.deepEqual(runtime.toolChain.names(), [], '再清一次之后链必须重新为空');
+    assert.deepEqual(second.plugins.remainingBeforeClear, ['demo.backdoor'], '这份新报告要如实说出清空前链上剩的是什么');
+    assert.equal(runtime.toolChain.definitionsForRound(CONVERSATION_SCOPE, 1), undefined, '模型又看不到了');
+
+    // 清完之后幂等照旧：第三次还是第二份报告。
+    assert.equal(await runtime.stop(), second);
+  } finally {
+    dispose(r);
+  }
+});
+
+/**
+ * 关停是**同步**的终态：`stop()` 不 `await` 也已经开始关门（守卫见 `shutdown()` 的第一条语句）。
  *
  * 为什么要有这条：终态标记虽然写在 `shutdown()` 的第一行，但「第一行」与「第一个 `await` 之前」是两件事
- * ——把那个赋值挪到 `await extraction.drain()` 之后，交付用例与 t19 的 11 项检查**全都还是绿的**，
+ * ——把那个赋值挪到 `await extraction.drain()` 之后，当时的交付用例与那一轮的 11 项检查**全都还是绿的**，
  * 窗口却回来了。所以这句注释必须有判据：`stop()` 的 promise 还挂着就立刻 `start()`，必须被终态门拒。
  *
  * 反事实：把 `closed = true` 从 `shutdown()` 第一行移到 `await` 之后，这条立刻红。
@@ -1075,6 +1154,9 @@ test('stop() 不 await 就开始关门：promise 还挂着时 start() 已经被�
         return true;
       },
     );
+    // 标记是**同步**置位的：`stop()` 的 promise 还挂着时，这个 runtime 就已经不是「能再起来」的状态了。
+    // 把 `closed = true` 挪到第一个 `await` 之后，上面那条 rejects 会变成 `Missing expected rejection`。
+    assert.notEqual(runtime.state, 'started', 'stop 在途时 state 绝不许是 started');
     await stopping;
     assert.equal(runtime.state, 'stopped');
     assert.deepEqual(runtime.toolChain.names(), []);

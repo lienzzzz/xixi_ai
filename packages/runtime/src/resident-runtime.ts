@@ -554,13 +554,13 @@ export function createResidentRuntime(options: ResidentRuntimeOptions): XixiResi
    * Terminal once `stop()` is called — set **synchronously**, before `shutdown()`'s first `await`, so
    * there is no window in which a `start()` can slip in behind a `stop()` that is already under way.
    *
-   * Why this exists (P2.5-C round 3): `shutdown()` disposes the tool chain, built-ins included, and
+   * Why this exists (P2.5-C): `shutdown()` disposes the tool chain, built-ins included, and
    * shuts the plugin kernel down. `startCalled` alone therefore did **not** close the door on the
    * 「stop 了但没 start 过」 path: that runtime still passed the first guard, `plugins.start()` came
    * back empty (the kernel is disposed; `loadAll` is a bring-up-what-you-can entry point), and the
    * object reported `state: 'started'` with an **empty** chain — 「看起来起来了、其实什么都调不了」.
    *
-   * 这扇门管的是**两条**路，不是一条（round 3 复审抓到的第二扇门）：
+   * 这扇门管的是**两条**路，不是一条（第二扇门就是这么漏掉的）：
    *  * `start()` 见它抛 `RESIDENT_RUNTIME_ALREADY_STOPPED`；
    *  * `runtime.plugins.mount()` 见它抛 `RESIDENT_RUNTIME_CLOSED`。
    *
@@ -574,11 +574,22 @@ export function createResidentRuntime(options: ResidentRuntimeOptions): XixiResi
   let stopPromise: Promise<ResidentShutdownReport> | undefined;
 
   /**
-   * `plugins` 的对外视图：除了 `mount()` 之外全部透传。
+   * `plugins` 的对外视图：只有**关停后还能往链上写东西**的那两个入口被包住，其余透传。
    *
-   * 只包这一个方法，是因为它是**关停后唯一还能往链上写东西的公开入口**（`start()`/`shutdown()` 自身都幂等，
-   * 而 `registry` / `runtime` / `notes` 是读的）。返回的对象在 `runtime.plugins` 位置上，所以调用方拿不到
-   * 一个绕开这道门的 `mount`。
+   * 为什么是**两个**而不是一个（`mount()` 那道守卫见提交 29d1be8）：只包 `mount()` 会漏掉 `start()`，
+   * 因为
+   *  * `mount()` —— `ToolRegistry.dispose()` 只做 `#tools.clear()`，**不是终态**：关停后再 mount 一次，
+   *    `mountPluginTools` 的 `register()` 就把工具写回同一条链；
+   *  * `start()` —— 它内部调的是**没有这道守卫的那一份** `mount()`（`buildPluginRuntime` 里的闭包），
+   *    所以只包 `mount()` 拦不住它。它在「stop 了但没 start 过」的 runtime 上真的能跑完：`loadAll()`
+   *    的逐插件失败被吞掉，随后那个内部 `mount()` 把当时登记的能力写回链上。
+   *
+   * 多包这一道的教训：原先那条注释把「只有一个写入口」的理由写成「`start()`/`shutdown()` 自身都幂等」——
+   * **那句前提是错的**，`start()` 并不只是「再启动一次」，它还会 mount。守卫的理由不成立时，守卫本身
+   * 就会漏（比「少包一个方法」更难发现）。
+   *
+   * 两道门都抛 `RESIDENT_RUNTIME_CLOSED`：**响亮地拒绝**，不静默什么都不做（太安静会让调用方以为挂上了）。
+   * `shutdown()` 故意**不**包：它是清道夫（再清一次、不往链上写），关停后透传它是修复手段而不是漏口。
    */
   const guardedPlugins: PluginRuntimeMount = {
     ...plugins,
@@ -592,6 +603,17 @@ export function createResidentRuntime(options: ResidentRuntimeOptions): XixiResi
         );
       }
       return plugins.mount();
+    },
+    start: async () => {
+      if (closed) {
+        throw new RuntimeError(
+          'RESIDENT_RUNTIME_CLOSED',
+          '这个常驻 runtime 已经关停：plugins.start() 不会再把它拉起来，要重启就新建一个 runtime。',
+          '`start()` 内部调的是**没有守卫的那一份** mount()（按当时登记的能力把工具写回链上），' +
+            '所以只包 mount() 拦不住它：关停之后调用它，state 仍是 stopped，而模型又能看到工具。',
+        );
+      }
+      return plugins.start();
     },
   };
 
@@ -671,7 +693,14 @@ export function createResidentRuntime(options: ResidentRuntimeOptions): XixiResi
       return report;
     },
     stop(): Promise<ResidentShutdownReport> {
-      // Idempotent, and a failed stop is retried rather than cached: every step it calls is idempotent.
+      // 幂等，但**不把不一致冻住**：关停之后若链上又出现了东西（有人直接往
+      // `toolChain` 注册、或哪条路绕过了上面的守卫），记忆化的那份报告会让它永远留着 —— 那就丢掉缓存、
+      // 再清一次，并把这次清理如实报出去。链是空的（正常情况）时行为不变：第二次 stop() 仍是同一份报告。
+      if (stopPromise !== undefined && toolChain.names().length > 0) {
+        log?.(`[resident-runtime] 关停之后链上又出现了 ${toolChain.names().length} 个工具：再清一次，不把不一致冻住`);
+        stopPromise = undefined;
+      }
+      // A failed stop is retried rather than cached: every step it calls is idempotent.
       stopPromise ??= shutdown().catch((error: unknown) => {
         stopPromise = undefined;
         throw error;
