@@ -110,13 +110,21 @@ npm run check:types      # 类型检查门禁（tsc --noEmit，无构建步骤�
                          #   tsconfig 覆盖 packages/apps/scripts/services/tests（155 个 .ts，--listFiles 可复核）
                          #   纪律：**不许用铺 any、ts-ignore、关 strict 或 exclude 难点文件换绿**；
                          #   抑制要写理由并列清单，启用 noUnusedLocals 暴露的死导入要顺手清掉
-npm test                 # 全部离线测试（unit/integration/perception/console），不花 API 费用
+npm test                 # 全部离线测试（unit/integration/perception/console + ui 快档），不花 API 费用
                          #   项数与耗时**以实跑输出为准**（不写死；2026-09-30 实测点 223 项、空载约 20s）
                          #   关键路径曾是单文件 frontend.test.ts（多次 Python 冷启动）；
                          #   t47 **改的是 runner（scripts/verify-voice-noise.ts）的常驻 Python worker**，
                          #   该文件因此变快（它一行未改，实测约 10s）；如需回退可设 XIXI_VAD_ONESHOT=1
+                         #   D0.3 起还含 tests/ui/smoke/**（零依赖、约 0.3s）：**本仓库唯一真的去看
+                         #   页面 JS 能不能跑的一层**——此前内联脚本整块解析失败也没有门禁看得见
 npm run test:perception  # 只跑摄像头在场与 WorldState 投影
 npm run test:console     # 只跑现场测试控制台
+npm run test:ui:smoke    # 只跑页面 JS 快档：内联脚本能否解析 + 脚本按字面量找的 id 在不在页面里
+                         #   （零依赖、离线、不建库；判据与边界见 docs/testing.md §3.2，决策见 adr/0021）
+npm run test:ui:install  # 一次性取浏览器（playwright install chromium --only-shell，约 278 MB，
+                         #   不进版本库；沙箱里 ~/.cache 不可写时用 PLAYWRIGHT_BROWSERS_PATH 指到仓库内 data/）
+npm run test:ui          # 深档：真实 Chromium 加载控制台页面，断言零 pageerror 与关键控件真的执行处理器
+                         #   **不在默认门禁**；缺浏览器时报缺并 exit 1，**不许静默 skip**（§10.3）
 npm run install:profile  # 幂等：把仓库内的西西 DSH profile 装进 .dsh/
 npm run chat             # 交互式对话（直连 MiMo，实时路径）
 npm run chat -- --fake   # 完全离线的对话演示

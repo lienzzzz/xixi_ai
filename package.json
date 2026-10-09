@@ -12,13 +12,16 @@
     "apps/*"
   ],
   "scripts": {
-    "test": "node --test \"tests/unit/**/*.test.ts\" \"tests/integration/**/*.test.ts\" \"tests/scenarios/**/*.test.ts\" \"tests/replay/**/*.test.ts\" \"tests/perception/**/*.test.ts\" \"tests/console/**/*.test.ts\"",
+    "test": "node --test \"tests/unit/**/*.test.ts\" \"tests/integration/**/*.test.ts\" \"tests/scenarios/**/*.test.ts\" \"tests/replay/**/*.test.ts\" \"tests/perception/**/*.test.ts\" \"tests/console/**/*.test.ts\" \"tests/ui/smoke/**/*.test.ts\"",
     "test:unit": "node --test \"tests/unit/**/*.test.ts\"",
     "test:integration": "node --test \"tests/integration/**/*.test.ts\"",
     "test:scenarios": "node --test \"tests/scenarios/**/*.test.ts\"",
     "test:replay": "node --test \"tests/replay/**/*.test.ts\"",
     "test:perception": "node --test \"tests/perception/**/*.test.ts\"",
     "test:console": "node --test \"tests/console/**/*.test.ts\"",
+    "test:ui:smoke": "node --test \"tests/ui/smoke/**/*.test.ts\"",
+    "test:ui": "node --test \"tests/ui/e2e/**/*.test.ts\"",
+    "test:ui:install": "playwright install chromium --only-shell",
     "install:profile": "node scripts/install-dsh-profile.ts",
     "verify:m0": "node scripts/verify-m0.ts",
     "verify:p2.5": "node scripts/verify-p2-5.ts",
@@ -44,6 +47,7 @@
   "devDependencies": {
     "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
     "@types/node": "24.19.1",
+    "playwright": "1.64.0",
     "typescript": "7.0.2"
   }
 }
