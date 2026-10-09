@@ -32,7 +32,9 @@
  *    handed out as `runtime.reminderSeams` — writing that one line is the entry's job, not this
  *    factory's. The same is true of the plugin-topic feed (P2.5-C): `capabilities` is assembled (and
  *    reads this runtime's own capability registry), but `ProactiveLoopOptions.readPluginTopics` is the
- *    entry's line to write — there is no call site in `scripts/` yet, and this file does not claim one.
+ *    entry's line to write. **V0.3 D1.1/D1.2 wrote both lines in the two live entries**
+ *    （复核 `git grep -n 'readPluginTopics' -- scripts` 与 `git grep -n 'reminderSeams' -- scripts`）——
+ *    本文件仍然**不建循环**，接线状态见下面那块。
  *
  * ## 接线状态（诚实记录，AGENTS §9.24）
  *
@@ -63,10 +65,26 @@
  *    按本块点名的入口逐个核，防止它再悄悄变假。
  *    （「入口尚未接线」这几个字只作为**历史引文**留在这里：P2.5-A 就是这么写下这条债的，而它已经还清。
  *    口径的现状一律用上面两条命令核，不要读这半句。）
- *  * **提醒回路尚未接线**：接缝已经在本装配点上（`runtime.reminderSeams`，入口一行展开即可），但
- *    **还没有调用点** —— `git grep -n 'new ProactiveLoop(' -- scripts` 那三处都在 `scripts/` 下，
- *    不在本装配点的 inScope 里。所以「到点她会说出来」今天仍然只是**手调 tick() 才看得见**的事，不是活的；
- *    真正接上以后，这句话与钉它的那条用例要一起改（AGENTS §9.24 的口径纪律）。
+ *  * **提醒回路尚未接线（V0.3 P2.5-F 写下这条时的口径，历史引文，§9.21）**：当时接缝已经在本装配点上
+ *    （`runtime.reminderSeams`，入口一行展开即可），但**还没有调用点** —— 那几处 `new ProactiveLoop(`
+ *    都在 `scripts/` 下，不在本装配点当时的 inScope 里，所以「到点她会说出来」当时只有**手调 `tick()`**
+ *    才看得见。**这句话是历史，不是现状**：现状见下一条，不要按它写任何今天的结论。
+ *  * **提醒回路与插件话题已经接进 live 入口（V0.3 D1.1 + D1.2）**：两个 live 入口
+ *    （`scripts/serve-chat.ts` 试用页、`scripts/field-test.ts` 现场测试控制台）各自的
+ *    `new ProactiveLoop({ … })` 里写了一行 `...runtime.reminderSeams` 与一行 `readPluginTopics`，
+ *    所以循环**自己**会跑到点（读接缝是整个时钟 pass）也会读插件的 `topic_source` 提案。
+ *    复核命令（名单会过期，命令不会）：
+ *
+ *    ```text
+ *    git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts'   # 应命中那两个 live 入口
+ *    git grep -n 'readPluginTopics' -- scripts                          # 同上
+ *    ```
+ *
+ *    第一条要排除 `scripts/verify-p2-5.ts`：那是**验收脚本**，它自己也构造一个循环（与本文件无关，
+ *    是脚本自己的判定需要）；`scripts/eval-proactive-timeline.ts` 是**确定性仿真**，不是 live 入口，
+ *    按既有口径不接。入口侧的行为证据在 `tests/console/live-entry-proactive-seams.test.ts`：提醒由
+ *    **入口自己的定时器**读成候选（用例里没有手调 tick、也没有手调接缝），插件提案进候选而开口与否
+ *    仍由硬底线与既有评分决定。
  *  * **配置真的能管插件了（P2.5-H）**：`xixi.plugins` 段由 `@xixi/domain` 的 `parsePluginSettings` **严格**解析
  *    （越界的值、写错的键名、拼错的 transport 都在**加载配置**时带路径报错，而不是留一个看起来生效的键），
  *    本文件在装配时消费它：`directories` → 内核的插件来源、`news` → 新闻来源、`mcp.servers` → MCP 服务器的
@@ -272,9 +290,11 @@ export interface XixiResidentRuntime {
    * **接缝没有参数**：`readDueReminders()` 读的是本 runtime 的 `now`，所以入口要把**同一个时钟**交给
    * 循环与装配点（两处给不同的时钟 = 「到点」判定与候选读取各看一个时刻，那正是这个仓库最讨厌的隐形不一致）。
    *
-   * **怎么接进主动循环**（放给入口那一行，与 `capabilities` 同一个先例）。今天仓库里还没有调用点：
-   * 那三处在 `scripts/` 下（`git grep -n 'new ProactiveLoop(' -- scripts`），本任务的 inScope 之外。
-   * 本文件只保证**接缝可用**，不声称「活的西西已经在说到点提醒」。
+   * **怎么接进主动循环**：入口那一行 `...runtime.reminderSeams`（与 `capabilities` 同一个先例）。
+   * **V0.3 D1.1 起两个 live 入口已经写过它**（`scripts/serve-chat.ts`、`scripts/field-test.ts`；
+   * 复核 `git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts'`），所以「到点她会说出来」
+   * 在活入口里成立。本文件负责的是**把接缝做对**（先跑到点再取候选、送达才记账），入口侧的行为证据在
+   * `tests/console/live-entry-proactive-seams.test.ts`。
    */
   readonly reminderSeams: {
     readonly readDueReminders: NonNullable<ProactiveLoopOptions['readDueReminders']>;
@@ -294,8 +314,10 @@ export interface XixiResidentRuntime {
    * readPluginTopics: async (now) => (await runtime.capabilities.topics.propose({ now })).candidates,
    * ```
    *
-   * 今天仓库里还没有调用点：那一处在 `scripts/` 下（本任务的 inScope 之外）。本文件只保证**能力可见**
-   * 与**形状可用**，不声称「活的西西已经在用新闻话题」——那句要等入口接上以后才成立。
+   * **V0.3 D1.2 起两个 live 入口已经写过它**（那一行就是上面那行代码；复核
+   * `git grep -n 'readPluginTopics' -- scripts`），所以「活的西西会读插件提案」在活入口里成立。
+   * 判定归属一步没变：插件只提案，说不说仍由硬底线与既有评分决定（铁律 3），
+   * 入口侧证据见 `tests/console/live-entry-proactive-seams.test.ts`。
    */
   readonly capabilities: PluginCapabilityBridge;
   readonly state: ResidentRuntimeState;

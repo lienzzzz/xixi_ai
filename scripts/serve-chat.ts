@@ -257,6 +257,27 @@ const proactiveLoop = new ProactiveLoop({
     topicEngine.reconcile(at);
     return topicEngine.followUps(at);
   },
+  /**
+   * V0.3 D1.1（把 P2.5-F 的接缝接进 live 入口）：到点的 durable 提醒。
+   *
+   * `...runtime.reminderSeams` 展开成**一对**：
+   *   * `readDueReminders` —— 先跑到点（`markDue`，全库唯一比时钟的地方）再取候选，所以「到点」是循环
+   *     自己判断出来的，而不是谁替它 tick 过一遍；
+   *   * `onReminderDelivered` —— 说出口之后的记账（`candidate → delivered`）。
+   * 只接一半的后果写在装配点 `XixiResidentRuntime.reminderSeams` 的文档里：只接读接缝时提醒会被反复
+   * 提议却永远停在 `candidate`；只接送达接缝则循环永远读不到东西。
+   *
+   * 时钟：本入口的运行时与循环都用真实时钟（本文件没有注入 `now`），所以「到点」判定与候选读取看的是
+   * 同一个时刻 —— 装配点的接口文档专门警告过「两处给不同时钟」这种隐形不一致。
+   */
+  ...runtime.reminderSeams,
+  /**
+   * V0.3 D1.2（把 P2.5-C 的能力桥接进 live 入口）：插件提案的话题。
+   *
+   * 参数是**这一 tick 的 `now`**（提案用它判断新鲜度，所以必须是评分用的那一刻）。插件只提供候选与依据：
+   * 说不说仍由硬底线与既有评分决定（铁律 3）；插件候选也只在既有来源之后**追加**，挤不掉它们。
+   */
+  readPluginTopics: async (now) => (await runtime.capabilities.topics.propose({ now })).candidates,
   readSessionId: () => session.sessionId,
   replyLimits: config.reply,
   synthesizeProvider: loopSynthesizeProvider,

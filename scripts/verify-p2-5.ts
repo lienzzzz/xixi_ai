@@ -35,10 +35,13 @@
  *     `createChatRuntime` 不接受 `now`，而验收要的是「到点」而不是「等一天」。所以**写**那一步用的是
  *     入口们共同调用的装配点 `createResidentRuntime`（控制台/试用页/CLI 都是它）；**读**那一步用的是
  *     文字入口 `createChatRuntime` + 真实时钟，所以「到点」是它自己判断出来的。
- *   * 场景 2 的主动那一步由本脚本按 `runtime.reminderSeams` 的一行接法驱动：**没有任何 live 入口
- *     写过那一行**（判据：`git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts'` 应为 0 命中
- *     —— 必须排除本脚本自己，否则这条判据会被它自己打破，见 P2.5-K 那次 buildToolChain 的教训）。脚本把这句如实打印，
- *     不把「接缝可用」写成「活的西西已经在说提醒」。
+ *   * 场景 2 的主动那一步由**循环自己**驱动（V0.3 D1.1 接上之后；在此之前脚本是手调
+ *     `runtime.reminderSeams.readDueReminders()` 再喂给循环的 —— 那只证明「接缝可用」，证明不了
+ *     「循环在用它」）。现在脚本与本仓库的 live 入口写的是**同一行** `...runtime.reminderSeams`，
+ *     并且**不再**手调那对接缝：候选是不是被读出来的，由「循环自己把提醒推进到 candidate / 说出口」证明。
+ *     可复核：`git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts'` **应当命中**
+ *     `scripts/serve-chat.ts` 与 `scripts/field-test.ts`（必须排除本脚本自己，见 P2.5-K 那次
+ *     buildToolChain 的教训）；入口侧的端到端用例在 `tests/console/live-entry-proactive-seams.test.ts`。
  *   * 场景 4 的「相关连接」由探针插件自己用文件标记表示（`activate` 置 `{open:true}`，`deactivate` /
  *     `dispose` 都置 `{open:false}`）：生产里这一处是 MCP transport 的 `close()`，探针要证明的是
  *     **关停真的走到了那个钩子**。
@@ -389,13 +392,15 @@ async function scenarioReminder(): Promise<Record<string, unknown>> {
       });
       await runtime.start();
 
-      const offered = runtime.reminderSeams.readDueReminders();
-      const candidateIds = offered.map((input) => input.reminderId);
-      check(candidateIds.includes(written.reminderId), '[进程 B] 读接缝把到点的提醒交了出来（先跑到点、再取候选）', candidateIds);
-      const afterDue = new ReminderStore(store).get(written.reminderId);
-      check(afterDue?.status === 'candidate', '[进程 B] 到点之后状态推进到 candidate', afterDue?.status);
+      // 这里**故意不调** `runtime.reminderSeams.readDueReminders()`（D1.1 之前的写法）：手调只能证明
+      // 「接缝可用」，证明不了「循环在用它」。读接缝跑不跑、跑得对不对，由下面那一拍的循环自己交代。
+      const before = new ReminderStore(store).get(written.reminderId);
+      check(before?.status === 'pending', '[进程 B] 循环还没跑之前它仍是 pending（所以下面的推进只能是循环做的）', before?.status);
 
-      // 主动那一步：接缝来自装配点（一行展开就是入口要写的那行；见文件头「模拟的部分」）。
+      // 主动那一步：接缝来自装配点，**与两个 live 入口写的是同一行** `...runtime.reminderSeams`。
+      // V0.3 D1.1 之前本脚本是手调 `runtime.reminderSeams.readDueReminders()` 再喂给循环的 —— 那只证明
+      // 「接缝可用」，证明不了「循环在用它」。现在**不再**有那次手调：候选是不是被读出来的，由下面这两步
+      // 证明（状态推进 + 候选 id），所以这条验收不会变成空断言。
       const loop = new ProactiveLoop({
         store,
         // 静默时段清零：真实运行时刻可能正落在出厂静默时段里（00:00–24:00 之外没有窗口），
@@ -412,11 +417,31 @@ async function scenarioReminder(): Promise<Record<string, unknown>> {
         now: () => new Date(),
         log: () => {},
       });
-      const spoken = await tickUntilSpoken(loop);
+
+      // 第一步：**循环自己**读库（读接缝跑整个时钟 pass：markDue → candidateInputs），把这条提醒变成候选。
+      const first = await loop.tickOnce();
+      const afterDue = new ReminderStore(store).get(written.reminderId);
+      check(
+        afterDue?.status === 'candidate' || afterDue?.status === 'delivered',
+        '[进程 B] 循环自己把到点的提醒推进到了 candidate（本脚本没有手调过读接缝）',
+        afterDue?.status,
+      );
+      check(
+        first !== null && first.candidateId.includes(written.reminderId),
+        '[进程 B] 这一拍循环考虑的就是这条提醒的候选（候选 id 钉在它身上）',
+        first?.candidateId ?? null,
+      );
+
+      // 第二步：说出口（这一拍通常就说了：离线兜底 + 确定性推荐；万一是「被拦」就继续 tick 到说出来）。
+      const spoken =
+        first !== null && first.speak
+          ? { text: String(first.text ?? ''), trigger: first.trigger, initiativeKind: first.initiativeKind, candidateId: first.candidateId }
+          : await tickUntilSpoken(loop);
       check(spoken !== null, '[进程 B] 主动路径真的把这条提醒说出口了', spoken);
       if (spoken !== null) {
-        console.log(`  主动说出口：${spoken.text}（trigger=${spoken.trigger}）`);
+        console.log(`  主动说出口：${spoken.text}（trigger=${spoken.trigger}，候选 ${spoken.candidateId}）`);
         check(spoken.text.includes('给儿子打电话'), '说出口的内容就是那条提醒', spoken.text);
+        check(spoken.candidateId.includes(written.reminderId), '说出口的就是**这条**提醒的候选', spoken.candidateId);
       }
 
       const delivered = new ReminderStore(store).get(written.reminderId);
@@ -432,10 +457,12 @@ async function scenarioReminder(): Promise<Record<string, unknown>> {
       );
 
       console.log(
-        '  口径：上面这对接缝取自装配点（`runtime.reminderSeams`），由本脚本按文档那一行接进循环。\n' +
-          '        **没有任何 live 入口写过那一行**（判据 `git grep -n reminderSeams -- scripts\n' +
-          "          ':!scripts/verify-p2-5.ts' 应为 0 命中；T8 的披露），\n" +
-          '        所以这条证据是「接缝可用 + 到点会被主动路径说出来」，不是「活的西西已经在说提醒」。',
+        '  口径：接缝取自装配点（`runtime.reminderSeams`），本脚本**不再**手调它 —— 上面这条链\n' +
+          '       （pending → due → candidate → delivered）是**循环自己**走出来的，候选 id 也钉在这条提醒上。\n' +
+          "       两个 live 入口写的是同一行；复核 `git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts'`\n" +
+          '       应当命中 scripts/serve-chat.ts 与 scripts/field-test.ts（入口侧端到端见\n' +
+          '       tests/console/live-entry-proactive-seams.test.ts）。\n' +
+          '       「到点」是注入时钟造的（写提醒那一步把 now 往前挪 30 小时），不是真的等到了时间。',
       );
 
       return {
@@ -445,10 +472,10 @@ async function scenarioReminder(): Promise<Record<string, unknown>> {
         reminderId: written.reminderId,
         dueAt: written.dueAt,
         statuses,
-        spoken: spoken === null ? null : { text: spoken.text, trigger: spoken.trigger, initiativeKind: spoken.initiativeKind },
+        spoken: spoken === null ? null : { text: spoken.text, trigger: spoken.trigger, initiativeKind: spoken.initiativeKind, candidateId: spoken.candidateId },
         seamsSource: 'runtime.reminderSeams（装配点自己的那一对）',
-        seamsWiredByEntry: false,
-        seamsNote: "scripts/ 下还没有入口写「...runtime.reminderSeams」这一行（判据 git grep -n reminderSeams -- scripts ':!scripts/verify-p2-5.ts' 应为 0 命中；排除本脚本自己）",
+        seamsWiredByEntry: true,
+        seamsNote: "live 入口写的就是同一行 `...runtime.reminderSeams`（复核 git grep -n 'reminderSeams' -- scripts ':!scripts/verify-p2-5.ts' 命中 scripts/serve-chat.ts 与 scripts/field-test.ts）；本脚本不手调接缝，「读成候选」由循环自己走出来",
       };
     } finally {
       if (runtime !== undefined) await runtime.stop().catch(() => undefined);
@@ -459,11 +486,19 @@ async function scenarioReminder(): Promise<Record<string, unknown>> {
   }
 }
 
-async function tickUntilSpoken(loop: ProactiveLoop): Promise<{ readonly text: string; readonly trigger: string; readonly initiativeKind: string } | null> {
+interface SpokenProactive {
+  readonly text: string;
+  readonly trigger: string;
+  readonly initiativeKind: string;
+  /** 候选 id（循环自己拼的 `loop-<trigger>-<候选 id>`）——「说的是不是**这条**候选」要靠它判。 */
+  readonly candidateId: string;
+}
+
+async function tickUntilSpoken(loop: ProactiveLoop): Promise<SpokenProactive | null> {
   for (let tick = 0; tick < 10; tick += 1) {
     const entry = await loop.tickOnce();
     if (entry !== null && entry.reasonCode === 'PASSED') {
-      return { text: String(entry.text ?? ''), trigger: entry.trigger, initiativeKind: entry.initiativeKind };
+      return { text: String(entry.text ?? ''), trigger: entry.trigger, initiativeKind: entry.initiativeKind, candidateId: entry.candidateId };
     }
     if (entry !== null) console.log(`  （tick ${tick + 1}：${entry.reasonCode}）`);
   }
