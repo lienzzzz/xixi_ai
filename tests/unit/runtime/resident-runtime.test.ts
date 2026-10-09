@@ -403,6 +403,12 @@ test('审批闭环（模型发起 → 待批 → 点头）：写工具先落待�
     assert.equal(both.length, 2, '第二组参数是**另一条**待批请求');
     assert.deepEqual(rows(), [], '两条都还只是待批');
 
+    // 「第二条」按**身份**认领，不按下标：`pending()` 在 `requestedAt` 并列时用随机 `approvalId` 兜底
+    // （`apr_` + `randomUUID()`），所以下标随时可能指向**已经批准过的那一条**（AGENTS §9.25 ④）。
+    const secondRequest = both.find((row) => row.approvalId !== first[0]!.approvalId);
+    assert.ok(secondRequest !== undefined, '第二组参数该是**另一条**待批请求（不是第一条那条 id）');
+    assert.deepEqual(secondRequest.frozenArgs, regenerated, '认领到的这条就是模型后来生成的那组参数');
+
     // ② 点头第一条：执行的是当时冻结的那一组，不是模型后来生成的那一组。
     const decision = await runtime.approvals.approve({ approvalId: first[0]!.approvalId, actorId: 'father', now: T0 });
     assert.equal(decision.status, 'executed');
@@ -412,13 +418,55 @@ test('审批闭环（模型发起 → 待批 → 点头）：写工具先落待�
       '2026-10-06T08:00:00.000+08:00',
       'when 也是冻结参数解析出来的那个绝对时刻（不是第二组的后天九点）',
     );
-    assert.deepEqual(runtime.approvals.pending(T0).map((row) => row.approvalId), [both[1]!.approvalId], '第二条还在等谁点头');
+    assert.deepEqual(runtime.approvals.pending(T0).map((row) => row.approvalId), [secondRequest.approvalId], '第二条还在等谁点头');
     assert.deepEqual(rows(), ['给儿子打电话'], '第二条没点头，业务数据不许因为「已经批准过一条」而动');
 
     // ③ 再点头第二条：两条各自执行各自冻结的那一组 —— 冻结是**逐条**的，不是「批过一次就放行同类」。
-    const second = await runtime.approvals.approve({ approvalId: both[1]!.approvalId, actorId: 'father', now: T0 });
+    const second = await runtime.approvals.approve({ approvalId: secondRequest.approvalId, actorId: 'father', now: T0 });
     assert.equal(second.status, 'executed');
     assert.deepEqual(rows().sort(), ['买牛奶', '给儿子打电话'].sort());
+  } finally {
+    dispose(r);
+  }
+});
+
+/**
+ * 同一毫秒的两条待批请求：**「另一条」只能按身份认领，不能按下标**。
+ *
+ * 为什么需要这条（AGENTS §9.25 ④）：`pending()` 的排序键是 `requestedAt`，并列时用
+ * `a.approvalId.localeCompare(b.approvalId)` 兜底，而 `approvalId` 是 `apr_` + `randomUUID()` ——
+ * 「并列时谁在前」由随机 id 决定。上一条用例走模型路径，两次请求的 `requestedAt` 实测相差 8–24 ms
+ * （本机连续 8 次都没并列过），所以那里的抖动是**稀有**的；这条用例用同一个 `CONTEXT.now`（T0）走公开的
+ * `toolChain.execute()` 路径，把并列**确定地**造出来 —— 「按下标取第二条」这种写法在任何机器上都会被它
+ * 抓住，不必再靠运气。
+ */
+test('同一毫秒的两条待批请求：按身份认领「另一条」，不按下标（并列时顺序由随机 id 决定）', async () => {
+  const [writeTool] = builtinWriteTools();
+  assert.ok(writeTool !== undefined, '出厂的链上该有一个写工具');
+  const r = rig({ config: config(`  tools:\n    approval:\n      ask: ['${writeTool}']\n      ttl_seconds: 300\n`) });
+  try {
+    const { runtime } = r;
+    await runtime.start();
+
+    // 两次都传同一个 CONTEXT（`now` = T0）：`requestedAt` 一字不差，`pending()` 只能拿 approvalId 兜底。
+    const firstAsked = await runtime.toolChain.execute({ name: writeTool, arguments: { what: '给儿子打电话', when: '明天八点' } }, CONTEXT);
+    const secondAsked = await runtime.toolChain.execute({ name: writeTool, arguments: { what: '买牛奶', when: '后天九点' } }, CONTEXT);
+    const firstId = String(firstAsked.payload['approvalId']);
+    const secondId = String(secondAsked.payload['approvalId']);
+    assert.notEqual(firstId, secondId, '两条各有各的 approvalId');
+
+    const pending = runtime.approvals.pending(T0);
+    assert.equal(pending.length, 2, '两条都在待批');
+    assert.equal(pending[0]?.requestedAt, pending[1]?.requestedAt, '本用例的前提：两条的 requestedAt 真的并列');
+    // 并列时先后由随机 id 决定 —— 所以下面认领「另一条」只能按身份，不能按下标。
+    const other = pending.find((row) => row.approvalId !== firstId);
+    assert.equal(other?.approvalId, secondId, '按身份找「另一条」永远找得到，而且就是第二条');
+
+    // 语义不变：点头第一条之后，还在等的恰好剩下第二条（按身份，不按位置）。
+    const decision = await runtime.approvals.approve({ approvalId: firstId, actorId: 'father', now: T0 });
+    assert.equal(decision.status, 'executed');
+    assert.deepEqual(runtime.approvals.pending(T0).map((row) => row.approvalId), [secondId], '剩下的那条与并列顺序无关');
+    assert.deepEqual(runtime.reminders.store.list().map((reminder) => reminder.what), ['给儿子打电话'], '只执行了第一条');
   } finally {
     dispose(r);
   }
