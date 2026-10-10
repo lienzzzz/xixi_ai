@@ -313,8 +313,8 @@ npm run test:ui            # 深档：真实 Chromium；缺浏览器时明确报
 - 快档覆盖**三个页面**：现场测试控制台 `GET /`、**试用页 `GET /`**（`scripts/serve-chat.ts` 的 `PAGE`——
   那次事故就发生在它身上，第一版防线恰恰漏了它）、`apps/demo-ui/index.html` + 它的外链 `app.js`。
 - **深档覆盖控制台的 `GET /`（`e2e/page-behavior.test.ts`）与 demo 原型页的 `GET /demo/`
-  （`e2e/demo-page.test.ts`，2026-10-10 补齐；`xixi_demo_design_pack/tests/browser_smoke.py` 的移植版，
-  但走真路由而不是把三个文件注入页面）**：**试用页的*运行时行为*今天仍没有自动防线**——
+  （`e2e/demo-page.test.ts`，2026-10-10 补齐；随设计包交付的 `browser_smoke.py` 的移植版——那个设计包是
+  外部输入，已按用户裁定归档、不在仓库里；但改走真路由而不是把三个文件注入页面）**：**试用页的*运行时行为*今天仍没有自动防线**——
   它只有「解析 + id」两层；要接是它自己任务里的一件事。
 - **没有豁免（2026-10-10，t31 收口）**：试用页曾经把控制台的面板脚本**逐字**嵌进自己的 `<script>`，那段里
   有硬编码的控制台 id（`px-cam-problem*`、`turns`、`presence-text`、`px-live-*`），于是试用页上有约 30 条

@@ -45,8 +45,11 @@ npm run field-test            # 打开 http://127.0.0.1:8792（只监听本机�
 **交互原型页（`apps/demo-ui/`，2026-10-10 起）挂在同一个服务上**：`npm run web` 之后打开
 http://127.0.0.1:8791/demo/ ——**末尾的斜杠不能少**（`/demo` 会被 302 到 `/demo/?…`，查询串保留）。
 它默认是**页面内模拟数据**，加上 `?mode=live` 才去调真实 `/api/*`（摄像头预览、主动循环开关、安静一会儿等）。
-它是**交互原型**（把界面与文案先定下来用），不是第二个试用页：真实的语音 / 摄像头 / 主动循环仍只在试用页与控制台上跑。
-它自己那份 JS 今天**不在** §3 那两档浏览器防线的覆盖里（两档覆盖的是现场测试控制台发出去的页面），
+它是**交互原型**（把界面与文案先定下来用），默认模式不碰任何真实设备与库；但 `?mode=live` 时会**真的**起摄像头
+子进程、真的开关主动循环、真的发 `/api/voice`——所以「**摄像头同一时刻只能被一个进程占用**」那条规则对它同样成立。
+它自己那份 JS **已进 §3 那两档防线**（2026-10-10 D0.4 补）：**快档**编译它的静态 `app.js` 并核对脚本按字面量找的 id，
+**深档**用真 Chromium 打开 `/demo/` 走真路由并点关键控件（`tests/ui/e2e/demo-page.test.ts`——设计包
+`browser_smoke.py` 的移植版，但不再把三个文件注入页面）；**今天仍没有运行时防线的是试用页**（它只有「解析 + id」两层）。
 口径见 [`testing.md`](testing.md) §3.2、决策见 [`adr/0021`](adr/0021-browser-ui-testing.md)、明细见 [`progress.md`](progress.md) §14。
 
 **怎么判读结果**：
@@ -208,9 +211,9 @@ http://127.0.0.1:8791/demo/ ——**末尾的斜杠不能少**（`/demo` 会被 
 | `services/perception-edge/**` 或在场检测参数 | [`design/perception.md`](design/perception.md)、`recon/camera-detector-choice-2026-09-30.md`；**改 `run.py` 的 `main()`／live 配置时，必须同时断言「live 拿到的配置」**（见 `design/perception.md` §7.1 里那条 20 秒自杀的记录） |
 | `scripts/field-test.ts`（现场测试控制台） | `design/perception.md`、`design/voice.md`、[`testing.md`](testing.md) 的脚本表、本文件 §0 的用户须知；**改共享的主动性面板（`proactivePanelHtml` / `PROACTIVE_PANEL_IDS`）会同时影响试用页**，两边都要看；它的 `new ProactiveLoop({…})` 里有 `...runtime.reminderSeams` 与 `readPluginTopics` 两行（D1.1/D1.2，接线口径见 [`design/conversation.md`](design/conversation.md) 的「主动开口」行） |
 | `scripts/serve-chat.ts`（试用页） | 本文件 §0 的用户须知、[`design/voice.md`](design/voice.md) §3（浏览器语音路径与回放）、[`design/conversation.md`](design/conversation.md) 的「主动开口」行（它与控制台共用面板，差别只在页面加载是否自动起循环）、[`testing.md`](testing.md) 的脚本表、[`progress.md`](progress.md) §13；**`/demo/` 三条静态路由也在这里**（`/demo/` → `apps/demo-ui/index.html`、`/demo/styles.css`、`/demo/app.js`；`/demo` 少一个斜杠是 302 且**保留查询串**，旧调试页 `/` 与 `/demo/nope.js` 的 404 都不受影响——用例 `tests/console/serve-chat-demo-route.test.ts`），改它要同步本文件 §0 与 [`progress.md`](progress.md) §14 |
-| `apps/demo-ui/`（交互原型页，D0.1/D0.2） | 它是**静态三件套**（`apps/demo-ui/index.html` / `apps/demo-ui/styles.css` / `apps/demo-ui/app.js`），由试用页服务在 `/demo/` 提供（`npm run web` → http://127.0.0.1:8791/demo/，末尾斜杠与 `?mode=live` 见本文件 §0）；改它要同步本文件 §0 与上一条、[`progress.md`](progress.md) §14，并**手工在浏览器里点一遍**——它今天不在两档门禁的覆盖里（见 [`testing.md`](testing.md) §3.2、§6 第 8 条） |
+| `apps/demo-ui/`（交互原型页，D0.1/D0.2） | 它是**静态三件套**（`apps/demo-ui/index.html` / `apps/demo-ui/styles.css` / `apps/demo-ui/app.js`），由试用页服务在 `/demo/` 提供（`npm run web` → http://127.0.0.1:8791/demo/，末尾斜杠与 `?mode=live` 见本文件 §0）；改它要同步本文件 §0 与上一条、[`progress.md`](progress.md) §14，并跑 `npm run test:ui`——它**在两档门禁的覆盖里**（快档在 `npm test` 里编译它的静态 `app.js` 并核 id；深档用真 Chromium 跑它的运行时行为，见 [`testing.md`](testing.md) §3.2、§6 第 8 条） |
 | `tests/ui/**`（页面 JS 的两档防线，D0.3） | **快档** `tests/ui/smoke/page-script.test.ts` 就在 `npm test` 里：编译服务端真正发出的每个内联 `<script>`（`node:vm`，只编译不执行）+ 核对脚本按字面量找的每个 id 在 markup 里存在；**深档** `tests/ui/e2e/page-behavior.test.ts` 单跑 `npm run test:ui`（真 Chromium + 真服务，**不在默认门禁**，首次先 `npm run test:ui:install`，缺浏览器时报缺并 exit 1）。两档的分工、能抓什么与抓不到什么见 [`testing.md`](testing.md) §3.2，决策与代价见 [`adr/0021`](adr/0021-browser-ui-testing.md) |
-| **任何页面里内联的 JS**（模板字符串里的 `<script>`） | **已有门禁：`npm run test:ui:smoke`（D0.3 起就在 `npm test` 里）**——它把服务端真正发出的页面里每个内联脚本抽出来用 `node:vm` **只编译不执行**，并核对脚本按字面量找的每个 id（`el('x')` / `getElementById` / `#x` / 共享面板的 `PX.ids`）在 markup 里真实存在。**边界**：它**看不见运行时行为**（handler 里 `null.addEventListener`、异步分支根本没跑、点了没渲染），那一层归深档 `npm run test:ui`（真 Chromium，**不在默认门禁**）；**今天覆盖的是现场测试控制台的 `GET /`，试用页与 `apps/demo-ui/` 还没有**。历史：2026-10-08 的「整页按钮没反应」就是模板字符串里少一层反斜杠、`<script>` 在解析阶段抛 `SyntaxError`，而当时**没有任何测试执行过页面的 JS**（`tests/console/*` 全是对生成文本做正则断言）——本行因此曾写成「改完必须手工打开一次页面」，那句话现在只对试用页与 demo 页成立。口径见 [`testing.md`](testing.md) §3.2、决策见 [`adr/0021`](adr/0021-browser-ui-testing.md)、起因见 [`progress.md`](progress.md) §13.1 缺陷 2 |
+| **任何页面里内联的 JS**（模板字符串里的 `<script>`） | **已有门禁：`npm run test:ui:smoke`（D0.3 起就在 `npm test` 里）**——它把服务端真正发出的页面里每个内联脚本抽出来用 `node:vm` **只编译不执行**，并核对脚本按字面量找的每个 id（`el('x')` / `getElementById` / `#x` / 共享面板的 `PX.ids`）在 markup 里真实存在。**边界**：它**看不见运行时行为**（handler 里 `null.addEventListener`、异步分支根本没跑、点了没渲染），那一层归深档 `npm run test:ui`（真 Chromium，**不在默认门禁**）；**今天覆盖三个页面：现场测试控制台 `GET /`、试用页 `GET /`、`apps/demo-ui/`（静态外链脚本）**；深档另覆盖控制台与 demo 原型页的**运行时行为**——**今天仍没有运行时防线的是试用页**。历史：2026-10-08 的「整页按钮没反应」就是模板字符串里少一层反斜杠、`<script>` 在解析阶段抛 `SyntaxError`，而当时**没有任何测试执行过页面的 JS**（`tests/console/*` 全是对生成文本做正则断言）——本行因此曾写成「改完必须手工打开一次页面」，那句话现在只对试用页的运行时行为成立。口径见 [`testing.md`](testing.md) §3.2、决策见 [`adr/0021`](adr/0021-browser-ui-testing.md)、起因见 [`progress.md`](progress.md) §13.1 缺陷 2 |
 | `packages/conversation/src/proactive.ts` 或人格默认值 | `design/conversation.md`、[`adr/0009`](adr/0009-proactive-triggers-and-hard-gates.md)、本文件 §0（主动性怎么调/怎么关） |
 | 任何 `scripts/verify-*.ts` / `eval-*.ts` / `voice-*.ts` | [`testing.md`](testing.md) 的脚本表、`README.md` 的命令段、`AGENTS.md` §7 |
 | 里程碑推进（做完 M2/M3/…） | `progress.md` §0/§1、`architecture.md` 的「未实现」列表、相关 `design/*` |

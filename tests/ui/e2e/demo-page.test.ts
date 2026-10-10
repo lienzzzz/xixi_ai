@@ -2,9 +2,10 @@
  * Deep tier — the interactive prototype (`apps/demo-ui/`) loaded by **real Chromium** through the
  * **real `/demo/` routes** of `scripts/serve-chat.ts` (ADR-0021).
  *
- * This is the port of `xixi_demo_design_pack/tests/browser_smoke.py` (D0) — the smoke the design
- * pack shipped together with the prototype, and the one piece of that pack that never made it into
- * the repository. Until now the demo page's runtime behaviour had **no** automatic defence: the fast
+ * This is the port of the design pack's `browser_smoke.py` (D0) — the smoke the pack shipped with the
+ * prototype, and the one piece of that pack that never made it into the repository. (That pack was an
+ * external input; it has since been archived outside the repo, so the name is provenance, not a path.)
+ * Until now the demo page's runtime behaviour had **no** automatic defence: the fast
  * tier only parses its scripts and cross-checks ids, and the deep tier only executed the console
  * page. `docs/testing.md` §3.2 said so in as many words ("`/demo/` 的浏览器取证是一次性的").
  *

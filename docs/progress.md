@@ -1224,7 +1224,16 @@ D0 做这两件（原型页 + 两道防线），D1 把 P2.5 已经准备好、�
 |---|---|---|
 | D0.1 / D0.2（t22） | `apps/demo-ui/index.html`、`apps/demo-ui/styles.css`、`apps/demo-ui/app.js`；`scripts/serve-chat.ts` 的 `/demo/` 三条静态路由；`tests/console/serve-chat-demo-route.test.ts` | 交互原型挂在试用页服务上：默认（`/demo/`）是**页面内模拟数据**，`?mode=live` 才去调真实 `/api/*`；`/demo` 少一个斜杠是 302（**查询串保留**）、`/demo/nope.js` 是 404、旧调试页 `/` 不受影响 |
 | D0.3（t23） | `tests/ui/smoke/page-script.test.ts`、`tests/ui/e2e/page-behavior.test.ts`、`tests/ui/lib/harness.ts`；`docs/adr/0021-browser-ui-testing.md`；`package.json` 的三条脚本 | **两档**：快档（零依赖、离线、在 `npm test` 里）编译页面里每个内联脚本并核对脚本按字面量找的 id；深档用真 Chromium + 真服务，断言零 `pageerror` / 零失败请求并点关键控件 |
+| D0.4 | `tests/ui/e2e/demo-page.test.ts`；`tests/ui/lib/harness.ts`（拆出通用装载 `openPage`）；`docs/testing.md` §3.2 与 §6、`docs/adr/0021` | 把设计包随附的 `browser_smoke.py` 移植成 demo 原型页的**深档**：走**真路由** `GET /demo/`（原版是把三个文件注入页面，那是在给副本判分），启动信号改用**只有脚本会写**的 `#mode-pill`（原版等的 `#companion-state` 本来就在 markup 里，脚本整块解析失败也照样绿——正是 2026-10-08 那次事故的形态） |
 | D1.1 / D1.2（t25） | `scripts/serve-chat.ts` 与 `scripts/field-test.ts` 的 `new ProactiveLoop({…})`；`tests/console/live-entry-proactive-seams.test.ts`；`scripts/verify-p2-5.ts` 场景 2 | 两个 live 入口各接**两行**：`...runtime.reminderSeams`（读接缝是整个时钟 pass + 送达记账）与 `readPluginTopics`（插件 `topic_source` 的提案） |
+
+**设计包的去向（2026-10-10，用户裁定「搞定的设计方案可以删除或归档」）**：`xixi_demo_design_pack/` 的 demo
+三件套已吸收进 `apps/demo-ui/`（`styles.css` 由压缩版展开成可读版），它的 `browser_smoke.py` 已移植成
+上表的 D0.4。**其余 8 个文件不入库**：`01`/`03`/`05` 是诊断与路线图（用户明确不要入库），`02`/`04` 是原型的
+设计意图与**时点** API 快照——实现与测试已经取代它们，收进 `docs/` 等于再养一份必须跟着 `apps/demo-ui/`
+同步的文档（本仓库被过期文档咬过多次，本轮又抓到 5 处）。**整包从未被 git 跟踪，所以它不在 git 历史里**；
+工作区里的目录与 `XIXI_LATEST_REVIEW_DEMO_AND_ROADMAP.md` 已按同一裁定移除，归档是**仓库外的本机产物**
+（`~/xixi_demo_design_pack_2026-10-10.tar.gz`），**不是项目资产、换机器即失**，不要把它当引用来源。
 
 ### 14.2 判据（命令优先）
 
@@ -1255,18 +1264,21 @@ git grep -n 'readPluginTopics' -- scripts                           # 同上
   与「字符串断言看见两行字」的区别（AGENTS §9.24）。
 - **验收脚本改口径**：`npm run verify:p2.5 -- --offline` 的场景 2 由「脚本手调 `runtime.reminderSeams.readDueReminders()`
   再喂给循环」改成「第一次 tick 由循环自己读库」，并断言状态推进到 `candidate`、候选 id 钉在这条提醒上。
-- **一次性浏览器取证（不是自动门禁，不能重跑）**：原型页用真 Chromium + 真服务把导航、开关（陪伴 / 主动聊天 / 朗读 /
-  摄像头）、实验室的三个按钮、麦克风开始与结束、停止朗读、清空画面、安静一会儿、发送与建议按钮**逐个点过一遍**
-  （`/demo/` 与 `/demo/?mode=live` 各一遍，加载时与全部点完之后 `console.error` / `pageerror` / 失败请求都是 0）；
-  live 模式另核了 `/api/proactive/settings`、`/api/proactive/loop`、`/api/tts`、`/api/camera`、`/api/quiet`、
-  `/api/state`、`/api/voice` 的返回。**这次取证没有留下脚本**，所以它**不能重跑**——要复现只能照
-  [`README.md`](README.md) §0 手工点一遍，或自己照两档的 harness 写一条。
+- **浏览器取证从「一次性」变成可重跑（D0.4）**：原型页那条手工取证现在有了脚本化对应物
+  `tests/ui/e2e/demo-page.test.ts`（`npm run test:ui`，真 Chromium + 真服务）：断言 `GET /demo/` 真的 200、
+  页面**自己**取到 `/demo/app.js` 与 `/demo/styles.css`、零 `pageerror` / 零失败请求 / 零 console error、
+  点建议会把它自己的文本填进输入框且发送渲染出「一句 + 一回」、陪伴与摄像头两个开关各自只移动自己的状态、
+  两个工作区互换与隐私对话框开合、390/768/1440 三个宽度都不横向溢出。
+  **口径差异要如实说**：它在**默认（模拟）模式**下跑，**不覆盖 `?mode=live`**——手工那遍核过的
+  `/api/proactive/settings`、`/api/proactive/loop`、`/api/tts`、`/api/camera`、`/api/quiet`、`/api/state`、
+  `/api/voice` 返回**仍只在手工那一次做过**；要复现那一层只能照 [`README.md`](README.md) §0 手工点一遍。
 - **门禁**：`npm run check:docs` 三个 0 且 exit 0；`npm test` **全绿（项数以实跑末行为准）**。
 
 ### 14.4 边界与已知缺口（**不许写成「页面的 JS 已经全都有防线」**）
 
-1. **覆盖范围只有现场测试控制台的 `GET /`**：试用页（`scripts/serve-chat.ts`）与 `apps/demo-ui/` 的内联脚本
-   **还没有**这两档门禁——原型页甚至不是 Node 侧拼出来的页面（它是仓库里的静态文件），所以连快档的输入都不在流水线里。
+1. **覆盖范围（2026-10-10 D0.4 更新）**：快档覆盖**三个页面**——现场测试控制台 `GET /`、试用页 `GET /`、
+   `apps/demo-ui/index.html` 与它的外链 `app.js`；深档覆盖控制台 `GET /` 与 demo 原型页 `GET /demo/` 的
+   **运行时行为**。**今天仍缺的是试用页的运行时行为**——它只有「解析 + id」两层，要接是它自己任务里的一件事。
    见 [`testing.md`](testing.md) §6 第 8 条。
 2. **快档看不见运行时行为**：handler 里访问不存在的属性、`null.addEventListener`、异步分支根本没跑、点了没渲染——
    它一个字都看不见（那是深档的职责），而深档**不在默认门禁**、还要先花一次 `npm run test:ui:install` 取浏览器。
