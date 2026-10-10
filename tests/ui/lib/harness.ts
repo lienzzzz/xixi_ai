@@ -702,10 +702,28 @@ export async function launchChromium(options: { readonly executablePath?: string
   }
 }
 
-/** Open the page served by `server` in a real browser and start recording what it does. */
-export async function openConsolePage(server: ConsoleServer, options: { readonly executablePath?: string } = {}): Promise<BrowserSession> {
-  const browser = await launchChromium(options);
-  const page = await browser.newPage();
+/** A viewport to open a page at — the deep tier's responsive checks need more than one. */
+export interface PageViewport {
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface OpenPageOptions {
+  /** Reuse a browser that is already up. The session then closes only its own page, not the browser. */
+  readonly browser?: Browser;
+  readonly executablePath?: string;
+  readonly viewport?: PageViewport;
+}
+
+/**
+ * Open `url` in a real browser and start recording what it does. Every deep-tier page goes through
+ * here, so "what counts as a failure" — an uncaught `pageerror`, an `error`-level console line, a
+ * failed request — is defined **once** instead of once per page.
+ */
+export async function openPage(url: string, options: OpenPageOptions = {}): Promise<BrowserSession> {
+  const browser = options.browser ?? (await launchChromium(options));
+  const ownsBrowser = options.browser === undefined;
+  const page = await browser.newPage(options.viewport === undefined ? {} : { viewport: options.viewport });
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
   const failedRequests: string[] = [];
@@ -719,7 +737,7 @@ export async function openConsolePage(server: ConsoleServer, options: { readonly
     failedRequests.push(`${request.method()} ${new URL(request.url()).pathname} ${request.failure()?.errorText ?? ''}`);
   });
   await page.addInitScript(UI_PROBE_SCRIPT);
-  const response = await page.goto(`${server.url}/`, { waitUntil: 'load' });
+  const response = await page.goto(url, { waitUntil: 'load' });
   return {
     browser,
     page,
@@ -734,28 +752,77 @@ export async function openConsolePage(server: ConsoleServer, options: { readonly
         return holder.__xixiUiProbe ?? { listeners: {}, calls: {} };
       }),
     stop: async () => {
-      await browser.close();
+      await page.close().catch(() => undefined);
+      // Only the session that launched the browser may close it: the responsive checks in the demo
+      // tier open several pages on one browser, and they must not take each other down.
+      if (ownsBrowser) await browser.close();
     },
   };
 }
 
+/** Open the console page served by `server` in a real browser and start recording what it does. */
+export async function openConsolePage(server: ConsoleServer, options: OpenPageOptions = {}): Promise<BrowserSession> {
+  return await openPage(`${server.url}/`, options);
+}
+
 /**
- * Wait until the page has *run its own start-up code*: `#p-listen` is filled by
- * `renderState(payload)` after a real `GET /api/field/state` round trip, so the text only appears
- * when the script parsed, wired up, and reached the server. A dead script times out here — and the
- * error carries the captured `pageerror`, which is the actual diagnosis.
+ * `document.documentElement.scrollWidth > window.innerWidth` — "the whole page pans sideways",
+ * which is what a single unshrinkable child does at phone width and what no CSS assertion sees.
+ *
+ * It lives here because this repository's type program deliberately has no `dom` lib, so DOM access
+ * has to be spelled through one narrow cast; scattering the cast through the tests would be the
+ * second copy this harness exists to prevent.
+ */
+export async function hasHorizontalOverflow(session: BrowserSession): Promise<boolean> {
+  return await session.page.evaluate(() => {
+    const dom = globalThis as unknown as {
+      document: { documentElement: { scrollWidth: number } };
+      innerWidth: number;
+    };
+    return dom.document.documentElement.scrollWidth > dom.innerWidth;
+  });
+}
+
+/**
+ * Wait until one element carries text that **only the page's own script can have written**.
+ *
+ * That qualifier is the whole point: a string that is already in the markup stays there on a page
+ * whose script died in the parser, so waiting for it proves nothing. Callers must hand in a
+ * selector/text pair the markup cannot satisfy on its own.
+ *
+ * `state` defaults to `visible`, which is what the console wants. A page may legitimately **hide**
+ * its start-up marker at narrow widths (the demo prototype's mode badge is `display: none` below
+ * 768 px), and there "the script ran" and "the element is visible" are different questions — ask for
+ * `attached` rather than dropping the wait, or the boot signal is lost exactly where the layout is
+ * most likely to be wrong.
  *
  * The wait itself is Playwright's locator API rather than `page.waitForFunction`: the callback of
  * the latter would need DOM types, and this repository's `tsconfig.json` deliberately has no `dom`
  * lib (there is no browser code in TypeScript anywhere else). Locators run on the Node side, so the
  * check stays inside the same type program as the rest of the repository.
  */
-export async function waitForPageBoot(session: BrowserSession, timeoutMs = 15_000): Promise<void> {
+export async function waitForSelectorText(
+  session: BrowserSession,
+  selector: string,
+  text: RegExp | string,
+  wait: { readonly state?: 'attached' | 'visible'; readonly timeoutMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = wait.timeoutMs ?? 15_000;
   try {
-    await session.page.locator('#p-listen', { hasText: /^地址 / }).waitFor({ state: 'visible', timeout: timeoutMs });
+    await session.page.locator(selector, { hasText: text }).waitFor({ state: wait.state ?? 'visible', timeout: timeoutMs });
   } catch (error) {
     const reason = error instanceof Error ? error.message.split('\n')[0] : String(error);
     const scriptErrors = session.pageErrors.length === 0 ? '（没有捕获到 pageerror）' : session.pageErrors.join(' | ');
-    throw new Error(`页面没有完成启动（等待 #p-listen 超时，${timeoutMs}ms）：${reason}\n脚本错误：${scriptErrors}`);
+    throw new Error(`页面没有完成启动（等待 ${selector} 超时，${timeoutMs}ms）：${reason}\n脚本错误：${scriptErrors}`);
   }
+}
+
+/**
+ * Wait until the console page has *run its own start-up code*: `#p-listen` is filled by
+ * `renderState(payload)` after a real `GET /api/field/state` round trip, so the text only appears
+ * when the script parsed, wired up, and reached the server. A dead script times out here — and the
+ * error carries the captured `pageerror`, which is the actual diagnosis.
+ */
+export async function waitForPageBoot(session: BrowserSession, timeoutMs = 15_000): Promise<void> {
+  await waitForSelectorText(session, '#p-listen', /^地址 /, { timeoutMs });
 }
