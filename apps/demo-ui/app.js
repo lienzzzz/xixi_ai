@@ -4,6 +4,18 @@
   'use strict';
   const $ = (id) => document.getElementById(id);
   const live = new URLSearchParams(location.search).get('mode') === 'live';
+  /**
+   * Camera preview frame interval (both call sites below use this one constant so they cannot drift).
+   *
+   * It used to be 450 ms — about 2.2 fps — while the perception child measured **8.2 fps** and
+   * `/api/camera/frame.jpg` costs ~0.4 ms (it returns an already-decoded frame). So the preview was
+   * showing a third of what the pipeline produced: the timer, not the resolution, was the bottleneck.
+   * 120 ms is just under the ~122 ms production period, so the picture is paced by **production**.
+   *
+   * Requests cannot pile up: `cameraInFlight` only allows the next fetch after the previous one has
+   * loaded (or failed), so a faster timer removes idle time rather than adding load.
+   */
+  const CAMERA_FRAME_MS = 120;
   const state = { on:false, camera:false, proactive:false, speak:true, busy:false, recording:false,
     recorder:null, cameraTimer:null, cameraInFlight:false, cursor:0, turnCount:0, session:null,
     audioQueue:[], playing:false, audioNode:null, audioEnd:null, lastEvent:'尚未发生操作', lastCameraState:null };
@@ -130,7 +142,7 @@
   async function setTts(on){try{if(live)await request('/api/tts',{method:'POST',body:{enabled:on}});state.speak=on;if(!on)stopPlayback();updateUI();logEvent(on?'朗读已打开':'朗读已关闭');}catch(e){toast(escapeError(e),true);updateUI();}}
   async function toggleCamera(on){try{if(live){const data=await request('/api/camera',{method:'POST',body:{action:on?'start':'stop'}});state.camera=Boolean(data.status?.child?.running);}
       else state.camera=on;
-      if(state.camera){$('camera-placeholder').querySelector('strong').textContent=live?'正在接收画面…':'模拟预览模式';$('camera-placeholder').querySelector('small').textContent=live?'请稍候':'不会连接真实设备';if(live){cameraFrame();if(!state.cameraTimer)state.cameraTimer=setInterval(cameraFrame,450);}}
+      if(state.camera){$('camera-placeholder').querySelector('strong').textContent=live?'正在接收画面…':'模拟预览模式';$('camera-placeholder').querySelector('small').textContent=live?'请稍候':'不会连接真实设备';if(live){cameraFrame();if(!state.cameraTimer)state.cameraTimer=setInterval(cameraFrame,CAMERA_FRAME_MS);}}
       else {clearInterval(state.cameraTimer);state.cameraTimer=null;state.cameraInFlight=false;$('camera-image').style.display='none';$('camera-image').removeAttribute('src');$('camera-placeholder').style.display='flex';}
       updateUI();logEvent(on?'摄像头预览已打开':'摄像头预览已关闭');
     }catch(e){toast('摄像头操作失败：'+escapeError(e),true);logEvent('摄像头失败 '+escapeError(e));}}
@@ -144,7 +156,7 @@
     catch(e){logEvent('无法连接当前 API：'+escapeError(e));toast('连接失败，请先启动 npm run web 再以 /demo/?mode=live 访问',true);}}
   async function pollLive(){if(!live)return;try{const [cam,loop]=await Promise.all([request('/api/camera'),request('/api/proactive/loop?cursor='+state.cursor)]);
       const previousCamera=state.camera;state.camera=cam.status?.child?.running===true;
-      if(state.camera&&!previousCamera&&!state.cameraTimer){state.cameraTimer=setInterval(cameraFrame,450);cameraFrame();}
+      if(state.camera&&!previousCamera&&!state.cameraTimer){state.cameraTimer=setInterval(cameraFrame,CAMERA_FRAME_MS);cameraFrame();}
       if(!state.camera&&previousCamera){clearInterval(state.cameraTimer);state.cameraTimer=null;}
       const f=cam.status?.lastFrame;
       if(cam.problem){$('presence-label').textContent='摄像头不可用';$('camera-detail').textContent=cam.problem.title||'读取失败';}
